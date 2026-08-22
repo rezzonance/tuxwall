@@ -1,17 +1,21 @@
 # tuxwall
 
-A Linux firewall configuration tool/script for managing and applying firewall rules on Linux systems.
+A Linux network dashboard providing a web UI for managing DHCP leases, DNS, firewall rules, VPN (WireGuard), and security — designed to run on a dedicated Linux gateway/router.
+
+> **Note:** tuxwall does not work out of the box. It is a dashboard that sits on top of a carefully assembled stack of Linux networking services. Getting everything working together — especially IPv6 — requires time and patience. This README documents a known-working configuration.
 
 ---
 
 ## Table of Contents
 
 - [Overview](#overview)
-- [Requirements](#requirements)
+- [Tested Environment](#tested-environment)
+- [Dependencies](#dependencies)
+- [IPv6 Notes](#ipv6-notes)
 - [Installation](#installation)
-- [Configuration](#configuration)
-- [Usage](#usage)
-- [Examples](#examples)
+- [Service Configuration](#service-configuration)
+- [SQM / Traffic Shaping](#sqm--traffic-shaping)
+- [Nginx Configuration](#nginx-configuration)
 - [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
 - [License](#license)
@@ -20,173 +24,282 @@ A Linux firewall configuration tool/script for managing and applying firewall ru
 
 ## Overview
 
-tuxwall is a Linux firewall management tool that simplifies the setup, configuration, and management of firewall rules. It provides a straightforward interface for defining and applying network filtering policies on Linux systems.
+tuxwall is a web-based network dashboard that provides visibility and control over:
+
+- **DHCP leases** (via Kea)
+- **DNS filtering and local domains** (via Unbound)
+- **Firewall rules** (via UFW / iptables)
+- **Intrusion detection** (via Suricata + CrowdSec)
+- **WireGuard VPN** management
+- **IPv6 router advertisements** (via radvd)
+- **SQM / traffic shaping** (via CAKE qdisc)
+- **AI-assisted firewall suggestions** (optional, via LLM integration)
 
 ---
 
-## Requirements
+## Tested Environment
 
-- Linux (kernel 2.4+ recommended)
-- `iptables` or `nftables` (depending on configuration)
-- Root / sudo privileges
-- `bash` 4.0 or newer
+- **OS:** Ubuntu 25.04 (noble)
+- **Kernel:** 6.x
+- **Architecture:** x86_64
+- **Role:** Dedicated gateway/router (not a desktop — a headless server connected between your modem and LAN switch)
+
+---
+
+## Dependencies
+
+All of the following must be installed and working **before** tuxwall will function correctly. tuxwall is a dashboard — it reads from and controls these services but does not replace them.
+
+### Core Networking
+
+| Package | Version | Purpose |
+|---|---|---|
+| `ufw` | 0.36+ | Firewall rule management |
+| `iptables` | 1.8+ | Underlying packet filtering |
+| `nftables` | 1.1+ | Modern netfilter backend |
+| `iproute2` | 6.x | Interface and routing management |
+
+### DHCP
+
+| Package | Version | Purpose |
+|---|---|---|
+| `kea-dhcp4-server` | 3.0+ | IPv4 DHCP server |
+| `kea-common` | 3.0+ | Shared Kea libraries |
+
+> **Note:** tuxwall reads Kea lease files directly. ISC DHCP (`isc-dhcp-server`) is **not** supported.
+
+### DNS
+
+| Package | Version | Purpose |
+|---|---|---|
+| `unbound` | 1.24+ | Recursive DNS resolver and local filtering |
+| `unbound-anchor` | 1.24+ | DNSSEC trust anchor management |
+
+### IPv6
+
+| Package | Version | Purpose |
+|---|---|---|
+| `radvd` | 2.20+ | IPv6 Router Advertisement daemon |
+
+> **This is the most difficult part of the setup.** See [IPv6 Notes](#ipv6-notes) below.
+
+### VPN
+
+| Package | Version | Purpose |
+|---|---|---|
+| `wireguard` | 1.0+ | WireGuard kernel module |
+| `wireguard-tools` | 1.0+ | `wg` and `wg-quick` CLI tools |
+
+### Intrusion Detection / Threat Intelligence
+
+| Package | Version | Purpose |
+|---|---|---|
+| `suricata` | 8.0+ | IDS/IPS — network threat detection |
+| `suricata-update` | 1.3+ | Rule set updater for Suricata |
+| `crowdsec` | 1.7+ | Collaborative threat intelligence agent |
+| `crowdsec-firewall-bouncer-iptables` | 0.0.36+ | Applies CrowdSec bans via iptables |
+
+### Web Server
+
+| Package | Version | Purpose |
+|---|---|---|
+| `nginx` | 1.28+ | Reverse proxy serving the tuxwall dashboard |
+
+### Runtime
+
+| Package | Version | Purpose |
+|---|---|---|
+| `python3` | 3.12+ | Required to run `api_server.py` |
+| `curl` | 8.x | Used by blocklist update service |
+| `jq` | 1.8+ | JSON processing in scripts |
+
+### Optional
+
+| Package | Purpose |
+|---|---|
+| `tcpdump` | Packet capture for debugging |
+| `python3-netifaces` | Enhanced network interface detection |
+| `python3-maxminddb` | GeoIP lookups in the dashboard |
+
+---
+
+## IPv6 Notes
+
+IPv6 was by far the hardest part of getting tuxwall working on a live internet connection. If your ISP provides native IPv6 (e.g. via DHCPv6-PD or SLAAC), you need to be extremely careful about how you configure `radvd`, `unbound`, and your kernel forwarding settings — getting any of it wrong will drop your internet connection.
+
+**Key lessons learned:**
+
+- **Do not disable IPv6 on the WAN interface.** Even if you don't use it internally, disabling it can break routing.
+- **`radvd` must be configured to match your ISP's prefix delegation.** If your ISP hands you a `/64` or `/56`, `radvd` needs to advertise the correct subnet to your LAN.
+- **Unbound needs to listen on both IPv4 and IPv6** (`interface: 0.0.0.0` and `interface: ::0`) or DNS will fail for IPv6 clients.
+- **Kernel forwarding must be enabled for both IPv4 and IPv6:**
+  ```bash
+  sysctl -w net.ipv4.ip_forward=1
+  sysctl -w net.ipv6.conf.all.forwarding=1
+  ```
+  Make these permanent in `/etc/sysctl.conf`.
+- **UFW IPv6 support** must be enabled — set `IPV6=yes` in `/etc/default/ufw`.
+- **CrowdSec and Suricata** can interfere with IPv6 traffic if not configured to allow it. Check your bouncer rules carefully.
+- **WireGuard and IPv6** require explicit AllowedIPs entries for IPv6 ranges if you want VPN clients to use IPv6.
+
+If your internet drops after starting any of these services, check your IPv6 routing table first:
+```bash
+ip -6 route show
+```
 
 ---
 
 ## Installation
 
-### 1. Clone the repository
+### 1. Install all dependencies
 
 ```bash
-git clone https://github.com/yourusername/tuxwall.git
-cd tuxwall
+sudo apt update
+sudo apt install -y \
+  ufw iptables nftables iproute2 \
+  kea-dhcp4-server kea-common \
+  unbound unbound-anchor \
+  radvd \
+  wireguard wireguard-tools \
+  suricata suricata-update \
+  crowdsec crowdsec-firewall-bouncer-iptables \
+  nginx \
+  python3 curl jq
 ```
 
-### 2. Make the script executable
+### 2. Install tuxwall
+
+Install the provided `.deb` package:
 
 ```bash
-chmod +x tuxwall.sh
+sudo dpkg -i tuxwall_2.0.0_all.deb
 ```
 
-### 3. Install system-wide (optional)
+If you encounter dependency errors:
+```bash
+sudo apt -f install
+sudo dpkg -i tuxwall_2.0.0_all.deb
+```
+
+### 3. Enable and start services
 
 ```bash
-sudo cp tuxwall.sh /usr/local/bin/tuxwall
-sudo chmod +x /usr/local/bin/tuxwall
+sudo systemctl enable --now kea-dhcp4-server
+sudo systemctl enable --now unbound
+sudo systemctl enable --now radvd
+sudo systemctl enable --now suricata
+sudo systemctl enable --now crowdsec
+sudo systemctl enable --now nginx
+sudo systemctl enable --now tuxwall
+sudo systemctl enable --now tuxwall-blocklist-update.timer
 ```
 
-### 4. Install the configuration file
+### 4. Enable SQM (optional)
+
+If you want CAKE-based traffic shaping, edit `scripts/tuxwall-sqm.sh` with your WAN interface and speeds, then:
+
+```bash
+sudo cp scripts/tuxwall-sqm.sh /usr/local/sbin/tuxwall-sqm.sh
+sudo chmod +x /usr/local/sbin/tuxwall-sqm.sh
+sudo cp systemd/tuxwall-sqm.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now tuxwall-sqm
+```
+
+---
+
+## Service Configuration
+
+### Nginx
+
+Copy the nginx site config and enable it:
+
+```bash
+sudo cp nginx/tuxwall.conf /etc/nginx/sites-available/tuxwall
+sudo ln -s /etc/nginx/sites-available/tuxwall /etc/nginx/sites-enabled/tuxwall
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+If you want the dashboard accessible by your gateway's LAN IP directly, uncomment and edit the optional `listen` directives at the top of `nginx/tuxwall.conf`.
+
+### tuxwall config directory
 
 ```bash
 sudo mkdir -p /etc/tuxwall
-sudo cp tuxwall.conf /etc/tuxwall/tuxwall.conf
+sudo cp config/llm.json.example /etc/tuxwall/llm.json
+sudo cp config/custom-blocklist.txt /etc/tuxwall/custom-blocklist.txt
 ```
+
+Edit `/etc/tuxwall/llm.json` if you want to enable the AI assistant feature (requires an OpenAI-compatible API key or a local LLM endpoint).
 
 ---
 
-## Configuration
+## SQM / Traffic Shaping
 
-The main configuration file is located at `/etc/tuxwall/tuxwall.conf` (or `./tuxwall.conf` for local use).
+The `scripts/tuxwall-sqm.sh` script applies CAKE qdisc to your WAN interface for bufferbloat reduction and per-host fairness. Before using it:
 
-### Configuration Options
+1. Set `WAN` to your actual WAN interface name (find it with `ip link show`)
+2. Set `UP_RATE` to ~95% of your provisioned upload speed
+3. Set `DOWN_RATE` to ~92% of your provisioned download speed
 
-| Option             | Description                                      | Default         |
-|--------------------|--------------------------------------------------|-----------------|
-| `ALLOWED_PORTS`    | Comma-separated list of allowed inbound ports    | `22,80,443`     |
-| `BLOCKED_IPS`      | Comma-separated list of IPs to block             | (empty)         |
-| `DEFAULT_POLICY`   | Default policy for incoming traffic (`ACCEPT` / `DROP`) | `DROP`   |
-| `ENABLE_LOGGING`   | Enable firewall event logging (`yes` / `no`)     | `yes`           |
-| `LOG_FILE`         | Path to the log file                             | `/var/log/tuxwall.log` |
-| `INTERFACE`        | Network interface to apply rules to              | `eth0`          |
-
-### Example `tuxwall.conf`
-
-```ini
-# tuxwall Configuration File
-
-INTERFACE=eth0
-DEFAULT_POLICY=DROP
-ALLOWED_PORTS=22,80,443
-BLOCKED_IPS=
-ENABLE_LOGGING=yes
-LOG_FILE=/var/log/tuxwall.log
-```
-
----
-
-## Usage
-
-```
-Usage: tuxwall [COMMAND] [OPTIONS]
-
-Commands:
-  start       Apply firewall rules from configuration
-  stop        Flush all rules and set policies to ACCEPT
-  restart     Stop and re-apply all rules
-  status      Show current firewall rules
-  reload      Reload configuration without full restart
-  help        Show this help message
-
-Options:
-  -c <file>   Specify a custom configuration file
-  -v          Verbose output
-```
-
-### Starting the firewall
-
-```bash
-sudo tuxwall start
-```
-
-### Stopping the firewall
-
-```bash
-sudo tuxwall stop
-```
-
-### Checking status
-
-```bash
-sudo tuxwall status
-```
-
-### Using a custom config file
-
-```bash
-sudo tuxwall start -c /path/to/custom.conf
-```
-
----
-
-## Examples
-
-### Allow only SSH and HTTPS
-
-```ini
-ALLOWED_PORTS=22,443
-DEFAULT_POLICY=DROP
-```
-
-### Block a specific IP address
-
-```ini
-BLOCKED_IPS=192.168.1.100,10.0.0.5
-```
-
-### Apply rules to a specific interface
-
-```ini
-INTERFACE=ens3
-```
+Using a slightly lower percentage than your rated speed prevents your modem's queue from filling up, which is what causes bufferbloat.
 
 ---
 
 ## Troubleshooting
 
-### Rules not applying
-
-- Ensure you are running with `sudo` or as root.
-- Verify `iptables` or `nftables` is installed: `which iptables` or `which nft`.
-- Check the configuration file path and syntax.
-
-### Locked out of SSH
-
-If you accidentally block SSH access:
-1. Access the machine via console or out-of-band management.
-2. Run `sudo tuxwall stop` to flush all rules.
-3. Update your config to include port `22` in `ALLOWED_PORTS`.
-4. Run `sudo tuxwall start` to re-apply rules.
-
-### Viewing logs
+### Dashboard not loading
 
 ```bash
-sudo tail -f /var/log/tuxwall.log
+sudo systemctl status tuxwall
+sudo systemctl status nginx
+sudo journalctl -u tuxwall -n 50
 ```
 
-### Checking current iptables rules
+### Internet drops after enabling a service
+
+Check your IPv6 routing first — this was the most common cause:
+```bash
+ip -6 route show
+ip route show
+sudo ufw status verbose
+```
+
+### DNS not resolving
 
 ```bash
-sudo iptables -L -n -v
+sudo systemctl status unbound
+sudo unbound-control status
+dig @127.0.0.1 google.com
+```
+
+### DHCP leases not appearing in dashboard
+
+Confirm Kea is running and writing its lease file:
+```bash
+sudo systemctl status kea-dhcp4-server
+ls -lh /var/lib/kea/kea-leases4.csv
+```
+
+### CrowdSec bans blocking legitimate traffic
+
+```bash
+sudo cscli decisions list
+sudo cscli decisions delete --ip <ip>
+```
+
+### WireGuard not routing traffic
+
+```bash
+sudo wg show
+sudo ufw status
+ip route show table main
+```
+
+### Checking all tuxwall-related services at once
+
+```bash
+systemctl status tuxwall tuxwall-sqm kea-dhcp4-server unbound radvd suricata crowdsec nginx
 ```
 
 ---
