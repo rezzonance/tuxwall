@@ -687,7 +687,7 @@
           </div>
           <div class="table-wrap">
             <table id="sec-ips-table">
-              <thead><tr><th>Source</th><th>Location</th><th>Hits</th><th>Share</th><th>Action</th></tr></thead>
+              <thead><tr><th>Source IP</th><th>Threat</th><th>Location / ISP</th><th>Hits</th><th>Share</th><th>Actions</th></tr></thead>
               <tbody id="sec-ips-body"></tbody>
             </table>
           </div>
@@ -715,7 +715,7 @@
             <h3>All Attackers</h3>
             <div class="table-wrap modal-scroll-wrap">
               <table id="sec-ips-full-table">
-                <thead><tr><th>Source</th><th>Location</th><th>Hits</th><th>Share</th><th>Action</th></tr></thead>
+                <thead><tr><th>Source IP</th><th>Threat</th><th>Location / ISP</th><th>Hits</th><th>Share</th><th>Actions</th></tr></thead>
                 <tbody id="sec-ips-full-body"></tbody>
               </table>
             </div>
@@ -1412,5 +1412,7 @@
 <script src="/scripts/leaflet.js"></script>
 <script src="/scripts/qrcode.js"></script>
 <script src="/scripts/dashboard.js?v=20260822i"></script>
+<!-- IP hover card (global, positioned by JS) -->
+<div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>
 </html>

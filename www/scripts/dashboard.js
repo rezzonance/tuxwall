@@ -1354,17 +1354,63 @@
     const byIp = d.by_ip || [];
     const ipMax = byIp[0] ? byIp[0].count : 1;
     const csUp = state.secCrowdsecUp;
-    const buildIpRow = (i) => `
-      <tr>
-        <td class="mono"><a href="https://www.abuseipdb.com/check/${esc(i.ip)}" target="_blank" rel="noopener">${esc(i.ip)}</a></td>
-        <td>${esc(i.country || "Unknown")}${i.city ? ` <span class="muted">· ${esc(i.city)}</span>` : ""}</td>
+
+    // Threat level derived from hit-count percentile
+    function threatLevel(count) {
+      const pct = count / ipMax;
+      if (pct >= 0.5) return "HIGH";
+      if (pct >= 0.15) return "MED";
+      return "LOW";
+    }
+    function threatBadge(count, banned) {
+      if (banned) return '<span class="ip-threat ip-threat-banned">BANNED</span>';
+      const lvl = threatLevel(count);
+      return `<span class="ip-threat ip-threat-${lvl.toLowerCase()}">${lvl}</span>`;
+    }
+
+    // IP pill with copy button
+    function ipPill(ip, count, banned) {
+      const lvl = banned ? "banned" : threatLevel(count).toLowerCase();
+      return `<span class="ip-pill ip-pill-${lvl}" data-ip="${esc(ip)}">
+        <span class="ip-pill-addr">${esc(ip)}</span>
+        <button class="ip-copy-btn" title="Copy IP" data-copy="${esc(ip)}">⎘</button>
+      </span>`;
+    }
+
+    // Hover card content stored in data attributes
+    const buildIpRow = (i) => {
+      const banned   = state.secBannedIps.has(i.ip);
+      const pct      = Math.round(i.count / ipMax * 100);
+      const firstSeen = i.first ? new Date(i.first * 1000).toLocaleDateString() : "—";
+      const lastSeen  = i.last  ? new Date(i.last  * 1000).toLocaleString()     : "—";
+      const location  = [i.city, i.country].filter(Boolean).join(", ") || "Unknown";
+      const banBtn    = csUp
+        ? (banned
+            ? `<button type="button" class="btn btn-sm sec-unban" data-ip="${esc(i.ip)}" title="Remove CrowdSec ban">Unban</button>`
+            : `<button type="button" class="btn btn-sm btn-danger sec-ban" data-ip="${esc(i.ip)}" title="Add to CrowdSec blocklist">Ban</button>`)
+        : "";
+      const abuseBtn = `<a class="btn btn-sm btn-ghost ip-lookup-btn" href="https://www.abuseipdb.com/check/${esc(i.ip)}" target="_blank" rel="noopener" title="Check AbuseIPDB">🔍</a>`;
+
+      return `<tr class="ip-row" data-ip="${esc(i.ip)}"
+          data-location="${esc(location)}"
+          data-port="${esc(i.port || "—")}"
+          data-first="${esc(firstSeen)}"
+          data-last="${esc(lastSeen)}"
+          data-count="${i.count}"
+          data-pct="${pct}"
+          data-banned="${banned}">
+        <td>
+          ${ipPill(i.ip, i.count, banned)}
+        </td>
+        <td>${threatBadge(i.count, banned)}</td>
+        <td>${flagEmoji(i.iso)} <span class="ip-location">${esc(location)}</span>
+            <span class="ip-isp muted" id="isp-${esc(i.ip).replace(/\./g,'-')}"></span></td>
         <td>${formatNumber(i.count)}</td>
-        <td><div class="bar"><div class="bar-fill bar-fill-err" style="width:${Math.round(i.count / ipMax * 100)}%"></div></div></td>
-        <td>${csUp ? (state.secBannedIps.has(i.ip)
-          ? `<button type="button" class="btn btn-sm sec-unban" data-ip="${esc(i.ip)}">Unban</button>`
-          : `<button type="button" class="btn btn-sm btn-danger sec-ban" data-ip="${esc(i.ip)}">Ban</button>`)
-          : ""}</td>
+        <td><div class="bar"><div class="bar-fill bar-fill-err" style="width:${pct}%"></div></div></td>
+        <td><div class="svc-actions">${banBtn}${abuseBtn}</div></td>
       </tr>`;
+    };
+
     els.secIpsBody.innerHTML = byIp.slice(0, 25).map(buildIpRow).join("");
     const ipMoreWrap = document.getElementById("sec-ips-more-wrap");
     ipMoreWrap.hidden = byIp.length <= 25;
@@ -1372,8 +1418,46 @@
       document.getElementById("sec-ips-more").onclick = () => {
         document.getElementById("sec-ips-full-body").innerHTML = byIp.map(buildIpRow).join("");
         document.getElementById("sec-ips-modal").hidden = false;
+        fetchIspInfo(byIp, "sec-ips-full");
       };
     }
+
+    // Copy-to-clipboard for IP pills
+    document.querySelectorAll(".ip-copy-btn").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        navigator.clipboard.writeText(btn.dataset.copy).then(() => {
+          btn.textContent = "✓";
+          setTimeout(() => { btn.textContent = "⎘"; }, 1200);
+        });
+      });
+    });
+
+    // Hover card
+    const hoverCard = document.getElementById("ip-hover-card");
+    document.querySelectorAll(".ip-row").forEach(row => {
+      row.addEventListener("mouseenter", (e) => {
+        const isp = document.getElementById("isp-" + row.dataset.ip.replace(/\./g, "-"))?.textContent || "";
+        hoverCard.innerHTML = `
+          <div class="iph-ip mono">${esc(row.dataset.ip)}</div>
+          <div class="iph-row"><span class="iph-label">Location</span><span>${esc(row.dataset.location)}</span></div>
+          ${isp ? `<div class="iph-row"><span class="iph-label">ISP</span><span>${esc(isp)}</span></div>` : ""}
+          <div class="iph-row"><span class="iph-label">Top Port</span><span class="mono">${esc(row.dataset.port)}</span></div>
+          <div class="iph-row"><span class="iph-label">Hits</span><span>${esc(row.dataset.count)} <span class="muted">(${esc(row.dataset.pct)}% of max)</span></span></div>
+          <div class="iph-row"><span class="iph-label">First seen</span><span>${esc(row.dataset.first)}</span></div>
+          <div class="iph-row"><span class="iph-label">Last seen</span><span>${esc(row.dataset.last)}</span></div>
+          <div class="iph-row"><span class="iph-label">CrowdSec</span><span style="color:${row.dataset.banned==='true'?'var(--red)':'var(--green)'}">
+            ${row.dataset.banned === "true" ? "Banned ✓" : "Not banned"}
+          </span></div>`;
+        hoverCard.hidden = false;
+        positionHoverCard(e);
+      });
+      row.addEventListener("mousemove", positionHoverCard);
+      row.addEventListener("mouseleave", () => { hoverCard.hidden = true; });
+    });
+
+    // Fetch ISP info from ip-api.com batch (free, no key needed)
+    fetchIspInfo(byIp, "sec-ips");
 
     // (Recent Hits table replaced by Traffic Monitor)
 
@@ -1578,6 +1662,41 @@
       btn.disabled = false;
       btn.textContent = "Check";
     }
+  }
+
+  // ---- IP hover card positioning ----
+  function positionHoverCard(e) {
+    const card = document.getElementById("ip-hover-card");
+    if (!card || card.hidden) return;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const cw = card.offsetWidth || 260, ch = card.offsetHeight || 180;
+    let x = e.clientX + 14, y = e.clientY + 14;
+    if (x + cw > vw - 10) x = e.clientX - cw - 10;
+    if (y + ch > vh - 10) y = e.clientY - ch - 10;
+    card.style.left = x + "px";
+    card.style.top  = y + "px";
+  }
+
+  // ---- ISP batch lookup via ip-api.com (free, no key) ----
+  async function fetchIspInfo(ipList, tablePrefix) {
+    if (!ipList || !ipList.length) return;
+    const ips = ipList.slice(0, 50).map(i => ({ query: i.ip, fields: "query,org,hosting" }));
+    try {
+      const resp = await fetch("http://ip-api.com/batch?fields=query,org,hosting", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(ips),
+      });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      data.forEach(r => {
+        const id = `isp-${(r.query || "").replace(/\./g, "-")}`;
+        const el = document.getElementById(id);
+        if (!el) return;
+        const hosting = r.hosting ? " · <span class='ip-hosting-badge'>Hosting</span>" : "";
+        el.innerHTML = r.org ? `· ${esc(r.org)}${hosting}` : "";
+      });
+    } catch (_) { /* ip-api unreachable, skip silently */ }
   }
 
   function initDiagnose() {
