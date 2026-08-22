@@ -1101,13 +1101,133 @@ body.light-theme .sec-map .leaflet-container { background: #10151b; }
 /* ---------- Responsive ---------- */
 @media (max-width: 760px) {
   .layout { flex-direction: column; }
+
+  /* Sidebar becomes a sticky top nav bar */
   .sidebar {
-    width: 100%; height: auto; position: static;
-    flex-direction: row; align-items: center; flex-wrap: wrap;
-    gap: 10px;
+    width: 100%; height: auto; position: sticky; top: 0; z-index: 200;
+    flex-direction: column; align-items: stretch;
+    padding: 8px 10px; gap: 6px;
   }
-  .nav { flex-direction: row; flex-wrap: wrap; flex: 1; }
-  .main { padding: 16px; }
+
+  /* Brand row: logo + name side by side */
+  .brand { padding: 0 4px 4px; gap: 8px; }
+  .brand-mark { width: 36px; height: 36px; border-radius: 6px; }
+  .brand-name { font-size: 14px; }
+  .brand-sub { font-size: 10px; }
+  .brand-accent-bar { margin: -8px -10px 6px; }
+
+  /* Nav: horizontal scrolling strip */
+  .nav {
+    flex-direction: row; flex-wrap: nowrap;
+    overflow-x: auto; gap: 2px;
+    scrollbar-width: none; padding-bottom: 2px;
+  }
+  .nav::-webkit-scrollbar { display: none; }
+  .nav::before { display: none; }
+  .nav-item {
+    flex-shrink: 0; padding: 6px 10px;
+    font-size: 12px; white-space: nowrap;
+    min-height: 36px;
+  }
+  .nav-item:hover { transform: none; }
+  .nav-item.active::before { display: none; }
+
+  /* Service status dots: hide on mobile to save space */
+  .sidebar-foot { display: none; }
+
+  /* Main content */
+  .main { padding: 12px 10px 32px; }
+  .topbar { margin-bottom: 12px; gap: 8px; }
+  .topbar h1 { font-size: 18px; }
+  .topbar-actions { gap: 8px; }
+
+  /* Stats: 2-column grid on mobile */
+  .stats-row { grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
+  .stat-card { padding: 12px; }
+  .stat-value { font-size: 18px; }
+  .stat-label { font-size: 11.5px; }
+
+  /* Cards */
+  .card-toolbar { gap: 8px; padding: 10px 10px; }
+  .card-toolbar input[type="search"],
+  .card-toolbar input[type="text"] { min-width: 0; font-size: 14px; }
+
+  /* Tables: horizontal scroll container, wrappable cells */
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  tbody td { padding: 10px 10px; font-size: 13px; }
+  thead th { padding: 8px 10px; font-size: 11px; }
+
+  /* Touch-friendly buttons — minimum 44px tap target */
+  .btn { padding: 10px 16px; font-size: 13px; min-height: 44px; }
+  .btn-sm { padding: 8px 12px; font-size: 12px; min-height: 36px; }
+  .icon-btn { width: 36px; height: 36px; }
+  table .btn { margin-left: 4px; }
+
+  /* Card grids: single column */
+  .card-grid { grid-template-columns: 1fr; gap: 10px; }
+  .chart-grid { grid-template-columns: 1fr; gap: 10px; }
+  .pie-grid   { grid-template-columns: 1fr; gap: 10px; }
+  .wg-grid    { grid-template-columns: 1fr; }
+
+  /* Security map: shorter on mobile */
+  .sec-map { height: 300px; }
+  .sec-map-hud { min-width: 110px; padding: 8px 10px; }
+  .sec-hud-val { font-size: 13px; }
+
+  /* Bandwidth canvas */
+  .bw-canvas { height: 140px; }
+  .bw-head { flex-direction: column; align-items: flex-start; gap: 6px; }
+  .bw-rates { gap: 12px; font-size: 12px; }
+
+  /* Overview chart grid */
+  .chart-grid-map { grid-template-columns: 1fr; grid-template-rows: auto; min-height: auto; }
+  .ov-map { min-height: 280px; }
+
+  /* Modals: full width */
+  .modal { padding: 10px; }
+  .modal-box { max-width: 100%; padding: 16px 14px; border-radius: 12px; }
+
+  /* WireGuard QR code */
+  .wg-qr-wrap { margin-bottom: 10px; }
+  .wg-qr { width: 180px; height: 180px; }
+
+  /* Login card already uses min(360px, 92vw) — just tighten padding */
+  .login-card { padding: 22px 18px; }
+
+  /* Segmented buttons: allow wrap */
+  .seg-btns { flex-wrap: wrap; }
+  .seg-btn { padding: 6px 12px; min-height: 36px; }
+
+  /* Firewall form: stack fields vertically */
+  .fw-form { flex-wrap: wrap; }
+  .fw-form input[type="text"] { flex: 1 1 100%; }
+  .fw-form select { flex: 1 1 auto; }
+
+  /* Client host cell: tighten */
+  .client-hostname { max-width: 130px; }
+  .client-vendor   { max-width: 130px; }
+
+  /* Blocklist log */
+  .bl-log { font-size: 11px; }
+
+  /* Svc tabs: wrap */
+  .svc-tabs { gap: 4px; }
+  .svc-tab { padding: 5px 10px; font-size: 11.5px; }
+
+  /* AI provider presets: single column */
+  .ai-provider-presets { grid-template-columns: 1fr; }
+}
+
+/* Extra-small phones (< 420px) */
+@media (max-width: 420px) {
+  .stats-row { grid-template-columns: 1fr 1fr; gap: 6px; }
+  .stat-value { font-size: 16px; }
+  .topbar h1 { font-size: 16px; }
+  .nav-item { padding: 5px 8px; font-size: 11.5px; }
+  .main { padding: 10px 8px 28px; }
+  .client-hostname { max-width: 100px; }
+  .client-vendor   { max-width: 100px; }
+  .sec-map { height: 240px; }
 }
 
 /* ---------- Settings / Themes ---------- */
