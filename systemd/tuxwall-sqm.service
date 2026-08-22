@@ -1,0 +1,14 @@
+[Unit]
+Description=TuxWall SQM - CAKE queue management on WAN
+Documentation=man:tc-cake(8)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tuxwall-sqm.sh
+RemainAfterExit=yes
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target

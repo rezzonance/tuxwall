@@ -1,0 +1,16 @@
+[Unit]
+Description=Network Dashboard API
+After=network.target kea-dhcp4-server.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /var/www/html/includes/api_server.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/etc/wireguard /etc/ufw /etc/systemd/system /etc/tuxwall /etc/unbound
+
+[Install]
+WantedBy=multi-user.target
