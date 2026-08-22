@@ -1442,8 +1442,9 @@
           const countChanged = row.dataset.count !== String(entry.count);
           const bannedChanged = curBanned !== banned;
 
+          // Update cells that change on each refresh
           if (countChanged || bannedChanged) {
-            // Update pill class
+            // IP pill threat class
             const pill = row.querySelector(".ip-pill");
             if (pill) {
               const lvl = banned ? "banned" : threatLevel(entry.count).toLowerCase();
@@ -1456,18 +1457,21 @@
             // Bar
             if (cells[4]) cells[4].innerHTML =
               `<div class="bar"><div class="bar-fill bar-fill-err" style="width:${pct}%"></div></div>`;
-            // Ban button only
-            if (cells[5] && csUp) {
-              const existing = cells[5].querySelector(".sec-ban, .sec-unban");
-              if (existing) {
-                existing.className = banned ? "btn btn-sm sec-unban" : "btn btn-sm btn-danger sec-ban";
-                existing.textContent = banned ? "Unban" : "Ban";
-              }
-            }
             // Update data attrs
             row.dataset.count  = entry.count;
             row.dataset.pct    = pct;
             row.dataset.banned = banned;
+          }
+          // Always rebuild the actions cell — csUp may have changed since first render,
+          // and this is just buttons so there's no flicker risk
+          if (cells[5]) {
+            const abuseBtn = `<a class="btn btn-sm btn-ghost ip-lookup-btn" href="https://www.abuseipdb.com/check/${esc(entry.ip)}" target="_blank" rel="noopener" title="Check AbuseIPDB">🔍</a>`;
+            const banBtn = csUp
+              ? (banned
+                  ? `<button type="button" class="btn btn-sm sec-unban" data-ip="${esc(entry.ip)}" title="Remove CrowdSec ban">Unban</button>`
+                  : `<button type="button" class="btn btn-sm btn-danger sec-ban" data-ip="${esc(entry.ip)}" title="Add to CrowdSec blocklist">Ban</button>`)
+              : "";
+            cells[5].innerHTML = `<div class="svc-actions">${banBtn}${abuseBtn}</div>`;
           }
         }
 
