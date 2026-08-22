@@ -1230,6 +1230,54 @@ body.light-theme .sec-map .leaflet-container { background: #10151b; }
 /* Security page — full-width stacked cards */
 .sec-full-cards { display: flex; flex-direction: column; }
 
+/* ========== TOP COUNTRIES ========== */
+.country-row { transition: background var(--transition); }
+
+.country-cell {
+  display: flex; align-items: center; gap: 10px;
+}
+.country-rank {
+  font-size: 11px; font-weight: 800; letter-spacing: 0.04em;
+  min-width: 24px; text-align: right; flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.country-iso-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 36px; height: 22px; border-radius: 5px; flex-shrink: 0;
+  font-size: 10.5px; font-weight: 800; letter-spacing: 0.08em;
+  font-family: var(--mono);
+  background: color-mix(in srgb, var(--cc, var(--muted)) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--cc, var(--muted)) 35%, transparent);
+  color: var(--cc, var(--muted));
+  box-shadow: 0 0 8px color-mix(in srgb, var(--cc, var(--muted)) 15%, transparent);
+  transition: box-shadow var(--transition), transform var(--transition);
+}
+.country-row:hover .country-iso-badge {
+  transform: scale(1.1);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--cc, var(--muted)) 35%, transparent);
+}
+.country-name {
+  font-size: 13px; font-weight: 500; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 200px;
+}
+.country-bar-wrap {
+  width: 100%; min-width: 80px; height: 6px;
+  background: var(--bg-elev); border-radius: 4px; overflow: hidden;
+}
+.country-bar-fill {
+  height: 100%; border-radius: 4px;
+  transition: width 0.4s ease;
+  box-shadow: 0 0 6px currentColor;
+}
+.country-hits {
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+  font-size: 13px; text-align: right;
+}
+.country-share {
+  font-size: 12px; color: var(--muted); text-align: right;
+  white-space: nowrap; min-width: 42px;
+}
+
 /* New attacker row fade-in (keyed diff) */
 .ip-row-new {
   animation: ip-row-appear 0.5s ease;

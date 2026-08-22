@@ -1334,13 +1334,42 @@
     renderAttackMap(secMap, d.by_ip || []);
 
     const countries = d.countries || [];
-    const cMax = countries[0] ? countries[0].count : 1;
-    const buildCountryRow = (c) => `
-      <tr>
-        <td>${flagEmoji(c.iso)} ${esc(c.name)}</td>
-        <td>${formatNumber(c.count)}</td>
-        <td><div class="bar"><div class="bar-fill bar-fill-err" style="width:${Math.round(c.count / cMax * 100)}%"></div></div></td>
+    const cTotal = countries.reduce((s, c) => s + c.count, 0) || 1;
+    const cMax   = countries[0] ? countries[0].count : 1;
+
+    // Colour ramp for rank: top 3 get distinct colours, rest fade through amber→muted
+    const RANK_COLORS = ["#f85149", "#ffa657", "#d29922"];
+    function rankColor(idx) {
+      if (idx < 3) return RANK_COLORS[idx];
+      const t = Math.min((idx - 3) / 12, 1);
+      // fade from amber to muted
+      return `color-mix(in srgb, var(--amber) ${Math.round((1-t)*60)}%, var(--muted))`;
+    }
+
+    const buildCountryRow = (c, idx) => {
+      const pct     = Math.round(c.count / cMax * 100);
+      const sharePct = ((c.count / cTotal) * 100).toFixed(1);
+      const color   = rankColor(idx);
+      const iso     = (c.iso && c.iso !== "??") ? c.iso.toUpperCase() : "—";
+      return `
+      <tr class="country-row">
+        <td>
+          <div class="country-cell">
+            <span class="country-rank" style="color:${color}">#${idx + 1}</span>
+            <span class="country-iso-badge" style="--cc:${color}">${esc(iso)}</span>
+            <span class="country-name">${esc(c.name || "Unknown")}</span>
+          </div>
+        </td>
+        <td>
+          <div class="country-bar-wrap">
+            <div class="country-bar-fill" style="width:${pct}%;background:${color}"></div>
+          </div>
+        </td>
+        <td class="country-hits">${formatNumber(c.count)}</td>
+        <td class="country-share">${sharePct}%</td>
       </tr>`;
+    };
+
     els.secCountriesBody.innerHTML = countries.slice(0, 25).map(buildCountryRow).join("");
     const cMoreWrap = document.getElementById("sec-countries-more-wrap");
     cMoreWrap.hidden = countries.length <= 25;
