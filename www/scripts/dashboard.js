@@ -1367,8 +1367,6 @@
       const lvl = threatLevel(count);
       return `<span class="ip-threat ip-threat-${lvl.toLowerCase()}">${lvl}</span>`;
     }
-
-    // IP pill with copy button
     function ipPill(ip, count, banned) {
       const lvl = banned ? "banned" : threatLevel(count).toLowerCase();
       return `<span class="ip-pill ip-pill-${lvl}" data-ip="${esc(ip)}">
@@ -1377,10 +1375,10 @@
       </span>`;
     }
 
-    // Hover card content stored in data attributes
-    const buildIpRow = (i) => {
-      const banned   = state.secBannedIps.has(i.ip);
-      const pct      = Math.round(i.count / ipMax * 100);
+    // Build a full <tr> string for a given IP entry
+    function buildIpRow(i) {
+      const banned    = state.secBannedIps.has(i.ip);
+      const pct       = Math.round(i.count / ipMax * 100);
       const firstSeen = i.first ? new Date(i.first * 1000).toLocaleDateString() : "—";
       const lastSeen  = i.last  ? new Date(i.last  * 1000).toLocaleString()     : "—";
       const location  = [i.city, i.country].filter(Boolean).join(", ") || "Unknown";
@@ -1390,7 +1388,6 @@
             : `<button type="button" class="btn btn-sm btn-danger sec-ban" data-ip="${esc(i.ip)}" title="Add to CrowdSec blocklist">Ban</button>`)
         : "";
       const abuseBtn = `<a class="btn btn-sm btn-ghost ip-lookup-btn" href="https://www.abuseipdb.com/check/${esc(i.ip)}" target="_blank" rel="noopener" title="Check AbuseIPDB">🔍</a>`;
-
       return `<tr class="ip-row" data-ip="${esc(i.ip)}"
           data-location="${esc(location)}"
           data-port="${esc(i.port || "—")}"
@@ -1399,9 +1396,7 @@
           data-count="${i.count}"
           data-pct="${pct}"
           data-banned="${banned}">
-        <td>
-          ${ipPill(i.ip, i.count, banned)}
-        </td>
+        <td>${ipPill(i.ip, i.count, banned)}</td>
         <td>${threatBadge(i.count, banned)}</td>
         <td>${flagEmoji(i.iso)} <span class="ip-location">${esc(location)}</span>
             <span class="ip-isp muted" id="isp-${esc(i.ip).replace(/\./g,'-')}"></span></td>
@@ -1409,9 +1404,132 @@
         <td><div class="bar"><div class="bar-fill bar-fill-err" style="width:${pct}%"></div></div></td>
         <td><div class="svc-actions">${banBtn}${abuseBtn}</div></td>
       </tr>`;
-    };
+    }
 
-    els.secIpsBody.innerHTML = byIp.slice(0, 25).map(buildIpRow).join("");
+    // Keyed diff update — only touch rows that changed, never flash the whole table
+    function diffIpTable(tbody, entries, limit) {
+      const slice      = entries.slice(0, limit);
+      const newIps     = slice.map(i => i.ip);
+      const newMap     = Object.fromEntries(slice.map(i => [i.ip, i]));
+      const existingRows = Array.from(tbody.querySelectorAll("tr[data-ip]"));
+      const existingIps  = existingRows.map(r => r.dataset.ip);
+
+      // Remove rows no longer in the list
+      existingRows.forEach(r => {
+        if (!newMap[r.dataset.ip]) r.remove();
+      });
+
+      // Insert / update rows in order
+      newIps.forEach((ip, idx) => {
+        const entry      = newMap[ip];
+        const banned     = state.secBannedIps.has(ip);
+        const pct        = Math.round(entry.count / ipMax * 100);
+        let   row        = tbody.querySelector(`tr[data-ip="${CSS.escape(ip)}"]`);
+        const isNew      = !row;
+
+        if (isNew) {
+          // Brand-new IP — insert a fresh row
+          const tmp = document.createElement("tbody");
+          tmp.innerHTML = buildIpRow(entry);
+          row = tmp.firstElementChild;
+          row.classList.add("ip-row-new");
+          setTimeout(() => row.classList.remove("ip-row-new"), 600);
+        } else {
+          // Existing row — update only the cells that change frequently
+          // (threat badge, hit count, bar, ban button — NOT the ISP span)
+          const cells      = row.cells;
+          const curBanned  = row.dataset.banned === "true";
+          const countChanged = row.dataset.count !== String(entry.count);
+          const bannedChanged = curBanned !== banned;
+
+          if (countChanged || bannedChanged) {
+            // Update pill class
+            const pill = row.querySelector(".ip-pill");
+            if (pill) {
+              const lvl = banned ? "banned" : threatLevel(entry.count).toLowerCase();
+              pill.className = `ip-pill ip-pill-${lvl}`;
+            }
+            // Threat badge
+            if (cells[1]) cells[1].innerHTML = threatBadge(entry.count, banned);
+            // Hit count
+            if (cells[3]) cells[3].textContent = formatNumber(entry.count);
+            // Bar
+            if (cells[4]) cells[4].innerHTML =
+              `<div class="bar"><div class="bar-fill bar-fill-err" style="width:${pct}%"></div></div>`;
+            // Ban button only
+            if (cells[5] && csUp) {
+              const existing = cells[5].querySelector(".sec-ban, .sec-unban");
+              if (existing) {
+                existing.className = banned ? "btn btn-sm sec-unban" : "btn btn-sm btn-danger sec-ban";
+                existing.textContent = banned ? "Unban" : "Ban";
+              }
+            }
+            // Update data attrs
+            row.dataset.count  = entry.count;
+            row.dataset.pct    = pct;
+            row.dataset.banned = banned;
+          }
+        }
+
+        // Ensure correct DOM order
+        const sibling = tbody.children[idx];
+        if (sibling !== row) tbody.insertBefore(row, sibling || null);
+
+        // Wire up copy button if new row
+        if (isNew) {
+          const copyBtn = row.querySelector(".ip-copy-btn");
+          if (copyBtn) {
+            copyBtn.addEventListener("click", (e) => {
+              e.stopPropagation();
+              navigator.clipboard.writeText(copyBtn.dataset.copy).then(() => {
+                copyBtn.textContent = "✓";
+                setTimeout(() => { copyBtn.textContent = "⎘"; }, 1200);
+              });
+            });
+          }
+          attachIpRowHover(row);
+        }
+      });
+
+      // If table was empty placeholder, clear it
+      const placeholder = tbody.querySelector("td[colspan]");
+      if (placeholder && newIps.length) placeholder.closest("tr")?.remove();
+    }
+
+    // Attach hover card to a single row (called once per row, on insert)
+    function attachIpRowHover(row) {
+      const hoverCard = document.getElementById("ip-hover-card");
+      row.addEventListener("mouseenter", (e) => {
+        const ispEl = document.getElementById("isp-" + row.dataset.ip.replace(/\./g, "-"));
+        const isp   = ispEl ? ispEl.textContent.replace(/^·\s*/, "").trim() : "";
+        hoverCard.innerHTML = `
+          <div class="iph-ip mono">${esc(row.dataset.ip)}</div>
+          <div class="iph-row"><span class="iph-label">Location</span><span>${esc(row.dataset.location)}</span></div>
+          ${isp ? `<div class="iph-row"><span class="iph-label">ISP</span><span>${esc(isp)}</span></div>` : ""}
+          <div class="iph-row"><span class="iph-label">Top Port</span><span class="mono">${esc(row.dataset.port)}</span></div>
+          <div class="iph-row"><span class="iph-label">Hits</span><span>${esc(row.dataset.count)} <span class="muted">(${esc(row.dataset.pct)}% of max)</span></span></div>
+          <div class="iph-row"><span class="iph-label">First seen</span><span>${esc(row.dataset.first)}</span></div>
+          <div class="iph-row"><span class="iph-label">Last seen</span><span>${esc(row.dataset.last)}</span></div>
+          <div class="iph-row"><span class="iph-label">CrowdSec</span>
+            <span style="color:${row.dataset.banned==='true'?'var(--red)':'var(--green)'}">
+              ${row.dataset.banned === "true" ? "Banned ✓" : "Not banned"}
+            </span></div>`;
+        hoverCard.hidden = false;
+        positionHoverCard(e);
+      });
+      row.addEventListener("mousemove", positionHoverCard);
+      row.addEventListener("mouseleave", () => { hoverCard.hidden = true; });
+    }
+
+    // Run the diff update
+    const newIps = byIp.map(i => i.ip);
+    const prevIps = Array.from(els.secIpsBody.querySelectorAll("tr[data-ip]")).map(r => r.dataset.ip);
+    diffIpTable(els.secIpsBody, byIp, 25);
+
+    // Only fetch ISP info for IPs that are new to the table
+    const brandNewIps = byIp.slice(0, 25).filter(i => !prevIps.includes(i.ip));
+    if (brandNewIps.length) fetchIspInfo(brandNewIps, "sec-ips");
+
     const ipMoreWrap = document.getElementById("sec-ips-more-wrap");
     ipMoreWrap.hidden = byIp.length <= 25;
     if (!ipMoreWrap.hidden) {
@@ -1421,43 +1539,6 @@
         fetchIspInfo(byIp, "sec-ips-full");
       };
     }
-
-    // Copy-to-clipboard for IP pills
-    document.querySelectorAll(".ip-copy-btn").forEach(btn => {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        navigator.clipboard.writeText(btn.dataset.copy).then(() => {
-          btn.textContent = "✓";
-          setTimeout(() => { btn.textContent = "⎘"; }, 1200);
-        });
-      });
-    });
-
-    // Hover card
-    const hoverCard = document.getElementById("ip-hover-card");
-    document.querySelectorAll(".ip-row").forEach(row => {
-      row.addEventListener("mouseenter", (e) => {
-        const isp = document.getElementById("isp-" + row.dataset.ip.replace(/\./g, "-"))?.textContent || "";
-        hoverCard.innerHTML = `
-          <div class="iph-ip mono">${esc(row.dataset.ip)}</div>
-          <div class="iph-row"><span class="iph-label">Location</span><span>${esc(row.dataset.location)}</span></div>
-          ${isp ? `<div class="iph-row"><span class="iph-label">ISP</span><span>${esc(isp)}</span></div>` : ""}
-          <div class="iph-row"><span class="iph-label">Top Port</span><span class="mono">${esc(row.dataset.port)}</span></div>
-          <div class="iph-row"><span class="iph-label">Hits</span><span>${esc(row.dataset.count)} <span class="muted">(${esc(row.dataset.pct)}% of max)</span></span></div>
-          <div class="iph-row"><span class="iph-label">First seen</span><span>${esc(row.dataset.first)}</span></div>
-          <div class="iph-row"><span class="iph-label">Last seen</span><span>${esc(row.dataset.last)}</span></div>
-          <div class="iph-row"><span class="iph-label">CrowdSec</span><span style="color:${row.dataset.banned==='true'?'var(--red)':'var(--green)'}">
-            ${row.dataset.banned === "true" ? "Banned ✓" : "Not banned"}
-          </span></div>`;
-        hoverCard.hidden = false;
-        positionHoverCard(e);
-      });
-      row.addEventListener("mousemove", positionHoverCard);
-      row.addEventListener("mouseleave", () => { hoverCard.hidden = true; });
-    });
-
-    // Fetch ISP info from ip-api.com batch (free, no key needed)
-    fetchIspInfo(byIp, "sec-ips");
 
     // (Recent Hits table replaced by Traffic Monitor)
 

@@ -1230,6 +1230,15 @@ body.light-theme .sec-map .leaflet-container { background: #10151b; }
 /* Security page — full-width stacked cards */
 .sec-full-cards { display: flex; flex-direction: column; }
 
+/* New attacker row fade-in (keyed diff) */
+.ip-row-new {
+  animation: ip-row-appear 0.5s ease;
+}
+@keyframes ip-row-appear {
+  from { opacity: 0; background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  to   { opacity: 1; background: transparent; }
+}
+
 /* ========== IP PILL (Top Attackers) ========== */
 .ip-pill {
   display: inline-flex; align-items: center; gap: 5px;
