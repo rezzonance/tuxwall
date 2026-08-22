@@ -1227,6 +1227,9 @@ body.light-theme .sec-map .leaflet-container { background: #10151b; }
   .diag-input { min-width: 0; }
 }
 
+/* Security page — full-width stacked cards */
+.sec-full-cards { display: flex; flex-direction: column; }
+
 /* ========== IP PILL (Top Attackers) ========== */
 .ip-pill {
   display: inline-flex; align-items: center; gap: 5px;

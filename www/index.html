@@ -663,8 +663,8 @@
         <p class="muted bl-note">Signature detections are read live from <b>/var/log/suricata/eve.json</b> and also feed the AI Threat Summary above. Suricata runs as a <b>passive IDS</b>: it inspects a copy of each packet via af-packet and never sits in the forwarding path, so internet throughput is unaffected. Install and enable <a href="https://suricata.io" target="_blank" rel="noopener">Suricata</a> on the LAN/WAN interfaces to populate this table.</p>
       </div>
 
-      <div class="card-grid">
-        <div class="card">
+      <div class="sec-full-cards">
+        <div class="card card-mt">
           <div class="card-head"><h2>Top Countries</h2></div>
           <div class="table-wrap">
             <table id="sec-countries-table">
@@ -676,7 +676,7 @@
             <button id="sec-countries-more" class="btn btn-ghost btn-sm" type="button">Show more</button>
           </div>
         </div>
-        <div class="card">
+        <div class="card card-mt">
           <div class="card-head">
             <h2>Top Attackers</h2>
             <div class="card-toolbar bl-toolbar">
@@ -695,6 +695,8 @@
             <button id="sec-ips-more" class="btn btn-ghost btn-sm" type="button">Show more</button>
           </div>
         </div>
+
+      </div><!-- end sec-full-cards -->
 
         <!-- Full list modals -->
         <div class="modal" id="sec-countries-modal" hidden>
@@ -721,7 +723,6 @@
             </div>
           </div>
         </div>
-      </div>
 
       <div class="card card-mt">
         <div class="card-head">
