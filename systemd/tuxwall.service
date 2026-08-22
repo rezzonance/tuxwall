@@ -5,6 +5,7 @@ After=network.target kea-dhcp4-server.service
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /var/www/html/includes/api_server.py
+ExecReload=/bin/kill -USR1 $MAINPID
 Restart=always
 RestartSec=3
 NoNewPrivileges=true

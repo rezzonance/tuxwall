@@ -5524,6 +5524,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 _ensure_unbound_local_actions()
+                subprocess.Popen(["systemctl", "restart", "unbound.service"])
                 subprocess.Popen(["systemctl", "restart", "tuxwall.service"])
                 self._send(200, {"ok": True})
             except Exception as exc:
@@ -5936,6 +5937,39 @@ TRAFFIC_JOURNAL_RE = re.compile(
     r"^(\S+)\s+\S+\s+unbound\[\d+\]"
 )
 
+TUXWALL_SERVICE_FILE = "/etc/systemd/system/tuxwall.service"
+TUXWALL_SERVICE_CONTENT = """\
+[Unit]
+Description=Network Dashboard API
+After=network.target kea-dhcp4-server.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /var/www/html/includes/api_server.py
+ExecReload=/bin/kill -USR1 $MAINPID
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/etc/wireguard /etc/ufw /etc/systemd/system /etc/tuxwall /etc/unbound
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+def _ensure_service_reload():
+    """Add ExecReload to tuxwall.service if missing, then daemon-reload."""
+    try:
+        current = open(TUXWALL_SERVICE_FILE).read()
+        if "ExecReload" not in current:
+            with open(TUXWALL_SERVICE_FILE, "w") as f:
+                f.write(TUXWALL_SERVICE_CONTENT)
+            subprocess.run(["systemctl", "daemon-reload"],
+                           capture_output=True, text=True, timeout=10)
+    except Exception:
+        pass
+
 def _ensure_unbound_local_actions():
     """Write log-local-actions conf if missing, reload unbound."""
     if os.path.exists(UNBOUND_LOCAL_ACTIONS_CONF):
@@ -6187,6 +6221,7 @@ def _self_restart(signum, frame):
 
 def main():
     signal.signal(signal.SIGUSR1, _self_restart)
+    _ensure_service_reload()
     _ensure_unbound_local_actions()
     get_security_monitor()
     get_system_monitor()
