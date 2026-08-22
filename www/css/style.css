@@ -1216,6 +1216,110 @@ body.light-theme .sec-map .leaflet-container { background: #10151b; }
 
   /* AI provider presets: single column */
   .ai-provider-presets { grid-template-columns: 1fr; }
+
+  /* Traffic monitor */
+  .tm-controls { gap: 6px; }
+  .tm-scroll { max-height: 320px; }
+  .tm-ts { font-size: 11px; }
+
+  /* Diagnose */
+  .diag-input-row { flex-direction: column; align-items: stretch; }
+  .diag-input { min-width: 0; }
+}
+
+/* ========== TRAFFIC MONITOR ========== */
+.tm-controls {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.tm-scroll {
+  max-height: 420px; overflow-y: auto; overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.tm-foot {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 14px; border-top: 1px solid var(--border);
+  font-size: 12px; color: var(--muted);
+}
+.tm-ts { font-size: 12px; white-space: nowrap; }
+
+/* Row colours */
+.tm-row-block { background: rgba(248, 81, 73, 0.06); }
+.tm-row-block:hover { background: rgba(248, 81, 73, 0.12) !important; }
+.tm-row-dns   { background: rgba(210, 153, 34, 0.06); }
+.tm-row-dns:hover   { background: rgba(210, 153, 34, 0.12) !important; }
+.tm-row-allow { background: rgba(63, 185, 80, 0.06); }
+.tm-row-allow:hover { background: rgba(63, 185, 80, 0.12) !important; }
+
+/* Type badges */
+.tm-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 20px;
+  font-size: 11px; font-weight: 700; white-space: nowrap;
+  border: 1px solid transparent;
+}
+.tm-badge-block {
+  background: rgba(248, 81, 73, 0.15); color: var(--red);
+  border-color: rgba(248, 81, 73, 0.3);
+}
+.tm-badge-dns {
+  background: rgba(210, 153, 34, 0.15); color: var(--amber);
+  border-color: rgba(210, 153, 34, 0.3);
+}
+.tm-badge-allow {
+  background: rgba(63, 185, 80, 0.15); color: var(--green);
+  border-color: rgba(63, 185, 80, 0.3);
+}
+
+/* Direction */
+.tm-dir { font-size: 11px; font-weight: 700; white-space: nowrap; }
+.tm-dir-in  { color: var(--red); }
+.tm-dir-out { color: var(--accent); }
+
+/* Domain name in DNS block rows */
+.tm-domain { color: var(--amber); }
+
+/* ========== DIAGNOSE TOOL ========== */
+.diag-body { padding: 14px 16px 16px; }
+.diag-input-row {
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+}
+.diag-input {
+  flex: 1; min-width: 220px;
+  background: var(--bg-elev); border: 1px solid var(--border);
+  color: var(--text); border-radius: 8px; padding: 9px 12px;
+  font: inherit; font-size: 14px; font-family: var(--mono); outline: none;
+}
+.diag-input:focus { border-color: var(--accent); }
+.diag-loading { padding: 14px 0; color: var(--muted); font-size: 13px; }
+.diag-error { padding: 10px 12px; color: var(--red); font-size: 13px;
+  background: rgba(248,81,73,0.08); border-radius: 8px; margin-top: 12px; }
+.diag-overall {
+  padding: 10px 14px; border-radius: 8px; font-size: 14px; font-weight: 600;
+  margin: 12px 0 10px;
+}
+.diag-overall-blocked {
+  background: rgba(248, 81, 73, 0.12); color: var(--red);
+  border: 1px solid rgba(248, 81, 73, 0.3);
+}
+.diag-overall-ok {
+  background: rgba(63, 185, 80, 0.12); color: var(--green);
+  border: 1px solid rgba(63, 185, 80, 0.3);
+}
+.diag-checks { display: flex; flex-direction: column; gap: 8px; }
+.diag-check {
+  border-radius: 8px; padding: 10px 14px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+.diag-check-blocked { border-color: rgba(248, 81, 73, 0.35); background: rgba(248,81,73,0.06); }
+.diag-check-ok      { border-color: rgba(63, 185, 80, 0.25); background: rgba(63,185,80,0.04); }
+.diag-check-unknown { border-color: var(--border); }
+.diag-check-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.diag-check-icon { font-size: 14px; }
+.diag-check-name { font-weight: 600; font-size: 13px; }
+.diag-check-detail { font-size: 12.5px; color: var(--muted); margin-left: 22px; }
+.diag-check-action {
+  font-size: 12px; color: var(--amber); margin-left: 22px; margin-top: 4px;
+  font-family: var(--mono);
 }
 
 /* ---------- Show more bar ---------- */

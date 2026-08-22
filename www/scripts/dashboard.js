@@ -125,8 +125,8 @@
     secIpsBody: document.querySelector("#sec-ips-body"),
     secBanAll: document.getElementById("sec-ban-all"),
     secBanStatus: document.getElementById("sec-ban-status"),
-    secEventsBody: document.querySelector("#sec-events-body"),
-    secEventCount: document.getElementById("sec-event-count"),
+    secEventsBody: null,
+    secEventCount: null,
     secSuricataBody: document.querySelector("#sec-suricata-body"),
     secSuricataHint: document.getElementById("sec-suricata-hint"),
     secSuricataTabs: document.getElementById("sec-suricata-tabs"),
@@ -1375,15 +1375,7 @@
       };
     }
 
-    els.secEventsBody.innerHTML = (d.events || []).map((e) => `
-      <tr>
-        <td class="mono">${formatTime(e.ts)}</td>
-        <td class="mono">${esc(e.src)}</td>
-        <td>${flagEmoji(e.iso)} ${esc(e.country || "Unknown")}</td>
-        <td class="mono">${esc(e.dst)}</td>
-        <td class="mono">${esc(e.port)}</td>
-      </tr>`).join("");
-    els.secEventCount.textContent = `${(d.events || []).length} shown`;
+    // (Recent Hits table replaced by Traffic Monitor)
 
     requestAnimationFrame(() => {
       drawSecurityChart(els.secChart, d.series || []);
@@ -1441,6 +1433,158 @@
     } catch (err) {
       showBanner(true, "Suricata error: " + err.message);
     }
+  }
+
+  // ===================== TRAFFIC MONITOR =====================
+  const TM_LIMIT = 100;
+  let tmPaused = false;
+  let tmFilter = "all";
+  let tmEntries = [];
+  let tmInterval = null;
+
+  function tmBadge(type) {
+    switch (type) {
+      case "fw-block":  return '<span class="tm-badge tm-badge-block">FW Block</span>';
+      case "fw-allow":  return '<span class="tm-badge tm-badge-allow">FW Allow</span>';
+      case "dns-block": return '<span class="tm-badge tm-badge-dns">DNS Block</span>';
+      default:          return '<span class="tm-badge">' + esc(type) + '</span>';
+    }
+  }
+
+  function tmRowClass(type) {
+    if (type === "fw-block")  return "tm-row-block";
+    if (type === "dns-block") return "tm-row-dns";
+    if (type === "fw-allow")  return "tm-row-allow";
+    return "";
+  }
+
+  function tmDirection(dir) {
+    return dir === "in"
+      ? '<span class="tm-dir tm-dir-in">↓ IN</span>'
+      : '<span class="tm-dir tm-dir-out">↑ OUT</span>';
+  }
+
+  function renderTrafficMonitor() {
+    const body = document.getElementById("tm-body");
+    if (!body) return;
+    const visible = tmFilter === "all"
+      ? tmEntries
+      : tmEntries.filter(e => e.type === tmFilter);
+    if (!visible.length) {
+      body.innerHTML = '<tr><td colspan="6" class="empty">No events yet — traffic will appear as connections are made or blocked.</td></tr>';
+      document.getElementById("tm-count").textContent = "";
+      return;
+    }
+    body.innerHTML = visible.slice(0, TM_LIMIT).map(e => {
+      const ts = e.ts ? e.ts.replace("T", " ").substring(0, 19).replace("+", " +") : "—";
+      const src = e.src ? `<span class="mono">${esc(e.src)}</span>` : '<span class="muted">—</span>';
+      const dst = e.dst
+        ? (e.proto === "DNS" ? `<span class="mono tm-domain">${esc(e.dst)}</span>` : `<span class="mono">${esc(e.dst)}</span>`)
+        : '<span class="muted">—</span>';
+      const proto = e.port
+        ? `<span class="mono">${esc(e.proto)}/${esc(e.port)}</span>`
+        : (e.proto ? `<span class="mono">${esc(e.proto)}</span>` : '<span class="muted">—</span>');
+      return `<tr class="${tmRowClass(e.type)}">
+        <td class="mono tm-ts">${esc(ts)}</td>
+        <td>${tmBadge(e.type)}</td>
+        <td>${tmDirection(e.direction || "in")}</td>
+        <td>${src}</td>
+        <td>${dst}</td>
+        <td>${proto}</td>
+      </tr>`;
+    }).join("");
+    document.getElementById("tm-count").textContent = `${visible.length} events`;
+  }
+
+  async function refreshTrafficMonitor() {
+    if (tmPaused) return;
+    try {
+      const d = await fetchJSON("/api/traffic-monitor");
+      if (!d.ok) return;
+      tmEntries = d.entries || [];
+      renderTrafficMonitor();
+      document.getElementById("tm-status").textContent =
+        `Last updated ${new Date().toLocaleTimeString()} · auto-refresh every 5s`;
+    } catch (e) {
+      document.getElementById("tm-status").textContent = "Error fetching traffic data: " + e.message;
+    }
+  }
+
+  function initTrafficMonitor() {
+    // Filter buttons
+    document.getElementById("tm-filter-btns").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-tm-filter]");
+      if (!btn) return;
+      tmFilter = btn.dataset.tmFilter;
+      document.querySelectorAll("[data-tm-filter]").forEach(b =>
+        b.classList.toggle("active", b === btn));
+      renderTrafficMonitor();
+    });
+
+    // Pause/resume
+    document.getElementById("tm-pause-btn").addEventListener("click", () => {
+      tmPaused = !tmPaused;
+      document.getElementById("tm-pause-btn").textContent = tmPaused ? "▶ Resume" : "⏸ Pause";
+      document.getElementById("tm-status").textContent = tmPaused
+        ? "Paused — click Resume to continue"
+        : "Resuming…";
+      if (!tmPaused) refreshTrafficMonitor();
+    });
+
+    refreshTrafficMonitor();
+    if (tmInterval) clearInterval(tmInterval);
+    tmInterval = setInterval(refreshTrafficMonitor, 5000);
+  }
+
+  // ===================== DIAGNOSE TOOL =====================
+  async function runDiagnose() {
+    const target = (document.getElementById("diag-target").value || "").trim();
+    if (!target) return;
+    const btn = document.getElementById("diag-btn");
+    const out = document.getElementById("diag-results");
+    btn.disabled = true;
+    btn.textContent = "Checking…";
+    out.hidden = false;
+    out.innerHTML = '<div class="diag-loading">Checking ' + esc(target) + '…</div>';
+    try {
+      const d = await postJSON("/api/diagnose", { target });
+      if (!d.ok) {
+        out.innerHTML = `<div class="diag-error">${esc(d.error || "Unknown error")}</div>`;
+        return;
+      }
+      const overallClass = d.blocked ? "diag-overall-blocked" : "diag-overall-ok";
+      const overallText = d.blocked ? "⚠ Something is blocking " + esc(d.target) : "✓ No blocks found for " + esc(d.target);
+      out.innerHTML = `
+        <div class="diag-overall ${overallClass}">${overallText}</div>
+        <div class="diag-checks">
+          ${(d.results || []).map(r => {
+            const cls = r.blocked === true ? "diag-check-blocked"
+                      : r.blocked === false ? "diag-check-ok"
+                      : "diag-check-unknown";
+            const icon = r.blocked === true ? "🔴" : r.blocked === false ? "🟢" : "⚪";
+            return `<div class="diag-check ${cls}">
+              <div class="diag-check-head">
+                <span class="diag-check-icon">${icon}</span>
+                <span class="diag-check-name">${esc(r.check)}</span>
+              </div>
+              <div class="diag-check-detail">${esc(r.detail)}</div>
+              ${r.action ? `<div class="diag-check-action">→ ${esc(r.action)}</div>` : ""}
+            </div>`;
+          }).join("")}
+        </div>`;
+    } catch (e) {
+      out.innerHTML = `<div class="diag-error">Request failed: ${esc(e.message)}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Check";
+    }
+  }
+
+  function initDiagnose() {
+    document.getElementById("diag-btn").addEventListener("click", runDiagnose);
+    document.getElementById("diag-target").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") runDiagnose();
+    });
   }
 
   function renderAiSummary(d) {
@@ -4274,6 +4418,8 @@
         initSecurityMap();
         refreshSecurity();
         refreshSuricata();
+        initTrafficMonitor();
+        initDiagnose();
         setTimeout(() => { if (secMap) secMap.map.invalidateSize(); }, 60);
       }
       if (view === "crowdsec") {

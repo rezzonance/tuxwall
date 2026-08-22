@@ -9,8 +9,10 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import socket
 import subprocess
+import sys
 import tarfile
 import threading
 import time
@@ -393,7 +395,7 @@ def build_leases():
 # --- System services (systemd) --------------------------------------------
 
 SERVICE_UNIT_RE = re.compile(r"^[A-Za-z0-9@._-]+\.service$")
-PROTECTED_SERVICES = {"tuxwall.service", "nginx.service"}
+PROTECTED_SERVICES = {"nginx.service"}
 ALLOWED_SERVICE_ACTIONS = {"start", "stop", "restart", "reload"}
 
 
@@ -5350,6 +5352,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_interfaces())
         elif path == "/api/security":
             self._send(200, get_security_monitor().snapshot())
+        elif path == "/api/traffic-monitor":
+            self._send(200, build_traffic_monitor())
         elif path == "/api/ai/chat/models":
             self._send(200, llm_model_list())
         elif path == "/api/security/ai-models":
@@ -5513,6 +5517,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send_auth(200, {"ok": True}, clear_cookie=True)
             return
 
+        # Internal self-restart: localhost only, no auth required
+        if path == "/api/system/self-restart":
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                self._send(403, {"ok": False, "error": "Forbidden"})
+                return
+            try:
+                _ensure_unbound_local_actions()
+                subprocess.Popen(["systemctl", "restart", "tuxwall.service"])
+                self._send(200, {"ok": True})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+            return
+
         identity = _session_identity(self.headers) if path.startswith("/api/") else None
         if path.startswith("/api/") and identity is None:
             self._send(401, {"ok": False, "error": "Authentication required"})
@@ -5645,6 +5662,9 @@ class Handler(BaseHTTPRequestHandler):
             whitelist.discard(dom)
             save_whitelist(whitelist)
             self._send(200, build_blocklists())
+
+        elif path == "/api/diagnose":
+            self._send(200, build_diagnose(body.get("target", "")))
 
         elif path == "/api/blocklists/update":
             if BLOCKLIST_STATE["status"] == "updating":
@@ -5866,6 +5886,15 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self._send(400, {"ok": False, "error": str(exc)})
 
+        elif path == "/api/system/self-restart":
+            # Internal-use restart: writes unbound conf and restarts tuxwall service
+            try:
+                _ensure_unbound_local_actions()
+                subprocess.Popen(["systemctl", "restart", "tuxwall.service", "--no-block"])
+                self._send(200, {"ok": True})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
         elif path == "/api/system/reboot":
             try:
                 self._send(200, system_reboot())
@@ -5899,7 +5928,266 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+UNBOUND_LOCAL_ACTIONS_CONF = "/etc/unbound/unbound.conf.d/log-local-actions.conf"
+UNBOUND_LOCAL_ACTIONS_RE = re.compile(
+    r"unbound\[\d+\].*?(?:info|notice):\s+local\s+(?:data|zone)\s+/?(\S+?\.?)\s+\w+\s+\w+\s+\w+"
+)
+TRAFFIC_JOURNAL_RE = re.compile(
+    r"^(\S+)\s+\S+\s+unbound\[\d+\]"
+)
+
+def _ensure_unbound_local_actions():
+    """Write log-local-actions conf if missing, reload unbound."""
+    if os.path.exists(UNBOUND_LOCAL_ACTIONS_CONF):
+        return
+    try:
+        with open(UNBOUND_LOCAL_ACTIONS_CONF, "w") as f:
+            f.write("server:\n    log-local-actions: yes\n")
+        subprocess.run(["unbound-control", "reload"],
+                       capture_output=True, text=True, timeout=10)
+    except Exception:
+        pass
+
+def build_traffic_monitor():
+    """Return merged, time-sorted traffic events from UFW log + Unbound local-actions."""
+    _ensure_unbound_local_actions()
+    entries = []
+
+    # --- UFW log (last 512 KB) ---
+    try:
+        with open(UFW_LOG, "r", errors="replace") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 524288))
+            text = f.read()
+    except Exception:
+        text = ""
+
+    for line in text.splitlines():
+        m = EVENT_RE.match(line.strip())
+        if not m:
+            continue
+        g = m.groupdict()
+        action = g["action"]
+        iface_in  = g.get("in", "") or ""
+        iface_out = g.get("out", "") or ""
+        direction = "in" if iface_in else "out"
+        src = g.get("src", "") or ""
+        dst = g.get("dst", "") or ""
+        # Skip multicast/IGMP noise with no real src
+        if action == "BLOCK" and src in ("0.0.0.0", ""):
+            continue
+        entries.append({
+            "ts":        g["ts"],
+            "type":      "fw-block" if action == "BLOCK" else "fw-allow",
+            "source":    "Firewall",
+            "direction": direction,
+            "src":       src,
+            "dst":       dst,
+            "proto":     g.get("proto", "") or "",
+            "port":      g.get("dpt", "") or g.get("spt", "") or "",
+            "iface":     iface_in or iface_out,
+            "detail":    "",
+        })
+
+    # --- Unbound local-actions (DNS blocklist hits) via journald ---
+    try:
+        proc = subprocess.run(
+            ["journalctl", "-u", "unbound", "--no-pager", "-n", "300",
+             "--output=short-iso", "--since", "1 hour ago"],
+            capture_output=True, text=True, timeout=8
+        )
+        for line in proc.stdout.splitlines():
+            m = UNBOUND_LOCAL_ACTIONS_RE.search(line)
+            if not m:
+                continue
+            domain = m.group(1).rstrip(".").lstrip("/")
+            if not domain or domain.startswith("_"):
+                continue
+            # Extract timestamp from start of journal line
+            ts_raw = line.split()[0] if line else ""
+            entries.append({
+                "ts":        ts_raw,
+                "type":      "dns-block",
+                "source":    "DNS Blocklist",
+                "direction": "out",
+                "src":       "",
+                "dst":       domain,
+                "proto":     "DNS",
+                "port":      "53",
+                "iface":     "",
+                "detail":    domain,
+            })
+    except Exception:
+        pass
+
+    # Sort newest first, cap at 150
+    entries.sort(key=lambda x: x["ts"], reverse=True)
+    entries = entries[:150]
+
+    return {"ok": True, "entries": entries}
+
+
+def build_diagnose(target):
+    """Check whether a domain or IP is blocked by firewall, DNS blocklist, or CrowdSec."""
+    target = (target or "").strip().lower().rstrip(".")
+    if not target:
+        return {"ok": False, "error": "No target provided"}
+
+    results = []
+    is_ip = bool(re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", target))
+
+    # --- 1. DNS blocklist check ---
+    if not is_ip:
+        blocked_by_dns = False
+        try:
+            with open(BLOCKLIST_CONF, "r", errors="replace") as f:
+                content = f.read()
+            # Unbound blocklist format: local-zone: "domain." always_nxdomain
+            if f'"{target}."' in content or f'"{target}"' in content:
+                blocked_by_dns = True
+        except Exception:
+            pass
+        if not blocked_by_dns:
+            # Also check custom blocklist file
+            try:
+                custom = open("/etc/tuxwall/custom-blocklist.txt").read()
+                if target in custom:
+                    blocked_by_dns = True
+            except Exception:
+                pass
+        results.append({
+            "check":   "DNS Blocklist",
+            "blocked": blocked_by_dns,
+            "detail":  f"{target} is in the Unbound blocklist — DNS queries will return NXDOMAIN" if blocked_by_dns
+                       else f"{target} is not in the DNS blocklist",
+            "action":  "Remove from blocklist in the DNS Blocklists page" if blocked_by_dns else "",
+        })
+
+        # --- 2. Live DNS resolution test ---
+        try:
+            proc = subprocess.run(
+                ["dig", "+short", "+time=3", target],
+                capture_output=True, text=True, timeout=6
+            )
+            answer = proc.stdout.strip()
+            if not answer:
+                dns_result = "No answer — domain may not exist, or DNS is blocking it"
+                dns_ok = False
+            else:
+                dns_result = f"Resolves to: {answer.splitlines()[0]}"
+                dns_ok = True
+        except Exception as e:
+            dns_result = f"DNS lookup failed: {e}"
+            dns_ok = False
+        results.append({
+            "check":   "DNS Resolution",
+            "blocked": not dns_ok,
+            "detail":  dns_result,
+            "action":  "Check Unbound logs or blocklist" if not dns_ok else "",
+        })
+
+    # --- 3. CrowdSec ban check ---
+    try:
+        proc = subprocess.run(
+            ["cscli", "decisions", "list", "--ip", target, "--output", "json"],
+            capture_output=True, text=True, timeout=8
+        )
+        decisions = json.loads(proc.stdout or "[]") or []
+        cs_blocked = bool(decisions)
+        results.append({
+            "check":   "CrowdSec",
+            "blocked": cs_blocked,
+            "detail":  f"{target} has {len(decisions)} active CrowdSec decision(s)" if cs_blocked
+                       else f"{target} is not banned by CrowdSec",
+            "action":  f"Run: cscli decisions delete --ip {target}" if cs_blocked else "",
+        })
+    except Exception:
+        results.append({
+            "check":   "CrowdSec",
+            "blocked": None,
+            "detail":  "CrowdSec not available",
+            "action":  "",
+        })
+
+    # --- 4. Custom IP blocklist check ---
+    if is_ip:
+        ip_blocked = False
+        try:
+            with open("/etc/tuxwall/custom-blocklist.txt") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line == target:
+                        ip_blocked = True
+                        break
+        except Exception:
+            pass
+        results.append({
+            "check":   "Custom IP Blocklist",
+            "blocked": ip_blocked,
+            "detail":  f"{target} is in the custom IP blocklist" if ip_blocked
+                       else f"{target} is not in the custom IP blocklist",
+            "action":  "Remove from /etc/tuxwall/custom-blocklist.txt" if ip_blocked else "",
+        })
+
+    # --- 5. UFW rules check ---
+    try:
+        proc = subprocess.run(
+            ["ufw", "status", "verbose"],
+            capture_output=True, text=True, timeout=8
+        )
+        ufw_out = proc.stdout
+        # Look for explicit DENY/REJECT rules matching the target
+        deny_match = any(
+            target in line and ("DENY" in line or "REJECT" in line)
+            for line in ufw_out.splitlines()
+        )
+        allow_match = any(
+            target in line and "ALLOW" in line
+            for line in ufw_out.splitlines()
+        )
+        if deny_match:
+            detail = f"{target} matches an explicit UFW DENY/REJECT rule"
+            action = "Check rules: ufw status numbered"
+        elif allow_match:
+            detail = f"{target} matches an explicit UFW ALLOW rule"
+            action = ""
+        else:
+            detail = f"No explicit UFW rule for {target} — default policy applies"
+            action = ""
+        results.append({
+            "check":   "UFW Firewall Rules",
+            "blocked": deny_match,
+            "detail":  detail,
+            "action":  action,
+        })
+    except Exception:
+        results.append({
+            "check":   "UFW Firewall Rules",
+            "blocked": None,
+            "detail":  "UFW not available",
+            "action":  "",
+        })
+
+    overall = any(r["blocked"] for r in results if r["blocked"] is not None)
+    return {
+        "ok":      True,
+        "target":  target,
+        "blocked": overall,
+        "results": results,
+    }
+
+
+def _self_restart(signum, frame):
+    """SIGUSR1 handler: re-exec the API process in-place to pick up code changes."""
+    print("tuxwall API self-restarting...", flush=True)
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
 def main():
+    signal.signal(signal.SIGUSR1, _self_restart)
+    _ensure_unbound_local_actions()
     get_security_monitor()
     get_system_monitor()
     get_latency_monitor()

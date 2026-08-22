@@ -731,20 +731,61 @@
         <div class="bw-canvas-wrap"><canvas id="sec-chart" class="bw-canvas"></canvas></div>
       </div>
 
-      <div class="card card-mt">
+      <!-- Traffic Monitor -->
+      <div class="card card-mt" id="traffic-monitor-card">
         <div class="card-head">
-          <h2>Recent Hits</h2>
-          <span class="muted" id="sec-event-count"></span>
+          <h2>Traffic Monitor</h2>
+          <div class="tm-controls">
+            <div class="seg-btns" id="tm-filter-btns">
+              <button class="seg-btn active" data-tm-filter="all">All</button>
+              <button class="seg-btn" data-tm-filter="fw-block">FW Blocks</button>
+              <button class="seg-btn" data-tm-filter="dns-block">DNS Blocks</button>
+              <button class="seg-btn" data-tm-filter="fw-allow">Allowed</button>
+            </div>
+            <button class="btn btn-ghost btn-sm" id="tm-pause-btn" type="button">⏸ Pause</button>
+          </div>
         </div>
-        <div class="table-wrap">
-          <table id="sec-events-table">
-            <thead><tr><th>Time</th><th>Source</th><th>Location</th><th>Destination</th><th>Port</th></tr></thead>
-            <tbody id="sec-events-body"></tbody>
+        <div class="table-wrap tm-scroll">
+          <table id="tm-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Type</th>
+                <th>Direction</th>
+                <th>Source</th>
+                <th>Destination / Domain</th>
+                <th>Proto / Port</th>
+              </tr>
+            </thead>
+            <tbody id="tm-body">
+              <tr><td colspan="6" class="empty">Waiting for traffic events…</td></tr>
+            </tbody>
           </table>
+        </div>
+        <div class="tm-foot">
+          <span class="muted" id="tm-status">Auto-refreshing every 5s</span>
+          <span class="muted" id="tm-count"></span>
         </div>
       </div>
 
-      <p class="muted bl-note">Blocked inbound connections are read live from <b>/var/log/ufw.log</b>. Source IPs are geo-located locally with the free <a href="https://db-ip.com/db/lite.php" target="_blank" rel="noopener">db-ip City Lite</a> database (installed by scripts/geoip-setup.sh) — nothing is sent to external services. IP Geolocation by <a href="https://db-ip.com" target="_blank" rel="noopener">DB-IP</a>.</p>
+      <!-- Diagnose Tool -->
+      <div class="card card-mt">
+        <div class="card-head"><h2>Diagnose Blocked Traffic</h2></div>
+        <div class="diag-body">
+          <p class="muted" style="margin:0 0 10px">Enter an IP address or domain name to find out what (if anything) is blocking it.</p>
+          <div class="diag-input-row">
+            <input type="text" id="diag-target" class="diag-input" placeholder="e.g. ads.example.com or 1.2.3.4" autocomplete="off" spellcheck="false">
+            <button class="btn" id="diag-btn" type="button">Check</button>
+          </div>
+          <div id="diag-results" hidden></div>
+        </div>
+      </div>
+
+      <p class="muted bl-note">
+        <b>FW Block</b> — UFW dropped an inbound packet (<code>/var/log/ufw.log</code>).&nbsp;
+        <b>DNS Block</b> — Unbound blocklist returned NXDOMAIN for a domain (requires tuxwall + unbound restart to activate).&nbsp;
+        Source IPs are geo-located locally via the free <a href="https://db-ip.com/db/lite.php" target="_blank" rel="noopener">db-ip City Lite</a> database — nothing is sent externally.
+      </p>
     </section>
     <section id="view-wireguard" class="view" hidden>
       <div id="wg-unconfigured" class="card" hidden>
