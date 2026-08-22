@@ -1218,6 +1218,29 @@ body.light-theme .sec-map .leaflet-container { background: #10151b; }
   .ai-provider-presets { grid-template-columns: 1fr; }
 }
 
+/* ---------- Show more bar ---------- */
+.show-more-bar {
+  display: flex; justify-content: center;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+}
+.show-more-bar .btn { min-width: 120px; }
+
+/* ---------- Wide modal (full list) ---------- */
+.modal-box-wide {
+  max-width: 720px;
+  width: 100%;
+}
+.modal-scroll-wrap {
+  max-height: 65vh;
+  overflow-y: auto;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.modal-scroll-wrap table { min-width: 480px; }
+
 /* Extra-small phones (< 420px) */
 @media (max-width: 420px) {
   .stats-row { grid-template-columns: 1fr 1fr; gap: 6px; }

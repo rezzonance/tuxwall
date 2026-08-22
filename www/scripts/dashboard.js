@@ -1333,17 +1333,28 @@
 
     renderAttackMap(secMap, d.by_ip || []);
 
-    const cMax = (d.countries && d.countries[0]) ? d.countries[0].count : 1;
-    els.secCountriesBody.innerHTML = (d.countries || []).map((c) => `
+    const countries = d.countries || [];
+    const cMax = countries[0] ? countries[0].count : 1;
+    const buildCountryRow = (c) => `
       <tr>
         <td>${flagEmoji(c.iso)} ${esc(c.name)}</td>
         <td>${formatNumber(c.count)}</td>
         <td><div class="bar"><div class="bar-fill bar-fill-err" style="width:${Math.round(c.count / cMax * 100)}%"></div></div></td>
-      </tr>`).join("");
+      </tr>`;
+    els.secCountriesBody.innerHTML = countries.slice(0, 25).map(buildCountryRow).join("");
+    const cMoreWrap = document.getElementById("sec-countries-more-wrap");
+    cMoreWrap.hidden = countries.length <= 25;
+    if (!cMoreWrap.hidden) {
+      document.getElementById("sec-countries-more").onclick = () => {
+        document.getElementById("sec-countries-full-body").innerHTML = countries.map(buildCountryRow).join("");
+        document.getElementById("sec-countries-modal").hidden = false;
+      };
+    }
 
-    const ipMax = (d.by_ip && d.by_ip[0]) ? d.by_ip[0].count : 1;
+    const byIp = d.by_ip || [];
+    const ipMax = byIp[0] ? byIp[0].count : 1;
     const csUp = state.secCrowdsecUp;
-    els.secIpsBody.innerHTML = (d.by_ip || []).slice(0, 25).map((i) => `
+    const buildIpRow = (i) => `
       <tr>
         <td class="mono"><a href="https://www.abuseipdb.com/check/${esc(i.ip)}" target="_blank" rel="noopener">${esc(i.ip)}</a></td>
         <td>${esc(i.country || "Unknown")}${i.city ? ` <span class="muted">· ${esc(i.city)}</span>` : ""}</td>
@@ -1353,7 +1364,16 @@
           ? `<button type="button" class="btn btn-sm sec-unban" data-ip="${esc(i.ip)}">Unban</button>`
           : `<button type="button" class="btn btn-sm btn-danger sec-ban" data-ip="${esc(i.ip)}">Ban</button>`)
           : ""}</td>
-      </tr>`).join("");
+      </tr>`;
+    els.secIpsBody.innerHTML = byIp.slice(0, 25).map(buildIpRow).join("");
+    const ipMoreWrap = document.getElementById("sec-ips-more-wrap");
+    ipMoreWrap.hidden = byIp.length <= 25;
+    if (!ipMoreWrap.hidden) {
+      document.getElementById("sec-ips-more").onclick = () => {
+        document.getElementById("sec-ips-full-body").innerHTML = byIp.map(buildIpRow).join("");
+        document.getElementById("sec-ips-modal").hidden = false;
+      };
+    }
 
     els.secEventsBody.innerHTML = (d.events || []).map((e) => `
       <tr>
@@ -1754,6 +1774,21 @@
     });
 
     updateSecBanAvailability();
+
+    // Modal close buttons
+    document.getElementById("sec-countries-modal-close").onclick = () => {
+      document.getElementById("sec-countries-modal").hidden = true;
+    };
+    document.getElementById("sec-ips-modal-close").onclick = () => {
+      document.getElementById("sec-ips-modal").hidden = true;
+    };
+    // Close on backdrop click
+    document.getElementById("sec-countries-modal").addEventListener("click", (e) => {
+      if (e.target === e.currentTarget) e.currentTarget.hidden = true;
+    });
+    document.getElementById("sec-ips-modal").addEventListener("click", (e) => {
+      if (e.target === e.currentTarget) e.currentTarget.hidden = true;
+    });
   }
 
   function formatHandshake(ts) {

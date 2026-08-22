@@ -672,6 +672,9 @@
               <tbody id="sec-countries-body"></tbody>
             </table>
           </div>
+          <div id="sec-countries-more-wrap" class="show-more-bar" hidden>
+            <button id="sec-countries-more" class="btn btn-ghost btn-sm" type="button">Show more</button>
+          </div>
         </div>
         <div class="card">
           <div class="card-head">
@@ -687,6 +690,35 @@
               <thead><tr><th>Source</th><th>Location</th><th>Hits</th><th>Share</th><th>Action</th></tr></thead>
               <tbody id="sec-ips-body"></tbody>
             </table>
+          </div>
+          <div id="sec-ips-more-wrap" class="show-more-bar" hidden>
+            <button id="sec-ips-more" class="btn btn-ghost btn-sm" type="button">Show more</button>
+          </div>
+        </div>
+
+        <!-- Full list modals -->
+        <div class="modal" id="sec-countries-modal" hidden>
+          <div class="modal-box modal-box-wide">
+            <button class="modal-close" id="sec-countries-modal-close">&times;</button>
+            <h3>All Countries</h3>
+            <div class="table-wrap modal-scroll-wrap">
+              <table id="sec-countries-full-table">
+                <thead><tr><th>Country</th><th>Hits</th><th>Share</th></tr></thead>
+                <tbody id="sec-countries-full-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="modal" id="sec-ips-modal" hidden>
+          <div class="modal-box modal-box-wide">
+            <button class="modal-close" id="sec-ips-modal-close">&times;</button>
+            <h3>All Attackers</h3>
+            <div class="table-wrap modal-scroll-wrap">
+              <table id="sec-ips-full-table">
+                <thead><tr><th>Source</th><th>Location</th><th>Hits</th><th>Share</th><th>Action</th></tr></thead>
+                <tbody id="sec-ips-full-body"></tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>
