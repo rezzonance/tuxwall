@@ -1,4 +1,7 @@
-![TuxWall Logo](images/tux-logo-big.png)
+
+<p align="center">
+  <img src="images/tux-logo-big.png" width="500" alt="Logo">
+</p>
 
 # tuxwall
 
@@ -307,11 +310,18 @@ systemctl status tuxwall tuxwall-sqm kea-dhcp4-server unbound radvd suricata cro
 ---
 
 ## Screenshots
-
-![Screenshot1](images/screenshots/1.png)
-![Screenshot2](images/screenshots/2.png)
-![Screenshot3](images/screenshots/3.png)
-![Screenshot4](images/screenshots/4.png)
+<p align="center">
+  <img src="images/screenshots/1.png" width="500" alt="Screenshot">
+</p>
+<p align="center">
+  <img src="images/screenshots/1.png" width="500" alt="Screenshot">
+</p>
+<p align="center">
+  <img src="images/screenshots/1.png" width="500" alt="Screenshot">
+</p>
+<p align="center">
+  <img src="images/screenshots/1.png" width="500" alt="Screenshot">
+</p>
 
 ## Contributing
 
