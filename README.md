@@ -180,13 +180,13 @@ sudo apt install -y \
 Install the provided `.deb` package:
 
 ```bash
-sudo dpkg -i tuxwall_2.1.0_all.deb
+sudo dpkg -i tuxwall_2.2.0_all.deb
 ```
 
 If you encounter dependency errors:
 ```bash
 sudo apt -f install
-sudo dpkg -i tuxwall_2.1.0_all.deb
+sudo dpkg -i tuxwall_2.2.0_all.deb
 ```
 
 ### 3. Enable and start services

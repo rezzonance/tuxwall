@@ -2625,3 +2625,32 @@ body.light-theme .stat-card.stat-c:hover {
 @media (max-width: 760px) {
   #sec-chart { height: 160px; }
 }
+
+/* ========== DHCP RESERVATIONS ========== */
+.res-form { flex-wrap: wrap; gap: 6px; }
+
+.res-form input[type="text"] {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.res-form input[type="text"]:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+/* Highlight leases rows to hint they're clickable for auto-fill */
+#leases-body tr.client-row {
+  cursor: pointer;
+}
+
+#leases-body tr.client-row:hover td {
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}

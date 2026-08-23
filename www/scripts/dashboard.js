@@ -605,7 +605,174 @@
     els.updated.textContent = state.lastUpdate
       ? `Updated ${state.lastUpdate.toLocaleTimeString()}`
       : "";
+    // Also refresh reservations table if it's visible
+    if (document.getElementById("reservations-card") &&
+        !document.getElementById("reservations-card").closest(".view[hidden]")) {
+      refreshReservations();
+    }
   }
+
+  // ── DHCP Reservations module ───────────────────────────────────────────────
+
+  async function refreshReservations() {
+    try {
+      const data = await fetchJSON("/api/reservations");
+      if (!data.ok) throw new Error(data.error);
+      renderReservations(data.reservations || []);
+    } catch (err) {
+      document.getElementById("res-body").innerHTML =
+        `<tr><td colspan="6" class="muted" style="text-align:center;padding:1.5rem">Error: ${esc(err.message)}</td></tr>`;
+    }
+  }
+
+  function renderReservations(reservations) {
+    const tbody = document.getElementById("res-body");
+    if (!reservations.length) {
+      tbody.innerHTML = `<tr><td colspan="6" class="muted" style="text-align:center;padding:1.5rem">No static reservations configured</td></tr>`;
+      return;
+    }
+
+    // Sort by IP numerically
+    reservations.sort((a, b) => {
+      const toNum = ip => ip.split(".").reduce((acc, o) => (acc << 8) + parseInt(o), 0);
+      return toNum(a.ip) - toNum(b.ip);
+    });
+
+    tbody.innerHTML = reservations.map(r => {
+      const onlineDot = r.online
+        ? `<span class="dmz-dot dmz-dot-green" title="Online"></span>`
+        : `<span class="dmz-dot dmz-dot-grey"  title="Offline / no ARP"></span>`;
+      return `<tr>
+        <td>${r.hostname ? `<span class="client-hostname">${esc(r.hostname)}</span>` : '<span class="muted">—</span>'}</td>
+        <td class="mono">${esc(r.ip)}</td>
+        <td class="mono">${esc(r.mac)}</td>
+        <td class="muted" style="font-size:0.8rem">${esc(r.subnet)}</td>
+        <td style="text-align:center">${onlineDot}</td>
+        <td>
+          <button class="btn btn-sm res-edit-btn"
+            data-id="${esc(r.id)}" data-ip="${esc(r.ip)}"
+            data-mac="${esc(r.mac)}" data-hostname="${esc(r.hostname)}">Edit</button>
+          <button class="btn btn-sm btn-danger res-del-btn"
+            data-id="${esc(r.id)}" data-ip="${esc(r.ip)}">Del</button>
+        </td>
+      </tr>`;
+    }).join("");
+
+    // Edit buttons
+    document.querySelectorAll(".res-edit-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        document.getElementById("res-edit-id").value       = btn.dataset.id;
+        document.getElementById("res-edit-ip").value       = btn.dataset.ip;
+        document.getElementById("res-edit-mac").value      = btn.dataset.mac;
+        document.getElementById("res-edit-hostname").value = btn.dataset.hostname;
+        document.getElementById("res-edit-title").textContent = `Edit — ${btn.dataset.ip}`;
+        document.getElementById("res-edit-hint").textContent  = "";
+        document.getElementById("res-edit-modal").hidden = false;
+      });
+    });
+
+    // Delete buttons
+    document.querySelectorAll(".res-del-btn").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        if (!confirm(`Delete reservation for ${btn.dataset.ip}?\nThe device will fall back to a dynamic lease.`)) return;
+        btn.disabled = true;
+        try {
+          const r = await fetchJSON("/api/reservations/delete", {
+            method: "POST", body: JSON.stringify({ id: btn.dataset.id })
+          });
+          if (!r.ok) throw new Error(r.error || "Failed");
+          renderReservations(r.reservations || []);
+        } catch (err) {
+          alert("Error: " + err.message);
+          btn.disabled = false;
+        }
+      });
+    });
+  }
+
+  // Add reservation
+  document.getElementById("res-add-btn").addEventListener("click", async () => {
+    const btn      = document.getElementById("res-add-btn");
+    const hint     = document.getElementById("res-hint");
+    const mac      = document.getElementById("res-mac").value.trim();
+    const ip       = document.getElementById("res-ip").value.trim();
+    const hostname = document.getElementById("res-hostname").value.trim();
+
+    hint.textContent = "";
+    if (!mac || !ip) { hint.textContent = "MAC and IP are required."; return; }
+
+    btn.disabled = true;
+    hint.textContent = "Adding…";
+    try {
+      const r = await fetchJSON("/api/reservations/add", {
+        method: "POST", body: JSON.stringify({ mac, ip, hostname })
+      });
+      if (!r.ok) throw new Error(r.error || "Failed");
+      document.getElementById("res-mac").value      = "";
+      document.getElementById("res-ip").value       = "";
+      document.getElementById("res-hostname").value = "";
+      hint.textContent = `✓ Reserved ${ip}`;
+      renderReservations(r.reservations || []);
+      render(); // refresh leases table to reflect static badge
+    } catch (err) {
+      hint.textContent = "Error: " + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // Edit modal save / close
+  document.getElementById("res-edit-save").addEventListener("click", async () => {
+    const btn      = document.getElementById("res-edit-save");
+    const hint     = document.getElementById("res-edit-hint");
+    const id       = document.getElementById("res-edit-id").value;
+    const mac      = document.getElementById("res-edit-mac").value.trim();
+    const hostname = document.getElementById("res-edit-hostname").value.trim();
+
+    hint.textContent = "";
+    btn.disabled = true;
+    hint.textContent = "Saving…";
+    try {
+      const r = await fetchJSON("/api/reservations/edit", {
+        method: "POST", body: JSON.stringify({ id, mac, hostname })
+      });
+      if (!r.ok) throw new Error(r.error || "Failed");
+      document.getElementById("res-edit-modal").hidden = true;
+      renderReservations(r.reservations || []);
+    } catch (err) {
+      hint.textContent = "Error: " + err.message;
+      btn.disabled = false;
+    }
+  });
+
+  ["res-edit-close", "res-edit-cancel"].forEach(id => {
+    document.getElementById(id).addEventListener("click", () => {
+      document.getElementById("res-edit-modal").hidden = true;
+    });
+  });
+
+  // Auto-fill MAC from leases table when a client row is clicked
+  document.getElementById("leases-body").addEventListener("click", e => {
+    const row = e.target.closest("tr.client-row");
+    if (!row) return;
+    const ip  = row.querySelector("td:nth-child(2)")?.textContent?.trim() || "";
+    const mac = row.querySelector("td:nth-child(3)")?.textContent?.trim() || "";
+    if (!ip || !mac || mac === "—") return;
+    const macIn = document.getElementById("res-mac");
+    const ipIn  = document.getElementById("res-ip");
+    // Only fill if fields are empty
+    if (!macIn.value && !ipIn.value) {
+      macIn.value = mac;
+      ipIn.value  = ip;
+      document.getElementById("reservations-card").scrollIntoView({ behavior: "smooth", block: "start" });
+      macIn.focus();
+    }
+  });
+
+  // Load reservations when clients view is first shown
+  refreshReservations();
+
+  // ── end DHCP Reservations module ───────────────────────────────────────────
 
   function renderDns(d) {
     if (!d.ok) {

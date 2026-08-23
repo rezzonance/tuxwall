@@ -239,6 +239,212 @@ def router_static():
     return data
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# DHCP Reservations (read/write kea-dhcp4.conf)
+# ─────────────────────────────────────────────────────────────────────────────
+
+KEA_CONF    = "/etc/kea/kea-dhcp4.conf"
+_KEA_LOCK   = threading.Lock()
+
+
+def _read_kea():
+    with open(KEA_CONF) as f:
+        return json.load(f)
+
+
+def _write_kea(data):
+    # Atomic write via temp file
+    tmp = KEA_CONF + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=4)
+    os.replace(tmp, KEA_CONF)
+
+
+def _reload_kea():
+    """Signal Kea to reload its config via the control socket."""
+    try:
+        kea_command("config-reload")
+    except Exception:
+        # Fallback: systemctl reload
+        subprocess.run(
+            ["systemctl", "reload-or-restart", "kea-dhcp4-server"],
+            capture_output=True, text=True, timeout=15
+        )
+
+
+def _validate_reservation(ip, mac, hostname, existing_id=None):
+    """Return error string or None."""
+    try:
+        ipaddress.IPv4Address(ip)
+    except ValueError:
+        return f"Invalid IP address: {ip}"
+
+    # Normalise MAC
+    mac_norm = mac.lower().strip()
+    if not re.match(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$", mac_norm):
+        return "Invalid MAC address — expected format aa:bb:cc:dd:ee:ff"
+
+    if hostname and not re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$", hostname):
+        return "Invalid hostname — letters, numbers and hyphens only"
+
+    return None
+
+
+def build_reservations():
+    """Return all reservations from kea-dhcp4.conf with live ARP status."""
+    try:
+        kea  = _read_kea()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "reservations": []}
+
+    out = []
+    for subnet in kea.get("Dhcp4", {}).get("subnet4", []):
+        subnet_id  = subnet.get("id", 1)
+        subnet_str = subnet.get("subnet", "")
+        for r in subnet.get("reservations", []):
+            ip = r.get("ip-address", "")
+            if not ip:
+                continue
+            out.append({
+                "id":        f"{subnet_id}_{ip.replace('.','_')}",
+                "subnet_id": subnet_id,
+                "subnet":    subnet_str,
+                "ip":        ip,
+                "mac":       r.get("hw-address", "") or "",
+                "hostname":  r.get("hostname", "") or "",
+                "online":    arp_online(ip),
+            })
+
+    return {"ok": True, "reservations": out}
+
+
+def add_reservation(body):
+    ip       = (body.get("ip") or "").strip()
+    mac      = (body.get("mac") or "").strip().lower()
+    hostname = (body.get("hostname") or "").strip()
+
+    err = _validate_reservation(ip, mac, hostname)
+    if err:
+        raise ValueError(err)
+
+    with _KEA_LOCK:
+        kea = _read_kea()
+        subnets = kea.get("Dhcp4", {}).get("subnet4", [])
+        if not subnets:
+            raise ValueError("No subnet4 defined in Kea config")
+
+        # Check for duplicates
+        for s in subnets:
+            for r in s.get("reservations", []):
+                if r.get("ip-address") == ip:
+                    raise ValueError(f"IP {ip} is already reserved")
+                if r.get("hw-address", "").lower() == mac:
+                    raise ValueError(f"MAC {mac} already has a reservation")
+
+        # Add to the first subnet (or whichever contains the IP)
+        target = subnets[0]
+        for s in subnets:
+            net = s.get("subnet", "")
+            if net:
+                try:
+                    if ipaddress.IPv4Address(ip) in ipaddress.IPv4Network(net, strict=False):
+                        target = s
+                        break
+                except ValueError:
+                    pass
+
+        entry = {"hw-address": mac, "ip-address": ip}
+        if hostname:
+            entry["hostname"] = hostname
+
+        target.setdefault("reservations", []).append(entry)
+        _write_kea(kea)
+        _reload_kea()
+
+    return build_reservations()
+
+
+def edit_reservation(body):
+    res_id   = (body.get("id") or "").strip()
+    mac      = (body.get("mac") or "").strip().lower()
+    hostname = (body.get("hostname") or "").strip()
+
+    if not res_id:
+        raise ValueError("id is required")
+
+    # id format: {subnet_id}_{ip_with_underscores}
+    parts = res_id.split("_", 1)
+    try:
+        subnet_id = int(parts[0])
+    except (ValueError, IndexError):
+        raise ValueError("Invalid reservation id")
+    ip = parts[1].replace("_", ".") if len(parts) > 1 else ""
+
+    err = _validate_reservation(ip, mac, hostname, existing_id=res_id)
+    if err:
+        raise ValueError(err)
+
+    with _KEA_LOCK:
+        kea = _read_kea()
+        found = False
+        for s in kea.get("Dhcp4", {}).get("subnet4", []):
+            if s.get("id") != subnet_id:
+                continue
+            for r in s.get("reservations", []):
+                if r.get("ip-address") == ip:
+                    r["hw-address"] = mac
+                    if hostname:
+                        r["hostname"] = hostname
+                    elif "hostname" in r:
+                        del r["hostname"]
+                    found = True
+                    break
+            if found:
+                break
+
+        if not found:
+            raise ValueError(f"Reservation for {ip} not found")
+
+        _write_kea(kea)
+        _reload_kea()
+
+    return build_reservations()
+
+
+def delete_reservation(body):
+    res_id = (body.get("id") or "").strip()
+    if not res_id:
+        raise ValueError("id is required")
+
+    parts = res_id.split("_", 1)
+    try:
+        subnet_id = int(parts[0])
+    except (ValueError, IndexError):
+        raise ValueError("Invalid reservation id")
+    ip = parts[1].replace("_", ".") if len(parts) > 1 else ""
+
+    with _KEA_LOCK:
+        kea = _read_kea()
+        found = False
+        for s in kea.get("Dhcp4", {}).get("subnet4", []):
+            if s.get("id") != subnet_id:
+                continue
+            before = s.get("reservations", [])
+            after  = [r for r in before if r.get("ip-address") != ip]
+            if len(after) < len(before):
+                s["reservations"] = after
+                found = True
+            break
+
+        if not found:
+            raise ValueError(f"Reservation for {ip} not found")
+
+        _write_kea(kea)
+        _reload_kea()
+
+    return build_reservations()
+
+
 def kea_reservations():
     """Static reservations defined in kea-dhcp4.conf."""
     try:
@@ -5412,6 +5618,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send_file(fpath, base)
 
+        elif path == "/api/reservations":
+            self._send(200, build_reservations())
+
         elif path == "/api/portforward":
             self._send(200, build_portforward())
 
@@ -5930,6 +6139,30 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, {"ok": False, "error": str(exc)})
                 return
             self._send(200, {"ok": True, **result})
+
+        elif path == "/api/reservations/add":
+            try:
+                self._send(200, add_reservation(body))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/reservations/edit":
+            try:
+                self._send(200, edit_reservation(body))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/reservations/delete":
+            try:
+                self._send(200, delete_reservation(body))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
 
         elif path == "/api/portforward/add":
             try:

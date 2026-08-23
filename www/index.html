@@ -306,6 +306,72 @@
         </div>
       </div>
       <p class="muted bl-note">Banning a client blocks all internet access with a UFW deny rule plus an Unbound DNS block. Bans apply to the client's current IP address — if it gets a new lease with a different IP, re-ban it.</p>
+
+      <!-- ── Static IP Reservations ──────────────────────────────────── -->
+      <div class="card card-mt" id="reservations-card">
+        <div class="card-head">
+          <h2>Static IP Reservations</h2>
+          <span class="card-head-note muted">Stored in kea-dhcp4.conf · changes reload Kea automatically</span>
+        </div>
+
+        <!-- Add form -->
+        <div class="card-toolbar bl-toolbar res-form">
+          <input type="text" id="res-mac"      placeholder="MAC  aa:bb:cc:dd:ee:ff" autocomplete="off" spellcheck="false" style="width:200px">
+          <input type="text" id="res-ip"       placeholder="IP   192.168.1.x"        autocomplete="off" spellcheck="false" style="width:155px">
+          <input type="text" id="res-hostname" placeholder="Hostname (optional)"     autocomplete="off" spellcheck="false" style="width:180px">
+          <button id="res-add-btn" class="btn btn-primary" type="button">Add Reservation</button>
+          <span class="toolbar-spacer"></span>
+          <span class="muted" id="res-hint"></span>
+        </div>
+
+        <!-- Reservation table -->
+        <div class="table-wrap">
+          <table id="res-table">
+            <thead>
+              <tr>
+                <th>Hostname</th>
+                <th>IP Address</th>
+                <th>MAC Address</th>
+                <th>Subnet</th>
+                <th>Online</th>
+                <th style="width:140px"></th>
+              </tr>
+            </thead>
+            <tbody id="res-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Edit modal -->
+      <div id="res-edit-modal" class="vlan-modal" hidden>
+        <div class="vlan-modal-box">
+          <div class="vlan-modal-head">
+            <span id="res-edit-title">Edit Reservation</span>
+            <button class="btn btn-sm btn-ghost" id="res-edit-close" type="button">✕</button>
+          </div>
+          <div class="vlan-modal-body">
+            <input type="hidden" id="res-edit-id">
+            <label class="vlan-field">
+              <span>IP Address <span class="muted">(cannot change — delete and re-add to move IP)</span></span>
+              <input type="text" id="res-edit-ip" disabled style="opacity:0.5">
+            </label>
+            <label class="vlan-field">
+              <span>MAC Address</span>
+              <input type="text" id="res-edit-mac" placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off" spellcheck="false">
+            </label>
+            <label class="vlan-field">
+              <span>Hostname</span>
+              <input type="text" id="res-edit-hostname" placeholder="Optional" autocomplete="off" spellcheck="false">
+            </label>
+            <div class="vlan-modal-actions">
+              <button id="res-edit-save" class="btn btn-primary" type="button">Save</button>
+              <button id="res-edit-cancel" class="btn" type="button">Cancel</button>
+              <span class="muted" id="res-edit-hint"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
     </section>
 
     <section id="view-dns" class="view" hidden>
