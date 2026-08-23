@@ -1,3 +1,5 @@
+![TuxWall Logo](images/tux-logo-big.png)
+
 # tuxwall
 
 A Linux network dashboard providing a web UI for managing DHCP leases, DNS, firewall rules, VPN (WireGuard), and security — designed to run on a dedicated Linux gateway/router.
@@ -303,6 +305,13 @@ systemctl status tuxwall tuxwall-sqm kea-dhcp4-server unbound radvd suricata cro
 ```
 
 ---
+
+## Screenshots
+
+![Screenshot1](images/screenshots/1.png)
+![Screenshot2](images/screenshots/2.png)
+![Screenshot3](images/screenshots/3.png)
+![Screenshot4](images/screenshots/4.png)
 
 ## Contributing
 
