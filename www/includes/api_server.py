@@ -5412,6 +5412,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send_file(fpath, base)
 
+        elif path == "/api/portforward":
+            self._send(200, build_portforward())
+
+        elif path == "/api/dmz":
+            self._send(200, build_dmz())
+
+        elif path == "/api/vlans":
+            self._send(200, build_vlans())
+
         elif path == "/api/system/updates":
             self._send(200, updates_snapshot())
 
@@ -5922,6 +5931,86 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(200, {"ok": True, **result})
 
+        elif path == "/api/portforward/add":
+            try:
+                self._send(200, add_portforward(body))
+            except (ValueError, subprocess.CalledProcessError) as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/portforward/delete":
+            try:
+                self._send(200, delete_portforward(body))
+            except (ValueError, subprocess.CalledProcessError) as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/portforward/toggle":
+            try:
+                self._send(200, toggle_portforward(body))
+            except (ValueError, subprocess.CalledProcessError) as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/dmz/enable":
+            try:
+                self._send(200, enable_dmz(body))
+            except (ValueError, subprocess.CalledProcessError) as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/dmz/disable":
+            try:
+                self._send(200, disable_dmz(body))
+            except (ValueError, subprocess.CalledProcessError) as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/vlans/add":
+            try:
+                self._send(200, add_vlan(body))
+            except (ValueError, subprocess.CalledProcessError) as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/vlans/edit":
+            try:
+                self._send(200, edit_vlan(body))
+            except (ValueError, subprocess.CalledProcessError) as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/vlans/delete":
+            try:
+                self._send(200, delete_vlan(body))
+            except (ValueError, subprocess.CalledProcessError) as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/vlans/policy/add":
+            try:
+                self._send(200, add_vlan_policy(body))
+            except (ValueError, subprocess.CalledProcessError) as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/vlans/policy/delete":
+            try:
+                self._send(200, delete_vlan_policy(body))
+            except (ValueError, subprocess.CalledProcessError) as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
         else:
             self._send(404, {"ok": False, "error": "Not found"})
 
@@ -5931,7 +6020,7 @@ class Handler(BaseHTTPRequestHandler):
 
 UNBOUND_LOCAL_ACTIONS_CONF = "/etc/unbound/unbound.conf.d/log-local-actions.conf"
 UNBOUND_LOCAL_ACTIONS_RE = re.compile(
-    r"unbound\[\d+\].*?(?:info|notice):\s+local\s+(?:data|zone)\s+/?(\S+?\.?)\s+\w+\s+\w+\s+\w+"
+    r"unbound\[\d+\].*?info:\s+\S+\s+always_nxdomain\s+(\d+\.\d+\.\d+\.\d+)@\d+\s+(\S+?\.?)\s+(\w+)\s+IN"
 )
 TRAFFIC_JOURNAL_RE = re.compile(
     r"^(\S+)\s+\S+\s+unbound\[\d+\]"
@@ -6034,22 +6123,23 @@ def build_traffic_monitor():
             m = UNBOUND_LOCAL_ACTIONS_RE.search(line)
             if not m:
                 continue
-            domain = m.group(1).rstrip(".").lstrip("/")
+            client_ip  = m.group(1)
+            domain     = m.group(2).rstrip(".").lstrip("/")
+            rec_type   = m.group(3)   # A, AAAA, MX, etc.
             if not domain or domain.startswith("_"):
                 continue
-            # Extract timestamp from start of journal line
             ts_raw = line.split()[0] if line else ""
             entries.append({
                 "ts":        ts_raw,
                 "type":      "dns-block",
                 "source":    "DNS Blocklist",
                 "direction": "out",
-                "src":       "",
+                "src":       client_ip,
                 "dst":       domain,
                 "proto":     "DNS",
                 "port":      "53",
                 "iface":     "",
-                "detail":    domain,
+                "detail":    f"{rec_type} blocked",
             })
     except Exception:
         pass
@@ -6213,6 +6303,749 @@ def build_diagnose(target):
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Port Forwarding + DMZ
+# ─────────────────────────────────────────────────────────────────────────────
+
+PF_PERSIST   = "/etc/tuxwall/portforward.json"
+DMZ_PERSIST  = "/etc/tuxwall/dmz.json"
+
+
+def _wan_iface():
+    """Return the WAN interface name from the default route."""
+    try:
+        r = subprocess.run(
+            ["ip", "-j", "route", "show", "default"],
+            capture_output=True, text=True, timeout=5
+        )
+        routes = json.loads(r.stdout or "[]")
+        if routes:
+            return routes[0].get("dev", "enp5s0")
+    except Exception:
+        pass
+    return "enp5s0"
+
+
+def _lan_iface():
+    """LAN interface — the one carrying 192.168.1.0/24."""
+    try:
+        r = subprocess.run(
+            ["ip", "-j", "addr"], capture_output=True, text=True, timeout=5
+        )
+        for iface in json.loads(r.stdout or "[]"):
+            for a in iface.get("addr_info", []):
+                if a.get("family") == "inet" and a.get("local", "").startswith("192.168.1."):
+                    return iface.get("ifname", "enp6s0")
+    except Exception:
+        pass
+    return "enp6s0"
+
+
+def _lan_subnet():
+    """e.g. '192.168.1.0/24'"""
+    try:
+        r = subprocess.run(
+            ["ip", "-j", "addr"], capture_output=True, text=True, timeout=5
+        )
+        for iface in json.loads(r.stdout or "[]"):
+            for a in iface.get("addr_info", []):
+                if a.get("family") == "inet" and a.get("local", "").startswith("192.168.1."):
+                    net = ipaddress.ip_interface(f"{a['local']}/{a['prefixlen']}").network
+                    return str(net)
+    except Exception:
+        pass
+    return "192.168.1.0/24"
+
+
+def _gateway_ip():
+    """Gateway's own LAN IP."""
+    try:
+        r = subprocess.run(
+            ["ip", "-j", "addr"], capture_output=True, text=True, timeout=5
+        )
+        for iface in json.loads(r.stdout or "[]"):
+            for a in iface.get("addr_info", []):
+                if a.get("family") == "inet" and a.get("local", "").startswith("192.168.1."):
+                    return a["local"]
+    except Exception:
+        pass
+    return "192.168.1.1"
+
+
+def _ipt_backend():
+    """
+    Return the correct iptables binary for the active backend.
+    UFW on this system uses iptables-nft; the 'iptables' alternative
+    may point to iptables-legacy which is a different (empty) ruleset.
+    We detect which backend actually has UFW chains loaded.
+    """
+    for binary in ("iptables-nft", "iptables-legacy", "iptables"):
+        try:
+            r = subprocess.run(
+                [binary, "-t", "filter", "-L", "ufw-before-input", "-n"],
+                capture_output=True, text=True, timeout=5
+            )
+            if r.returncode == 0:
+                return binary
+        except FileNotFoundError:
+            continue
+    return "iptables"
+
+
+_IPT_BIN = None
+
+
+def _get_ipt_bin():
+    global _IPT_BIN
+    if _IPT_BIN is None:
+        _IPT_BIN = _ipt_backend()
+    return _IPT_BIN
+
+
+def _ipt(*args, table="filter", check=True):
+    """Run iptables (correct backend) with the given args."""
+    cmd = [_get_ipt_bin(), "-t", table] + list(args)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    if check and r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout or "iptables failed").strip())
+    return r.returncode == 0
+
+
+def _ipt_rule_exists(table, chain, *rule_args):
+    """True if the rule already exists (iptables -C)."""
+    return _ipt("-C", chain, *rule_args, table=table, check=False)
+
+
+# ── Port Forwarding ──────────────────────────────────────────────────────────
+
+def _load_pf():
+    try:
+        with open(PF_PERSIST) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_pf(rules):
+    os.makedirs("/etc/tuxwall", exist_ok=True)
+    with open(PF_PERSIST, "w") as f:
+        json.dump(rules, f, indent=2)
+
+
+def _apply_pf_rule(rule):
+    """Insert a single port forward into iptables (idempotent)."""
+    wan  = _wan_iface()
+    lan  = _lan_iface()
+    ext  = str(rule["ext_port"])
+    dst  = rule["int_ip"]
+    dpt  = str(rule["int_port"])
+    proto = rule["proto"]   # tcp | udp | both
+
+    protos = ["tcp", "udp"] if proto == "both" else [proto]
+    for p in protos:
+        # PREROUTING DNAT
+        dnat_args = ["-i", wan, "-p", p, "--dport", ext,
+                     "-j", "DNAT", "--to-destination", f"{dst}:{dpt}"]
+        if not _ipt_rule_exists("nat", "PREROUTING", *dnat_args):
+            _ipt("-A", "PREROUTING", *dnat_args, table="nat")
+
+        # FORWARD accept for the forwarded traffic
+        fwd_args = ["-i", wan, "-o", lan, "-p", p,
+                    "-d", dst, "--dport", dpt, "-m", "state",
+                    "--state", "NEW,ESTABLISHED,RELATED", "-j", "ACCEPT"]
+        if not _ipt_rule_exists("filter", "FORWARD", *fwd_args):
+            _ipt("-A", "FORWARD", *fwd_args)
+
+
+def _remove_pf_rule(rule):
+    """Remove a single port forward from iptables."""
+    wan  = _wan_iface()
+    lan  = _lan_iface()
+    ext  = str(rule["ext_port"])
+    dst  = rule["int_ip"]
+    dpt  = str(rule["int_port"])
+    proto = rule["proto"]
+
+    protos = ["tcp", "udp"] if proto == "both" else [proto]
+    for p in protos:
+        dnat_args = ["-i", wan, "-p", p, "--dport", ext,
+                     "-j", "DNAT", "--to-destination", f"{dst}:{dpt}"]
+        if _ipt_rule_exists("nat", "PREROUTING", *dnat_args):
+            _ipt("-D", "PREROUTING", *dnat_args, table="nat")
+
+        fwd_args = ["-i", wan, "-o", lan, "-p", p,
+                    "-d", dst, "--dport", dpt, "-m", "state",
+                    "--state", "NEW,ESTABLISHED,RELATED", "-j", "ACCEPT"]
+        if _ipt_rule_exists("filter", "FORWARD", *fwd_args):
+            _ipt("-D", "FORWARD", *fwd_args)
+
+
+def build_portforward():
+    rules = _load_pf()
+    # Enrich with live iptables state
+    for rule in rules:
+        wan = _wan_iface()
+        ext = str(rule["ext_port"])
+        dst = rule["int_ip"]
+        dpt = str(rule["int_port"])
+        proto = rule["proto"]
+        protos = ["tcp", "udp"] if proto == "both" else [proto]
+        active = all(
+            _ipt_rule_exists("nat", "PREROUTING",
+                             "-i", wan, "-p", p, "--dport", ext,
+                             "-j", "DNAT", "--to-destination", f"{dst}:{dpt}")
+            for p in protos
+        )
+        rule["active"] = active
+    return {"ok": True, "rules": rules}
+
+
+def add_portforward(body):
+    label    = (body.get("label") or "").strip()
+    proto    = (body.get("proto") or "tcp").strip().lower()
+    int_ip   = (body.get("int_ip") or "").strip()
+    try:
+        ext_port = int(body.get("ext_port", 0))
+        int_port = int(body.get("int_port") or ext_port)
+    except (TypeError, ValueError):
+        raise ValueError("Ports must be integers")
+
+    if proto not in ("tcp", "udp", "both"):
+        raise ValueError("proto must be tcp, udp, or both")
+    if not (1 <= ext_port <= 65535) or not (1 <= int_port <= 65535):
+        raise ValueError("Port out of range 1–65535")
+    if not int_ip:
+        raise ValueError("Internal IP is required")
+    ipaddress.ip_address(int_ip)   # validate
+
+    rules = _load_pf()
+    # Check for duplicate external port + proto
+    for r in rules:
+        if r["ext_port"] == ext_port and (r["proto"] == proto or proto == "both" or r["proto"] == "both"):
+            raise ValueError(f"External port {ext_port} is already forwarded")
+
+    rule = {
+        "id":       str(uuid4())[:8],
+        "label":    label,
+        "proto":    proto,
+        "ext_port": ext_port,
+        "int_ip":   int_ip,
+        "int_port": int_port,
+        "enabled":  True,
+    }
+    _apply_pf_rule(rule)
+    rules.append(rule)
+    _save_pf(rules)
+    return {"ok": True, "rule": rule}
+
+
+def delete_portforward(body):
+    rid = (body.get("id") or "").strip()
+    if not rid:
+        raise ValueError("id is required")
+    rules = _load_pf()
+    target = next((r for r in rules if r["id"] == rid), None)
+    if not target:
+        raise ValueError("Rule not found")
+    _remove_pf_rule(target)
+    _save_pf([r for r in rules if r["id"] != rid])
+    return {"ok": True}
+
+
+def toggle_portforward(body):
+    rid = (body.get("id") or "").strip()
+    if not rid:
+        raise ValueError("id is required")
+    rules = _load_pf()
+    target = next((r for r in rules if r["id"] == rid), None)
+    if not target:
+        raise ValueError("Rule not found")
+    if target["enabled"]:
+        _remove_pf_rule(target)
+        target["enabled"] = False
+    else:
+        _apply_pf_rule(target)
+        target["enabled"] = True
+    _save_pf(rules)
+    return {"ok": True, "enabled": target["enabled"]}
+
+
+# ── DMZ ──────────────────────────────────────────────────────────────────────
+
+def _load_dmz():
+    try:
+        with open(DMZ_PERSIST) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_dmz(data):
+    os.makedirs("/etc/tuxwall", exist_ok=True)
+    with open(DMZ_PERSIST, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _apply_dmz_isolation(ip):
+    """
+    Isolate a DMZ client from the rest of the LAN while allowing:
+      - DMZ → gateway (DNS, DHCP, management)
+      - DMZ → WAN (outbound internet)
+      - WAN → DMZ (inbound, handled by port forwards)
+      - established return traffic
+    Blocks:
+      - DMZ → any other LAN host
+    """
+    lan_subnet = _lan_subnet()
+    gw         = _gateway_ip()
+    wan        = _wan_iface()
+    lan        = _lan_iface()
+
+    # 1. Allow DMZ client to reach the gateway (DNS port 53, DHCP is broadcast, any)
+    gw_args = ["-s", ip, "-d", gw, "-i", lan, "-j", "ACCEPT"]
+    if not _ipt_rule_exists("filter", "FORWARD", *gw_args):
+        _ipt("-I", "FORWARD", "1", *gw_args)
+
+    # 2. Allow established/related return traffic back to DMZ client
+    est_args = ["-d", ip, "-o", lan, "-m", "state",
+                "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"]
+    if not _ipt_rule_exists("filter", "FORWARD", *est_args):
+        _ipt("-I", "FORWARD", "2", *est_args)
+
+    # 3. Allow DMZ client outbound to WAN
+    wan_args = ["-s", ip, "-i", lan, "-o", wan, "-j", "ACCEPT"]
+    if not _ipt_rule_exists("filter", "FORWARD", *wan_args):
+        _ipt("-I", "FORWARD", "3", *wan_args)
+
+    # 4. Block DMZ client from reaching any other LAN host (DROP, not REJECT,
+    #    so port scanning the LAN from DMZ is silent)
+    drop_args = ["-s", ip, "-d", lan_subnet, "-j", "DROP"]
+    if not _ipt_rule_exists("filter", "FORWARD", *drop_args):
+        _ipt("-A", "FORWARD", *drop_args)
+
+
+def _remove_dmz_isolation(ip):
+    """Remove DMZ isolation rules for a client."""
+    lan_subnet = _lan_subnet()
+    gw         = _gateway_ip()
+    wan        = _wan_iface()
+    lan        = _lan_iface()
+
+    rules_to_remove = [
+        ("filter", "FORWARD", ["-s", ip, "-d", gw, "-i", lan, "-j", "ACCEPT"]),
+        ("filter", "FORWARD", ["-d", ip, "-o", lan, "-m", "state",
+                               "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"]),
+        ("filter", "FORWARD", ["-s", ip, "-i", lan, "-o", wan, "-j", "ACCEPT"]),
+        ("filter", "FORWARD", ["-s", ip, "-d", lan_subnet, "-j", "DROP"]),
+    ]
+    for table, chain, args in rules_to_remove:
+        if _ipt_rule_exists(table, chain, *args):
+            _ipt("-D", chain, *args, table=table, check=False)
+
+
+def build_dmz():
+    """Return DMZ-enabled clients merged with live lease data."""
+    dmz = _load_dmz()
+
+    # Get all known clients from leases
+    leases_data = build_leases()
+    clients = []
+    for lease in leases_data.get("leases", []):
+        ip = lease.get("ip", "")
+        enabled = ip in dmz
+        has_reservation = lease.get("static", False)
+        clients.append({
+            "ip":              ip,
+            "hostname":        lease.get("hostname", ""),
+            "mac":             lease.get("mac", ""),
+            "online":          lease.get("online", False),
+            "has_reservation": has_reservation,
+            "dmz_enabled":     enabled,
+            "dmz_note":        dmz.get(ip, {}).get("note", "") if enabled else "",
+        })
+
+    # Sort: DMZ-enabled first, then by IP
+    clients.sort(key=lambda c: (not c["dmz_enabled"],
+                                [int(x) for x in c["ip"].split(".")
+                                 if x.isdigit()]))
+    return {
+        "ok":        True,
+        "clients":   clients,
+        "dmz_count": sum(1 for c in clients if c["dmz_enabled"]),
+        "warning":   (
+            "DMZ clients share the LAN subnet. Isolation is enforced via "
+            "iptables FORWARD rules that drop DMZ→LAN traffic. The DMZ client "
+            "can still reach the gateway and the internet."
+        ),
+    }
+
+
+def enable_dmz(body):
+    ip   = (body.get("ip") or "").strip()
+    note = (body.get("note") or "").strip()
+    if not ip:
+        raise ValueError("IP is required")
+    ipaddress.ip_address(ip)
+
+    dmz = _load_dmz()
+    if ip in dmz:
+        return {"ok": True, "already_enabled": True}
+
+    _apply_dmz_isolation(ip)
+    dmz[ip] = {"note": note, "enabled_at": time.time()}
+    _save_dmz(dmz)
+    return {"ok": True}
+
+
+def disable_dmz(body):
+    ip = (body.get("ip") or "").strip()
+    if not ip:
+        raise ValueError("IP is required")
+
+    dmz = _load_dmz()
+    if ip not in dmz:
+        return {"ok": True, "already_disabled": True}
+
+    _remove_dmz_isolation(ip)
+    dmz.pop(ip, None)
+    _save_dmz(dmz)
+    return {"ok": True}
+
+
+def _restore_nat_on_boot():
+    """Re-apply all stored port forward and DMZ rules on API startup."""
+    # Port forwards
+    for rule in _load_pf():
+        if rule.get("enabled", True):
+            try:
+                _apply_pf_rule(rule)
+            except Exception as exc:
+                print(f"[boot] PF restore failed for {rule.get('id')}: {exc}", flush=True)
+
+    # DMZ isolation
+    dmz = _load_dmz()
+    for ip in dmz:
+        try:
+            _apply_dmz_isolation(ip)
+        except Exception as exc:
+            print(f"[boot] DMZ restore failed for {ip}: {exc}", flush=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VLAN management
+# ─────────────────────────────────────────────────────────────────────────────
+
+VLAN_PERSIST_FILE = "/etc/tuxwall/vlans.json"
+
+
+def _load_vlan_persist():
+    """Load persisted VLAN metadata (name, policy notes)."""
+    try:
+        with open(VLAN_PERSIST_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_vlan_persist(data):
+    os.makedirs("/etc/tuxwall", exist_ok=True)
+    with open(VLAN_PERSIST_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def build_vlans():
+    """Return all VLAN interfaces, their addresses, and inter-VLAN UFW policies."""
+
+    # --- live interfaces via iproute2 ---
+    try:
+        r = subprocess.run(
+            ["ip", "-j", "-d", "link", "show"],
+            capture_output=True, text=True, timeout=5
+        )
+        links = json.loads(r.stdout or "[]")
+    except Exception:
+        links = []
+
+    try:
+        r = subprocess.run(
+            ["ip", "-j", "addr", "show"],
+            capture_output=True, text=True, timeout=5
+        )
+        addrs_raw = json.loads(r.stdout or "[]")
+    except Exception:
+        addrs_raw = []
+
+    addr_map = {}
+    for iface in addrs_raw:
+        name = iface.get("ifname", "")
+        addr_map[name] = [
+            f"{a['local']}/{a['prefixlen']}"
+            for a in iface.get("addr_info", [])
+            if a.get("family") in ("inet", "inet6")
+        ]
+
+    persist = _load_vlan_persist()
+
+    vlans = []
+    for link in links:
+        li = link.get("linkinfo", {})
+        if li.get("info_kind") != "vlan":
+            continue
+        name = link.get("ifname", "")
+        vid = li.get("info_data", {}).get("id", "")
+        parent = link.get("link", "")
+        state = link.get("operstate", "UNKNOWN")
+        mtu = link.get("mtu", "")
+        addresses = addr_map.get(name, [])
+        meta = persist.get(name, {})
+        vlans.append({
+            "iface":     name,
+            "vlan_id":   vid,
+            "parent":    parent,
+            "state":     state,
+            "mtu":       mtu,
+            "addresses": addresses,
+            "label":     meta.get("label", ""),
+        })
+
+    # --- physical interfaces (candidates for VLAN parent) ---
+    parents = []
+    for link in links:
+        li = link.get("linkinfo", {})
+        kind = li.get("info_kind") or ""
+        if kind in ("vlan", "wireguard", "loopback", "bridge"):
+            continue
+        flags = link.get("flags", [])
+        if "LOOPBACK" in flags:
+            continue
+        parents.append(link.get("ifname", ""))
+
+    # --- inter-VLAN UFW policies stored in persist ---
+    policies = persist.get("__policies__", [])
+
+    return {"ok": True, "vlans": vlans, "parents": parents, "policies": policies}
+
+
+def add_vlan(body):
+    parent = (body.get("parent") or "").strip()
+    try:
+        vid = int(body.get("vlan_id", 0))
+    except (TypeError, ValueError):
+        raise ValueError("VLAN ID must be an integer")
+    address = (body.get("address") or "").strip()
+    label   = (body.get("label") or "").strip()
+
+    if not parent or not vid:
+        raise ValueError("parent interface and VLAN ID are required")
+    if not (1 <= vid <= 4094):
+        raise ValueError("VLAN ID must be 1–4094")
+    if address:
+        ipaddress.ip_interface(address)   # validate
+
+    iface = f"{parent}.{vid}"
+
+    # Create the VLAN interface
+    subprocess.run(
+        ["ip", "link", "add", "link", parent, "name", iface, "type", "vlan", "id", str(vid)],
+        check=True, capture_output=True, text=True, timeout=10
+    )
+    if address:
+        subprocess.run(
+            ["ip", "addr", "add", address, "dev", iface],
+            check=True, capture_output=True, text=True, timeout=10
+        )
+    subprocess.run(
+        ["ip", "link", "set", iface, "up"],
+        check=True, capture_output=True, text=True, timeout=10
+    )
+
+    # Persist metadata + netplan
+    persist = _load_vlan_persist()
+    persist[iface] = {"label": label, "address": address, "vlan_id": vid, "parent": parent}
+    _save_vlan_persist(persist)
+    _vlan_netplan_sync(persist)
+
+    return {"ok": True, "iface": iface}
+
+
+def edit_vlan(body):
+    iface   = (body.get("iface") or "").strip()
+    address = (body.get("address") or "").strip()
+    label   = (body.get("label") or "").strip()
+
+    if not iface:
+        raise ValueError("iface is required")
+    if address:
+        ipaddress.ip_interface(address)
+
+    persist = _load_vlan_persist()
+
+    # Replace addresses on the interface
+    try:
+        r = subprocess.run(
+            ["ip", "-j", "addr", "show", "dev", iface],
+            capture_output=True, text=True, timeout=5
+        )
+        existing = json.loads(r.stdout or "[]")
+        for entry in existing:
+            for a in entry.get("addr_info", []):
+                if a.get("family") == "inet":
+                    subprocess.run(
+                        ["ip", "addr", "del", f"{a['local']}/{a['prefixlen']}", "dev", iface],
+                        capture_output=True, text=True, timeout=10
+                    )
+    except Exception:
+        pass
+
+    if address:
+        subprocess.run(
+            ["ip", "addr", "add", address, "dev", iface],
+            check=True, capture_output=True, text=True, timeout=10
+        )
+
+    meta = persist.get(iface, {})
+    meta["label"]   = label
+    meta["address"] = address
+    persist[iface]  = meta
+    _save_vlan_persist(persist)
+    _vlan_netplan_sync(persist)
+
+    return {"ok": True}
+
+
+def delete_vlan(body):
+    iface = (body.get("iface") or "").strip()
+    if not iface:
+        raise ValueError("iface is required")
+
+    subprocess.run(
+        ["ip", "link", "set", iface, "down"],
+        capture_output=True, text=True, timeout=10
+    )
+    subprocess.run(
+        ["ip", "link", "delete", iface],
+        check=True, capture_output=True, text=True, timeout=10
+    )
+
+    persist = _load_vlan_persist()
+    persist.pop(iface, None)
+    _save_vlan_persist(persist)
+    _vlan_netplan_sync(persist)
+
+    return {"ok": True}
+
+
+def add_vlan_policy(body):
+    src  = (body.get("src") or "").strip()
+    dst  = (body.get("dst") or "").strip()
+    policy = (body.get("policy") or "deny").strip().lower()
+    proto  = (body.get("proto") or "any").strip()
+    port   = (body.get("port") or "").strip()
+
+    if not src or not dst:
+        raise ValueError("src and dst interfaces are required")
+    if policy not in ("allow", "deny"):
+        raise ValueError("policy must be allow or deny")
+
+    # Build UFW rule
+    port_part  = f" port {port}" if port and port != "any" else ""
+    proto_part = f" proto {proto}" if proto and proto != "any" else ""
+    rule = f"{policy} in on {src} out on {dst}{port_part}{proto_part}"
+    add_firewall_rule(rule)
+
+    persist = _load_vlan_persist()
+    policies = persist.get("__policies__", [])
+    policies.append({
+        "id":     str(uuid4())[:8],
+        "src":    src,
+        "dst":    dst,
+        "policy": policy,
+        "proto":  proto,
+        "port":   port,
+        "rule":   rule,
+    })
+    persist["__policies__"] = policies
+    _save_vlan_persist(persist)
+
+    return {"ok": True}
+
+
+def delete_vlan_policy(body):
+    pid = (body.get("id") or "").strip()
+    if not pid:
+        raise ValueError("policy id is required")
+
+    persist = _load_vlan_persist()
+    policies = persist.get("__policies__", [])
+    target = next((p for p in policies if p["id"] == pid), None)
+    if not target:
+        raise ValueError("policy not found")
+
+    # Remove from UFW by matching rule text
+    try:
+        r = subprocess.run(
+            ["ufw", "status", "numbered"],
+            capture_output=True, text=True, timeout=8
+        )
+        for line in reversed(r.stdout.splitlines()):
+            m = re.match(r"\[\s*(\d+)\]", line)
+            if m and target["src"] in line and target["dst"] in line:
+                subprocess.run(
+                    ["ufw", "--force", "delete", m.group(1)],
+                    capture_output=True, text=True, timeout=10
+                )
+                break
+    except Exception:
+        pass
+
+    persist["__policies__"] = [p for p in policies if p["id"] != pid]
+    _save_vlan_persist(persist)
+    return {"ok": True}
+
+
+def _vlan_netplan_sync(persist):
+    """Write a netplan yaml for all persisted VLANs so they survive reboot."""
+    netplan_path = "/etc/netplan/99-tuxwall-vlans.yaml"
+    vlans_cfg = {}
+    ethernets = set()
+
+    for iface, meta in persist.items():
+        if iface.startswith("__"):
+            continue
+        parent  = meta.get("parent", "")
+        vid     = meta.get("vlan_id", "")
+        address = meta.get("address", "")
+        if not parent or not vid:
+            continue
+        ethernets.add(parent)
+        entry = {"id": int(vid), "link": parent}
+        if address:
+            entry["addresses"] = [address]
+        vlans_cfg[iface] = entry
+
+    if not vlans_cfg:
+        # Remove the file if no VLANs left
+        try:
+            os.remove(netplan_path)
+        except FileNotFoundError:
+            pass
+        return
+
+    lines = ["network:", "  version: 2", "  ethernets:"]
+    for eth in sorted(ethernets):
+        lines.append(f"    {eth}: {{optional: true}}")
+    lines.append("  vlans:")
+    for name, cfg in vlans_cfg.items():
+        lines.append(f"    {name}:")
+        lines.append(f"      id: {cfg['id']}")
+        lines.append(f"      link: {cfg['link']}")
+        if cfg.get("addresses"):
+            lines.append(f"      addresses: [{cfg['addresses'][0]}]")
+
+    with open(netplan_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def _self_restart(signum, frame):
     """SIGUSR1 handler: re-exec the API process in-place to pick up code changes."""
     print("tuxwall API self-restarting...", flush=True)
@@ -6223,6 +7056,7 @@ def main():
     signal.signal(signal.SIGUSR1, _self_restart)
     _ensure_service_reload()
     _ensure_unbound_local_actions()
+    _restore_nat_on_boot()
     get_security_monitor()
     get_system_monitor()
     get_latency_monitor()

@@ -226,7 +226,7 @@ body {
 }
 
 /* ---------- Main ---------- */
-.main { flex: 1; padding: 20px 28px 40px; max-width: 1200px; }
+.main { flex: 1; min-width: 0; width: 0; padding: 20px 28px 40px; max-width: 100%; overflow-x: hidden; }
 
 .topbar {
   display: flex; align-items: center; justify-content: space-between;
@@ -1135,8 +1135,8 @@ body.light-theme .sec-map .leaflet-container { background: #10151b; }
   /* Service status dots: hide on mobile to save space */
   .sidebar-foot { display: none; }
 
-  /* Main content */
-  .main { padding: 12px 10px 32px; }
+  /* Main content — restore natural width on mobile (stacked layout, no sidebar column) */
+  .main { width: auto; min-width: 0; padding: 12px 10px 32px; overflow-x: hidden; }
   .topbar { margin-bottom: 12px; gap: 8px; }
   .topbar h1 { font-size: 18px; }
   .topbar-actions { gap: 8px; }
@@ -1484,7 +1484,7 @@ body.light-theme .sec-map .leaflet-container { background: #10151b; }
   .stat-value { font-size: 16px; }
   .topbar h1 { font-size: 16px; }
   .nav-item { padding: 5px 8px; font-size: 11.5px; }
-  .main { padding: 10px 8px 28px; }
+  .main { width: auto; min-width: 0; padding: 10px 8px 28px; }
   .client-hostname { max-width: 100px; }
   .client-vendor   { max-width: 100px; }
   .sec-map { height: 240px; }
@@ -2288,4 +2288,340 @@ body.light-theme tbody tr:hover {
 }
 body.light-theme .stat-card.stat-c:hover {
   box-shadow: 0 8px 24px color-mix(in srgb, var(--stat-c, var(--accent)) 15%, transparent);
+}
+
+/* ========== VLANS ========== */
+.vlan-vid-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 12px;
+  font-family: var(--mono);
+  font-weight: 600;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 4px;
+}
+
+.vlan-state {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+
+.vlan-state.badge-green {
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+  color: var(--green);
+  border: 1px solid color-mix(in srgb, var(--green) 30%, transparent);
+}
+
+.vlan-state.badge-red {
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  color: var(--red);
+  border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
+}
+
+.vlan-form {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.vlan-form input[type="number"],
+.vlan-form input[type="text"],
+.vlan-form select {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.vlan-form input[type="number"]:focus,
+.vlan-form input[type="text"]:focus,
+.vlan-form select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.vlan-form input[type="number"] { width: 150px; -moz-appearance: textfield; appearance: textfield; }
+.vlan-form input[type="number"]::-webkit-inner-spin-button,
+.vlan-form input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
+
+/* Edit modal */
+.vlan-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  background: rgba(0,0,0,0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(3px);
+}
+
+.vlan-modal[hidden] { display: none; }
+
+.vlan-modal-box {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: min(460px, 94vw);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  overflow: hidden;
+}
+
+.vlan-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.85rem 1.2rem;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--border) 30%, var(--card)) 0%, var(--card) 100%);
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.vlan-modal-body {
+  padding: 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.vlan-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.vlan-field input {
+  width: 100%;
+}
+
+.vlan-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.4rem;
+}
+
+/* ========== PORT FORWARDING ========== */
+.pf-form { flex-wrap: wrap; gap: 6px; }
+
+.pf-form input[type="number"],
+.pf-form input[type="text"],
+.pf-form select {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.pf-form input[type="number"]:focus,
+.pf-form input[type="text"]:focus,
+.pf-form select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+/* Remove browser number spinners — cleaner look */
+.pf-form input[type="number"]::-webkit-inner-spin-button,
+.pf-form input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
+.pf-form input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+
+.pf-proto-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-family: var(--mono);
+  font-weight: 600;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+}
+
+.pf-status {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+
+.pf-status-active {
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+  color: var(--green);
+  border: 1px solid color-mix(in srgb, var(--green) 30%, transparent);
+}
+
+.pf-status-inactive {
+  background: color-mix(in srgb, var(--muted) 12%, transparent);
+  color: var(--muted);
+  border: 1px solid color-mix(in srgb, var(--muted) 30%, transparent);
+}
+
+.card-head-note {
+  font-size: 0.75rem;
+  font-weight: 400;
+  margin-left: 0.75rem;
+}
+
+/* ========== DMZ ========== */
+.dmz-security-note {
+  display: flex;
+  gap: 0.85rem;
+  align-items: flex-start;
+  margin: 0 1.2rem 1rem;
+  padding: 0.85rem 1rem;
+  border-left: 3px solid var(--amber, #f0a500);
+  background: color-mix(in srgb, var(--amber, #f0a500) 6%, transparent);
+  border-radius: 0 6px 6px 0;
+  font-size: 0.8rem;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.dmz-warn-icon {
+  font-size: 1.2rem;
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--amber, #f0a500);
+}
+
+.dmz-security-note strong { color: var(--amber, #f0a500); }
+.dmz-security-note code {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  background: color-mix(in srgb, var(--border) 60%, transparent);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.dmz-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+.dmz-dot-green { background: var(--green); box-shadow: 0 0 4px var(--green); }
+.dmz-dot-grey  { background: var(--muted); }
+
+.dmz-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+
+.dmz-badge-green {
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+  color: var(--green);
+  border: 1px solid color-mix(in srgb, var(--green) 30%, transparent);
+}
+
+.dmz-badge-red {
+  background: color-mix(in srgb, var(--red) 15%, transparent);
+  color: var(--red);
+  border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
+}
+
+.dmz-badge-amber {
+  background: color-mix(in srgb, #f0a500 10%, transparent);
+  color: #f0a500;
+  border: 1px solid color-mix(in srgb, #f0a500 30%, transparent);
+}
+
+.dmz-badge-grey {
+  background: color-mix(in srgb, var(--muted) 10%, transparent);
+  color: var(--muted);
+  border: 1px solid color-mix(in srgb, var(--muted) 25%, transparent);
+}
+
+.dmz-row-active {
+  background: color-mix(in srgb, var(--red) 4%, transparent) !important;
+}
+
+.dmz-row-active:hover {
+  background: color-mix(in srgb, var(--red) 7%, transparent) !important;
+}
+
+/* ========== SCROLLBARS ========== */
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+/* Chromium / WebKit — vertical */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Keep sidebar nav scrollbar hidden */
+.nav {
+  scrollbar-width: none;
+}
+.nav::-webkit-scrollbar {
+  display: none;
+}
+
+/* ========== SECURITY HITS CHART ========== */
+#sec-chart-card .bw-canvas-wrap,
+#traffic-monitor-card + .card .bw-canvas-wrap {
+  padding: 12px 16px 8px;
+}
+
+#sec-chart {
+  height: 220px;
+  cursor: crosshair;
+}
+
+@media (max-width: 760px) {
+  #sec-chart { height: 160px; }
 }

@@ -11,7 +11,7 @@ A Linux network dashboard providing a web UI for managing DHCP leases, DNS, fire
 
 [![Donate with PayPal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/ncp/payment/GY6799FZ4ZPB2)
 
-
+[![Donate with PayPal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/ncp/payment/GY6799FZ4ZPB2)
 ---
 
 ## Table of Contents
@@ -180,13 +180,13 @@ sudo apt install -y \
 Install the provided `.deb` package:
 
 ```bash
-sudo dpkg -i tuxwall_2.0.0_all.deb
+sudo dpkg -i tuxwall_2.1.0_all.deb
 ```
 
 If you encounter dependency errors:
 ```bash
 sudo apt -f install
-sudo dpkg -i tuxwall_2.0.0_all.deb
+sudo dpkg -i tuxwall_2.1.0_all.deb
 ```
 
 ### 3. Enable and start services

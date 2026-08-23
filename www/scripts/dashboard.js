@@ -388,6 +388,7 @@
     domains: "Local Domains",
     blocklists: "Blocklists",
     firewall: "Firewall (UFW)",
+    vlans: "VLANs",
     security: "Security",
     wireguard: "WireGuard",
     crowdsec: "CrowdSec",
@@ -576,8 +577,8 @@
     });
   }
 
-  async function fetchJSON(url) {
-    const res = await fetch(url, { cache: "no-store" });
+  async function fetchJSON(url, opts = {}) {
+    const res = await fetch(url, { cache: "no-store", ...opts });
     if (res.status === 401) handleSessionExpired();
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
@@ -863,6 +864,431 @@
         <td class="mono">${esc(e.dpt ? e.dpt + "/" + e.proto : e.proto || "—")}</td>
       </tr>`).join("");
   }
+
+  // ── VLAN module ────────────────────────────────────────────────────────────
+
+  let _vlanData = { vlans: [], parents: [], policies: [] };
+
+  async function refreshVlans() {
+    try {
+      const data = await fetchJSON("/api/vlans");
+      _vlanData = data;
+
+      // Stat cards
+      const up = data.vlans.filter(v => v.state === "UP").length;
+      const parentSet = new Set(data.vlans.map(v => v.parent).filter(Boolean));
+      document.getElementById("vlan-count").textContent    = data.vlans.length;
+      document.getElementById("vlan-parents").textContent  = parentSet.size;
+      document.getElementById("vlan-policies").textContent = data.policies.length;
+      document.getElementById("vlan-up").textContent       = up;
+
+      // Populate parent selects
+      const parentSel = document.getElementById("vlan-parent-sel");
+      const polSrc    = document.getElementById("pol-src");
+      const polDst    = document.getElementById("pol-dst");
+      parentSel.innerHTML = data.parents.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join("");
+
+      const vlanIfaceOpts = `<option value="">Source interface</option>` +
+        data.vlans.map(v => `<option value="${esc(v.iface)}">${esc(v.iface)} (VLAN ${esc(v.vlan_id)})</option>`).join("");
+      polSrc.innerHTML = vlanIfaceOpts.replace("Source interface", "Source interface");
+      polDst.innerHTML = vlanIfaceOpts.replace("Source interface", "Destination interface");
+
+      // VLAN table
+      const vtbody = document.querySelector("#vlan-table tbody");
+      if (!data.vlans.length) {
+        vtbody.innerHTML = `<tr><td colspan="8" class="muted" style="text-align:center;padding:1.5rem">No VLAN interfaces configured</td></tr>`;
+      } else {
+        vtbody.innerHTML = data.vlans.map(v => {
+          const stateClass = v.state === "UP" ? "badge-green" : "badge-red";
+          const addrs = v.addresses.length ? esc(v.addresses.join(", ")) : `<span class="muted">—</span>`;
+          return `<tr data-iface="${esc(v.iface)}">
+            <td class="mono">${esc(v.iface)}</td>
+            <td><span class="vlan-vid-badge">${esc(v.vlan_id)}</span></td>
+            <td class="mono">${esc(v.parent)}</td>
+            <td class="mono">${addrs}</td>
+            <td>${v.label ? esc(v.label) : `<span class="muted">—</span>`}</td>
+            <td><span class="vlan-state ${stateClass}">${esc(v.state)}</span></td>
+            <td class="muted">${esc(v.mtu)}</td>
+            <td>
+              <button class="btn btn-sm vlan-edit-btn" data-iface="${esc(v.iface)}"
+                data-addr="${esc((v.addresses[0] || ""))}" data-label="${esc(v.label)}">Edit</button>
+              <button class="btn btn-sm btn-danger vlan-del-btn" data-iface="${esc(v.iface)}">Del</button>
+            </td>
+          </tr>`;
+        }).join("");
+      }
+
+      // Policy table
+      const ptbody = document.querySelector("#pol-table tbody");
+      if (!data.policies.length) {
+        ptbody.innerHTML = `<tr><td colspan="7" class="muted" style="text-align:center;padding:1.5rem">No inter-VLAN policies configured</td></tr>`;
+      } else {
+        ptbody.innerHTML = data.policies.map(p => {
+          const pClass = p.policy === "allow" ? "badge-green" : "badge-red";
+          return `<tr>
+            <td class="mono">${esc(p.src)}</td>
+            <td class="mono">${esc(p.dst)}</td>
+            <td><span class="vlan-state ${pClass}">${esc(p.policy.toUpperCase())}</span></td>
+            <td class="muted">${esc(p.proto)}</td>
+            <td class="muted">${p.port || "—"}</td>
+            <td class="mono muted" style="font-size:0.75rem">${esc(p.rule)}</td>
+            <td><button class="btn btn-sm btn-danger pol-del-btn" data-id="${esc(p.id)}">Del</button></td>
+          </tr>`;
+        }).join("");
+      }
+
+      _bindVlanEvents();
+    } catch (err) {
+      console.error("VLAN refresh error:", err);
+    }
+  }
+
+  function _bindVlanEvents() {
+    // Edit buttons
+    document.querySelectorAll(".vlan-edit-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const iface = btn.dataset.iface;
+        document.getElementById("vlan-edit-iface").value  = iface;
+        document.getElementById("vlan-edit-addr").value   = btn.dataset.addr || "";
+        document.getElementById("vlan-edit-label").value  = btn.dataset.label || "";
+        document.getElementById("vlan-edit-title").textContent = `Edit ${iface}`;
+        document.getElementById("vlan-edit-hint").textContent  = "";
+        document.getElementById("vlan-edit-modal").hidden = false;
+      });
+    });
+
+    // Delete VLAN buttons
+    document.querySelectorAll(".vlan-del-btn").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const iface = btn.dataset.iface;
+        if (!confirm(`Delete VLAN interface ${iface}? The interface will be removed immediately.`)) return;
+        btn.disabled = true;
+        try {
+          const r = await fetchJSON("/api/vlans/delete", { method: "POST", body: JSON.stringify({ iface }) });
+          if (!r.ok) throw new Error(r.error || "Failed");
+          refreshVlans();
+        } catch (err) {
+          alert("Error: " + err.message);
+          btn.disabled = false;
+        }
+      });
+    });
+
+    // Delete policy buttons
+    document.querySelectorAll(".pol-del-btn").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("Remove this routing policy?")) return;
+        btn.disabled = true;
+        try {
+          const r = await fetchJSON("/api/vlans/policy/delete", { method: "POST", body: JSON.stringify({ id: btn.dataset.id }) });
+          if (!r.ok) throw new Error(r.error || "Failed");
+          refreshVlans();
+        } catch (err) {
+          alert("Error: " + err.message);
+          btn.disabled = false;
+        }
+      });
+    });
+  }
+
+  // Add VLAN
+  document.getElementById("vlan-add-btn").addEventListener("click", async () => {
+    const btn     = document.getElementById("vlan-add-btn");
+    const hint    = document.getElementById("vlan-add-hint");
+    const parent  = document.getElementById("vlan-parent-sel").value.trim();
+    const vid     = document.getElementById("vlan-vid-in").value.trim();
+    const address = document.getElementById("vlan-addr-in").value.trim();
+    const label   = document.getElementById("vlan-label-in").value.trim();
+
+    hint.textContent = "";
+    if (!parent || !vid) { hint.textContent = "Parent interface and VLAN ID are required."; return; }
+
+    btn.disabled = true;
+    hint.textContent = "Adding…";
+    try {
+      const r = await fetchJSON("/api/vlans/add", {
+        method: "POST",
+        body: JSON.stringify({ parent, vlan_id: Number(vid), address, label })
+      });
+      if (!r.ok) throw new Error(r.error || "Failed");
+      document.getElementById("vlan-vid-in").value   = "";
+      document.getElementById("vlan-addr-in").value  = "";
+      document.getElementById("vlan-label-in").value = "";
+      hint.textContent = `✓ ${r.iface} created`;
+      refreshVlans();
+    } catch (err) {
+      hint.textContent = "Error: " + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // Edit modal save / cancel / close
+  document.getElementById("vlan-edit-save").addEventListener("click", async () => {
+    const btn   = document.getElementById("vlan-edit-save");
+    const hint  = document.getElementById("vlan-edit-hint");
+    const iface = document.getElementById("vlan-edit-iface").value;
+    const addr  = document.getElementById("vlan-edit-addr").value.trim();
+    const label = document.getElementById("vlan-edit-label").value.trim();
+
+    hint.textContent = "";
+    btn.disabled = true;
+    hint.textContent = "Saving…";
+    try {
+      const r = await fetchJSON("/api/vlans/edit", {
+        method: "POST",
+        body: JSON.stringify({ iface, address: addr, label })
+      });
+      if (!r.ok) throw new Error(r.error || "Failed");
+      document.getElementById("vlan-edit-modal").hidden = true;
+      refreshVlans();
+    } catch (err) {
+      hint.textContent = "Error: " + err.message;
+      btn.disabled = false;
+    }
+  });
+
+  ["vlan-edit-close", "vlan-edit-cancel"].forEach(id => {
+    document.getElementById(id).addEventListener("click", () => {
+      document.getElementById("vlan-edit-modal").hidden = true;
+    });
+  });
+
+  // Add routing policy
+  document.getElementById("pol-add-btn").addEventListener("click", async () => {
+    const btn   = document.getElementById("pol-add-btn");
+    const hint  = document.getElementById("pol-hint");
+    const src   = document.getElementById("pol-src").value;
+    const dst   = document.getElementById("pol-dst").value;
+    const policy = document.getElementById("pol-policy").value;
+    const proto  = document.getElementById("pol-proto").value;
+    const port   = document.getElementById("pol-port").value.trim();
+
+    hint.textContent = "";
+    if (!src || !dst) { hint.textContent = "Select source and destination interfaces."; return; }
+    if (src === dst)  { hint.textContent = "Source and destination must differ."; return; }
+
+    btn.disabled = true;
+    hint.textContent = "Adding…";
+    try {
+      const r = await fetchJSON("/api/vlans/policy/add", {
+        method: "POST",
+        body: JSON.stringify({ src, dst, policy, proto, port })
+      });
+      if (!r.ok) throw new Error(r.error || "Failed");
+      document.getElementById("pol-port").value = "";
+      hint.textContent = "✓ Policy added";
+      refreshVlans();
+    } catch (err) {
+      hint.textContent = "Error: " + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // ── end VLAN module ────────────────────────────────────────────────────────
+
+  // ── Port Forwarding module ─────────────────────────────────────────────────
+
+  async function refreshPortForward() {
+    try {
+      const [pfData, leaseData] = await Promise.all([
+        fetchJSON("/api/portforward"),
+        fetchJSON("/api/leases"),
+      ]);
+
+      // Populate internal IP dropdown with known hosts
+      const ipSel = document.getElementById("pf-int-ip");
+      const leases = (leaseData.leases || []).slice()
+        .sort((a, b) => a.ip.localeCompare(b.ip, undefined, { numeric: true }));
+      ipSel.innerHTML = leases.map(l => {
+        const label = l.hostname ? `${esc(l.ip)} — ${esc(l.hostname)}` : esc(l.ip);
+        return `<option value="${esc(l.ip)}">${label}</option>`;
+      }).join("");
+
+      // Render table
+      const tbody = document.querySelector("#pf-table tbody");
+      const rules = pfData.rules || [];
+      if (!rules.length) {
+        tbody.innerHTML = `<tr><td colspan="8" class="muted" style="text-align:center;padding:1.5rem">No port forwarding rules configured</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = rules.map(r => {
+        const statusClass = r.active ? "pf-status-active" : "pf-status-inactive";
+        const statusText  = r.active ? "Active" : "Inactive";
+        const toggleLabel = r.enabled ? "Disable" : "Enable";
+        const protoLabel  = r.proto === "both" ? "TCP+UDP" : r.proto.toUpperCase();
+        return `<tr>
+          <td>${r.label ? esc(r.label) : '<span class="muted">—</span>'}</td>
+          <td><span class="pf-proto-badge">${esc(protoLabel)}</span></td>
+          <td class="mono">${esc(r.ext_port)}</td>
+          <td class="muted" style="font-size:1.1rem;text-align:center">→</td>
+          <td class="mono">${esc(r.int_ip)}</td>
+          <td class="mono">${esc(r.int_port)}</td>
+          <td><span class="pf-status ${statusClass}">${statusText}</span></td>
+          <td>
+            <button class="btn btn-sm pf-toggle-btn" data-id="${esc(r.id)}" data-enabled="${r.enabled}">${toggleLabel}</button>
+            <button class="btn btn-sm btn-danger pf-del-btn" data-id="${esc(r.id)}">Del</button>
+          </td>
+        </tr>`;
+      }).join("");
+
+      // Bind table buttons
+      document.querySelectorAll(".pf-toggle-btn").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          try {
+            const r = await fetchJSON("/api/portforward/toggle", {
+              method: "POST", body: JSON.stringify({ id: btn.dataset.id })
+            });
+            if (!r.ok) throw new Error(r.error || "Failed");
+            refreshPortForward();
+          } catch (err) { alert("Error: " + err.message); btn.disabled = false; }
+        });
+      });
+
+      document.querySelectorAll(".pf-del-btn").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          if (!confirm("Delete this port forward rule?")) return;
+          btn.disabled = true;
+          try {
+            const r = await fetchJSON("/api/portforward/delete", {
+              method: "POST", body: JSON.stringify({ id: btn.dataset.id })
+            });
+            if (!r.ok) throw new Error(r.error || "Failed");
+            refreshPortForward();
+          } catch (err) { alert("Error: " + err.message); btn.disabled = false; }
+        });
+      });
+
+    } catch (err) {
+      console.error("Port forward refresh error:", err);
+    }
+  }
+
+  document.getElementById("pf-add-btn").addEventListener("click", async () => {
+    const btn     = document.getElementById("pf-add-btn");
+    const hint    = document.getElementById("pf-hint");
+    const extPort = document.getElementById("pf-ext-port").value.trim();
+    const proto   = document.getElementById("pf-proto").value;
+    const intIp   = document.getElementById("pf-int-ip").value;
+    const intPort = document.getElementById("pf-int-port").value.trim() || extPort;
+    const label   = document.getElementById("pf-label").value.trim();
+
+    hint.textContent = "";
+    if (!extPort || !intIp) { hint.textContent = "External port and internal host are required."; return; }
+
+    btn.disabled = true;
+    hint.textContent = "Adding…";
+    try {
+      const r = await fetchJSON("/api/portforward/add", {
+        method: "POST",
+        body: JSON.stringify({ ext_port: Number(extPort), proto, int_ip: intIp, int_port: Number(intPort), label })
+      });
+      if (!r.ok) throw new Error(r.error || "Failed");
+      document.getElementById("pf-ext-port").value = "";
+      document.getElementById("pf-int-port").value = "";
+      document.getElementById("pf-label").value    = "";
+      hint.textContent = "✓ Rule added";
+      refreshPortForward();
+    } catch (err) {
+      hint.textContent = "Error: " + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // ── DMZ module ─────────────────────────────────────────────────────────────
+
+  async function refreshDmz() {
+    try {
+      const data = await fetchJSON("/api/dmz");
+      const clients = data.clients || [];
+      const tbody = document.querySelector("#dmz-table tbody");
+
+      if (!clients.length) {
+        tbody.innerHTML = `<tr><td colspan="7" class="muted" style="text-align:center;padding:1.5rem">No DHCP clients found</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = clients.map(c => {
+        const onlineDot = c.online
+          ? `<span class="dmz-dot dmz-dot-green" title="Online"></span>`
+          : `<span class="dmz-dot dmz-dot-grey" title="Offline"></span>`;
+
+        const staticBadge = c.has_reservation
+          ? `<span class="dmz-badge dmz-badge-green">Static</span>`
+          : `<span class="dmz-badge dmz-badge-amber" title="Add a DHCP reservation for reliable port forwarding">Dynamic</span>`;
+
+        const dmzBadge = c.dmz_enabled
+          ? `<span class="dmz-badge dmz-badge-red">DMZ ON</span>`
+          : `<span class="dmz-badge dmz-badge-grey">Off</span>`;
+
+        const btnClass = c.dmz_enabled ? "btn-danger" : "btn";
+        const btnLabel = c.dmz_enabled ? "Disable DMZ" : "Enable DMZ";
+        const btnTitle = c.dmz_enabled
+          ? "Remove iptables isolation rules for this client"
+          : c.has_reservation
+            ? "Apply iptables FORWARD DROP rules — blocks this client from reaching other LAN hosts"
+            : "⚠ No static reservation — enable anyway (IP may change on lease renewal)";
+
+        return `<tr class="${c.dmz_enabled ? "dmz-row-active" : ""}">
+          <td>${c.hostname ? esc(c.hostname) : '<span class="muted">—</span>'}</td>
+          <td class="mono">${esc(c.ip)}</td>
+          <td class="mono muted" style="font-size:0.78rem">${esc(c.mac)}</td>
+          <td style="text-align:center">${onlineDot}</td>
+          <td>${staticBadge}</td>
+          <td>${dmzBadge}</td>
+          <td>
+            <button class="btn btn-sm ${btnClass} dmz-toggle-btn"
+              data-ip="${esc(c.ip)}"
+              data-enabled="${c.dmz_enabled}"
+              title="${esc(btnTitle)}">${btnLabel}</button>
+          </td>
+        </tr>`;
+      }).join("");
+
+      // Bind toggle buttons
+      document.querySelectorAll(".dmz-toggle-btn").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          const ip      = btn.dataset.ip;
+          const enabled = btn.dataset.enabled === "true";
+          const action  = enabled ? "disable" : "enable";
+
+          if (!enabled) {
+            const confirmed = confirm(
+              `Enable DMZ isolation for ${ip}?\n\n` +
+              `This will:\n` +
+              `  • Block ${ip} from reaching other LAN hosts\n` +
+              `  • Allow ${ip} to reach the gateway and internet\n` +
+              `  • Allow inbound connections from the internet (via port forwards)\n\n` +
+              `The rest of your network will NOT be able to initiate connections to ${ip}.`
+            );
+            if (!confirmed) return;
+          } else {
+            if (!confirm(`Disable DMZ isolation for ${ip}? The client will regain full LAN access.`)) return;
+          }
+
+          btn.disabled = true;
+          try {
+            const r = await fetchJSON(`/api/dmz/${action}`, {
+              method: "POST", body: JSON.stringify({ ip })
+            });
+            if (!r.ok) throw new Error(r.error || "Failed");
+            refreshDmz();
+          } catch (err) {
+            alert("Error: " + err.message);
+            btn.disabled = false;
+          }
+        });
+      });
+
+    } catch (err) {
+      console.error("DMZ refresh error:", err);
+    }
+  }
+
+  // ── end Port Forwarding / DMZ module ──────────────────────────────────────
 
   async function refreshFirewall() {
     try {
@@ -1274,49 +1700,250 @@
     ovMap = createAttackMap(el, SEC_TARGET);
   }
 
-  function drawSecurityChart(canvas, series) {
+  // ── Security hits-over-time chart ─────────────────────────────────────────
+  let _secChartSeries  = [];
+  let _secChartHover   = null;
+  let _secChartRaf     = null;
+  let _secChartProgress = 0;   // 0→1 draw-in animation
+
+  function _secChartAttachHover(canvas) {
+    canvas._secHoverBound = canvas._secHoverBound || ((e) => {
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const n  = _secChartSeries.length;
+      if (!n) { _secChartHover = null; return; }
+      const padL = 42, padR = 12;
+      const pw = rect.width - padL - padR;
+      const idx = Math.round(((mx - padL) / pw) * (n - 1));
+      _secChartHover = Math.max(0, Math.min(n - 1, idx));
+      _drawSecChart(canvas);
+    });
+    canvas._secLeaveBound = canvas._secLeaveBound || ((() => {
+      _secChartHover = null;
+      _drawSecChart(canvas);
+    }));
+    canvas.removeEventListener("mousemove", canvas._secHoverBound);
+    canvas.removeEventListener("mouseleave", canvas._secLeaveBound);
+    canvas.addEventListener("mousemove", canvas._secHoverBound);
+    canvas.addEventListener("mouseleave", canvas._secLeaveBound);
+  }
+
+  function _drawSecChart(canvas, progress = 1) {
     if (!canvas) return;
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
+    const dpr  = window.devicePixelRatio || 1;
+    const rect  = canvas.getBoundingClientRect();
     if (rect.width < 10 || rect.height < 10) return;
-    canvas.width = Math.round(rect.width * dpr);
+    canvas.width  = Math.round(rect.width  * dpr);
     canvas.height = Math.round(rect.height * dpr);
     const ctx = canvas.getContext("2d");
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const w = rect.width, h = rect.height;
     ctx.clearRect(0, 0, w, h);
-    const padT = 8, padB = 16;
-    const ph = h - padT - padB;
+
+    const series = _secChartSeries;
     const n = series.length;
+
     if (n < 2) {
       ctx.fillStyle = cssVar("--muted", "#8b949e");
-      ctx.font = "11px sans-serif";
+      ctx.font = `12px ${cssVar("--font","sans-serif")}`;
       ctx.textAlign = "center";
       ctx.fillText("Collecting samples…", w / 2, h / 2);
       return;
     }
-    const max = Math.max(1, ...series.map((s) => s[1]));
-    const bw = Math.max(1, w / n - 1);
-    const hmRed = cssVar("--red", "#f85149");
-    const hmBlue = cssVar("--accent", "#4f8cff");
-    const hmZero = hexToRgba(cssVar("--muted", "#8b949e"), 0.15);
-    for (let i = 0; i < n; i++) {
-      const x = (w * i) / n;
-      const val = series[i][1];
-      const bh = val > 0 ? Math.max(1, Math.round((val / max) * ph)) : 0;
-      ctx.fillStyle = val ? (i === n - 1 ? hexToRgba(hmRed, 0.9) : hexToRgba(hmBlue, 0.7)) : hmZero;
-      ctx.fillRect(x, padT + ph - bh, bw, bh);
+
+    // Layout
+    const padT = 18, padB = 28, padL = 42, padR = 12;
+    const pw = w - padL - padR;
+    const ph = h - padT - padB;
+
+    const vals = series.map(s => s[1]);
+    const max  = Math.max(1, ...vals);
+
+    // Colour tokens
+    const red    = cssVar("--red",    "#f85149");
+    const accent = cssVar("--accent", "#4f8cff");
+    const muted  = cssVar("--muted",  "#8b949e");
+    const border = cssVar("--border", "#2d333b");
+
+    // X/Y helpers
+    const xOf = i => padL + (pw * i) / (n - 1);
+    const yOf = v => padT + ph - (ph * Math.min(v, max) / max);
+
+    // ── Grid lines + Y labels ──────────────────────────────────────────────
+    const gridSteps = 4;
+    ctx.save();
+    ctx.strokeStyle = hexToRgba(border, 0.7);
+    ctx.lineWidth   = 1;
+    ctx.setLineDash([3, 4]);
+    for (let g = 0; g <= gridSteps; g++) {
+      const gy = padT + (ph / gridSteps) * g;
+      ctx.beginPath();
+      ctx.moveTo(padL, gy);
+      ctx.lineTo(w - padR, gy);
+      ctx.stroke();
+      const val = Math.round(max - (max / gridSteps) * g);
+      ctx.fillStyle = hexToRgba(muted, 0.7);
+      ctx.font = "10px monospace";
+      ctx.textAlign = "right";
+      ctx.fillText(val, padL - 6, gy + 3.5);
     }
-    ctx.fillStyle = hexToRgba(cssVar("--muted", "#8b949e"), 0.9);
-    ctx.font = "10px sans-serif";
+    ctx.restore();
+
+    // ── Clipping mask for animated draw-in ────────────────────────────────
+    const drawUpTo = padL + pw * Math.min(progress, 1);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(padL, 0, drawUpTo - padL, h);
+    ctx.clip();
+
+    // ── Gradient fill under line ───────────────────────────────────────────
+    const grad = ctx.createLinearGradient(0, padT, 0, padT + ph);
+    grad.addColorStop(0,   hexToRgba(accent, 0.45));
+    grad.addColorStop(0.5, hexToRgba(accent, 0.15));
+    grad.addColorStop(1,   hexToRgba(accent, 0.0));
+
+    ctx.beginPath();
+    ctx.moveTo(xOf(0), yOf(vals[0]));
+    for (let i = 1; i < n; i++) {
+      const cx = (xOf(i - 1) + xOf(i)) / 2;
+      ctx.bezierCurveTo(cx, yOf(vals[i - 1]), cx, yOf(vals[i]), xOf(i), yOf(vals[i]));
+    }
+    ctx.lineTo(xOf(n - 1), padT + ph);
+    ctx.lineTo(xOf(0),     padT + ph);
+    ctx.closePath();
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // ── Main line ─────────────────────────────────────────────────────────
+    ctx.beginPath();
+    ctx.moveTo(xOf(0), yOf(vals[0]));
+    for (let i = 1; i < n; i++) {
+      const cx = (xOf(i - 1) + xOf(i)) / 2;
+      ctx.bezierCurveTo(cx, yOf(vals[i - 1]), cx, yOf(vals[i]), xOf(i), yOf(vals[i]));
+    }
+    ctx.strokeStyle = accent;
+    ctx.lineWidth   = 2;
+    ctx.setLineDash([]);
+    ctx.stroke();
+
+    // ── Peak glow dots ────────────────────────────────────────────────────
+    const peakIdx = vals.indexOf(max);
+    for (let i = 0; i < n; i++) {
+      if (vals[i] === 0) continue;
+      const isPeak = i === peakIdx;
+      const isLast = i === n - 1;
+      if (!isPeak && !isLast && vals[i] < max * 0.6) continue;
+      const px = xOf(i), py = yOf(vals[i]);
+      const col = isPeak ? red : accent;
+
+      if (isPeak) {
+        // Outer glow ring
+        const glow = ctx.createRadialGradient(px, py, 0, px, py, 14);
+        glow.addColorStop(0,   hexToRgba(col, 0.35));
+        glow.addColorStop(1,   hexToRgba(col, 0.0));
+        ctx.beginPath();
+        ctx.arc(px, py, 14, 0, Math.PI * 2);
+        ctx.fillStyle = glow;
+        ctx.fill();
+      }
+
+      // Dot
+      ctx.beginPath();
+      ctx.arc(px, py, isPeak ? 5 : 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = isPeak ? red : hexToRgba(accent, 0.9);
+      ctx.fill();
+      ctx.strokeStyle = cssVar("--card", "#1c2333");
+      ctx.lineWidth = isPeak ? 2 : 1.5;
+      ctx.stroke();
+    }
+
+    ctx.restore();  // end clip
+
+    // ── X axis time labels ─────────────────────────────────────────────────
+    ctx.fillStyle = hexToRgba(muted, 0.8);
+    ctx.font = "10px monospace";
     ctx.textAlign = "center";
     const steps = Math.min(6, n);
     for (let i = 0; i < steps; i++) {
       const idx = Math.round((i * (n - 1)) / (steps - 1));
-      const t = new Date(series[idx][0] * 1000);
-      const label = `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}:${String(t.getSeconds()).padStart(2, "0")}`;
-      ctx.fillText(label, (w * idx) / (n - 1) + bw / 2, padT + ph + 12);
+      const t   = new Date(series[idx][0] * 1000);
+      const lbl = `${String(t.getHours()).padStart(2,"0")}:${String(t.getMinutes()).padStart(2,"0")}:${String(t.getSeconds()).padStart(2,"0")}`;
+      ctx.fillText(lbl, xOf(idx), padT + ph + 18);
     }
+
+    // ── Hover crosshair + tooltip ──────────────────────────────────────────
+    if (_secChartHover !== null && _secChartHover < n) {
+      const hi  = _secChartHover;
+      const hx  = xOf(hi);
+      const hv  = vals[hi];
+      const hy  = yOf(hv);
+
+      // Vertical crosshair
+      ctx.save();
+      ctx.strokeStyle = hexToRgba(muted, 0.5);
+      ctx.lineWidth   = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(hx, padT);
+      ctx.lineTo(hx, padT + ph);
+      ctx.stroke();
+      ctx.restore();
+
+      // Highlight dot
+      ctx.beginPath();
+      ctx.arc(hx, hy, 6, 0, Math.PI * 2);
+      ctx.fillStyle = hexToRgba(accent, 0.25);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(hx, hy, 4, 0, Math.PI * 2);
+      ctx.fillStyle = accent;
+      ctx.fill();
+
+      // Tooltip bubble
+      const t   = new Date(series[hi][0] * 1000);
+      const tLbl = `${String(t.getHours()).padStart(2,"0")}:${String(t.getMinutes()).padStart(2,"0")}:${String(t.getSeconds()).padStart(2,"0")}`;
+      const tip = `${hv} hit${hv !== 1 ? "s" : ""}  ${tLbl}`;
+      ctx.font = "bold 11px monospace";
+      const tipW = ctx.measureText(tip).width + 16;
+      const tipH = 22;
+      let tx = hx + 10;
+      if (tx + tipW > w - padR) tx = hx - tipW - 10;
+      const ty = Math.max(padT, hy - tipH / 2);
+
+      ctx.fillStyle   = cssVar("--card", "#1c2333");
+      ctx.strokeStyle = hexToRgba(accent, 0.6);
+      ctx.lineWidth   = 1;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.roundRect(tx, ty, tipW, tipH, 5);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle  = cssVar("--text", "#e6edf3");
+      ctx.textAlign  = "left";
+      ctx.fillText(tip, tx + 8, ty + 14.5);
+    }
+  }
+
+  function drawSecurityChart(canvas, series) {
+    if (!canvas) return;
+    _secChartSeries = series || [];
+    _secChartAttachHover(canvas);
+
+    // Animate draw-in
+    if (_secChartRaf) cancelAnimationFrame(_secChartRaf);
+    _secChartProgress = 0;
+    const start = performance.now();
+    const dur   = 600;
+
+    function tick(now) {
+      _secChartProgress = Math.min((now - start) / dur, 1);
+      // Ease out cubic
+      const p = 1 - Math.pow(1 - _secChartProgress, 3);
+      _drawSecChart(canvas, p);
+      if (_secChartProgress < 1) _secChartRaf = requestAnimationFrame(tick);
+    }
+    _secChartRaf = requestAnimationFrame(tick);
   }
 
   function renderSecurity(d) {
@@ -4631,7 +5258,7 @@
     });
     els.title.textContent = VIEW_TITLES[view] || "Dashboard";
     state.activeView = view;
-    const implemented = view === "overview" || view === "clients" || view === "dns" || view === "domains" || view === "firewall" || view === "security" || view === "wireguard" || view === "crowdsec" || view === "bandwidth" || view === "blocklists" || view === "system" || view === "backups" || view === "logs" || view === "settings" || view === "ai";
+    const implemented = view === "overview" || view === "clients" || view === "dns" || view === "domains" || view === "firewall" || view === "vlans" || view === "security" || view === "wireguard" || view === "crowdsec" || view === "bandwidth" || view === "blocklists" || view === "system" || view === "backups" || view === "logs" || view === "settings" || view === "ai";
     document.querySelectorAll(".view").forEach((v) => { v.hidden = true; });
     document.querySelectorAll(".pie-canvas").forEach((c) => {
       const st = donutStates.get(c);
@@ -4645,7 +5272,8 @@
         refreshOverview();
         setTimeout(() => { if (ovMap) ovMap.map.invalidateSize(); }, 60);
       }
-      if (view === "firewall") refreshFirewall();
+      if (view === "firewall") { refreshFirewall(); refreshPortForward(); refreshDmz(); }
+      if (view === "vlans") refreshVlans();
       if (view === "domains") refreshDomains();
       if (view === "security") {
         initSecurityMap();

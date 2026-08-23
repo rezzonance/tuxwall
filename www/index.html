@@ -62,6 +62,10 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 4 6v6c0 5.5 3.4 9.4 8 10 4.6-.6 8-4.5 8-10V6l-8-4z"/></svg>
         <span>Firewall</span>
       </a>
+      <a class="nav-item ni-vlans" data-view="vlans" href="#vlans">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 6h20v2H2V6zm0 10h20v2H2v-2zM5 9h14v6H5V9zm2 2v2h10v-2H7z"/></svg>
+        <span>VLANs</span>
+      </a>
       <a class="nav-item ni-security" data-view="security" href="#security">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM18.92 8h-2.95c-.32-1.25-.78-2.45-1.38-3.56 1.84.63 3.37 1.91 4.33 3.56zM12 4.04c.83 1.2 1.48 2.53 1.91 3.96h-3.82c.43-1.43 1.08-2.76 1.91-3.96zM4.26 14C4.1 13.36 4 12.69 4 12s.1-1.36.26-2h3.38c-.08.66-.14 1.32-.14 2 0 .68.06 1.34.14 2H4.26zm.82 2h2.95c.32 1.25.78 2.45 1.38 3.56-1.84-.63-3.37-1.9-4.33-3.56zm2.95-8H5.08c.96-1.66 2.49-2.93 4.33-3.56C8.81 5.55 8.35 6.75 8.03 8zM12 19.96c-.83-1.2-1.48-2.53-1.91-3.96h3.82c-.43 1.43-1.08 2.76-1.91 3.96zM14.34 14H9.66c-.09-.66-.16-1.32-.16-2 0-.68.07-1.35.16-2h4.68c.09.65.16 1.32.16 2 0 .68-.07 1.34-.16 2zm.25 5.56c.6-1.11 1.06-2.31 1.38-3.56h2.95c-.96 1.65-2.49 2.93-4.33 3.56zM16.36 14c.08-.66.14-1.32.14-2 0-.68-.06-1.34-.14-2h3.38c.16.64.26 1.31.26 2s-.1 1.36-.26 2h-3.38z"/></svg>
         <span>Security</span>
@@ -610,7 +614,206 @@
           </table>
         </div>
       </div>
+
+      <!-- ── Port Forwarding ───────────────────────────────────────────── -->
+      <div class="card card-mt">
+        <div class="card-head">
+          <h2>Port Forwarding</h2>
+          <span class="card-head-note muted">WAN → LAN DNAT rules via iptables. Rules persist across reboots.</span>
+        </div>
+        <div class="card-toolbar bl-toolbar pf-form">
+          <input type="number" id="pf-ext-port" placeholder="Ext port" min="1" max="65535" autocomplete="off" style="width:110px">
+          <select id="pf-proto">
+            <option value="tcp">TCP</option>
+            <option value="udp">UDP</option>
+            <option value="both">TCP+UDP</option>
+          </select>
+          <span class="muted" style="padding:0 4px">→</span>
+          <select id="pf-int-ip" title="Internal host (from DHCP leases)"></select>
+          <input type="number" id="pf-int-port" placeholder="Int port" min="1" max="65535" autocomplete="off" style="width:110px">
+          <input type="text"   id="pf-label"    placeholder="Label (optional)" autocomplete="off" style="width:160px" spellcheck="false">
+          <button id="pf-add-btn" class="btn" type="button">Add Rule</button>
+          <span class="toolbar-spacer"></span>
+          <span class="muted" id="pf-hint"></span>
+        </div>
+        <div class="table-wrap">
+          <table id="pf-table">
+            <thead>
+              <tr>
+                <th>Label</th>
+                <th>Proto</th>
+                <th>Ext Port</th>
+                <th></th>
+                <th>Internal Host</th>
+                <th>Int Port</th>
+                <th>Status</th>
+                <th style="width:120px"></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ── DMZ ───────────────────────────────────────────────────────── -->
+      <div class="card card-mt" id="dmz-card">
+        <div class="card-head">
+          <h2>DMZ Clients</h2>
+          <span class="card-head-note muted">Isolate a client from the LAN while keeping it reachable from the internet.</span>
+        </div>
+        <div class="dmz-security-note" id="dmz-warning-box">
+          <span class="dmz-warn-icon">⚠</span>
+          <div>
+            <strong>Soft DMZ — iptables isolation</strong><br>
+            DMZ clients share the LAN subnet. Isolation is enforced by <code>FORWARD DROP</code> rules
+            that block the DMZ client from initiating connections to any other LAN host.
+            The DMZ client can still reach the gateway (DNS / management) and the internet.
+            <strong>A static DHCP reservation is required</strong> so port forwards always
+            reach the correct host.
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table id="dmz-table">
+            <thead>
+              <tr>
+                <th>Hostname</th>
+                <th>IP Address</th>
+                <th>MAC</th>
+                <th>Online</th>
+                <th>Static IP</th>
+                <th>DMZ</th>
+                <th style="width:160px"></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
     </section>
+    <section id="view-vlans" class="view" hidden>
+
+      <!-- Stat cards -->
+      <div class="stats-row">
+        <div class="stat-card stat-c stat-c-green">
+          <div class="stat-value" id="vlan-count">—</div>
+          <div class="stat-label">VLANs Active</div>
+        </div>
+        <div class="stat-card stat-c stat-c-blue">
+          <div class="stat-value" id="vlan-parents">—</div>
+          <div class="stat-label">Tagged Interfaces</div>
+        </div>
+        <div class="stat-card stat-c stat-c-amber">
+          <div class="stat-value" id="vlan-policies">—</div>
+          <div class="stat-label">Routing Policies</div>
+        </div>
+        <div class="stat-card stat-c stat-c-purple">
+          <div class="stat-value" id="vlan-up">—</div>
+          <div class="stat-label">Interfaces UP</div>
+        </div>
+      </div>
+
+      <!-- VLAN Interfaces -->
+      <div class="card">
+        <div class="card-head">
+          <h2>VLAN Interfaces</h2>
+        </div>
+        <div class="card-toolbar bl-toolbar vlan-form" id="vlan-add-form">
+          <select id="vlan-parent-sel" title="Parent interface"></select>
+          <input type="number" id="vlan-vid-in" placeholder="VLAN ID (1–4094)" min="1" max="4094" autocomplete="off">
+          <input type="text"   id="vlan-addr-in" placeholder="IP/prefix e.g. 10.10.0.1/24 (optional)" autocomplete="off" spellcheck="false">
+          <input type="text"   id="vlan-label-in" placeholder="Label / note (optional)" autocomplete="off" spellcheck="false">
+          <button id="vlan-add-btn" class="btn" type="button">Add VLAN</button>
+          <span class="toolbar-spacer"></span>
+          <span class="muted" id="vlan-add-hint"></span>
+        </div>
+        <div class="table-wrap">
+          <table id="vlan-table">
+            <thead>
+              <tr>
+                <th>Interface</th>
+                <th>VLAN ID</th>
+                <th>Parent</th>
+                <th>Address(es)</th>
+                <th>Label</th>
+                <th>State</th>
+                <th>MTU</th>
+                <th style="width:120px"></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Edit modal (inline) -->
+      <div id="vlan-edit-modal" class="vlan-modal" hidden>
+        <div class="vlan-modal-box">
+          <div class="vlan-modal-head">
+            <span id="vlan-edit-title">Edit VLAN</span>
+            <button class="btn btn-sm btn-ghost" id="vlan-edit-close" type="button">✕</button>
+          </div>
+          <div class="vlan-modal-body">
+            <input type="hidden" id="vlan-edit-iface">
+            <label class="vlan-field">
+              <span>Address / Prefix</span>
+              <input type="text" id="vlan-edit-addr" placeholder="e.g. 10.10.0.1/24" autocomplete="off" spellcheck="false">
+            </label>
+            <label class="vlan-field">
+              <span>Label / Note</span>
+              <input type="text" id="vlan-edit-label" placeholder="Optional label" autocomplete="off" spellcheck="false">
+            </label>
+            <div class="vlan-modal-actions">
+              <button id="vlan-edit-save" class="btn btn-primary" type="button">Save</button>
+              <button id="vlan-edit-cancel" class="btn" type="button">Cancel</button>
+              <span class="muted" id="vlan-edit-hint"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Inter-VLAN Routing Policies -->
+      <div class="card card-mt">
+        <div class="card-head">
+          <h2>Inter-VLAN Routing Policies</h2>
+        </div>
+        <div class="card-toolbar bl-toolbar vlan-form">
+          <select id="pol-src" title="Source VLAN interface"><option value="">Source interface</option></select>
+          <select id="pol-dst" title="Destination VLAN interface"><option value="">Destination interface</option></select>
+          <select id="pol-policy">
+            <option value="deny">DENY</option>
+            <option value="allow">ALLOW</option>
+          </select>
+          <select id="pol-proto">
+            <option value="any">any proto</option>
+            <option value="tcp">TCP</option>
+            <option value="udp">UDP</option>
+          </select>
+          <input type="text" id="pol-port" placeholder="port (optional)" autocomplete="off" style="width:130px">
+          <button id="pol-add-btn" class="btn" type="button">Add Policy</button>
+          <span class="toolbar-spacer"></span>
+          <span class="muted" id="pol-hint"></span>
+        </div>
+        <div class="table-wrap">
+          <table id="pol-table">
+            <thead>
+              <tr>
+                <th>Source</th>
+                <th>Destination</th>
+                <th>Policy</th>
+                <th>Proto</th>
+                <th>Port</th>
+                <th>UFW Rule</th>
+                <th style="width:80px"></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+    </section>
+
     <section id="view-security" class="view" hidden>
       <div class="stats-row">
         <div class="stat-card stat-c stat-c-red">
@@ -724,13 +927,13 @@
           </div>
         </div>
 
-      <div class="card card-mt">
-        <div class="card-head">
-          <h2>Hits Over Time</h2>
-          <span class="muted">Last 10 minutes, 10s buckets</span>
+        <div class="card card-mt" id="sec-chart-card">
+          <div class="card-head">
+            <h2>Hits Over Time</h2>
+            <span class="muted">Last 10 minutes · 10s buckets · hover for detail</span>
+          </div>
+          <div class="bw-canvas-wrap"><canvas id="sec-chart" class="bw-canvas"></canvas></div>
         </div>
-        <div class="bw-canvas-wrap"><canvas id="sec-chart" class="bw-canvas"></canvas></div>
-      </div>
 
       <!-- Traffic Monitor -->
       <div class="card card-mt" id="traffic-monitor-card">
