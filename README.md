@@ -196,7 +196,33 @@ ip -6 route show
 
 ## Installation
 
-### 1. Install all dependencies
+### Automated installer (recommended)
+
+The `install.sh` script handles everything: installs dependencies, disables conflicting services, configures Unbound/nginx, installs the `.deb`, and starts all services.
+
+```bash
+git clone https://github.com/rezzonance/tuxwall.git
+cd tuxwall
+sudo bash install.sh
+```
+
+The script will:
+- Install all system packages
+- Disable `systemd-resolved` and fix `/etc/resolv.conf`
+- Check for DHCPv6 port 546 conflicts
+- Enable IPv4 + IPv6 forwarding
+- Download and install the TuxWall `.deb` package
+- Configure nginx, Unbound, and systemd services
+- Fix hardcoded paths and set file permissions
+- Print a status summary with next steps
+
+After the installer finishes, you still need to configure your network services (Kea, Unbound, radvd) for your specific setup. See the manual steps below or edit the config files directly.
+
+### Manual installation
+
+If you prefer to install step by step:
+
+#### 1. Install all dependencies
 
 ```bash
 sudo apt update
