@@ -36,12 +36,14 @@ clear
 echo -e "${C}"
 cat << 'BANNER'
 
-  ████████╗██╗   ██╗██╗     ██╗     ███╗   ██╗    ███████╗      ██╗    ██╗ ██████╗
-  ╚══██╔══╝██║   ██║██║     ██║     ████╗  ██║    ██╔════╝      ██║    ██║██╔════╝
-     ██║   ██║   ██║██║     ██║     ██╔██╗ ██║    ███████╗      ██║ █╗ ██║██║
-     ██║   ██║   ██║██║     ██║     ██║╚██╗██║    ╚════██║      ██║███╗██║██║
-     ██║   ╚██████╔╝███████╗███████╗██║ ╚████║    ███████║      ╚███╔███╔╝╚██████╗
-     ╚═╝    ╚═════╝ ╚══════╝╚══════╝╚═╝  ╚═══╝    ╚══════╝       ╚══╝╚══╝  ╚═════╝
+  TTTTTTT  U   U  X   X  W     W    A     L     L
+     T     U   U  X  X   W     W   A A    L     L
+     T     U   U  X X    W     W  A   A   L     L
+     T      UUU   XX     W  W  W  AAAAA   L     L
+     T       U    X X    W W W W  A   A   L     L
+     T       U    X  X   WW   WW  A   A   L     L
+     T       U    X   X  W     W  A   A   LLLLLLL
+
 BANNER
 echo -e "${NC}"
 echo -e "  ${B}Linux Network Dashboard Installer${NC}"
