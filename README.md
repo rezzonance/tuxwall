@@ -5,7 +5,7 @@
 
 # TuxWall
 
-http://tuxwall.org
+https://tuxwall.org
 
 A Linux network dashboard providing a web UI for managing DHCP leases, DNS, firewall rules, VPN (WireGuard), and security — designed to run on a dedicated Linux gateway/router.
 
