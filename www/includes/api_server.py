@@ -5025,9 +5025,9 @@ def set_hostname(name):
     return socket.gethostname()
 
 
-BACKUP_DIR = "/home/jeff/backups"
+BACKUP_DIR = "/var/lib/tuxwall/backups"
 WWW_DIR = "/var/www/html"
-SOURCE_DIR = "/home/jeff/tuxwall-blocklist"
+SOURCE_DIR = "/var/www/html"
 BACKUP_RE = re.compile(r"^[A-Za-z0-9._-]+\.tar\.gz$")
 BACKUP_TARGETS = ("index.html", "css", "scripts", "includes", "images")
 SOURCE_SYNC = ("index.html", "css/style.css", "scripts/dashboard.js", "includes/api_server.py")

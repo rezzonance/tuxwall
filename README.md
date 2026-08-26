@@ -11,7 +11,7 @@ A Linux network dashboard providing a web UI for managing DHCP leases, DNS, fire
 
 [![Donate with PayPal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/ncp/payment/GY6799FZ4ZPB2)
 
-[![Donate with PayPal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/ncp/payment/GY6799FZ4ZPB2)
+
 ---
 
 ## Table of Contents
@@ -83,6 +83,25 @@ All of the following must be installed and working **before** tuxwall will funct
 | `unbound` | 1.24+ | Recursive DNS resolver and local filtering |
 | `unbound-anchor` | 1.24+ | DNSSEC trust anchor management |
 
+> **Important:** `systemd-resolved` conflicts with unbound. Both will bind to port 53 on `127.0.0.1` and `::1`, causing DNS queries to be randomly split between them. This leads to inconsistent resolution and broken local zone lookups. You **must** disable `systemd-resolved` and point `/etc/resolv.conf` directly to unbound:
+>
+> ```bash
+> sudo systemctl disable --now systemd-resolved
+> sudo systemctl disable systemd-resolved-varlink.socket systemd-resolved-monitor.socket
+> sudo rm /etc/resolv.conf
+> echo -e "nameserver 127.0.0.1\nnameserver ::1\nsearch housenetwork.site" | sudo tee /etc/resolv.conf
+> ```
+>
+> Verify no other process is on port 53:
+> ```bash
+> ss -ulnp | grep ':53 '
+> ```
+>
+> Only unbound should be listening. If `systemd-resolved` reappears, check that its sockets are disabled:
+> ```bash
+> systemctl is-enabled systemd-resolved-varlink.socket systemd-resolved-monitor.socket
+> ```
+
 ### IPv6
 
 | Package | Version | Purpose |
@@ -118,8 +137,9 @@ All of the following must be installed and working **before** tuxwall will funct
 | Package | Version | Purpose |
 |---|---|---|
 | `python3` | 3.12+ | Required to run `api_server.py` |
-| `curl` | 8.x | Used by blocklist update service |
+| `curl` | 8.x | Used by blocklist update service and GeoIP database download |
 | `jq` | 1.8+ | JSON processing in scripts |
+| `gzip` | 1.12+ | Decompression for blocklist and GeoIP database updates |
 
 ### Optional
 
@@ -127,7 +147,10 @@ All of the following must be installed and working **before** tuxwall will funct
 |---|---|
 | `tcpdump` | Packet capture for debugging |
 | `python3-netifaces` | Enhanced network interface detection |
-| `python3-maxminddb` | GeoIP lookups in the dashboard |
+| `python3-maxminddb` | GeoIP lookups in the dashboard (installed by `geoip-setup.sh`) |
+| `python3-pip` | Fallback installer for `maxminddb` if the deb package is unavailable |
+
+> **Note:** Node.js and Java are **not** required by tuxwall. If you have them installed for other purposes, they will not interfere.
 
 ---
 
@@ -149,6 +172,18 @@ IPv6 was by far the hardest part of getting tuxwall working on a live internet c
 - **UFW IPv6 support** must be enabled — set `IPV6=yes` in `/etc/default/ufw`.
 - **CrowdSec and Suricata** can interfere with IPv6 traffic if not configured to allow it. Check your bouncer rules carefully.
 - **WireGuard and IPv6** require explicit AllowedIPs entries for IPv6 ranges if you want VPN clients to use IPv6.
+- **`systemd-networkd` and DHCPv6 clients conflict on port 546.** If both are active, they will fight over the DHCPv6 client port (`UDP 546`), causing intermittent IPv6 connectivity drops. This is extremely difficult to diagnose because IPv6 will appear to work for a while then silently fail. Check with:
+  ```bash
+  ss -ulnp | grep ':546 '
+  ```
+  If you see two processes bound to port 546, disable the one you don't need. On a dedicated gateway/router, you likely want `systemd-networkd` handling DHCPv6 — disable any standalone DHCPv6 client (e.g., `kea-dhcp6-server`, `wide-dhcpv6-client`, `dibbler-client`):
+  ```bash
+  sudo systemctl disable --now <dhcpv6-client-service>
+  ```
+  If you need `systemd-networkd` for DHCPv6, ensure its `.network` file has `DHCP=ipv6` or `DHCP=yes` on the WAN interface. If you don't need `systemd-networkd` at all, disable it:
+  ```bash
+  sudo systemctl disable --now systemd-networkd
+  ```
 
 If your internet drops after starting any of these services, check your IPv6 routing table first:
 ```bash
@@ -180,16 +215,27 @@ sudo apt install -y \
 Install the provided `.deb` package:
 
 ```bash
-sudo dpkg -i tuxwall_2.2.0_all.deb
+sudo dpkg -i tuxwall_2.2.1_all.deb
 ```
 
 If you encounter dependency errors:
 ```bash
 sudo apt -f install
-sudo dpkg -i tuxwall_2.2.0_all.deb
+sudo dpkg -i tuxwall_2.2.1_all.deb
 ```
 
-### 3. Enable and start services
+### 3. Disable systemd-resolved and configure DNS
+
+`systemd-resolved` conflicts with unbound on port 53. Disable it and point `/etc/resolv.conf` to unbound:
+
+```bash
+sudo systemctl disable --now systemd-resolved
+sudo systemctl disable systemd-resolved-varlink.socket systemd-resolved-monitor.socket
+sudo rm /etc/resolv.conf
+echo -e "nameserver 127.0.0.1\nnameserver ::1\nsearch housenetwork.site" | sudo tee /etc/resolv.conf
+```
+
+### 4. Enable and start services
 
 ```bash
 sudo systemctl enable --now kea-dhcp4-server
@@ -202,7 +248,7 @@ sudo systemctl enable --now tuxwall
 sudo systemctl enable --now tuxwall-blocklist-update.timer
 ```
 
-### 4. Enable SQM (optional)
+### 5. Enable SQM (optional)
 
 If you want CAKE-based traffic shaping, edit `scripts/tuxwall-sqm.sh` with your WAN interface and speeds, then:
 
@@ -213,6 +259,16 @@ sudo cp systemd/tuxwall-sqm.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now tuxwall-sqm
 ```
+
+### 6. Enable GeoIP mapping (optional)
+
+To show attacker locations on the Security page map, run the GeoIP setup script:
+
+```bash
+sudo bash www/scripts/geoip-setup.sh
+```
+
+This downloads the free DB-IP City Lite database and installs the `maxminddb` Python package.
 
 ---
 
@@ -273,12 +329,33 @@ ip route show
 sudo ufw status verbose
 ```
 
+Also check for port 546 conflicts between `systemd-networkd` and a DHCPv6 client — both binding to the same port causes intermittent IPv6 drops:
+```bash
+ss -ulnp | grep ':546 '
+```
+If two processes appear, disable the DHCPv6 client you don't need (see [IPv6 Notes](#ipv6-notes)).
+
 ### DNS not resolving
 
 ```bash
 sudo systemctl status unbound
 sudo unbound-control status
 dig @127.0.0.1 google.com
+```
+
+Check if `systemd-resolved` is still running and conflicting with unbound:
+```bash
+systemctl is-active systemd-resolved
+ss -ulnp | grep ':53 '
+cat /etc/resolv.conf
+```
+
+If `systemd-resolved` is active, disable it:
+```bash
+sudo systemctl disable --now systemd-resolved
+sudo systemctl disable systemd-resolved-varlink.socket systemd-resolved-monitor.socket
+sudo rm /etc/resolv.conf
+echo -e "nameserver 127.0.0.1\nnameserver ::1\nsearch housenetwork.site" | sudo tee /etc/resolv.conf
 ```
 
 ### DHCP leases not appearing in dashboard
@@ -317,13 +394,16 @@ systemctl status tuxwall tuxwall-sqm kea-dhcp4-server unbound radvd suricata cro
   <img src="images/screenshots/1.png" width="500" alt="Screenshot">
 </p>
 <p align="center">
-  <img src="images/screenshots/1.png" width="500" alt="Screenshot">
+  <img src="images/screenshots/2.png" width="500" alt="Screenshot">
 </p>
 <p align="center">
-  <img src="images/screenshots/1.png" width="500" alt="Screenshot">
+  <img src="images/screenshots/3.png" width="500" alt="Screenshot">
 </p>
 <p align="center">
-  <img src="images/screenshots/1.png" width="500" alt="Screenshot">
+  <img src="images/screenshots/4.png" width="500" alt="Screenshot">
+</p>
+<p align="center">
+  <img src="images/screenshots/5.png" width="500" alt="Screenshot">
 </p>
 
 ## Contributing
