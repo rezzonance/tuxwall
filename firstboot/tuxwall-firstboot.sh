@@ -253,7 +253,7 @@ config_kea() {
         "subnet": "$LAN_SUBNET",
         "pools": [ { "pool": "$pool_low - $pool_high" } ],
         "option-data": [
-          { "name": "domain-name-servers", "data": "$LAN_STATIC_IP, ::1" },
+          { "name": "domain-name-servers", "data": "$LAN_STATIC_IP" },
           { "name": "domain-name", "data": "$DOMAIN" },
           { "name": "routers", "data": "$LAN_GATEWAY_IP" },
           { "name": "subnet-mask", "data": "$(mask_from_prefix $LAN_PREFIX)" }
@@ -269,6 +269,20 @@ KEA
 
     install_file "$TMP" "$KEA" 640
     rm -f "$TMP"
+
+    # kea runs as user/group _kea (or kea) and MUST be able to read its config.
+    # A root-owned mode-640 file is unreadable by the daemon -> "Unable to open
+    # file /etc/kea/kea-dhcp4.conf". Fix ownership to the kea group.
+    if command -v kea-dhcp4 >/dev/null 2>&1 || command -v kea >/dev/null 2>&1; then
+        local keagrp=""
+        getent group _kea >/dev/null 2>&1 && keagrp="_kea"
+        getent group kea   >/dev/null 2>&1 && keagrp="kea"
+        if [[ -n "$keagrp" ]]; then
+            chown "root:$keagrp" "$KEA" 2>/dev/null || true
+            chmod 640 "$KEA" 2>/dev/null || true
+            log "  Kea config ownership set to root:$keagrp"
+        fi
+    fi
 }
 
 mask_from_prefix() {
