@@ -323,6 +323,10 @@
     nuRole: document.getElementById("nu-role"),
     nuAdd: document.getElementById("nu-add"),
     usersMsg: document.getElementById("users-msg"),
+    routerLat: document.getElementById("router-lat"),
+    routerLon: document.getElementById("router-lon"),
+    routerLocSave: document.getElementById("router-loc-save"),
+    routerLocMsg: document.getElementById("router-loc-msg"),
   };
 
   const TYPE_LABEL = { 0: "Dynamic", 1: "Reserved", 2: "Reserved-Declined" };
@@ -1620,7 +1624,13 @@
   let secMap = null;
   let ovMap = null;
   const SVG_NS = "http://www.w3.org/2000/svg";
-  const SEC_TARGET = { lat: 39.9526, lon: -75.1652 }; // Philadelphia - your router location
+  const DEFAULT_TARGET = { lat: 39.9526, lon: -75.1652 }; // Philadelphia - fallback if no location set
+  function routerTarget() {
+    if (state.routerLat != null && state.routerLon != null) {
+      return { lat: Number(state.routerLat), lon: Number(state.routerLon) };
+    }
+    return DEFAULT_TARGET;
+  }
   const SEC_ARC_MAX = 40;
 
   // Arc colour tiers by hit count
@@ -1636,6 +1646,7 @@
     const m = {
       map: L.map(el, { worldCopyJump: true, zoomControl: false }).setView([25, 0], 2),
       target,
+      targetMarker: null,
       markers: null,
       svg: null,
       lastByIp: null,
@@ -1652,7 +1663,7 @@
     }).addTo(m.map);
 
     // Target marker — multi-ring shield
-    L.marker([target.lat, target.lon], {
+    m.targetMarker = L.marker([target.lat, target.lon], {
       icon: L.divIcon({
         className: "sec-target-wrap",
         html: `<div class="sec-target">
@@ -1858,13 +1869,26 @@
   function initSecurityMap() {
     const el = document.getElementById("sec-map");
     if (!el || secMap) return;
-    secMap = createAttackMap(el, SEC_TARGET);
+    secMap = createAttackMap(el, routerTarget());
   }
 
   function initOverviewMap() {
     const el = document.getElementById("ov-map");
     if (!el || ovMap) return;
-    ovMap = createAttackMap(el, SEC_TARGET);
+    ovMap = createAttackMap(el, routerTarget());
+  }
+
+  function updateMapTarget(m, target) {
+    if (!m) return;
+    m.target = target;
+    if (m.targetMarker) m.targetMarker.setLatLng([target.lat, target.lon]);
+    drawAttackArcs(m);
+  }
+
+  function applyRouterTarget() {
+    const t = routerTarget();
+    updateMapTarget(secMap, t);
+    updateMapTarget(ovMap, t);
   }
 
   // ── Security hits-over-time chart ─────────────────────────────────────────
@@ -5346,6 +5370,12 @@
     }
   }
 
+  function populateRouterLocation() {
+    if (state.routerLat != null && els.routerLat) els.routerLat.value = state.routerLat;
+    if (state.routerLon != null && els.routerLon) els.routerLon.value = state.routerLon;
+    if (els.routerLocMsg) els.routerLocMsg.textContent = "";
+  }
+
   function bindSettings() {
     els.themeFormatSample.textContent = JSON.stringify({
       name: "My Theme",
@@ -5389,6 +5419,27 @@
       if (card && !e.target.closest(".theme-del")) {
         e.preventDefault();
         applyTheme(card.dataset.id);
+      }
+    });
+
+    els.routerLocSave.addEventListener("click", async () => {
+      const lat = (els.routerLat.value || "").trim();
+      const lon = (els.routerLon.value || "").trim();
+      if (!lat || !lon) {
+        els.routerLocMsg.textContent = "Enter both latitude and longitude.";
+        return;
+      }
+      els.routerLocSave.disabled = true;
+      try {
+        const d = await postJSON("/api/ui/router-location", { lat, lon });
+        state.routerLat = Number(d.lat);
+        state.routerLon = Number(d.lon);
+        applyRouterTarget();
+        els.routerLocMsg.textContent = "Location saved.";
+      } catch (err) {
+        els.routerLocMsg.textContent = err.message;
+      } finally {
+        els.routerLocSave.disabled = false;
       }
     });
 
@@ -5473,6 +5524,7 @@
       }
       if (view === "settings") {
         loadThemes();
+        populateRouterLocation();
         if (state.isOwner) loadUsers();
       }
       els.soon.hidden = true;
@@ -6195,6 +6247,8 @@
     state.authed = true;
     state.role = d.role || "viewer";
     state.isOwner = !!d.is_owner;
+    state.routerLat = (d.router_lat != null) ? Number(d.router_lat) : null;
+    state.routerLon = (d.router_lon != null) ? Number(d.router_lon) : null;
     els.logoutBtn.hidden = false;
     if (d.username) {
       state.username = d.username;
@@ -6222,6 +6276,21 @@
     refreshOverview();
     loadThemes();
     setInterval(refreshSystem, 60000);
+    // On a fresh login (no persisted session bootstrap) the router location is
+    // not yet on state; fetch it so the attack map centers on the saved location.
+    if (state.routerLat == null) {
+      fetchJSON("/api/auth/session")
+        .then((d) => {
+          if (d.router_lat != null && d.router_lon != null) {
+            state.routerLat = Number(d.router_lat);
+            state.routerLon = Number(d.router_lon);
+            if (els.routerLat) els.routerLat.value = state.routerLat;
+            if (els.routerLon) els.routerLon.value = state.routerLon;
+            applyRouterTarget();
+          }
+        })
+        .catch(() => {});
+    }
   }
 
   document.addEventListener("DOMContentLoaded", init);

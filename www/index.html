@@ -1544,6 +1544,22 @@
       </div>
 
       <div class="card">
+        <div class="card-head">
+          <h2>Router location</h2>
+          <span class="muted">Used as the red target on the attack map</span>
+        </div>
+        <div class="bk-upload">
+          <p class="muted">Enter the latitude and longitude of your gateway so the attack map can center on your location.</p>
+          <div class="acct-grid">
+            <input type="text" id="router-lat" placeholder="Latitude (e.g. 39.9526)" autocomplete="off" spellcheck="false">
+            <input type="text" id="router-lon" placeholder="Longitude (e.g. -75.1652)" autocomplete="off" spellcheck="false">
+            <button class="btn btn-sm" id="router-loc-save" type="button">Save location</button>
+          </div>
+          <p class="muted" id="router-loc-msg"></p>
+        </div>
+      </div>
+
+      <div class="card">
         <div class="card-head"><h2>Install a custom theme</h2></div>
         <div class="bk-upload">
           <p class="muted">Upload a theme file (<b>.json</b>) to add it to the picker above. Custom themes are stored on the server and available from any browser.</p>

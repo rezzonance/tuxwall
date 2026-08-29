@@ -4440,6 +4440,9 @@ def auth_session_state(identity=None):
         "id": "dark", "name": "Dark", "dark": True,
         "colors": {k: v for k, v in BUILTIN_THEMES[0]["colors"].items()},
     }
+    _uc = load_ui_conf()
+    state["router_lat"] = _uc.get("router_lat")
+    state["router_lon"] = _uc.get("router_lon")
     return state
 
 
@@ -4814,6 +4817,24 @@ def set_active_theme(theme_id):
     conf["active_theme"] = theme_id
     save_ui_conf(conf)
     return {"ok": True, "active": theme_id}
+
+
+def set_router_location(lat, lon):
+    """Persist the router (home/target) location used by the attack map."""
+    try:
+        lat = float(lat)
+        lon = float(lon)
+    except (TypeError, ValueError):
+        raise ValueError("Latitude and longitude must be numbers.")
+    if not -90.0 <= lat <= 90.0:
+        raise ValueError("Latitude must be between -90 and 90.")
+    if not -180.0 <= lon <= 180.0:
+        raise ValueError("Longitude must be between -180 and 180.")
+    conf = load_ui_conf()
+    conf["router_lat"] = lat
+    conf["router_lon"] = lon
+    save_ui_conf(conf)
+    return {"ok": True, "lat": lat, "lon": lon}
 
 
 BASELINES_FILE = "/etc/tuxwall/baselines.json"
@@ -6102,6 +6123,12 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/themes/delete":
             try:
                 self._send(200, delete_custom_theme(body.get("id")))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/ui/router-location":
+            try:
+                self._send(200, set_router_location(body.get("lat"), body.get("lon")))
             except ValueError as exc:
                 self._send(400, {"ok": False, "error": str(exc)})
 
