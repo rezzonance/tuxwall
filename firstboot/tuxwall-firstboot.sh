@@ -86,10 +86,20 @@ pick_interface() {
         carrier=$(cat "/sys/class/net/${ifaces[$i]}/carrier" 2>/dev/null && echo " (LINK/UP)" || echo "")
         printf "  ${C}%2d)${NC} %-12s ${DIM}%s  %s${carrier}${NC}\n" "$idx" "${ifaces[$i]}" "$mac" "$state"
     done
+    echo -e "  ${C} 0)${NC} Exit setup (abort, keep current system as-is)"
+    echo
 
     local choice
     while true; do
-        read -rp "  Enter number (1-${#ifaces[@]}): " choice
+        read -rp "  Enter number (1-${#ifaces[@]}, 0 to exit): " choice
+        # Allow 0, q, Q, or x to abort cleanly.
+        if [[ "$choice" == "0" || "$choice" =~ ^[qQxX]$ ]]; then
+            echo -e "\n${DIM}Exiting first-boot setup. No changes were applied.${NC}"
+            echo -e "${DIM}Re-run later with: sudo /opt/tuxwall-appliance/tuxwall-firstboot.sh${NC}"
+            echo -e "${DIM}(Autologin stays active until setup completes or a marker is set.)${NC}"
+            ABORT=1
+            return 1
+        fi
         if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#ifaces[@]} )); then
             WAN_SEL="${ifaces[$(( choice - 1 ))]}"
             return 0
@@ -398,7 +408,9 @@ wait_for_network() {
 }
 
 install_tuxwall_stack() {
-    # Package list from tuxwall setup.sh, adapted for 26.04
+    # Package list from tuxwall setup.sh, adapted for 26.04.
+    # NOTE: crowdsec + its firewall bouncer come from the CrowdSec packagecloud
+    # repo (not the stock Ubuntu archive), so we add that repo first.
     local PKGS=(
         ufw iptables nftables iproute2
         kea-dhcp4-server kea-common
@@ -406,27 +418,62 @@ install_tuxwall_stack() {
         radvd
         wireguard wireguard-tools
         suricata suricata-update
-        crowdsec crowdsec-firewall-bouncer-iptables
+        crowdsec crowdsec-firewall-bouncer-nftables
         nginx
         python3 curl jq gzip ca-certificates ieee-data
     )
 
-    log "Installing dependency packages..."
     if [[ $DRY_RUN -eq 1 ]]; then
-        echo -e "${DIM}  (dry-run) apt-get install -y ${PKGS[*]}${NC}"
+        echo -e "${DIM}  (dry-run) add CrowdSec repo + apt-get install -y ${PKGS[*]}${NC}"
+        return 0
+    fi
+
+    export DEBIAN_FRONTEND=noninteractive
+
+    # Ensure curl + gpg are present (needed to add the CrowdSec repo below).
+    # Both come from the stock archive, so this works before any extra repos.
+    if ! command -v curl >/dev/null 2>&1 || ! command -v gpg >/dev/null 2>&1; then
+        log "Installing prerequisites (curl + gpg)..."
+        apt-get update -qq 2>/dev/null || true
+        apt-get install -y --no-install-recommends curl gnupg 2>/dev/null || true
+    fi
+
+    # ── CrowdSec repo (packagecloud) ──────────────────────────────────────
+    # crowdsec* is not in the stock Ubuntu archive; setup.sh relies on the
+    # CrowdSec packagecloud repo. Add it idempotently.
+    if ! command -v crowdsec >/dev/null 2>&1; then
+        log "Adding CrowdSec packagecloud repo..."
+        if [[ -f /etc/apt/sources.list.d/crowdsec-dev.list ]] || \
+           grep -rq "packagecloud.io/crowdsec" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+            log "  CrowdSec repo already present."
+        else
+            (
+                curl -fsSL https://packagecloud.io/crowdsec/gpg.key 2>/dev/null \
+                    | gpg --dearmor > /usr/share/keyrings/crowdsec-archive-keyring.gpg 2>/dev/null
+            ) || true
+            if [[ -f /usr/share/keyrings/crowdsec-archive-keyring.gpg ]]; then
+                printf 'deb [signed-by=/usr/share/keyrings/crowdsec-archive-keyring.gpg] https://packagecloud.io/crowdsec/crowdsec/any any main\n' \
+                    > /etc/apt/sources.list.d/crowdsec.list
+                log "  CrowdSec repo added."
+            else
+                warn "  Could not fetch CrowdSec GPG key - crowdsec packages may fail."
+            fi
+        fi
     else
-        export DEBIAN_FRONTEND=noninteractive
-        if ! apt-get update -qq; then
-            warn "apt-get update failed (network). Retrying once after a wait..."
-            sleep 10
-            apt-get update -qq || warn "apt-get update failed again - unknown packages will fail."
-        fi
-        if ! apt-get install -y --no-install-recommends "${PKGS[@]}"; then
-            # Surface the real failure (log captures it) instead of hiding it.
-            log "Package install reported an error. Attempting to recover missing pieces:"
-            apt-get install -y "${PKGS[@]}" 2>&1 | tail -n 20
-            warn "Some packages failed to install (see the output above for which)."
-        fi
+        log "crowdsec already installed - skipping repo setup."
+    fi
+
+    log "Installing dependency packages..."
+    if ! apt-get update -qq; then
+        warn "apt-get update failed (network). Retrying once after a wait..."
+        sleep 10
+        apt-get update -qq || warn "apt-get update failed again - unknown packages will fail."
+    fi
+    if ! apt-get install -y --no-install-recommends "${PKGS[@]}"; then
+        # Surface the real failure (log captures it) instead of hiding it.
+        log "Package install reported an error. Attempting to recover missing pieces:"
+        apt-get install -y "${PKGS[@]}" 2>&1 | tail -n 20
+        warn "Some packages failed to install (see the output above for which)."
     fi
 }
 
@@ -570,14 +617,19 @@ BANNER
 
     # Determine WAN/LAN interactively if not given
     if [[ -z "$WAN" && $DRY_RUN -eq 0 ]]; then
-        pick_interface "Select the WAN (internet) interface:" ""
+        ABORT=0
+        pick_interface "Select the WAN (internet) interface:" "" || true
+        [[ $ABORT -eq 1 ]] && exit 2
         WAN="$WAN_SEL"
-        pick_interface "Select the LAN (internal) interface:" "$WAN"
+        pick_interface "Select the LAN (internal) interface:" "$WAN" || true
+        [[ $ABORT -eq 1 ]] && exit 2
         LAN="$WAN_SEL"
         echo
-        read -rp "LAN subnet [default $LAN_SUBNET]: " -e input
+        read -rp "LAN subnet [default $LAN_SUBNET, 'x' to abort]: " -e input
+        [[ "$input" =~ ^[qQxX]$ ]] && { log "Aborted."; exit 2; }
         [[ -n "$input" ]] && LAN_SUBNET="$input"
-        read -rp "DNS domain [default $DOMAIN]: " -e input
+        read -rp "DNS domain [default $DOMAIN, 'x' to abort]: " -e input
+        [[ "$input" =~ ^[qQxX]$ ]] && { log "Aborted."; exit 2; }
         [[ -n "$input" ]] && DOMAIN="$input"
     elif [[ -z "$WAN" || -z "$LAN" ]]; then
         err "--dry-run requires --wan and --lan to be specified."

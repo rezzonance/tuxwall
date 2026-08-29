@@ -62,18 +62,39 @@ echo "Welcome to the TuxWall gateway first-time setup."
 echo "Choose your WAN and LAN interfaces and confirm a few settings. Once only."
 echo
 
-# Run the wizard. On success, disable autologin for future boots.
-if "$WIZARD"; then
-    echo
-    echo "TuxWall configuration complete."
-    echo "Disabling first-boot autologin - a normal login will be used henceforth."
+# Run the wizard. Exit codes:
+#   0  = completed and configured
+#   2  = user chose to EXIT setup (not configured, but wants a normal login)
+#   other = failure (keep autologin so setup can be retried)
+"$WIZARD"
+rc=$?
+
+disable_autologin() {
     rm -f "$DROPIN_TTY1" "$DROPIN_SERIAL" 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
-    echo "Reboot to apply networking and start services."
-    exit 0
-else
-    echo
-    echo "Wizard did not complete cleanly - it will run again on the next boot."
-    echo "Review the output above for what failed."
-    exit 1
-fi
+}
+
+case "$rc" in
+    0)
+        echo
+        echo "TuxWall configuration complete."
+        echo "Disabling first-boot autologin - a normal login will be used henceforth."
+        disable_autologin
+        echo "Reboot to apply networking and start services."
+        exit 0
+        ;;
+    2)
+        echo
+        echo "TuxWall setup EXITED at your request (not configured)."
+        echo "First-boot autologin is disabled so you get a normal login."
+        disable_autologin
+        echo "To set up TuxWall later, run:  sudo /opt/tuxwall-appliance/tuxwall-firstboot.sh"
+        exit 0
+        ;;
+    *)
+        echo
+        echo "Wizard did not complete cleanly - it will run again on the next boot."
+        echo "Review the output above for what failed."
+        exit 1
+        ;;
+esac
