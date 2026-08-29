@@ -356,6 +356,39 @@ UNB2
     rm -f "$TMP2"
 }
 
+# ── Ensure unbound's DNSSEC root trust anchor exists ────────────────────────
+# unbound's default config uses `auto-trust-anchor-file` pointing at
+# /var/lib/unbound/root.key. On a fresh install that file is absent unless
+# dns-root-data is present or unbound-anchor has fetched it, and unbound
+# refuses to start ("root.key: No such file or directory"). Create it first.
+setup_unbound_rootkey() {
+    log "Ensuring unbound DNSSEC root trust anchor (root.key)..."
+    mkdir -p /var/lib/unbound /etc/unbound
+
+    if [[ -f /var/lib/unbound/root.key ]]; then
+        log "  root.key already present."
+        return 0
+    fi
+
+    # 1. Prefer Ubuntu's dns-root-data copy (offline, no network needed).
+    if [[ -f /usr/share/dns/root.key ]]; then
+        cp /usr/share/dns/root.key /var/lib/unbound/root.key
+        log "  Installed root.key from dns-root-data."
+    # 2. Otherwise fetch/refresh via unbound-anchor (needs network).
+    elif command -v unbound-anchor >/dev/null 2>&1; then
+        unbound-anchor -a /var/lib/unbound/root.key 2>/dev/null \
+            && log "  Generated root.key via unbound-anchor." \
+            || warn "  unbound-anchor could not create root.key (network?)."
+    else
+        warn "  No way to obtain root.key (install dns-root-data). unbound may fail."
+    fi
+
+    if [[ -f /var/lib/unbound/root.key ]]; then
+        chown unbound:unbound /var/lib/unbound/root.key 2>/dev/null || true
+        chmod 640 /var/lib/unbound/root.key 2>/dev/null || true
+    fi
+}
+
 # ── Configure Suricata to run on the WAN interface ──────────────────────────
 config_suricata() {
     local SURICATA="/etc/suricata/suricata.yaml"
@@ -455,7 +488,7 @@ install_tuxwall_stack() {
     local PKGS=(
         ufw iptables nftables iproute2
         kea-dhcp4-server kea-common
-        unbound unbound-anchor
+        unbound unbound-anchor dns-root-data
         radvd
         wireguard wireguard-tools
         suricata suricata-update
@@ -564,6 +597,7 @@ run_firstboot() {
     config_kea
     config_radvd
     config_unbound
+    setup_unbound_rootkey
     config_suricata
     config_ufw
 
