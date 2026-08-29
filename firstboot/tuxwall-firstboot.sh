@@ -478,7 +478,7 @@ install_tuxwall_stack() {
             # not yet configured) is the #1 cause of an unsigned-repo failure.
             local key_ok=0 try
             for try in 1 2 3 4 5 6; do
-                if curl -fsSL https://packagecloud.io/crowdsec/gpg.key 2>/dev/null \
+                if curl -fsSL https://packagecloud.io/crowdsec/crowdsec/gpgkey 2>/dev/null \
                     | gpg --dearmor > "$KEYRING" 2>/dev/null \
                     && [[ -s "$KEYRING" ]] \
                     && gpg --no-default-keyring --keyring "$KEYRING" --list-keys >/dev/null 2>&1; then
