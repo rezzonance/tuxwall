@@ -108,7 +108,7 @@ fi
 # ── Install autologin mechanism on a live target (root) ─────────────────────
 # On a running machine run with sudo, actually install the autologin drop-ins
 # and root shell hook so the wizard fires on the next login. This is the
-# delivery path used by install-appliance.sh (stock-Ubuntu path).
+# delivery path used by install.sh (stock-Ubuntu path).
 if [[ $EUID -eq 0 && -f "$APP/firstboot-autologin.sh" ]]; then
     install -d -m 755 /etc/systemd/system/getty@tty1.service.d \
                      /etc/systemd/system/getty@ttyS0.service.d
