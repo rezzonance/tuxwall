@@ -248,6 +248,10 @@ config_kea() {
       "persist": true,
       "name": "/var/lib/kea/dhcp4.leases"
     },
+    "control-socket": {
+      "socket-type": "unix",
+      "socket-address": "/run/kea/kea4-ctrl-socket"
+    },
     "subnet4": [
       {
         "subnet": "$LAN_SUBNET",
