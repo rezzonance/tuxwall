@@ -416,9 +416,17 @@ install_tuxwall_stack() {
         echo -e "${DIM}  (dry-run) apt-get install -y ${PKGS[*]}${NC}"
     else
         export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq || warn "apt-get update failed (network?)"
-        apt-get install -y --no-install-recommends "${PKGS[@]}" 2>/dev/null \
-            || warn "Some packages failed to install (see above)."
+        if ! apt-get update -qq; then
+            warn "apt-get update failed (network). Retrying once after a wait..."
+            sleep 10
+            apt-get update -qq || warn "apt-get update failed again - unknown packages will fail."
+        fi
+        if ! apt-get install -y --no-install-recommends "${PKGS[@]}"; then
+            # Surface the real failure (log captures it) instead of hiding it.
+            log "Package install reported an error. Attempting to recover missing pieces:"
+            apt-get install -y "${PKGS[@]}" 2>&1 | tail -n 20
+            warn "Some packages failed to install (see the output above for which)."
+        fi
     fi
 }
 
