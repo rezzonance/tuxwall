@@ -406,14 +406,38 @@ setup_unbound_rootkey() {
 # ── Configure Suricata to run on the WAN interface ──────────────────────────
 config_suricata() {
     local SURICATA="/etc/suricata/suricata.yaml"
+    local WAN_NIC="${WAN:=wan0}"
     # Suricata runs in IDS (monitor) mode on WAN by default.
-    # The block below rewrites the HOME_NET to the LAN subnet.
+    # Rewrite HOME_NET to the LAN subnet AND point the af-packet capture at the
+    # actual WAN interface. The stock 26.04 config ships placeholder NIC names
+    # (enp5s0/enp6s0) under af-packet which fail to bind on a fresh VM ->
+    # suricata.service exits immediately. Binding to the real WAN NIC fixes it.
     if [[ -f "$SURICATA" ]]; then
-        log "Tuning Suricata HOME_NET for LAN subnet"
+        log "Tuning Suricata HOME_NET + af-packet interface (WAN=$WAN_NIC)"
         if [[ $DRY_RUN -eq 0 ]]; then
-            sed -i "s|HOME_NET: \"\[.*\]\"|HOME_NET: \"[$LAN_SUBNET]\"|" "$SURICATA" 2>/dev/null || true
+            python3 - "$SURICATA" "$LAN_SUBNET" "$WAN_NIC" <<'PY'
+import re, sys
+path, home_net, wan = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as f:
+    lines = f.readlines()
+out, in_af = [], False
+for ln in lines:
+    # track whether we are inside the top-level af-packet: block
+    top = re.match(r'^(\S.*):', ln)
+    if ln.lstrip().startswith('af-packet:') and not ln.startswith(' '):
+        in_af = True
+    elif top and in_af:
+        in_af = False
+    if in_af and re.match(r'^\s{2}- interface:', ln):
+        ln = re.sub(r'^(\s{2}- interface:\s*).*', r'\g<1>%s' % wan, ln)
+    out.append(ln)
+text = ''.join(out)
+text = re.sub(r'HOME_NET:\s*"\[.*?\]"', 'HOME_NET: "[%s]"' % home_net, text)
+with open(path, 'w') as f:
+    f.write(text)
+PY
         else
-            echo -e "${DIM}  (dry-run) sed HOME_NET in $SURICATA${NC}"
+            echo -e "${DIM}  (dry-run) tune HOME_NET + af-packet iface in $SURICATA${NC}"
         fi
     else
         warn "Suricata config not found at $SURICATA"
