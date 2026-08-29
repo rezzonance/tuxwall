@@ -448,8 +448,54 @@ PY
     fi
 }
 
+# ── Download the free DB-IP City Lite GeoIP DB (no API key required) ────────
+# The Security / attack-map page needs a GeoIP DB to map attacker IPs to
+# countries. DB-IP City Lite is free (CC BY 4.0) and requires NO account/key.
+# See www/scripts/geoip-setup.sh in the repo (same logic, kept here so the
+# wizard is self-contained on a fresh box).
+setup_geoip() {
+    local DEST="/var/lib/tuxwall/dbip-city-lite.mmdb"
+
+    if [[ -f "$DEST" ]]; then
+        log "GeoIP DB already present ($DEST)"
+        return 0
+    fi
+    log "Downloading DB-IP City Lite GeoIP database (no API key needed)..."
+    if [[ $DRY_RUN -eq 1 ]]; then
+        echo -e "${DIM}  (dry-run) download dbip-city-lite.mmdb to $DEST${NC}"
+        return 0
+    fi
+
+    local TMP="$(mktemp -d)" got="" url="" month offset
+    trap 'rm -rf "$TMP"' RETURN
+    for offset in 0 1 2 3; do
+        month="$(date -u -d "-${offset} month" +%Y-%m 2>/dev/null || date -u +%Y-%m)"
+        url="https://download.db-ip.com/free/dbip-city-lite-${month}.mmdb.gz"
+        if curl -fsSL --max-time 120 -o "$TMP/dbip.mmdb.gz" "$url" 2>/dev/null; then
+            got=1
+            break
+        fi
+        warn "  GeoIP download failed for $month, trying previous month..."
+    done
+
+    if [[ -z "$got" ]]; then
+        warn "GeoIP DB download failed (network?). Attack map will show '??' until it's fetched."
+        return 0
+    fi
+
+    if ! gzip -d -f "$TMP/dbip.mmdb.gz" 2>/dev/null; then
+        warn "GeoIP DB failed to decompress - attack map unavailable."
+        return 0
+    fi
+    mkdir -p /var/lib/tuxwall
+    install -m 0644 "$TMP/dbip.mmdb" "$DEST"
+    log "  Installed $DEST"
+    # Warm up: restart the API so it picks up the new DB
+    systemctl restart tuxwall 2>/dev/null || true
+}
+
 # ── Configure UFW: NAT + forwarding + allow services ────────────────────────
-config_ufw() {
+ config_ufw() {
     log "Configuring UFW default forwarding policy + NAT"
 
     if [[ $DRY_RUN -eq 0 ]]; then
@@ -536,7 +582,7 @@ install_tuxwall_stack() {
         suricata suricata-update
         crowdsec crowdsec-firewall-bouncer-nftables
         nginx
-        python3 curl jq gzip ca-certificates ieee-data
+        python3 curl jq gzip ca-certificates ieee-data python3-maxminddb
     )
 
     if [[ $DRY_RUN -eq 1 ]]; then
@@ -641,6 +687,7 @@ run_firstboot() {
     config_unbound
     setup_unbound_rootkey
     config_suricata
+    setup_geoip
     config_ufw
 
     # 5. Install the .deb if present in the stage dir
