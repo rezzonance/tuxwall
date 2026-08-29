@@ -39,7 +39,10 @@ done
 
 # Defaults based on known layout
 [[ -z "$DEB_SRC"  && -f "$PROJECT_DIR/stage/tuxwall.deb" ]]  && DEB_SRC="$PROJECT_DIR/stage/tuxwall.deb"
-[[ -z "$REPO_SRC" && -f "/home/jeff/github-tuxwall/install.sh" ]] && REPO_SRC="/home/jeff/github-tuxwall"
+# In the standalone GitHub layout the .deb sits at the repo root alongside
+# install.sh (e.g. tuxwall_2.2.1_all.deb).
+[[ -z "$DEB_SRC" && -f "$SCRIPT_DIR/install.sh" ]] && DEB_SRC="$(find "$SCRIPT_DIR" -maxdepth 1 -name 'tuxwall*.deb' | head -n1)"
+[[ -z "$REPO_SRC" && -f "$SCRIPT_DIR/install.sh" ]] && REPO_SRC="$SCRIPT_DIR"
 
 echo "[+] TuxWall appliance staging"
 echo "    target: $APP"
