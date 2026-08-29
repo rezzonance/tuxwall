@@ -315,7 +315,7 @@ server:
     local-zone: "$DOMAIN" static
     local-data: "gateway.$DOMAIN. IN A $LAN_STATIC_IP"
     local-data: "gateway.$DOMAIN. IN AAAA ::1"
-    local-data-ptr: "$(echo $LAN_STATIC_IP | awk -F. '{print $4"."$3"."$2"."$1}').in-addr.arpa. gateway.$DOMAIN."
+    local-data-ptr: "$LAN_STATIC_IP gateway.$DOMAIN."
 UNB
     install_file "$TMP" "$UNBOUND_DOM" 644
     rm -f "$TMP"
