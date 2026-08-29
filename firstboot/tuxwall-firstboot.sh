@@ -281,6 +281,16 @@ mask_from_prefix() {
 config_radvd() {
     local RADVD="/etc/radvd.conf"
     log "Writing radvd config: $RADVD"
+    # Guard: radvd hard-fails to start if fields are empty or if RDNSS gets an
+    # IPv4 address. We advertise a ULA derived from the LAN subnet and point
+    # RDNSS at the gateway's ULA address (valid IPv6), not the LAN IPv4.
+    if [[ -z "${LAN:-}" || -z "${LAN_PREFIX6:-}" ]]; then
+        err "config_radvd: LAN or LAN_PREFIX6 is empty - aborting config write."
+        return 1
+    fi
+    # AAAA record advertised in unbound uses ::1; use the ULA host address for
+    # radvd's own advertisement so RDNSS is a real IPv6 address.
+    local ULA_ADDR="${LAN_PREFIX6}::1"
     local TMP="$(mktemp)"
     cat > "$TMP" <<RADVD
 interface $LAN
@@ -290,13 +300,13 @@ interface $LAN
     MaxRtrAdvInterval 100;
     AdvManagedFlag off;
     AdvOtherConfigFlag off;
-    prefix ::/64
+    prefix $LAN_PREFIX6::/64
     {
         AdvOnLink on;
         AdvAutonomous on;
         AdvRouterAddr on;
     };
-    RDNSS $LAN_STATIC_IP { };
+    RDNSS $ULA_ADDR { };
 };
 RADVD
     install_file "$TMP" "$RADVD" 644
@@ -308,6 +318,14 @@ config_unbound() {
     local UNBOUND_DOM="/etc/unbound/unbound.conf.d/98-tuxwall-domains.conf"
     local UNBOUND_LST="/etc/unbound/unbound.conf.d/99-tuxwall-listen.conf"
     log "Writing Unbound local domain: $UNBOUND_DOM"
+
+    # Guard: never emit a broken config from empty variables (that produced
+    # the real-world `local-data-ptr: " gateway.."` failure: unbound would not
+    # start, and unbound-resolvconf would fail).
+    if [[ -z "${LAN_STATIC_IP:-}" || -z "${DOMAIN:-}" ]]; then
+        err "config_unbound: LAN_STATIC_IP or DOMAIN is empty - aborting config write."
+        return 1
+    fi
 
     local TMP="$(mktemp)"
     cat > "$TMP" <<UNB
