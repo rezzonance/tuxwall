@@ -392,10 +392,13 @@ COMMIT\
 # ── Install the TuxWall stack (packages + deb + service layout) ─────────────
 # Wait until we have a default route + a working resolver before apt, so a
 # fresh install (no networking yet at wizard start) doesn't abort mid-setup.
+# If a physical default route exists but DNS still fails (the classic
+# systemd-resolved-not-up / stale-resolv.conf trap), repair the resolver so
+# apt can actually reach the archives.
 wait_for_network() {
     local i
     log "Waiting for network connectivity before installing packages..."
-    for i in $(seq 1 30); do
+    for i in $(seq 1 15); do
         if ip route show default >/dev/null 2>&1 && \
            getent hosts archive.ubuntu.com >/dev/null 2>&1; then
             log "Network is up (default route + DNS resolved)."
@@ -403,7 +406,27 @@ wait_for_network() {
         fi
         sleep 2
     done
-    warn "Network not ready after 60s - continuing anyway (apt may fail)."
+
+    # We have a link but resolution may still be broken. Try to repair DNS.
+    if ip route show default >/dev/null 2>&1; then
+        log "Default route present but DNS not resolving - attempting resolver repair..."
+        # Point resolv.conf at a public resolver so apt can work regardless of
+        # resolved/unbound state (the gateway will reconfigure DNS properly later).
+        if [[ $(command -v systemctl >/dev/null 2>&1 && systemctl is-system-running 2>/dev/null || true) != "" ]] \
+           && command -v systemd-resolve >/dev/null 2>&1; then
+            systemctl enable --now systemd-resolved 2>/dev/null || true
+            resolvectl flush-caches 2>/dev/null || true
+        fi
+        grep -qi "nameserver" /etc/resolv.conf 2>/dev/null || {
+            printf 'nameserver 1.1.1.1\nnameserver 9.9.9.9\n' > /etc/resolv.conf
+            log "  Set fallback resolvers in /etc/resolv.conf."
+        }
+        if getent hosts archive.ubuntu.com >/dev/null 2>&1; then
+            log "DNS restored."
+            return 0
+        fi
+    fi
+    warn "Network not ready after 30s - continuing anyway (apt may fail)."
     return 0
 }
 
@@ -440,23 +463,39 @@ install_tuxwall_stack() {
 
     # ── CrowdSec repo (packagecloud) ──────────────────────────────────────
     # crowdsec* is not in the stock Ubuntu archive; setup.sh relies on the
-    # CrowdSec packagecloud repo. Add it idempotently.
+    # CrowdSec packagecloud repo. Add it idempotently, RETRYING the GPG key
+    # fetch (network/DNS may not be ready yet) and failing loudly if the key
+    # never lands - otherwise apt rejects the repo as unsigned.
     if ! command -v crowdsec >/dev/null 2>&1; then
+        KEYRING=/usr/share/keyrings/crowdsec-archive-keyring.gpg
+        SOURCES=/etc/apt/sources.list.d/crowdsec.list
         log "Adding CrowdSec packagecloud repo..."
-        if [[ -f /etc/apt/sources.list.d/crowdsec-dev.list ]] || \
-           grep -rq "packagecloud.io/crowdsec" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+        if grep -rq "packagecloud.io/crowdsec" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
             log "  CrowdSec repo already present."
         else
-            (
-                curl -fsSL https://packagecloud.io/crowdsec/gpg.key 2>/dev/null \
-                    | gpg --dearmor > /usr/share/keyrings/crowdsec-archive-keyring.gpg 2>/dev/null
-            ) || true
-            if [[ -f /usr/share/keyrings/crowdsec-archive-keyring.gpg ]]; then
-                printf 'deb [signed-by=/usr/share/keyrings/crowdsec-archive-keyring.gpg] https://packagecloud.io/crowdsec/crowdsec/any any main\n' \
-                    > /etc/apt/sources.list.d/crowdsec.list
-                log "  CrowdSec repo added."
+            # Retry the key fetch (and ensure /etc/resolv.conf resolves) until
+            # it works, up to ~2 minutes. A failing DNS at first-boot (resolver
+            # not yet configured) is the #1 cause of an unsigned-repo failure.
+            local key_ok=0 try
+            for try in 1 2 3 4 5 6; do
+                if curl -fsSL https://packagecloud.io/crowdsec/gpg.key 2>/dev/null \
+                    | gpg --dearmor > "$KEYRING" 2>/dev/null \
+                    && [[ -s "$KEYRING" ]] \
+                    && gpg --no-default-keyring --keyring "$KEYRING" --list-keys >/dev/null 2>&1; then
+                    key_ok=1
+                    break
+                fi
+                warn "  Retrying CrowdSec key fetch (attempt $try)..."
+                sleep 10
+            done
+
+            if [[ $key_ok -eq 1 ]]; then
+                printf 'deb [signed-by=%s] https://packagecloud.io/crowdsec/crowdsec/any any main\n' "$KEYRING" \
+                    > "$SOURCES"
+                log "  CrowdSec repo added + key verified."
             else
-                warn "  Could not fetch CrowdSec GPG key - crowdsec packages may fail."
+                err "Could not fetch/verify the CrowdSec GPG key after several tries."
+                err "Check DNS/network, then re-run this wizard. crowdsec will be missing."
             fi
         fi
     else
