@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Installed as /root/.bash_profile on the appliance (first boot).
+# Runs the TuxWall first-boot wizard when THIS tty is the console the system
+# booted on (local tty1 or headless serial ttyS0). Other ttys get a normal
+# root shell. After configuration, firstboot-autologin.sh disables autologin.
+
+if [[ -e /opt/tuxwall-appliance/firstboot-autologin.sh ]]; then
+    # Determine which tty this login session is on.
+    tty_dev="$(tty 2>/dev/null || echo 'not a tty')"
+    case "$tty_dev" in
+        /dev/tty1|/dev/ttyS[0-9]*)
+            exec /opt/tuxwall-appliance/firstboot-autologin.sh
+            ;;
+        *)
+            :
+            ;;
+    esac
+fi
