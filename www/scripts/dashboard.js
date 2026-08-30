@@ -78,7 +78,8 @@
     fwRules: document.getElementById("fw-rules"),
     fwBlocks: document.getElementById("fw-blocks"),
     fwAllows: document.getElementById("fw-allows"),
-    fwLogging: document.getElementById("fw-logging"),
+    fwLogging: document.getElementById("fw-logging-state"),
+    fwSearch: document.getElementById("fw-search"),
     fwRulesBody: document.querySelector("#fw-rules-table tbody"),
     fwRule: document.getElementById("fw-rule"),
     fwAdd: document.getElementById("fw-add"),
@@ -131,15 +132,6 @@
     secSuricataHint: document.getElementById("sec-suricata-hint"),
     secSuricataTabs: document.getElementById("sec-suricata-tabs"),
     secChart: document.getElementById("sec-chart"),
-
-    aiCfgModal: document.getElementById("ai-cfg-modal"),
-    aiCfgModalClose: document.getElementById("ai-cfg-modal-close"),
-    aiCfgBaseUrl: document.getElementById("ai-cfg-base-url"),
-    aiCfgApiKey: document.getElementById("ai-cfg-api-key"),
-    aiCfgModel: document.getElementById("ai-cfg-model"),
-    aiCfgHint: document.getElementById("ai-cfg-hint"),
-    aiCfgSave: document.getElementById("ai-cfg-modal-save"),
-    aiCfgCancel: document.getElementById("ai-cfg-modal-cancel"),
     dmDomain: document.getElementById("dm-domain"),
     dmIp: document.getElementById("dm-ip"),
     dmPort: document.getElementById("dm-port"),
@@ -986,27 +978,94 @@
     });
   }
 
-  function renderFirewall(d) {
-    if (!d.ok) {
-      showBanner(true, d.error || "Firewall stats unavailable");
+  let _fwData = null;
+  let _fwFilterText = "";
+  let _fwFilterIface = "";   // "" = all, "__none__" = rules without iface
+
+  function fwActionMeta(verb) {
+    switch ((verb || "").toUpperCase()) {
+      case "ALLOW":  return { cls: "fw-act-pass",   label: "Pass" };
+      case "DENY":   return { cls: "fw-act-block",  label: "Block" };
+      case "REJECT": return { cls: "fw-act-reject", label: "Reject" };
+      case "LIMIT":  return { cls: "fw-act-limit",  label: "Limit" };
+      default:       return { cls: "fw-act-pass",   label: verb || "?" };
+    }
+  }
+
+  function fwRuleDirection(r) {
+    if (r.direction) return r.direction;
+    return (r.action || "").includes("OUT") ? "OUT" : "IN";
+  }
+
+  function renderFwRules() {
+    if (!_fwData) return;
+    const rules = _fwData.rules || [];
+    const q = _fwFilterText.trim().toLowerCase();
+    const rows = rules.filter((r) => {
+      if (_fwFilterIface === "__none__" && r.iface) return false;
+      if (_fwFilterIface && _fwFilterIface !== "__none__" && (r.iface || "") !== _fwFilterIface) return false;
+      if (!q) return true;
+      const hay = [r.number, r.to, r.from, r.action, r.iface, r.proto,
+                   r.port, r.src, r.dst].join(" ").toLowerCase();
+      return hay.includes(q);
+    });
+    if (!rows.length) {
+      els.fwRulesBody.innerHTML = `<tr><td colspan="9" class="muted" style="text-align:center;padding:1.5rem">${rules.length ? "No rules match the current filter." : "No firewall rules configured."}</td></tr>`;
       return;
     }
-    els.fwStatus.textContent = d.status ? d.status[0].toUpperCase() + d.status.slice(1) : "—";
-    els.fwIncoming.textContent = d.defaults.incoming || "—";
-    els.fwOutgoing.textContent = d.defaults.outgoing || "—";
-    els.fwRules.textContent = formatNumber(d.rules.length);
-    els.fwBlocks.textContent = formatNumber(d.traffic.block);
-    els.fwAllows.textContent = formatNumber(d.traffic.allow);
-    els.fwLogging.textContent = (d.logging || "").replace(/^on\s*/i, "") || "—";
-
-    els.fwRulesBody.innerHTML = (d.rules || []).map((r) => `
+    els.fwRulesBody.innerHTML = rows.map((r) => {
+      const a = fwActionMeta(r.verb || (r.action || "").split(" ")[0]);
+      const dir = fwRuleDirection(r);
+      return `
       <tr>
-        <td class="mono">${esc(r.to)}</td>
-        <td><span class="badge ${r.action.startsWith("ALLOW") ? "badge-ok" : "badge-err"}">${esc(r.action)}</span></td>
-        <td>${esc(r.from)}</td>
-        <td>${r.number ? `<button class="btn btn-sm btn-danger fw-remove" type="button" data-num="${r.number}">Remove</button>` : ""}</td>
-      </tr>`).join("");
+        <td class="mono muted">${r.number != null ? r.number : "—"}</td>
+        <td><span class="fw-act ${a.cls}">${a.label}</span></td>
+        <td><span class="fw-dir fw-dir-${dir.toLowerCase()}">${dir}</span></td>
+        <td>${r.iface ? `<span class="fw-iface mono">${esc(r.iface)}</span>` : `<span class="muted">any</span>`}</td>
+        <td class="mono">${esc(r.src || r.from || "")}</td>
+        <td class="mono">${esc(r.dst || r.to || "")}</td>
+        <td class="mono">${r.port ? esc(r.port) : `<span class="muted">any</span>`}</td>
+        <td>${r.proto ? `<span class="fw-proto-badge">${esc(r.proto)}</span>` : `<span class="muted">any</span>`}${r.v6 ? `<span class="fw-v6-badge">v6</span>` : ""}</td>
+        <td>${r.number ? `<button class="btn btn-sm btn-danger fw-remove" type="button" data-num="${r.number}" title="Remove rule">✕</button>` : ""}</td>
+      </tr>`;
+    }).join("");
+  }
 
+  function renderFwIfaceChips() {
+    if (!_fwData) return;
+    const counts = {};
+    let anyCount = 0;
+    (_fwData.rules || []).forEach((r) => {
+      if (r.iface) counts[r.iface] = (counts[r.iface] || 0) + 1;
+      else anyCount++;
+    });
+    const ifaces = Object.keys(counts).sort();
+    const box = document.getElementById("fw-iface-chips");
+    const chipColors = { "": "var(--accent)", "__none__": "#a371f7" };
+    const chipColor = (i) => chipColors[i] || ({ enp5s0: "var(--green)", enp6s0: "var(--amber)", wg0: "#39c5cf" }[i] || "#39c5cf");
+    const chip = (label, val, count) =>
+      `<button class="fw-chip${_fwFilterIface === val ? " active" : ""}" type="button" style="--fw-color:${chipColor(val)}" data-fw-iface="${esc(val)}">${esc(label)}${count ? ` <span class="fw-chip-n">${count}</span>` : ""}</button>`;
+    box.innerHTML = chip("All", "", "") + chip("any iface", "__none__", anyCount) +
+      ifaces.map((i) => chip(i, i, counts[i])).join("");
+  }
+
+  function fwLogLevel(d) {
+    const lm = (d.logging || "").match(/\((low|medium|high|full)\)/i);
+    if (lm) return lm[1].toLowerCase();
+    return (d.logging || "").toLowerCase().startsWith("on") ? "low" : "off";
+  }
+
+  function renderFwSettings(d) {
+    document.getElementById("fw-enabled-toggle").checked =
+      (d.status || "").toLowerCase() === "active";
+    document.getElementById("fw-def-incoming").value =
+      (d.defaults.incoming || "deny").toLowerCase();
+    document.getElementById("fw-def-outgoing").value =
+      (d.defaults.outgoing || "allow").toLowerCase();
+    document.getElementById("fw-log-level").value = fwLogLevel(d);
+  }
+
+  function renderFwTraffic(d) {
     const srcMax = (d.traffic.top_sources && d.traffic.top_sources[0])
       ? d.traffic.top_sources[0].count : 1;
     els.fwSourcesBody.innerHTML = (d.traffic.top_sources || []).map((s) => `
@@ -1014,7 +1073,8 @@
         <td class="mono">${esc(s.ip)}</td>
         <td>${formatNumber(s.count)}</td>
         <td><div class="bar"><div class="bar-fill bar-fill-err" style="width:${Math.round(s.count / srcMax * 100)}%"></div></div></td>
-      </tr>`).join("");
+        <td><button class="btn btn-sm fw-block-src" type="button" data-ip="${esc(s.ip)}" title="Add a deny rule for this source">Block</button></td>
+      </tr>`).join("") || `<tr><td colspan="4" class="muted" style="text-align:center;padding:1.5rem">No blocked sources in the recent log window</td></tr>`;
 
     const portMax = (d.traffic.top_ports && d.traffic.top_ports[0])
       ? d.traffic.top_ports[0].count : 1;
@@ -1023,7 +1083,7 @@
         <td class="mono">${esc(p.port)}</td>
         <td>${formatNumber(p.count)}</td>
         <td><div class="bar"><div class="bar-fill bar-fill-err" style="width:${Math.round(p.count / portMax * 100)}%"></div></div></td>
-      </tr>`).join("");
+      </tr>`).join("") || `<tr><td colspan="3" class="muted" style="text-align:center;padding:1.5rem">No blocked ports in the recent log window</td></tr>`;
 
     els.fwEventsBody.innerHTML = (d.traffic.recent || []).map((e) => `
       <tr>
@@ -1033,7 +1093,27 @@
         <td class="mono">${esc(e.src)}</td>
         <td class="mono">${esc(e.dst)}</td>
         <td class="mono">${esc(e.dpt ? e.dpt + "/" + e.proto : e.proto || "—")}</td>
-      </tr>`).join("");
+        <td>${e.action === "BLOCK" && e.src ? `<button class="btn btn-sm fw-block-src" type="button" data-ip="${esc(e.src)}" title="Add a deny rule for this source">Block</button>` : ""}</td>
+      </tr>`).join("") || `<tr><td colspan="7" class="muted" style="text-align:center;padding:1.5rem">No recent events</td></tr>`;
+  }
+
+  function renderFirewall(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "Firewall stats unavailable");
+      return;
+    }
+    _fwData = d;
+    els.fwStatus.textContent = d.status ? d.status[0].toUpperCase() + d.status.slice(1) : "—";
+    els.fwIncoming.textContent = d.defaults.incoming || "—";
+    els.fwOutgoing.textContent = d.defaults.outgoing || "—";
+    els.fwRules.textContent = formatNumber(d.rules.length);
+    els.fwBlocks.textContent = formatNumber(d.traffic.block);
+    els.fwAllows.textContent = formatNumber(d.traffic.allow);
+    els.fwLogging.textContent = "Logging: " + fwLogLevel(d);
+    renderFwRules();
+    renderFwIfaceChips();
+    renderFwTraffic(d);
+    renderFwSettings(d);
   }
 
   // ── VLAN module ────────────────────────────────────────────────────────────
@@ -1471,6 +1551,33 @@
   }
 
   function bindFirewallActions() {
+    // ── OPNsense-style sub-tabs ─────────────────────────────────────────
+    document.querySelectorAll("#fw-subtabs .fw-subtab").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll("#fw-subtabs .fw-subtab").forEach((b) =>
+          b.classList.toggle("active", b === btn));
+        document.querySelectorAll("#view-firewall .fw-pane").forEach((p) => {
+          p.hidden = p.dataset.fwPane !== btn.dataset.fwPane;
+        });
+      });
+    });
+
+    // ── Add-rule modal ──────────────────────────────────────────────────
+    const fwModal = document.getElementById("fw-add-modal");
+    const fwModalHint = document.getElementById("fw-hint-modal");
+    const fwCloseModal = () => { fwModal.hidden = true; };
+    document.getElementById("fw-add-open").addEventListener("click", () => {
+      fwModalHint.textContent = "";
+      fwModal.hidden = false;
+      els.fwPort.focus();
+    });
+    document.getElementById("fw-add-modal-close").addEventListener("click", fwCloseModal);
+    document.getElementById("fw-add-cancel").addEventListener("click", fwCloseModal);
+    fwModal.addEventListener("click", (e) => { if (e.target === fwModal) fwCloseModal(); });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !fwModal.hidden) fwCloseModal();
+    });
+
     async function refreshInterfaces() {
       try {
         const data = await fetchJSON("/api/firewall/interfaces");
@@ -1514,11 +1621,17 @@
 
     async function addRule(rule) {
       els.fwHint.textContent = "";
+      fwModalHint.textContent = "";
       try {
         await postJSON("/api/firewall/allow", { rule });
         els.fwHint.textContent = "Rule added: " + rule;
+        els.fwPort.value = "";
+        els.fwFrom.value = "";
+        fwModalHint.textContent = "";
+        fwCloseModal();
         await refreshFirewall();
       } catch (err) {
+        fwModalHint.textContent = "Error: " + err.message;
         els.fwHint.textContent = "Error: " + err.message;
         throw err;
       }
@@ -1586,6 +1699,87 @@
       await refreshFirewall();
       return res;
     }
+
+    // ── Rules filtering: search + interface chips ───────────────────────
+    els.fwSearch.addEventListener("input", () => {
+      _fwFilterText = els.fwSearch.value;
+      renderFwRules();
+    });
+    document.getElementById("fw-iface-chips").addEventListener("click", (e) => {
+      const chip = e.target.closest(".fw-chip");
+      if (!chip) return;
+      _fwFilterIface = chip.dataset.fwIface || "";
+      renderFwIfaceChips();
+      renderFwRules();
+    });
+
+    // ── One-click block on traffic views ────────────────────────────────
+    async function blockSource(ip) {
+      if (!window.confirm(`Add a firewall rule blocking all traffic from ${ip}?`)) return;
+      try {
+        await postJSON("/api/firewall/allow", { rule: `deny from ${ip}` });
+        els.fwHint.textContent = "Blocked source: " + ip;
+        await refreshFirewall();
+      } catch (err) {
+        els.fwHint.textContent = "Error: " + err.message;
+      }
+    }
+    [els.fwSourcesBody, els.fwEventsBody].forEach((tbody) => {
+      if (!tbody) return;
+      tbody.addEventListener("click", (e) => {
+        const btn = e.target.closest(".fw-block-src");
+        if (btn) blockSource(btn.dataset.ip);
+      });
+    });
+
+    // ── Live view auto-refresh ──────────────────────────────────────────
+    setInterval(() => {
+      if (state.activeView !== "firewall") return;
+      const active = document.querySelector("#fw-subtabs .fw-subtab.active");
+      const live = document.getElementById("fw-live-toggle");
+      if (active && active.dataset.fwPane === "traffic" && live && live.checked) {
+        refreshFirewall();
+      }
+    }, 5000);
+
+    // ── Settings pane ───────────────────────────────────────────────────
+    document.getElementById("fw-settings-apply").addEventListener("click", async () => {
+      const btn = document.getElementById("fw-settings-apply");
+      const hint = document.getElementById("fw-settings-hint");
+      if (!_fwData) return;
+      const wantEnabled = document.getElementById("fw-enabled-toggle").checked;
+      const wasEnabled = (_fwData.status || "").toLowerCase() === "active";
+      const di = document.getElementById("fw-def-incoming").value;
+      const dot = document.getElementById("fw-def-outgoing").value;
+      const lv = document.getElementById("fw-log-level").value;
+      hint.textContent = "";
+      if (!wantEnabled && wasEnabled &&
+          !window.confirm("Disable the firewall?\n\nThis turns off ALL packet filtering until re-enabled.")) {
+        return;
+      }
+      btn.disabled = true;
+      hint.textContent = "Applying…";
+      try {
+        if (wantEnabled !== wasEnabled) {
+          await postJSON("/api/firewall/enable", { enabled: wantEnabled });
+        }
+        if (di !== (_fwData.defaults.incoming || "").toLowerCase()) {
+          await postJSON("/api/firewall/default", { direction: "incoming", policy: di });
+        }
+        if (dot !== (_fwData.defaults.outgoing || "").toLowerCase()) {
+          await postJSON("/api/firewall/default", { direction: "outgoing", policy: dot });
+        }
+        if (lv !== fwLogLevel(_fwData)) {
+          await postJSON("/api/firewall/logging", { level: lv });
+        }
+        hint.textContent = "Settings applied.";
+        await refreshFirewall();
+      } catch (err) {
+        hint.textContent = "Error: " + err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
 
     els.fwBaseline.addEventListener("click", async () => {
       if (!window.confirm("Save the current live ruleset as the restore baseline?")) return;
@@ -2715,176 +2909,6 @@
   }
 
 
-
-  function openAiCfgModal() {
-    els.aiCfgHint.textContent = "";
-    els.aiCfgHint.className = "muted cfg-hint";
-    els.aiCfgApiKey.value = "";
-    els.aiCfgModal.hidden = false;
-    els.aiCfgSave.disabled = false;
-    fetchJSON("/api/security/ai-config").then((data) => {
-      if (!data.ok) throw new Error(data.error || "load failed");
-      els.aiCfgBaseUrl.value = data.base_url || "";
-      els.aiCfgModel.value = data.model || "";
-      els.aiCfgApiKey.placeholder = data.api_key_masked || "sk-...";
-      // Auto-highlight the matching preset
-      const url = (data.base_url || "").toLowerCase();
-      let matched = null;
-      if (url.includes("anthropic.com")) matched = "claude";
-      else if (url.includes("openai.com")) matched = "openai";
-      else if (url.includes("localhost") || url.includes("127.0.0.1")) matched = "ollama";
-      else if (url) matched = "custom";
-      if (matched) applyAiPreset(matched);
-      // Restore actual values after preset fill
-      els.aiCfgBaseUrl.value = data.base_url || "";
-      els.aiCfgModel.value = data.model || "";
-    }).catch((err) => {
-      els.aiCfgHint.className = "muted cfg-hint cfg-hint-err";
-      els.aiCfgHint.textContent = err.message;
-    });
-  }
-
-  function closeAiCfgModal() {
-    els.aiCfgModal.hidden = true;
-  }
-
-  async function saveAiCfg() {
-    const base_url = els.aiCfgBaseUrl.value.trim();
-    const model = els.aiCfgModel.value.trim();
-    const api_key = els.aiCfgApiKey.value;
-    if (!base_url) { els.aiCfgHint.className = "muted cfg-hint cfg-hint-err"; els.aiCfgHint.textContent = "Base URL is required."; return; }
-    if (!model) { els.aiCfgHint.className = "muted cfg-hint cfg-hint-err"; els.aiCfgHint.textContent = "Model is required."; return; }
-    els.aiCfgSave.disabled = true;
-    try {
-      const body = { base_url, model };
-      if (api_key) body.api_key = api_key;
-      const data = await postJSON("/api/security/ai-config", body);
-      els.aiCfgHint.className = "muted cfg-hint cfg-hint-ok";
-      els.aiCfgHint.textContent = "Saved." + (data.backup ? " Backup: " + data.backup : "");
-      refreshAiModels();
-      // Also reload the AI page model selector
-      const aiSel = document.getElementById("ai-model-select");
-      if (aiSel) { delete aiSel.dataset.loaded; }
-      loadAiPageConfig();
-      setTimeout(closeAiCfgModal, 900);
-    } catch (err) {
-      els.aiCfgSave.disabled = false;
-      els.aiCfgHint.className = "muted cfg-hint cfg-hint-err";
-      els.aiCfgHint.textContent = err.message;
-    }
-  }
-
-  function loadAiPageConfig() {
-    const sel     = document.getElementById("ai-model-select");
-    const notCfg  = document.getElementById("ai-not-configured");
-    if (!sel) return;
-    fetchJSON("/api/security/ai-config").then((d) => {
-      if (!d.ok) { if (notCfg) notCfg.hidden = false; return; }
-      const hasKey  = !!(d.api_key_masked && d.api_key_masked !== "");
-      const isLocal = /localhost|127\.0\.0\.1/.test(d.base_url || "");
-      if (!hasKey && !isLocal) { if (notCfg) notCfg.hidden = false; return; }
-      if (notCfg) notCfg.hidden = true;
-      // Build model list from preset matching the base_url
-      const url = (d.base_url || "").toLowerCase();
-      let preset = null;
-      if (url.includes("anthropic.com")) preset = "claude";
-      else if (url.includes("openai.com")) preset = "openai";
-      else if (isLocal) preset = "ollama";
-      const presetModels = preset && AI_PRESETS[preset] ? AI_PRESETS[preset].models : [];
-      // Always include the currently configured model
-      const configured = d.model || "";
-      const modelList = configured && !presetModels.includes(configured)
-        ? [configured, ...presetModels]
-        : (presetModels.length ? presetModels : [configured]);
-      sel.innerHTML = modelList.filter(Boolean).map((m) =>
-        `<option value="${esc(m)}"${m === configured ? " selected" : ""}>${esc(m)}</option>`
-      ).join("") || `<option value="${esc(configured)}">${esc(configured) || "unknown"}</option>`;
-    }).catch(() => { if (notCfg) notCfg.hidden = false; });
-  }
-
-  const AI_PRESETS = {
-    claude: {
-      base_url: "https://api.anthropic.com/v1",
-      models: ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-3-5"],
-      default_model: "claude-sonnet-4-5",
-      hint: "Get your API key at console.anthropic.com → API Keys",
-      key_placeholder: "sk-ant-api03-…",
-    },
-    openai: {
-      base_url: "https://api.openai.com/v1",
-      models: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
-      default_model: "gpt-4o",
-      hint: "Get your API key at platform.openai.com → API Keys",
-      key_placeholder: "sk-…",
-    },
-    ollama: {
-      base_url: "http://localhost:11434/v1",
-      models: [],
-      default_model: "",
-      hint: "Ollama runs locally — no API key needed. Make sure Ollama is running and you have a model pulled (e.g. ollama pull llama3).",
-      key_placeholder: "Not required for local Ollama",
-    },
-    custom: {
-      base_url: "",
-      models: [],
-      default_model: "",
-      hint: "Enter the base URL of any OpenAI-compatible API endpoint.",
-      key_placeholder: "API key (if required)",
-    },
-  };
-
-  function applyAiPreset(preset) {
-    const p = AI_PRESETS[preset];
-    if (!p) return;
-    els.aiCfgBaseUrl.value = p.base_url;
-    if (p.default_model) els.aiCfgModel.value = p.default_model;
-    els.aiCfgApiKey.placeholder = p.key_placeholder;
-    const hintEl = document.getElementById("ai-preset-hint");
-    if (hintEl) hintEl.textContent = p.hint;
-    // Render model suggestion chips
-    const chips = document.getElementById("ai-model-suggestions");
-    if (chips) {
-      chips.innerHTML = p.models.map((m) =>
-        `<button type="button" class="ai-model-chip" data-model="${esc(m)}">${esc(m)}</button>`
-      ).join("");
-      chips.querySelectorAll(".ai-model-chip").forEach((btn) => {
-        btn.addEventListener("click", () => {
-          els.aiCfgModel.value = btn.dataset.model;
-          chips.querySelectorAll(".ai-model-chip").forEach((b) => b.classList.remove("active"));
-          btn.classList.add("active");
-        });
-      });
-      // Mark default as active
-      const def = chips.querySelector(`[data-model="${esc(p.default_model)}"]`);
-      if (def) def.classList.add("active");
-    }
-    // Highlight active preset button
-    document.querySelectorAll(".ai-preset-btn").forEach((b) => {
-      b.classList.toggle("active", b.dataset.preset === preset);
-    });
-  }
-
-  function bindAiSummary() {
-    // AI configure buttons (AI page sidebar + not-configured banner)
-    const aiConfigureBtn = document.getElementById("ai-configure-btn");
-    if (aiConfigureBtn) aiConfigureBtn.addEventListener("click", openAiCfgModal);
-    const aiNotCfgBtn = document.getElementById("ai-not-cfg-btn");
-    if (aiNotCfgBtn) aiNotCfgBtn.addEventListener("click", openAiCfgModal);
-    // Config modal controls
-    els.aiCfgModalClose.addEventListener("click", closeAiCfgModal);
-    els.aiCfgCancel.addEventListener("click", closeAiCfgModal);
-    els.aiCfgSave.addEventListener("click", saveAiCfg);
-    els.aiCfgModal.addEventListener("click", (e) => {
-      if (e.target === els.aiCfgModal) closeAiCfgModal();
-    });
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && !els.aiCfgModal.hidden) closeAiCfgModal();
-    });
-    // Preset buttons
-    document.querySelectorAll(".ai-preset-btn").forEach((btn) => {
-      btn.addEventListener("click", () => applyAiPreset(btn.dataset.preset));
-    });
-  }
 
   function setSecBanStatus(text) {
     els.secBanStatus.textContent = text || "";
@@ -5528,12 +5552,8 @@
         if (state.isOwner) loadUsers();
       }
       els.soon.hidden = true;
-      if (view === "ai") {
-        const sel = document.getElementById("ai-model-select");
-        if (sel && !sel.dataset.loaded) {
-          sel.dataset.loaded = "1";
-          loadAiPageConfig();
-        }
+      if (view === "ai" && window.__tuxwallAgentEnable) {
+        window.__tuxwallAgentEnable();
       }
     } else {
       els.soon.hidden = false;
@@ -5544,347 +5564,1122 @@
   // AI ASSISTANT
   // ================================================================
   (function aiChat() {
-    const aiState = { messages: [], busy: false, inputTokens: 0, outputTokens: 0 };
-
-    // Pricing per million tokens — covers common models
-    const MODEL_PRICING = {
-      "claude-opus-4-5":       { input: 15.00,  output: 75.00  },
-      "claude-sonnet-4-5":     { input: 3.00,   output: 15.00  },
-      "claude-haiku-3-5":      { input: 0.80,   output: 4.00   },
-      "claude-3-5-sonnet-20241022": { input: 3.00, output: 15.00 },
-      "claude-3-5-haiku-20241022":  { input: 0.80, output: 4.00  },
-      "claude-3-opus-20240229":     { input: 15.00, output: 75.00 },
-      "gpt-4o":                { input: 2.50,   output: 10.00  },
-      "gpt-4o-mini":           { input: 0.15,   output: 0.60   },
-      "gpt-4-turbo":           { input: 10.00,  output: 30.00  },
-      "gpt-3.5-turbo":         { input: 0.50,   output: 1.50   },
+    // ── Agent mode (opencode terminal) ────────────────────────────────
+    const agent = {
+      enabled: false, sessionID: null, busy: false, pollTimer: null,
+      tokens: 0, cost: 0, msgs: 0, model: "", booted: false,
+      version: "", directory: "", vcs: null, placeholderTimer: null,
     };
+    const elAgentSide = document.getElementById("ai-agent-side");
+    const elAgentModel   = document.getElementById("agent-model-select");
+    const elAgentNewSess = document.getElementById("agent-new-session");
+    const elAgentStatus  = document.getElementById("agent-status");
+    const elAgentSessBtn = document.getElementById("agent-sessions-btn");
+    const elTerminal  = document.getElementById("oc-terminal");
+    const elOcScreen  = document.getElementById("oc-screen");
+    const elOcInput   = document.getElementById("oc-input");
+    const elOcSend    = document.getElementById("oc-send");
+    const elOcPopup   = document.getElementById("oc-popup");
+    const elOcOverlay = document.getElementById("oc-overlay");
+    const elOcModal   = document.getElementById("oc-modal");
+    const elOcStatus  = document.getElementById("oc-statusbar");
+    const elOcState   = document.getElementById("oc-agent-state");
+    const elOcVer     = document.getElementById("oc-term-ver");
+    const elOcVerSide = document.getElementById("oc-agent-version");
+    const elOcMark    = document.getElementById("oc-prompt-mark");
+    const elOcNote    = document.getElementById("oc-mode-note");
 
-    function calcCost(model, inputTok, outputTok) {
-      const key = Object.keys(MODEL_PRICING).find((k) => model && model.toLowerCase().includes(k.toLowerCase())) || null;
-      if (!key) return null;
-      const p = MODEL_PRICING[key];
-      return (inputTok / 1e6) * p.input + (outputTok / 1e6) * p.output;
+    // Authentic opencode TUI logo (packages/tui/src/logo.ts)
+    const OC_LOGO = {
+      left:  ["                   ", "█▀▀█ █▀▀█ █▀▀█ █▀▀▄", "█__█ █__█ █^^^ █__█", "▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀"],
+      right: ["             ▄     ", "█▀▀▀ █▀▀█ █▀▀█ █▀▀█", "█___ █__█ █__█ █^^^", "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"],
+    };
+    const OC_PLACEHOLDERS = [
+      "What is the tech stack of this project?",
+      "Audit my firewall rules for misconfigurations",
+      "Explain @includes/api_server.py",
+      "Fix broken tests",
+    ];
+    const OC_COMMANDS = [
+      { cmd: "/new",      desc: "start a new session",                       alias: "/clear" },
+      { cmd: "/sessions", desc: "list and switch sessions",                  alias: "/resume" },
+      { cmd: "/undo",     desc: "undo last message and file changes" },
+      { cmd: "/redo",     desc: "redo previously undone changes" },
+      { cmd: "/compact",  desc: "compact the session context",               alias: "/summarize" },
+      { cmd: "/share",    desc: "share session, get a link" },
+      { cmd: "/unshare",  desc: "stop sharing the session" },
+      { cmd: "/init",     desc: "analyze project and create AGENTS.md" },
+      { cmd: "/abort",    desc: "abort the running task" },
+      { cmd: "/clear",    desc: "start a new session (alias of /new)" },
+      { cmd: "/models",   desc: "change the agent model" },
+      { cmd: "/help",     desc: "show all commands" },
+      { cmd: "/exit",     desc: "no-op — opencode is the only assistant",       alias: "/quit /q" },
+    ];
+
+    function agentUpdateStats() {
+      const t = document.getElementById("agent-tokens");
+      const c = document.getElementById("agent-cost");
+      const m = document.getElementById("agent-msgs");
+      if (t) t.textContent = agent.tokens.toLocaleString();
+      if (c) c.textContent = agent.cost ? "$" + agent.cost.toFixed(4) : "$0.00";
+      if (m) m.textContent = String(agent.msgs);
+      ocRenderStatus();
     }
 
-    function formatCost(usd) {
-      if (usd === null) return null;
-      if (usd < 0.0001) return "<$0.0001";
-      if (usd < 0.01)   return "$" + usd.toFixed(4);
-      return "$" + usd.toFixed(4);
-    }
-
-    const elMessages  = document.getElementById("ai-messages");
-    const elInput     = document.getElementById("ai-input");
-    const elSendBtn   = document.getElementById("ai-send-btn");
-    const elClearBtn  = document.getElementById("ai-clear-btn");
-    const elModelSel  = document.getElementById("ai-model-select");
-    const elStatus    = document.getElementById("ai-status-text");
-    const elNotCfg    = document.getElementById("ai-not-configured");
-
-    if (!elMessages) return; // view not in DOM yet
-
-    // --- model list ---
-    async function loadModels() {
+    async function agentLoadModels() {
+      if (!elAgentModel || elAgentModel.dataset.loaded === "1") return;
       try {
-        const d = await fetchJSON("/api/ai/chat/models");
+        const d = await fetchJSON("/api/agent/models");
         if (!d.ok || !d.models || !d.models.length) {
-          if (elNotCfg) elNotCfg.hidden = false;
+          elAgentModel.innerHTML = `<option value="">no models available</option>`;
           return;
         }
-        elModelSel.innerHTML = d.models.map((m) =>
-          `<option value="${esc(m)}"${m === d.configured ? " selected" : ""}>${esc(m)}</option>`
-        ).join("");
-        if (elNotCfg) elNotCfg.hidden = true;
+        const groups = {};
+        d.models.forEach((m) => { (groups[m.provider] = groups[m.provider] || []).push(m); });
+        elAgentModel.innerHTML = Object.keys(groups).sort().map((prov) =>
+          `<optgroup label="${esc(prov)}">` + groups[prov].map((m) =>
+            `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join("") +
+          "</optgroup>").join("");
+        // preselect: last-used model (localStorage), else server default
+        const lastModel = localStorage.getItem("tuxwall.agent.model") || "";
+        if (lastModel && d.models.some((m) => m.id === lastModel)) {
+          elAgentModel.value = lastModel;
+        } else {
+          const defModel = (d.configured || "");
+          if (defModel && d.models.some((m) => m.id === defModel)) {
+            elAgentModel.value = defModel;
+          }
+        }
+        elAgentModel.dataset.loaded = "1";
       } catch (_) {
-        if (elNotCfg) elNotCfg.hidden = false;
+        elAgentModel.innerHTML = `<option value="">failed to load models</option>`;
       }
     }
 
-    // --- markdown-lite renderer (bold, inline code, fenced code, bullets) ---
-    function renderMarkdown(text) {
-      let html = "";
-      const lines = text.split("\n");
-      let inCode = false, codeLang = "", codeBuf = [];
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        if (!inCode && line.startsWith("```")) {
-          inCode = true; codeLang = line.slice(3).trim(); codeBuf = []; continue;
+    async function agentLoadBootInfo() {
+      try {
+        const d = await fetchJSON("/api/agent/config");
+        if (d && d.ok !== false) {
+          agent.version = d.version || "";
+          agent.directory = d.directory || "";
+          agent.vcs = d.vcs || null;
+          const vt = agent.version ? "v" + agent.version.replace(/^v/, "") : "opencode";
+          if (elOcVer) elOcVer.textContent = agent.version ? "v" + agent.version.replace(/^v/, "") : "";
+          if (elOcVerSide) elOcVerSide.textContent = vt + " · tuxwall";
+          // refresh the boot screen if it is still on screen
+          const bv = document.getElementById("oc-boot-ver");
+          const bd = document.getElementById("oc-boot-dir");
+          if (bv) bv.textContent = vt;
+          if (bd) bd.textContent = agent.directory || "/";
+          ocRenderStatus();
         }
-        if (inCode) {
-          if (line === "```") {
-            html += `<pre class="ai-code-block"><code>${esc(codeBuf.join("\n"))}</code></pre>`;
-            inCode = false; codeBuf = []; continue;
-          }
-          codeBuf.push(line); continue;
-        }
-        let l = esc(line);
-        l = l.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-        l = l.replace(/`([^`]+)`/g, "<code class='ai-inline-code'>$1</code>");
-        if (/^#{1,3}\s/.test(line)) {
-          const lvl = line.match(/^(#+)/)[1].length;
-          l = `<h${lvl} class="ai-resp-h">${l.replace(/^#+\s*/, "")}</h${lvl}>`;
-        } else if (/^[-*]\s/.test(line)) {
-          l = `<li>${l.slice(2)}</li>`;
-        } else if (l.trim() === "") {
-          l = "<br>";
-        } else {
-          l = `<p>${l}</p>`;
-        }
-        html += l;
+      } catch (_) { /* offline is shown by health check */ }
+    }
+
+    function agentSetEnabled() {
+      // opencode is the only AI assistant — always enabled
+      agent.enabled = true;
+      if (elAgentSide) elAgentSide.hidden = false;
+      if (elTerminal) elTerminal.hidden = false;
+      agentCheckHealth();
+      agentLoadModels();
+      agentUpdateStats();
+      if (!agent.booted) { agent.booted = true; ocBootScreen(); agentLoadBootInfo(); }
+      if (elOcInput) setTimeout(() => elOcInput.focus(), 50);
+    }
+
+    async function agentCheckHealth() {
+      if (!elAgentStatus) return;
+      try {
+        const d = await fetchJSON("/api/agent/status");
+        elAgentStatus.textContent = d.ok ? "● agent online" : "● agent offline: " + (d.error || "") + (d.status ? " (HTTP " + d.status + ")" : "");
+        elAgentStatus.title = d.detail || d.hint || "";
+        elAgentStatus.className = "agent-status" + (d.ok ? " agent-on" : " agent-off");
+      } catch (err) {
+        elAgentStatus.textContent = "● agent offline";
+        elAgentStatus.className = "agent-status agent-off";
       }
-      if (inCode) html += `<pre class="ai-code-block"><code>${esc(codeBuf.join("\n"))}</code></pre>`;
+    }
+
+
+    // ── terminal render helpers ─────────────────────────────────────
+    function ocScroll() { if (elOcScreen) elOcScreen.scrollTop = elOcScreen.scrollHeight; }
+
+    function ocLine(text, cls) {
+      const el = document.createElement("div");
+      el.className = "oc-line" + (cls ? " " + cls : "");
+      el.textContent = text == null ? "" : String(text);
+      if (elOcScreen) elOcScreen.appendChild(el);
+      ocScroll();
+      return el;
+    }
+
+    function ocBlock(text, cls) {
+      const el = document.createElement("div");
+      el.className = "oc-tool-out" + (cls ? " " + cls : "");
+      el.textContent = text == null ? "" : String(text);
+      if (elOcScreen) elOcScreen.appendChild(el);
+      ocScroll();
+      return el;
+    }
+
+    function ocDiffBlock(diffText) {
+      const el = document.createElement("div");
+      el.className = "oc-tool-out oc-diff";
+      (String(diffText || "").split("\n")).forEach((ln) => {
+        const span = document.createElement("span");
+        if (/^\+/.test(ln) && !/^\+\+\+/.test(ln)) span.className = "oc-add";
+        else if (/^-/.test(ln) && !(/^---/.test(ln))) span.className = "oc-del";
+        else if (/^@@/.test(ln)) span.className = "oc-hunk";
+        span.textContent = ln || " ";
+        el.appendChild(span);
+      });
+      if (elOcScreen) elOcScreen.appendChild(el);
+      ocScroll();
+      return el;
+    }
+
+    function ocTime() {
+      const d = new Date();
+      return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+    }
+
+    function ocLogoHTML() {
+      // faithful to the TUI: "open" muted, "code" bright+bold,
+      // _ ^ ~ , rendered as their block equivalents
+      const fix = (s) => s.replace(/_/g, " ").replace(/\^/g, "▀").replace(/~/g, "▀").replace(/,/g, "▄");
+      let html = "";
+      for (let i = 0; i < OC_LOGO.left.length; i++) {
+        html += `<span class="oc-l">${esc(fix(OC_LOGO.left[i]))}</span><span class="oc-r">${esc(fix(OC_LOGO.right[i]))}</span>\n`;
+      }
       return html;
     }
 
-    // --- parse <tuxwall-action> blocks out of AI response ---
-    function parseActions(text) {
-      const actions = [];
-      const re = /<tuxwall-action>([\s\S]*?)<\/tuxwall-action>/g;
-      let m;
-      while ((m = re.exec(text)) !== null) {
-        try { actions.push(JSON.parse(m[1].trim())); } catch (_) {}
-      }
-      return actions;
+    function ocBootScreen(keepSession) {
+      if (!elOcScreen) return;
+      if (!keepSession) { agent.sessionID = null; agent.tokens = 0; agent.cost = 0; agent.msgs = 0; }
+      elOcScreen.innerHTML = "";
+      const boot = document.createElement("div");
+      boot.className = "oc-boot";
+      const vcsBit = agent.vcs && agent.vcs.branch ? ` <b>${esc(agent.vcs.branch)}</b>` : "";
+      boot.innerHTML = `
+        <div class="oc-logo">${ocLogoHTML()}</div>
+        <div class="oc-boot-meta">
+          <span class="oc-bootline">version   <b id="oc-boot-ver">${esc(agent.version ? "v" + agent.version.replace(/^v/, "") : "…")}</b></span>
+          <span class="oc-bootline">directory <b id="oc-boot-dir">${esc(agent.directory || "/")}</b>${vcsBit}</span>
+          <span class="oc-bootline">host      <b>tuxwall gateway</b> · agent mode · build</span>
+        </div>
+        <div class="oc-boot-tips">
+          <span class="oc-tip">type <b>/</b> for commands — <b>!</b> runs shell — <b>@</b> mentions files</span><br>
+          <span class="oc-tip"><b>/help</b> lists everything the terminal can do</span>
+        </div>`;
+      elOcScreen.appendChild(boot);
+      if (elOcState) { elOcState.textContent = "idle"; elOcState.className = "oc-term-badge"; }
+      agentUpdateStats();
+      ocStartPlaceholders();
     }
 
-    function stripActions(text) {
-      return text.replace(/<tuxwall-action>[\s\S]*?<\/tuxwall-action>/g, "").trim();
+    function ocStartPlaceholders() {
+      if (agent.placeholderTimer) clearInterval(agent.placeholderTimer);
+      let idx = 0;
+      if (!elOcInput) return;
+      elOcInput.placeholder = OC_PLACEHOLDERS[0];
+      agent.placeholderTimer = setInterval(() => {
+        if (!agent.enabled || !elOcInput || document.activeElement === elOcInput) return;
+        idx = (idx + 1) % OC_PLACEHOLDERS.length;
+        elOcInput.placeholder = OC_PLACEHOLDERS[idx];
+      }, 4000);
     }
 
-    // --- render a single action card ---
-    function actionLabel(a) {
-      switch (a.action) {
-        case "block_ip":             return `🚫 Block IP <code>${esc(a.ip)}</code>`;
-        case "unblock_ip":           return `✅ Unblock IP <code>${esc(a.ip)}</code>`;
-        case "block_domain":         return `🚫 Block domain <code>${esc(a.domain)}</code>`;
-        case "unblock_domain":       return `✅ Unblock domain <code>${esc(a.domain)}</code>`;
-        case "restart_service":      return `🔄 Restart service <code>${esc(a.service)}</code>`;
-        case "add_firewall_rule":    return `➕ Add UFW rule: <code>${esc(a.rule)}</code>`;
-        case "delete_firewall_rule": return `🗑️ Delete UFW rule #<code>${esc(String(a.number))}</code>`;
-        default: return `⚙️ <code>${esc(a.action)}</code>`;
-      }
+    function ocSetState(st) {
+      if (!elOcState) return;
+      elOcState.textContent = st;
+      elOcState.className = "oc-term-badge" + (st === "busy" ? " oc-busy" : st === "error" ? " oc-error" : "");
+      ocRenderStatus();
     }
 
-    async function applyAction(a, btn) {
-      btn.disabled = true;
-      btn.textContent = "Applying…";
-      try {
-        let result = { ok: false, error: "Unknown action type" };
+    function ocRenderStatus() {
+      if (!elOcStatus) return;
+      const perms = document.querySelectorAll(".oc-perm:not(.oc-approved):not(.oc-denied)").length;
+      const dir = agent.directory || "/";
+      const git = agent.vcs && agent.vcs.branch ? " · git(" + agent.vcs.branch + ")" : "";
+      const model = (elAgentModel && elAgentModel.value) ? elAgentModel.value : agent.model || "";
+      elOcStatus.innerHTML =
+        `<span class="oc-sb-dir">${esc(dir)}${esc(git)}</span>` +
+        `<span class="oc-sb-right">` +
+        (perms ? `<span class="oc-sb-perms">${perms} Permission${perms > 1 ? "s" : ""}</span>` : "") +
+        (model ? `<span class="oc-sb-model">${esc(model)}</span>` : "") +
+        `<span class="oc-sb-tokens">${agent.tokens.toLocaleString()} tokens</span>` +
+        `<span class="oc-sb-ok">${agent.msgs} msg</span>` +
+        `</span>`;
+    }
 
-        if (a.action === "block_ip") {
-          result = await postJSON("/api/security/ban", { ip: a.ip });
+    function ocUserMsg(text) {
+      const el = document.createElement("div");
+      el.className = "oc-msg oc-msg-user";
+      el.innerHTML = `
+        <div class="oc-msg-head">
+          <span class="oc-msg-role">user</span>
+          <span class="oc-msg-time">${ocTime()}</span>
+        </div>
+        <div class="oc-msg-body"></div>`;
+      el.querySelector(".oc-msg-body").textContent = text;
+      if (elOcScreen) elOcScreen.appendChild(el);
+      ocScroll();
+      return el;
+    }
 
-        } else if (a.action === "unblock_ip") {
-          result = await postJSON("/api/security/unban", { ip: a.ip });
+    function ocAgentMsg(model) {
+      const el = document.createElement("div");
+      el.className = "oc-msg oc-msg-agent";
+      el.innerHTML = `
+        <div class="oc-msg-head">
+          <span class="oc-msg-role">opencode</span>
+          <span class="oc-msg-meta">${esc(model || "")}</span>
+          <span class="oc-msg-time">${ocTime()}</span>
+          <span class="oc-msg-tokens oc-msg-tok-v"></span>
+        </div>
+        <div class="oc-msg-body"></div>`;
+      if (elOcScreen) elOcScreen.appendChild(el);
+      ocScroll();
+      return el;
+    }
 
-        } else if (a.action === "block_domain") {
-          result = await postJSON("/api/domains/add", { name: a.domain, kind: "block" });
+    function ocToolInfo(part) {
+      const name = part.tool || (part.type || "").replace(/^tool\./, "") || "tool";
+      const st = part.state || {};
+      const input = st.input || part.input || {};
+      let detail = "";
+      if (input.command) detail = input.command;
+      else if (input.filePath) detail = input.filePath;
+      else if (input.path) detail = input.path;
+      else if (input.pattern) detail = input.pattern;
+      else if (input.query) detail = input.query;
+      else if (input.url) detail = input.url;
+      if (!detail && st.title) detail = st.title;
+      const pretty = {
+        bash: "Bash", read: "Read", edit: "Edit", write: "Write", glob: "Glob",
+        grep: "Grep", list: "List", webfetch: "Web Fetch", websearch: "Web Search",
+        todowrite: "Todo", "todo-write": "Todo", "todo-read": "Todo", task: "Task",
+        ask: "Ask", multiedit: "Multi Edit",
+      }[String(name).toLowerCase()] || name.charAt(0).toUpperCase() + name.slice(1);
+      return { name, pretty, detail, st };
+    }
 
-        } else if (a.action === "unblock_domain") {
-          result = await postJSON("/api/domains/delete", { name: a.domain });
+    // live tool rows keyed by part id — like the TUI's └─ tool lines
+    const ocToolEls = new Map();
 
-        } else if (a.action === "add_firewall_rule") {
-          result = await postJSON("/api/firewall/allow", { rule: a.rule });
-
-        } else if (a.action === "delete_firewall_rule") {
-          result = await postJSON("/api/firewall/delete", { number: a.number });
-
-        } else if (a.action === "restart_service") {
-          result = await postJSON("/api/system/services/action", { unit: a.service, action: "restart" });
+    function ocToolRow(part, afterEl) {
+      const key = part.id || (part.type + ":" + JSON.stringify(part.input || {}).slice(0, 60));
+      let entry = ocToolEls.get(key);
+      if (!entry) {
+        const info = ocToolInfo(part);
+        const wrap = document.createElement("div");
+        wrap.className = "oc-tool";
+        const row = document.createElement("div");
+        row.className = "oc-tool-row";
+        row.innerHTML = `<span class="oc-tool-name"></span><span class="oc-tool-detail"></span><span class="oc-tool-state"></span>`;
+        const out = document.createElement("div");
+        out.className = "oc-tool-out";
+        out.hidden = true;
+        row.addEventListener("click", () => { out.hidden = !out.hidden; ocScroll(); });
+        wrap.appendChild(row);
+        wrap.appendChild(out);
+        if (elOcScreen) {
+          if (afterEl && afterEl.parentNode === elOcScreen) elOcScreen.insertBefore(wrap, afterEl.nextSibling);
+          else elOcScreen.appendChild(wrap);
         }
-
-        if (result.ok) {
-          btn.textContent = "Applied ✓";
-          btn.className = "ai-action-apply ai-action-done";
-        } else {
-          btn.textContent = "Failed: " + (result.error || "unknown");
-          btn.disabled = false;
-          btn.className = "ai-action-apply ai-action-err";
-        }
-      } catch (err) {
-        btn.textContent = "Error: " + err.message;
-        btn.disabled = false;
-        btn.className = "ai-action-apply ai-action-err";
+        entry = { wrap, row, out, key };
+        ocToolEls.set(key, entry);
       }
+      ocToolUpdate(entry, part);
+      ocScroll();
+      return entry;
     }
 
-    // --- append a message bubble ---
-    function appendMessage(role, text, actions) {
-      // Remove welcome screen on first real message
-      const welcome = elMessages.querySelector(".ai-welcome");
-      if (welcome) welcome.remove();
-
-      const wrap = document.createElement("div");
-      wrap.className = `ai-msg ai-msg-${role}`;
-
-      if (role === "assistant") {
-        const clean = stripActions(text);
-        const avatar = document.createElement("div");
-        avatar.className = "ai-avatar";
-        avatar.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.38-1 1.73V7h2a7 7 0 0 1 7 7v1a3 3 0 0 1-2 2.83V19a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2.17A3 3 0 0 1 2 14v-1a7 7 0 0 1 7-7h2V5.73A2 2 0 0 1 10 4a2 2 0 0 1 2-2zm-3 9a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm6 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/></svg>`;
-        const bubble = document.createElement("div");
-        bubble.className = "ai-bubble";
-        bubble.innerHTML = renderMarkdown(clean);
-
-        // Action cards
-        if (actions && actions.length) {
-          const actDiv = document.createElement("div");
-          actDiv.className = "ai-actions-wrap";
-          actDiv.innerHTML = `<div class="ai-actions-label">Proposed changes</div>`;
-          actions.forEach((a) => {
-            const card = document.createElement("div");
-            card.className = "ai-action-card";
-            const lbl = document.createElement("span");
-            lbl.className = "ai-action-lbl";
-            lbl.innerHTML = actionLabel(a);
-            if (a.comment) {
-              const hint = document.createElement("span");
-              hint.className = "ai-action-hint";
-              hint.textContent = a.comment;
-              card.appendChild(lbl);
-              card.appendChild(hint);
-            } else {
-              card.appendChild(lbl);
-            }
-            const applyBtn = document.createElement("button");
-            applyBtn.type = "button";
-            applyBtn.className = "ai-action-apply";
-            applyBtn.textContent = "Apply";
-            applyBtn.addEventListener("click", () => applyAction(a, applyBtn));
-            card.appendChild(applyBtn);
-            actDiv.appendChild(card);
-          });
-          bubble.appendChild(actDiv);
-        }
-        wrap.appendChild(avatar);
-        wrap.appendChild(bubble);
+    function ocToolUpdate(entry, part) {
+      const info = ocToolInfo(part);
+      const nameEl = entry.row.querySelector(".oc-tool-name");
+      const detailEl = entry.row.querySelector(".oc-tool-detail");
+      const stateEl = entry.row.querySelector(".oc-tool-state");
+      nameEl.textContent = info.pretty;
+      detailEl.textContent = info.detail ? info.detail.slice(0, 120) : "";
+      const status = (info.st.status || "pending").toLowerCase();
+      if (status === "running") {
+        stateEl.className = "oc-tool-state oc-running";
+        stateEl.innerHTML = `<span class="oc-spinner">⠋</span> running`;
+      } else if (status === "completed" || status === "done") {
+        stateEl.className = "oc-tool-state oc-done";
+        stateEl.textContent = "done";
+      } else if (status === "error") {
+        stateEl.className = "oc-tool-state oc-error";
+        stateEl.textContent = "error";
       } else {
-        const bubble = document.createElement("div");
-        bubble.className = "ai-bubble";
-        bubble.textContent = text;
-        wrap.appendChild(bubble);
+        stateEl.className = "oc-tool-state oc-pending";
+        stateEl.textContent = "pending";
       }
-
-      elMessages.appendChild(wrap);
-      elMessages.scrollTop = elMessages.scrollHeight;
-      return wrap;
+      const diff = (info.st.meta && info.st.meta.diff) || info.st.diff ||
+        (info.st.output && info.st.output.diff);
+      const output = info.st.output != null && typeof info.st.output !== "object" ? info.st.output : "";
+      const err = info.st.error || "";
+      if (diff) {
+        entry.out.classList.add("oc-diff");
+        entry.out.innerHTML = "";
+        String(diff).split("\n").forEach((ln) => {
+          const span = document.createElement("span");
+          if (/^\+/.test(ln) && !/^\+\+\+/.test(ln)) span.className = "oc-add";
+          else if (/^-/.test(ln) && !/^---/.test(ln)) span.className = "oc-del";
+          else if (/^@@/.test(ln)) span.className = "oc-hunk";
+          span.textContent = ln || " ";
+          entry.out.appendChild(span);
+        });
+        entry.out.hidden = false;
+      } else if (err) {
+        entry.out.classList.remove("oc-diff");
+        entry.out.textContent = err;
+        entry.out.hidden = false;
+      } else if (output) {
+        entry.out.classList.remove("oc-diff");
+        entry.out.textContent = String(output).slice(0, 8000);
+        entry.out.hidden = false;
+      }
     }
 
-    function setStatus(msg) {
-      if (elStatus) elStatus.textContent = msg;
-    }
-
-    function setBusy(busy) {
-      aiState.busy = busy;
-      if (elSendBtn) elSendBtn.disabled = busy;
-      if (elInput)   elInput.disabled   = busy;
-      setStatus(busy ? "Thinking…" : "");
-    }
-
-    // --- typing indicator ---
-    function showTyping() {
-      const wrap = document.createElement("div");
-      wrap.className = "ai-msg ai-msg-assistant ai-typing-wrap";
-      wrap.innerHTML = `<div class="ai-avatar"><svg viewBox="0 0 24 24"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.38-1 1.73V7h2a7 7 0 0 1 7 7v1a3 3 0 0 1-2 2.83V19a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2.17A3 3 0 0 1 2 14v-1a7 7 0 0 1 7-7h2V5.73A2 2 0 0 1 10 4a2 2 0 0 1 2-2zm-3 9a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm6 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/></svg></div><div class="ai-bubble ai-typing"><span></span><span></span><span></span></div>`;
-      elMessages.appendChild(wrap);
-      elMessages.scrollTop = elMessages.scrollHeight;
-      return wrap;
-    }
-
-    function updateUsageBar(lastIn, lastOut, model) {
-      const bar = document.getElementById("ai-usage-bar");
-      if (!bar) return;
-      const totalIn  = aiState.inputTokens;
-      const totalOut = aiState.outputTokens;
-      const totalTok = totalIn + totalOut;
-      const sessionCost = calcCost(model, totalIn, totalOut);
-      const lastCost    = calcCost(model, lastIn, lastOut);
-      const tokStr  = totalTok.toLocaleString() + " tokens";
-      const costStr = sessionCost !== null ? " · " + formatCost(sessionCost) + " this session" : "";
-      const lastStr = lastCost   !== null ? "Last reply: " + formatCost(lastCost) + " · " : "";
-      bar.innerHTML =
-        `<span class="ai-usage-last">${lastStr}${(lastIn + lastOut).toLocaleString()} tokens</span>` +
-        `<span class="ai-usage-session">Session total: ${tokStr}${costStr}</span>`;
-    }
-
-    // --- send a message ---
-    async function sendMessage(text) {
-      text = text.trim();
-      if (!text || aiState.busy) return;
-      aiState.messages.push({ role: "user", content: text });
-      appendMessage("user", text);
-      if (elInput) { elInput.value = ""; elInput.style.height = "auto"; }
-      setBusy(true);
-      const typing = showTyping();
+    // ── permission cards (TUI style: y / a / n) ─────────────────────
+    async function agentReply(requestID, response, btn) {
+      btn.disabled = true;
       try {
-        const model = elModelSel ? elModelSel.value : "";
-        const body = { messages: aiState.messages };
-        if (model) body.model = model;
-        const d = await postJSON("/api/ai/chat", body);
-        typing.remove();
-        if (!d.ok) {
-          if (d.error === "not_configured" && elNotCfg) elNotCfg.hidden = false;
-          appendMessage("assistant", "Sorry, I couldn't reach the AI: " + (d.error || "unknown error") + (d.hint ? "\n\n" + d.hint : ""), []);
-        } else {
-          const actions = parseActions(d.content);
-          aiState.messages.push({ role: "assistant", content: d.content });
-          appendMessage("assistant", d.content, actions);
-          // Track usage
-          const u = d.usage || {};
-          const lastIn  = u.input_tokens  || 0;
-          const lastOut = u.output_tokens || 0;
-          aiState.inputTokens  += lastIn;
-          aiState.outputTokens += lastOut;
-          updateUsageBar(lastIn, lastOut, d.model || model);
+        await postJSON("/api/agent/permission/reply", { requestID, response });
+        const card = btn.closest(".oc-perm");
+        if (card) {
+          card.classList.add(response === "reject" ? "oc-denied" : "oc-approved");
+          const btns = card.querySelector(".oc-perm-btns");
+          if (btns) btns.innerHTML = `<span class="oc-perm-note">${response === "reject" ? "denied" : "approved"}</span>`;
+          ocRenderStatus();
         }
       } catch (err) {
-        typing.remove();
-        appendMessage("assistant", "Request failed: " + err.message, []);
-      } finally {
-        setBusy(false);
+        btn.disabled = false;
+        btn.textContent = "Error: " + err.message;
       }
     }
 
-    // --- event bindings ---
-    if (elSendBtn) {
-      elSendBtn.addEventListener("click", () => sendMessage(elInput.value));
+    function ocPermCard(r) {
+      const rid = r.id || r.requestID;
+      const permType = r.permission || r.tool || "tool";
+      const patterns = (r.patterns && r.patterns.length) ? r.patterns : [];
+      const meta = r.metadata || {};
+      const body = patterns.join("\n") || meta.title || "";
+      const card = document.createElement("div");
+      card.className = "oc-perm";
+      card.dataset.permId = rid;
+      card.innerHTML = `
+        <div class="oc-perm-head">△ ${esc(permType)} permission</div>
+        <div class="oc-perm-body">
+          ${meta.description ? `<p class="oc-perm-desc">${esc(meta.description)}</p>` : ""}
+        </div>`;
+      const bodyBox = card.querySelector(".oc-perm-body");
+      if (meta.diff) {
+        bodyBox.appendChild(ocDiffBlock(meta.diff));
+        bodyBox.lastChild.classList.add("oc-diff");
+      } else if (body) {
+        const pre = document.createElement("div");
+        pre.className = "oc-tool-out";
+        pre.textContent = body;
+        bodyBox.appendChild(pre);
+      }
+      const btns = document.createElement("div");
+      btns.className = "oc-perm-btns";
+      [["once", "y", "allow once", "oc-yes"], ["always", "a", "always this session", "oc-yes"], ["reject", "n", "reject", "oc-no"]].forEach(([resp, key, label, cls]) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "oc-perm-btn " + cls;
+        b.innerHTML = `<b>${key})</b>${esc(label)}`;
+        b.addEventListener("click", () => agentReply(rid, resp, b));
+        btns.appendChild(b);
+      });
+      bodyBox.appendChild(btns);
+      if (elOcScreen) elOcScreen.appendChild(card);
+      ocScroll();
+      ocRenderStatus();
+      return card;
     }
-    if (elInput) {
-      elInput.addEventListener("keydown", (e) => {
+
+    async function agentPollPermissions() {
+      if (!agent.enabled || !agent.sessionID) return;
+      try {
+        const d = await fetchJSON("/api/agent/permission");
+        const reqs = Array.isArray(d) ? d : (d.requests || []);
+        // include subagent sessions — their permission requests belong to
+        // this turn too and must be approvable from here
+        reqs.forEach((r) => {
+          const rid = r.id || r.requestID;
+          if (!rid || document.querySelector(`.oc-perm[data-perm-id="${rid}"]`)) return;
+          ocPermCard(r);
+        });
+      } catch (_) { /* agent server may be mid-restart */ }
+    }
+
+    async function agentEnsureSession() {
+      if (agent.sessionID) return agent.sessionID;
+      const d = await postJSON("/api/agent/session/new", {});
+      const sid = d.id;
+      if (!sid) throw new Error(d.error || "could not create agent session");
+      agent.sessionID = sid;
+      // start permission polling while a session is active
+      if (!agent.pollTimer) {
+        agent.pollTimer = setInterval(() => {
+          if (agent.busy) agentPollPermissions();
+        }, 2000);
+      }
+      return sid;
+    }
+
+    // ── live event stream (SSE) from opencode ──────────────────────
+    agent.es = null;
+    agent.onEvent = null;
+
+    function agentEvents() {
+      if (agent.es) return agent.es;
+      try {
+        const es = new EventSource("/api/agent/events");
+        es.onmessage = (ev) => {
+          if (!agent.onEvent) return;
+          let d = null;
+          try { d = JSON.parse(ev.data); } catch (_) { return; }
+          agent.onEvent(d);
+        };
+        es.onerror = () => { /* EventSource auto-reconnects */ };
+        agent.es = es;
+      } catch (_) { agent.es = null; }
+      return agent.es;
+    }
+
+    // ── agent prompt pipeline (terminal) ────────────────────────────
+    function ocClearInput() {
+      if (elOcInput) { elOcInput.value = ""; elOcInput.style.height = "auto"; }
+      ocUpdateModeNote("");
+      ocPopupHide();
+    }
+
+    function ocUpdateModeNote(val) {
+      const v = (val != null ? val : (elOcInput ? elOcInput.value : "")).trim();
+      if (!elOcNote || !elOcMark) return;
+      if (v.startsWith("/")) { elOcNote.textContent = "command"; elOcNote.className = "oc-mode-note"; elOcMark.textContent = "/"; }
+      else if (v.startsWith("!")) { elOcNote.textContent = "shell"; elOcNote.className = "oc-mode-note oc-shell"; elOcMark.textContent = "!"; }
+      else { elOcNote.textContent = "build"; elOcNote.className = "oc-mode-note"; elOcMark.textContent = "❯"; }
+    }
+
+    async function ocShell(command) {
+      if (!command) return;
+      if (agent.busy) { ocLine("a task is already running — press esc to abort", "oc-muted"); return; }
+      ocLine(command, "oc-echo");
+      try {
+        const sid = await agentEnsureSession();
+        agent.busy = true;
+        ocSetState("busy");
+        const d = await postJSON("/api/agent/shell", { sessionID: sid, command });
+        const res = d.result || {};
+        const parts = res.parts || [];
+        let out = "";
+        parts.forEach((p) => {
+          const t = p.type || "";
+          if (t === "tool" || t.startsWith("tool")) {
+            const st = p.state || {};
+            if (st.output != null && typeof st.output !== "object") out += st.output;
+            if (st.error) out += (out ? "\n" : "") + st.error;
+          } else if (t === "text" && p.text) {
+            out += (out ? "\n" : "") + p.text;
+          }
+        });
+        if (String(out).trim()) ocBlock(out);
+        else ocLine("(no output)", "oc-muted");
+      } catch (err) {
+        ocLine("shell error: " + err.message, "oc-error");
+        ocSetState("error");
+      } finally {
+        agent.busy = false;
+        if (!document.querySelector(".oc-perm:not(.oc-approved):not(.oc-denied)")) ocSetState("idle");
+        ocRenderStatus();
+      }
+    }
+
+    async function ocAbort() {
+      if (!agent.sessionID) { ocLine("no active session", "oc-muted"); return; }
+      if (!agent.busy) { ocLine("nothing running", "oc-muted"); return; }
+      // detach the live event handlers immediately so the UI stops waiting
+      agent.onEvent = null;
+      try {
+        await postJSON("/api/agent/session/abort", { sessionID: agent.sessionID });
+        ocLine("aborted", "oc-warn");
+      } catch (err) {
+        ocLine("abort failed: " + err.message, "oc-error");
+      }
+      // force-finish the pending turn locally even if the server is slow
+      // to confirm: clear any open permission cards and reset the state
+      document.querySelectorAll(".oc-perm:not(.oc-approved):not(.oc-denied)").forEach((el) => {
+        el.classList.add("oc-denied");
+        const btns = el.querySelector(".oc-perm-btns");
+        if (btns) btns.innerHTML = '<span class="oc-perm-note">cancelled</span>';
+      });
+      agent.busy = false;
+      ocSetState("idle");
+      agentUpdateStats();
+    }
+
+    async function ocRunCommand(raw) {
+      const trimmed = raw.trim();
+      const sp = trimmed.indexOf(" ");
+      const cmd = (sp === -1 ? trimmed : trimmed.slice(0, sp)).toLowerCase();
+      ocLine(trimmed, "oc-echo");
+      const model = elAgentModel ? elAgentModel.value : "";
+      const need = () => agent.sessionID || agentEnsureSession();
+      try {
+        switch (cmd) {
+          case "/help":
+            ocHelpModal();
+            break;
+          case "/new":
+          case "/clear":
+            ocToolEls.clear();
+            ocBootScreen(false);
+            ocLine("new session — type a prompt to begin", "oc-info");
+            break;
+          case "/sessions":
+          case "/resume":
+          case "/continue":
+            ocSessionsModal();
+            break;
+          case "/undo": {
+            const d = await postJSON("/api/agent/session/revert", { sessionID: await need() });
+            ocLine("undid last message — file changes reverted (git)", "oc-ok");
+            break;
+          }
+          case "/redo": {
+            await postJSON("/api/agent/session/unrevert", { sessionID: await need() });
+            ocLine("redone", "oc-ok");
+            break;
+          }
+          case "/compact":
+          case "/summarize": {
+            ocLine("compacting session context…", "oc-info");
+            await postJSON("/api/agent/session/summarize", { sessionID: await need(), model });
+            ocLine("session compacted", "oc-ok");
+            break;
+          }
+          case "/share": {
+            const d = await postJSON("/api/agent/session/share", { sessionID: await need() });
+            const s = d.session || {};
+            const url = s.share || (s.share && s.share.url) || "";
+            ocLine("shared: " + (url || "(no url returned — is sharing configured?)"), "oc-ok");
+            break;
+          }
+          case "/unshare": {
+            await postJSON("/api/agent/session/unshare", { sessionID: await need() });
+            ocLine("session unshared", "oc-ok");
+            break;
+          }
+          case "/init": {
+            ocLine("analyzing project, writing AGENTS.md…", "oc-info");
+            await postJSON("/api/agent/session/init", { sessionID: await need(), model });
+            ocLine("AGENTS.md created", "oc-ok");
+            break;
+          }
+          case "/abort":
+            await ocAbort();
+            break;
+          case "/models":
+            if (elAgentModel) {
+              elAgentModel.focus();
+              ocLine("model picker focused in the side panel — it applies to the next message", "oc-info");
+            }
+            break;
+          case "/exit":
+          case "/quit":
+          case "/q":
+            ocLine("opencode is the only assistant — nothing to exit to", "oc-muted");
+            break;
+          default:
+            ocLine("unknown command: " + cmd + " — try /help", "oc-error");
+        }
+      } catch (err) {
+        ocLine("error: " + err.message, "oc-error");
+      }
+    }
+
+    // ── modals (sessions, help) ─────────────────────────────────────
+    function ocModalOpen(title, bodyEl) {
+      if (!elOcOverlay || !elOcModal) return;
+      elOcModal.innerHTML = "";
+      const head = document.createElement("div");
+      head.className = "oc-modal-head";
+      head.innerHTML = `<span>${esc(title)}</span><button class="oc-modal-x" type="button">✕</button>`;
+      head.querySelector(".oc-modal-x").addEventListener("click", ocModalClose);
+      const body = document.createElement("div");
+      body.className = "oc-modal-body";
+      if (bodyEl) body.appendChild(bodyEl);
+      elOcModal.appendChild(head);
+      elOcModal.appendChild(body);
+      elOcOverlay.hidden = false;
+    }
+
+    function ocModalClose() { if (elOcOverlay) elOcOverlay.hidden = true; }
+
+    function ocHelpModal() {
+      const wrap = document.createElement("div");
+      wrap.style.padding = "6px 4px";
+      const head = document.createElement("div");
+      head.className = "oc-help-cmd";
+      head.innerHTML = `<b>command</b><span>what it does</span>`;
+      head.style.opacity = "0.5";
+      wrap.appendChild(head);
+      OC_COMMANDS.forEach((c) => {
+        const row = document.createElement("div");
+        row.className = "oc-help-cmd";
+        row.innerHTML = `<b>${esc(c.cmd)}${c.alias ? ` <i style="color:var(--oc-muted)">${esc(c.alias)}</i>` : ""}</b><span>${esc(c.desc)}</span>`;
+        wrap.appendChild(row);
+      });
+      const extra = document.createElement("div");
+      extra.className = "oc-help-cmd";
+      extra.style.marginTop = "10px";
+      extra.innerHTML = `<b>@file</b><span>fuzzy-search files and attach to the prompt</span>`;
+      wrap.appendChild(extra);
+      const extra2 = document.createElement("div");
+      extra2.className = "oc-help-cmd";
+      extra2.innerHTML = `<b>!command</b><span>run a shell command on the gateway</span>`;
+      wrap.appendChild(extra2);
+      ocModalOpen("opencode — help", wrap);
+    }
+
+    async function ocSessionsModal() {
+      const wrap = document.createElement("div");
+      wrap.innerHTML = `<div class="oc-modal-empty">loading sessions…</div>`;
+      ocModalOpen("sessions — click to continue one", wrap);
+      try {
+        const d = await fetchJSON("/api/agent/session");
+        const sessions = Array.isArray(d) ? d : (d.sessions || []);
+        wrap.innerHTML = "";
+        if (!sessions.length) {
+          wrap.innerHTML = `<div class="oc-modal-empty">no sessions yet — send a prompt first</div>`;
+          return;
+        }
+        sessions.sort((a, b) => {
+          const at = (a.time && (a.time.updated || a.time.created)) || 0;
+          const bt = (b.time && (b.time.updated || b.time.created)) || 0;
+          return bt - at;
+        });
+        sessions.forEach((s) => {
+          const row = document.createElement("div");
+          row.className = "oc-sess" + (s.id === agent.sessionID ? " oc-sel" : "");
+          const raw = (s.time && (s.time.updated || s.time.created)) || null;
+          let when = "";
+          if (raw) {
+            const ms = typeof raw === "number" && String(raw).length === 10 ? raw * 1000 : raw;
+            when = new Date(typeof ms === "number" ? ms : Date.parse(ms)).toLocaleString();
+          }
+          const title = s.title || s.id;
+          row.innerHTML = `
+            <span class="oc-sess-title">${s.id === agent.sessionID ? "<b>● </b>" : ""}${esc(String(title).slice(0, 70))}</span>
+            <span class="oc-sess-time">${esc(when)}</span>`;
+          const del = document.createElement("button");
+          del.type = "button";
+          del.className = "oc-sess-act";
+          del.textContent = "delete";
+          del.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            if (!window.confirm("Delete this agent session?")) return;
+            try {
+              await postJSON("/api/agent/session/delete", { sessionID: s.id });
+              row.remove();
+              if (s.id === agent.sessionID) agent.sessionID = null;
+            } catch (err) { ocLine("delete failed: " + err.message, "oc-error"); }
+          });
+          row.appendChild(del);
+          row.addEventListener("click", () => { ocModalClose(); ocLoadSession(s.id); });
+          wrap.appendChild(row);
+        });
+      } catch (err) {
+        wrap.innerHTML = `<div class="oc-modal-empty">${esc(err.message || "failed to load sessions")}</div>`;
+      }
+    }
+
+    async function ocLoadSession(sid) {
+      ocToolEls.clear();
+      if (elOcScreen) elOcScreen.innerHTML = "";
+      agent.sessionID = sid;
+      try {
+        const d = await fetchJSON("/api/agent/session/messages?id=" + encodeURIComponent(sid));
+        const msgs = d.messages || [];
+        if (elOcScreen) elOcScreen.innerHTML = "";
+        if (!msgs.length) { ocLine("(empty session)", "oc-muted"); return; }
+        msgs.forEach((m) => ocRenderHistoryMsg(m.info, m.parts));
+        ocLine("— session restored · " + msgs.length + " messages —", "oc-muted");
+        ocScroll();
+      } catch (err) {
+        ocLine("failed to load session: " + err.message, "oc-error");
+      }
+    }
+
+    function ocRenderHistoryMsg(info, parts) {
+      const role = info && info.role;
+      if (role === "user") {
+        const text = (parts || []).filter((p) => p.type === "text").map((p) => p.text).join("\n");
+        if (text) ocUserMsg(text);
+        return;
+      }
+      if (role !== "assistant") return;
+      const modelLabel = (info && (info.modelID || (info.model && info.model.modelID))) || "";
+      const el = ocAgentMsg(modelLabel);
+      const body = el.querySelector(".oc-msg-body");
+      let anchor = el;
+      (parts || []).forEach((p) => {
+        const t = p.type || "";
+        if (t === "text" && p.text) {
+          body.appendChild(document.createTextNode(p.text));
+        } else if (t === "reasoning") {
+          const rtext = (p.state && p.state.text) || p.text || "";
+          if (rtext) {
+            const th = document.createElement("div");
+            th.className = "oc-thinking";
+            th.textContent = rtext;
+            body.appendChild(th);
+          }
+        } else if (t === "tool" || t.startsWith("tool")) {
+          const entry = ocToolRow(p, anchor);
+          anchor = entry.wrap;
+        }
+      });
+      const tok = (info && info.tokens) || {};
+      const totalTok = (tok.input || 0) + (tok.output || 0) + (tok.reasoning || 0);
+      const tokEl = el.querySelector(".oc-msg-tok-v");
+      if (tokEl && totalTok) tokEl.textContent = totalTok.toLocaleString() + " tokens";
+      if (!body.childNodes.length && anchor === el) el.remove();
+      ocScroll();
+    }
+
+    // ── autocomplete popup (/ commands · @ files) ────────────────────
+    let ocPopupItems = [];
+    let ocPopupSel = 0;
+    let ocPopupKind = null; // "cmd" | "file"
+    let ocPopupToken = "";
+
+    function ocPopupShow(kind, items, token) {
+      if (!elOcPopup || !items.length) { ocPopupHide(); return; }
+      ocPopupItems = items;
+      ocPopupKind = kind;
+      ocPopupToken = token || "";
+      ocPopupSel = 0;
+      ocPopupRender();
+      elOcPopup.hidden = false;
+    }
+
+    function ocPopupRender() {
+      if (!elOcPopup) return;
+      elOcPopup.innerHTML = "";
+      ocPopupItems.forEach((it, i) => {
+        const row = document.createElement("div");
+        row.className = "oc-popup-item" + (i === ocPopupSel ? " oc-sel" : "");
+        if (ocPopupKind === "cmd") {
+          row.innerHTML = `<span class="oc-pop-cmd">${esc(it.cmd)}</span><span class="oc-pop-desc">${esc(it.desc)}</span>` +
+            (it.alias ? `<span class="oc-pop-hint">${esc(it.alias)}</span>` : "");
+        } else {
+          row.innerHTML = `<span class="oc-pop-desc" style="color:var(--oc-text)">${esc(it)}</span>`;
+        }
+        row.addEventListener("mousedown", (e) => { e.preventDefault(); ocPopupPick(i); });
+        elOcPopup.appendChild(row);
+      });
+    }
+
+    function ocPopupHide() {
+      if (!elOcPopup) return;
+      elOcPopup.hidden = true;
+      ocPopupItems = [];
+      ocPopupKind = null;
+      ocPopupToken = "";
+    }
+
+    function ocPopupPick(i) {
+      const it = ocPopupItems[i != null ? i : ocPopupSel];
+      if (!it || !elOcInput) { ocPopupHide(); return; }
+      const val = elOcInput.value;
+      if (ocPopupKind === "cmd") {
+        elOcInput.value = it.cmd + " ";
+      } else {
+        // replace the @token with @path
+        const atIdx = val.lastIndexOf("@");
+        if (atIdx >= 0) elOcInput.value = val.slice(0, atIdx) + "@" + it + " " + val.slice(atIdx + 1 + ocPopupToken.length);
+      }
+      ocPopupHide();
+      elOcInput.focus();
+      ocUpdateModeNote();
+    }
+
+    async function ocMaybePopup() {
+      if (!elOcInput) return;
+      const val = elOcInput.value;
+      if (val.startsWith("/")) {
+        const word = val.split(" ")[0].toLowerCase();
+        const matches = OC_COMMANDS.filter((c) => c.cmd.startsWith(word));
+        ocPopupShow("cmd", matches, word);
+        return;
+      }
+      const atIdx = val.lastIndexOf("@");
+      if (atIdx >= 0) {
+        const after = val.slice(atIdx + 1);
+        if (!after.includes(" ") && after.length <= 60) {
+          if (!after) { ocPopupShow("file", [], ""); return; }
+          try {
+            const d = await fetchJSON("/api/agent/find/file?q=" + encodeURIComponent(after));
+            if (d && d.ok !== false) ocPopupShow("file", d.files || [], after);
+          } catch (_) { ocPopupHide(); }
+          return;
+        }
+      }
+      ocPopupHide();
+    }
+
+    // ── submit ──────────────────────────────────────────────────────
+    function ocSubmit() {
+      if (!elOcInput) return;
+      const text = elOcInput.value.trim();
+      if (!text) return;
+      if (!elOcPopup.hidden) {
+        if (ocPopupKind === "cmd" && OC_COMMANDS.some((c) => c.cmd === text)) {
+          ocPopupHide(); // exact match — run it right away
+        } else {
+          ocPopupPick();
+          return;
+        }
+      }
+      ocClearInput();
+      sendAgentMessage(text);
+    }
+
+    async function sendAgentMessage(text) {
+      text = (text || "").trim();
+      if (!text) return;
+      if (text.startsWith("/")) return ocRunCommand(text);
+      if (text.startsWith("!")) return ocShell(text.slice(1).trim());
+      if (agent.busy) { ocLine("a task is already running — press esc to abort", "oc-muted"); return; }
+
+      ocUserMsg(text);
+      agent.busy = true;
+      ocSetState("busy");
+      const model = elAgentModel ? elAgentModel.value : "";
+
+      let msgEl = null, bodyEl = null, cursorEl = null, fullText = "", lastInfo = null;
+      let watchdog = null;
+      let assistantMsgID = null;
+      let sid = null;
+
+      const ensureMsg = () => {
+        if (msgEl) return;
+        msgEl = ocAgentMsg(model);
+        bodyEl = msgEl.querySelector(".oc-msg-body");
+        cursorEl = document.createElement("span");
+        cursorEl.className = "oc-cursor";
+        bodyEl.appendChild(cursorEl);
+      };
+      const setText = (t) => {
+        ensureMsg();
+        fullText = t || "";
+        while (bodyEl.firstChild && bodyEl.firstChild !== cursorEl) bodyEl.removeChild(bodyEl.firstChild);
+        bodyEl.insertBefore(document.createTextNode(fullText), cursorEl);
+        ocScroll();
+      };
+      const finish = (err) => {
+        agent.onEvent = null;
+        clearTimeout(watchdog);
+        if (cursorEl) cursorEl.remove();
+        if (err) {
+          if (msgEl && !fullText) msgEl.remove();
+          ocLine(String(err), "oc-error");
+          ocSetState("error");
+        } else {
+          if (msgEl && lastInfo) {
+            const tok = lastInfo.tokens || {};
+            const total = (tok.input || 0) + (tok.output || 0) + (tok.reasoning || 0);
+            const tokEl = msgEl.querySelector(".oc-msg-tok-v");
+            if (tokEl && total) tokEl.textContent = total.toLocaleString() + " tokens";
+          }
+          if (!msgEl && ocToolEls.size === 0) ocLine("(agent finished)", "oc-muted");
+          ocSetState("idle");
+          agent.msgs += 1;
+          // authoritative usage: opencode tracks cumulative session totals
+          if (sid) {
+            fetchJSON("/api/agent/session?id=" + encodeURIComponent(sid)).then((s) => {
+              const t = s.tokens || {};
+              agent.tokens = (t.input || 0) + (t.output || 0) + (t.reasoning || 0)
+                + (t.cache && (t.cache.read || 0) || 0) + (t.cache && (t.cache.write || 0) || 0);
+              agent.cost = s.cost || 0;
+              agentUpdateStats();
+            }).catch(() => {
+              // fallback: accumulate from the last event we saw
+              const tok = (lastInfo && lastInfo.tokens) || {};
+              agent.tokens += (tok.input || 0) + (tok.output || 0) + (tok.reasoning || 0);
+              agent.cost += (lastInfo && lastInfo.cost) || 0;
+              agentUpdateStats();
+            });
+          } else {
+            const tok = (lastInfo && lastInfo.tokens) || {};
+            agent.tokens += (tok.input || 0) + (tok.output || 0) + (tok.reasoning || 0);
+            agent.cost += (lastInfo && lastInfo.cost) || 0;
+            agentUpdateStats();
+          }
+        }
+        agent.busy = false;
+        agentUpdateStats();
+      };
+
+      bumpWatchdog();
+      function bumpWatchdog() {
+        clearTimeout(watchdog);
+        watchdog = setTimeout(async () => {
+          if (!agent.busy) return;
+          // a pending permission request means the agent is waiting on the
+          // user, not stuck — keep waiting as long as approvals are pending
+          // (any session: subagent requests count too)
+          try {
+            // recover any permission card lost to an SSE gap: re-render
+            // pending requests that have no card in the terminal yet
+            await agentPollPermissions();
+            const d = await fetchJSON("/api/agent/permission");
+            const pending = (Array.isArray(d) ? d : (d.requests || []))
+              .filter((r) => !document.querySelector(`.oc-perm[data-perm-id="${r.id}"].oc-denied, .oc-perm[data-perm-id="${r.id}"].oc-approved`));
+            if (pending.length) { bumpWatchdog(); return; }
+          } catch (_) { /* proceed to timeout */ }
+          finish("Timed out waiting for agent events (is tuxwall-agent.service healthy?). Check: journalctl -u tuxwall.service -t -n 50 | grep agent");
+        }, 180000);
+      }
+
+      try {
+        sid = await agentEnsureSession();
+        agentEvents();
+        agent.onEvent = (ev) => {
+          if (!agent.busy) return; // aborted — ignore stale events
+          const props = ev.properties || {};
+          const type = ev.type;
+          if (type === "permission.asked") {
+            // permission requests always render, even from subagent
+            // sessions (they carry their own sessionID) — filtering on
+            // sessionID here made prompts invisible and hung the turn
+            bumpWatchdog();
+            const r = props;
+            const rid = r.id || r.requestID;
+            if (rid && !document.querySelector(`.oc-perm[data-perm-id="${rid}"]`)) ocPermCard(r);
+            return;
+          }
+          if (props.sessionID !== sid) return;
+          if (type === "message.updated") {
+            const info = props.info || {};
+            if (info.role === "assistant") { lastInfo = info; assistantMsgID = info.id; }
+            if (info.error) finish("Agent error: " + (info.error.message || JSON.stringify(info.error)));
+          } else if (type === "message.part.updated") {
+            const part = props.part || {};
+            if (part.messageID && assistantMsgID && part.messageID !== assistantMsgID) return;
+            const pt = part.type || "";
+            if (pt === "text") {
+              bumpWatchdog();
+              setText(part.text || "");
+            } else if (pt === "reasoning") {
+              bumpWatchdog();
+            } else if (pt === "tool" || pt.startsWith("tool")) {
+              bumpWatchdog();
+              ocToolRow(part, msgEl);
+            }
+          } else if (type === "message.part.delta") {
+            if (props.messageID && assistantMsgID && props.messageID !== assistantMsgID) return;
+            bumpWatchdog();
+            if (props.field === "text" && props.delta) setText(fullText + props.delta);
+          } else if (type === "session.idle") {
+            finish();
+          }
+        };
+
+        const d = await postJSON("/api/agent/message", { sessionID: sid, text, model });
+        if (!d.async) {
+          // server fell back to blocking mode: response is the final message
+          agent.onEvent = null;
+          clearTimeout(watchdog);
+          if (msgEl) msgEl.remove();
+          const parts = d.parts || [];
+          const el = ocAgentMsg(model);
+          const body = el.querySelector(".oc-msg-body");
+          let anchor = el;
+          parts.forEach((p) => {
+            const pt = p.type || "";
+            if (pt === "text" && p.text) body.appendChild(document.createTextNode(p.text));
+            else if (pt === "tool" || pt.startsWith("tool")) anchor = ocToolRow(p, anchor).wrap;
+          });
+          const tok = d.tokens || {};
+          const total = (tok.input || 0) + (tok.output || 0) + (tok.reasoning || 0);
+          const tokEl = el.querySelector(".oc-msg-tok-v");
+          if (tokEl && total) tokEl.textContent = total.toLocaleString() + " tokens";
+          agent.tokens += total;
+          agent.cost += d.cost || 0;
+          agent.msgs += 1;
+          agent.busy = false;
+          ocSetState("idle");
+          agentUpdateStats();
+        }
+      } catch (err) {
+        finish(err.message + (err.detail ? "\n" + err.detail : ""));
+      }
+    }
+
+    // ── terminal event bindings ─────────────────────────────────────
+    if (elAgentNewSess) {
+      elAgentNewSess.addEventListener("click", () => {
+        ocToolEls.clear();
+        ocBootScreen(false);
+        ocLine("new session — type a prompt to begin", "oc-info");
+        if (elOcInput) elOcInput.focus();
+      });
+    }
+    if (elAgentSessBtn) elAgentSessBtn.addEventListener("click", () => ocSessionsModal());
+    if (elOcSend) elOcSend.addEventListener("click", ocSubmit);
+    if (elOcOverlay) elOcOverlay.addEventListener("click", (e) => { if (e.target === elOcOverlay) ocModalClose(); });
+    if (elAgentModel) {
+      elAgentModel.addEventListener("change", () => {
+        agent.model = elAgentModel.value;
+        try { localStorage.setItem("tuxwall.agent.model", elAgentModel.value); } catch (_) {}
+        ocLine("model → " + (elAgentModel.value || "default"), "oc-muted");
+        ocRenderStatus();
+      });
+    }
+    if (elOcInput) {
+      elOcInput.addEventListener("keydown", (e) => {
+        if (!elOcPopup || !elOcPopup.hidden) {
+          if (e.key === "ArrowDown") { e.preventDefault(); ocPopupSel = Math.min(ocPopupSel + 1, ocPopupItems.length - 1); ocPopupRender(); return; }
+          if (e.key === "ArrowUp") { e.preventDefault(); ocPopupSel = Math.max(ocPopupSel - 1, 0); ocPopupRender(); return; }
+          if (e.key === "Tab") { e.preventDefault(); ocPopupPick(); return; }
+          if (e.key === "Escape") { e.preventDefault(); ocPopupHide(); return; }
+        }
         if (e.key === "Enter" && !e.shiftKey) {
           e.preventDefault();
-          sendMessage(elInput.value);
+          ocSubmit();
+          return;
         }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          if (!elOcOverlay || elOcOverlay.hidden) {
+            if (agent.busy) ocAbort();
+          } else {
+            ocModalClose();
+          }
+          return;
+        }
+        if (e.key === "c" && e.ctrlKey) { e.preventDefault(); ocPopupHide(); return; }
       });
-      elInput.addEventListener("input", () => {
-        elInput.style.height = "auto";
-        elInput.style.height = Math.min(elInput.scrollHeight, 180) + "px";
-      });
-    }
-    if (elClearBtn) {
-      elClearBtn.addEventListener("click", () => {
-        aiState.messages = [];
-        aiState.inputTokens = 0;
-        aiState.outputTokens = 0;
-        const bar = document.getElementById("ai-usage-bar");
-        if (bar) bar.innerHTML = "";
-        elMessages.innerHTML = "";
-        const welcome = document.createElement("div");
-        welcome.className = "ai-welcome";
-        welcome.innerHTML = elMessages.closest("#view-ai").querySelector(".ai-welcome") ? "" :
-          `<div class="ai-welcome-icon"><svg viewBox="0 0 24 24"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.38-1 1.73V7h2a7 7 0 0 1 7 7v1a3 3 0 0 1-2 2.83V19a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2.17A3 3 0 0 1 2 14v-1a7 7 0 0 1 7-7h2V5.73A2 2 0 0 1 10 4a2 2 0 0 1 2-2zm-3 9a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm6 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/></svg></div><h2>TuxWall AI Assistant</h2><p>Chat cleared. Ask me anything.</p>`;
-        elMessages.appendChild(welcome);
+      elOcInput.addEventListener("input", () => {
+        elOcInput.style.height = "auto";
+        elOcInput.style.height = Math.min(elOcInput.scrollHeight, 180) + "px";
+        ocUpdateModeNote();
+        ocMaybePopup();
       });
     }
 
-    // Suggestion chips
-    elMessages.addEventListener("click", (e) => {
-      const s = e.target.closest(".ai-suggestion");
-      if (s) sendMessage(s.textContent);
-    });
-
-    // Model loading is now handled in switchView() when view === "ai"
+    // opencode is the only AI assistant — expose enable hook for switchView()
+    window.__tuxwallAgentEnable = agentSetEnabled;
   })();
 
   function init() {
@@ -5995,7 +6790,6 @@
     bindSystemBackups();
     bindWireguardActions();
     bindFirewallActions();
-    bindAiSummary();
     bindSecurityBans();
     bindCustomBlocklist();
     bindSettings();

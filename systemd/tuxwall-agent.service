@@ -1,0 +1,25 @@
+[Unit]
+Description=TuxWall opencode agent server
+Documentation=https://opencode.ai
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tuxwall-agent
+Group=tuxwall-agent
+WorkingDirectory=/var/www/html
+Environment=OPENCODE_CONFIG=/etc/tuxwall/opencode.json
+ExecStart=/home/tuxwall-agent/.opencode/bin/opencode serve --port 4096 --hostname 127.0.0.1
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=false
+ProtectHome=false
+# OPENCODE_SERVER_PASSWORD is NOT stored here. The installer writes it into
+# a root-only drop-in: /etc/systemd/system/tuxwall-agent.service.d/password.conf
+# The dashboard API gets the same token via tuxwall.service.d/agent-password.conf.
+
+[Install]
+WantedBy=multi-user.target

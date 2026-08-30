@@ -43,7 +43,7 @@ tuxwall is a web-based network dashboard that provides visibility and control ov
 - **WireGuard VPN** management
 - **IPv6 router advertisements** (via radvd)
 - **SQM / traffic shaping** (via CAKE qdisc)
-- **AI-assisted firewall suggestions** (optional, via LLM integration)
+- **AI assistant** (built-in [opencode](https://opencode.ai) agent with shell + file access, permission-gated, local or hosted models)
 
 ---
 
@@ -322,7 +322,21 @@ sudo cp config/llm.json.example /etc/tuxwall/llm.json
 sudo cp config/custom-blocklist.txt /etc/tuxwall/custom-blocklist.txt
 ```
 
-Edit `/etc/tuxwall/llm.json` if you want to enable the AI assistant feature (requires an OpenAI-compatible API key or a local LLM endpoint).
+Edit `/etc/tuxwall/llm.json` if you want to enable AI security summaries (requires an OpenAI-compatible API key or a local LLM endpoint).
+
+### AI assistant (opencode agent)
+
+The dashboard's AI Assistant page is powered by an embedded **opencode** agent
+(`tuxwall-agent.service` on `127.0.0.1:4096`). The installer sets it up
+automatically via `scripts/setup-opencode-agent.sh` — it also works standalone:
+
+```bash
+sudo bash scripts/setup-opencode-agent.sh config/opencode.json systemd/tuxwall-agent.service
+```
+
+Models and the bash permission allowlist live in `/etc/tuxwall/opencode.json`
+(local Ollama models are preconfigured — adjust the `baseURL` to your network).
+Every command or file edit requires your approval in the dashboard before it runs.
 
 ---
 

@@ -1186,6 +1186,44 @@ def build_interfaces():
     return {"ok": True, "interfaces": interfaces}
 
 
+_FW_IFACE_RE = re.compile(r"\bon\s+(\S+)")
+_FW_PORT_PROTO_RE = re.compile(r"(\d+(?:[:,-]\d+)*)\s*/\s*(tcp6|udp6|tcp|udp|tcp\|udp|ah|esp|gre|ipv6|igmp|sctp)\s*$", re.IGNORECASE)
+
+
+def _parse_rule_side(text):
+    """Parse one side of a ufw rule ('Anywhere on enp3s0', '10.0.0.0/24',
+    '80,443/tcp') into structured fields for the advanced firewall UI."""
+    text = (text or "").strip()
+    iface = None
+    m = _FW_IFACE_RE.search(text)
+    if m:
+        iface = m.group(1)
+        text = (text[:m.start()] + " " + text[m.end():]).strip()
+    v6 = "(v6)" in text
+    text = text.replace(" (v6)", "").replace("(v6)", "").strip()
+    port = None
+    proto = None
+    m = _FW_PORT_PROTO_RE.search(text)
+    if m:
+        port = m.group(1)
+        proto = m.group(2).lower()
+        text = text[:m.start()].strip()
+    elif text and re.fullmatch(r"\d+([:,]\d+)*", text):
+        # bare port list e.g. '53' or '80,443'
+        port = text
+        text = ""
+    if text == "Anywhere":
+        text = "any"
+    # '10.0.0.5 53' style (destination host + port)
+    m = re.match(r"^(\S+)\s+(\d+(?:[:,-]\d+)*)$", text)
+    if m and m.group(1) != "any":
+        text = m.group(1)
+        if not port:
+            port = m.group(2)
+    return {"addr": text or "any", "iface": iface, "port": port,
+            "proto": proto, "v6": v6}
+
+
 def build_firewall():
     try:
         proc = subprocess.run(
@@ -1197,11 +1235,21 @@ def build_firewall():
     if proc.returncode != 0:
         return {"ok": False, "error": (proc.stderr or "ufw failed").strip()}
 
+    # "Default:" and "Logging:" lines only appear in verbose output
+    try:
+        vproc = subprocess.run(
+            ["ufw", "status", "verbose"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        vproc = None
+
     status = ""
     logging_state = ""
     defaults = {}
     rules = []
-    for line in proc.stdout.splitlines():
+    for line in ((vproc.stdout if vproc and vproc.returncode == 0 else "")
+                 + "\n" + proc.stdout).splitlines():
         ls = line.strip()
         if not ls:
             continue
@@ -1223,11 +1271,25 @@ def build_firewall():
                 if m:
                     num = int(m.group(1))
                     to = m.group(2).strip()
+                action_words = parts[1].split()
+                from_text = " ".join(parts[2:]).strip()
+                src = _parse_rule_side(from_text)
+                dst = _parse_rule_side(to)
                 rules.append({
                     "number": num,
                     "to": to,
-                    "action": " ".join(parts[1].split()),
-                    "from": " ".join(parts[2:]).strip(),
+                    "action": " ".join(action_words),
+                    "from": from_text,
+                    # structured fields for the advanced UI
+                    "verb": action_words[0].upper(),
+                    "direction": (action_words[1].upper()
+                                  if len(action_words) > 1 else None),
+                    "iface": dst["iface"] or src["iface"],
+                    "proto": dst["proto"] or src["proto"],
+                    "port": dst["port"] or src["port"],
+                    "src": src["addr"],
+                    "dst": dst["addr"],
+                    "v6": src["v6"] or dst["v6"],
                 })
 
     traffic = {"allow": 0, "block": 0, "top_sources": [], "top_ports": [], "recent": []}
@@ -1310,6 +1372,37 @@ def delete_firewall_rule(number):
     if num < 1:
         raise RuntimeError("Invalid rule number")
     _ufw(["--force", "delete", str(num)])
+    return build_firewall()
+
+
+_UFW_POLICIES = ("allow", "deny", "reject")
+_UFW_LOG_LEVELS = ("off", "on", "low", "medium", "high", "full")
+
+
+def set_firewall_enabled(enabled):
+    """Enable or disable the ufw firewall."""
+    _ufw(["--force", "enable" if enabled else "disable"])
+    return build_firewall()
+
+
+def set_firewall_default(direction, policy):
+    """Set a default policy: `ufw default <policy> <direction>`."""
+    direction = (direction or "").lower()
+    policy = (policy or "").lower()
+    if direction not in ("incoming", "outgoing", "routed"):
+        raise RuntimeError("Invalid direction (incoming/outgoing/routed)")
+    if policy not in _UFW_POLICIES:
+        raise RuntimeError("Invalid policy (allow/deny/reject)")
+    _ufw(["default", policy, direction])
+    return build_firewall()
+
+
+def set_firewall_logging(level):
+    """Set ufw log level: off/on/low/medium/high/full."""
+    level = (level or "").lower()
+    if level not in _UFW_LOG_LEVELS:
+        raise RuntimeError("Invalid logging level")
+    _ufw(["logging", level])
     return build_firewall()
 
 
@@ -5513,7 +5606,132 @@ def tail_log(source, lines, priority):
     return {"ok": True, "source": source, "lines": n, "content": out}
 
 
+class AgentError(RuntimeError):
+    """Error talking to the opencode agent server, with upstream detail."""
+
+    def __init__(self, message, status=0, body=""):
+        super().__init__(message)
+        self.status = status
+        self.body = body
+
+
 class Handler(BaseHTTPRequestHandler):
+
+    # ── opencode agent proxy ────────────────────────────────────────────
+    AGENT_BASE = "http://127.0.0.1:4096"
+    AGENT_PASSWORD = os.environ.get("TUXWALL_AGENT_PASSWORD", "")
+
+    def _agent_ok(self):
+        return True
+
+    def _agent_log(self, msg):
+        """Log an agent-proxy event to stderr -> journald (journalctl -u tuxwall.service)."""
+        import sys as _sys
+        print("[agent] {} {}".format(time.strftime("%Y-%m-%d %H:%M:%S"), msg), file=_sys.stderr, flush=True)
+
+    def _agent_call(self, method, path, payload=None, timeout=30):
+        """Forward a request to the local opencode server (HTTP basic auth).
+
+        Returns parsed JSON. On failure raises AgentError carrying the
+        upstream status code and response body so callers can log and
+        display the real cause.
+        """
+        url = self.AGENT_BASE + path
+        data = json.dumps(payload).encode() if payload is not None else None
+        headers = {"Content-Type": "application/json"}
+        if self.AGENT_PASSWORD:
+            import base64
+            tok = base64.b64encode(
+                ("opencode:" + self.AGENT_PASSWORD).encode()).decode()
+            headers["Authorization"] = "Basic " + tok
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", "replace")
+                status = resp.status
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            try:
+                body = exc.read().decode("utf-8", "replace")
+            except Exception:
+                body = ""
+            self._agent_log("HTTP {} {} {} -> {} body={}".format(
+                method, path, status, exc.reason, body[:2000]))
+            detail = body.strip()
+            if not detail:
+                detail = str(exc.reason or "no response body")
+            raise AgentError("opencode returned HTTP {}: {}".format(status, detail[:2000]),
+                             status=status, body=detail[:2000])
+        except urllib.error.URLError as exc:
+            self._agent_log("HTTP {} {} -> unreachable: {}".format(method, path, exc.reason))
+            raise AgentError(
+                "opencode server unreachable at {} ({}). Is tuxwall-agent.service running?".format(
+                    url, exc.reason),
+                status=0, body=str(exc.reason))
+        except socket.timeout:
+            self._agent_log("HTTP {} {} -> timeout after {}s".format(method, path, timeout))
+            raise AgentError(
+                "opencode timed out after {}s on {} {}".format(timeout, method, path),
+                status=0, body="timeout")
+        self._agent_log("HTTP {} {} -> {} len={}".format(
+            method, path, status, len(body or "")))
+        try:
+            return json.loads(body or "{}")
+        except ValueError as exc:
+            self._agent_log("HTTP {} {} -> non-JSON response: {}".format(
+                method, path, body[:500]))
+            raise AgentError("opencode returned invalid JSON ({}): {}".format(
+                exc, body[:500]), status=status, body=body[:2000])
+
+    def _agent_error(self, exc):
+        """Build a structured error payload from an AgentError (or any exception)."""
+        if isinstance(exc, AgentError):
+            return {
+                "ok": False,
+                "error": str(exc),
+                "status": exc.status,
+                "detail": exc.body[:2000],
+                "hint": "see: journalctl -u tuxwall.service -t -n 50 | grep agent",
+            }
+        return {
+            "ok": False,
+            "error": str(exc),
+            "hint": "see: journalctl -u tuxwall.service -t -n 50 | grep agent",
+        }
+
+    def _agent_events_sse(self):
+        """Proxy opencode's /event SSE stream to the browser, live."""
+        import base64
+        url = self.AGENT_BASE + "/event"
+        headers = {"Accept": "text/event-stream"}
+        if self.AGENT_PASSWORD:
+            tok = base64.b64encode(
+                ("opencode:" + self.AGENT_PASSWORD).encode()).decode()
+            headers["Authorization"] = "Basic " + tok
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            upstream = urllib.request.urlopen(req, timeout=None)
+        except Exception as exc:
+            self._send(502, {"ok": False, "error": "agent event stream unavailable: %s" % exc})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        try:
+            for raw in upstream:
+                self.wfile.write(raw if isinstance(raw, bytes) else raw.encode())
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # browser closed the stream
+        finally:
+            try:
+                upstream.close()
+            except Exception:
+                pass
+            self.close_connection = True
+
     def _send(self, code, payload):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(code)
@@ -5552,6 +5770,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
+        if path == "/api/agent/events":
+            identity = _session_identity(self.headers)
+            if identity is None:
+                self._send(401, {"ok": False, "error": "Authentication required"})
+                return
+            self._agent_events_sse()
+            return
         if path == "/api/auth/session":
             self._send(200, auth_session_state(_session_identity(self.headers)))
             return
@@ -5593,6 +5818,100 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, ai_security_summary(model))
         elif path == "/api/security/suricata":
             self._send(200, build_suricata())
+        elif path == "/api/agent/models":
+            try:
+                data = self._agent_call("GET", "/config/providers", timeout=10)
+                models = []
+                for p in (data.get("providers") or []):
+                    pid = p.get("id")
+                    for mid in (p.get("models") or {}):
+                        models.append({
+                            "id": pid + "/" + mid,
+                            "provider": pid,
+                            "model": mid,
+                            "name": ((p.get("models") or {}).get(mid) or {}).get("name") or mid,
+                        })
+                configured = ""
+                try:
+                    conf = self._agent_call("GET", "/config", timeout=10)
+                    configured = conf.get("model") or ""
+                except Exception:
+                    pass
+                self._send(200, {"ok": True, "models": models,
+                                 "default": data.get("default") or {},
+                                 "configured": configured})
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+        elif path == "/api/agent/status":
+            try:
+                health = self._agent_call("GET", "/global/health", timeout=5)
+                self._send(200, {"ok": True, "server": health})
+            except Exception as exc:
+                self._send(200, self._agent_error(exc))
+        elif path == "/api/agent/session":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            session_id = (qs.get("id") or [None])[0]
+            try:
+                if session_id:
+                    data = self._agent_call("GET", "/session/" + urllib.parse.quote(session_id))
+                else:
+                    data = self._agent_call("GET", "/session")
+                self._send(200, data)
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+        elif path == "/api/agent/permission":
+            try:
+                data = self._agent_call("GET", "/permission")
+                self._send(200, data)
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+        elif path == "/api/agent/config":
+            # boot info for the terminal UI: version, cwd, vcs, config
+            out = {"ok": True, "version": "", "directory": "",
+                   "vcs": None, "config": {}, "error": ""}
+            try:
+                health = self._agent_call("GET", "/global/health", timeout=5)
+                out["version"] = (health or {}).get("version") or ""
+            except Exception as exc:
+                out["error"] = str(exc)
+            try:
+                out["config"] = self._agent_call("GET", "/config", timeout=10) or {}
+            except Exception:
+                pass
+            try:
+                out["directory"] = (self._agent_call("GET", "/path", timeout=10) or {}).get("directory") or ""
+            except Exception:
+                pass
+            try:
+                out["vcs"] = self._agent_call("GET", "/vcs", timeout=10)
+            except Exception:
+                out["vcs"] = None
+            self._send(200, out)
+        elif path == "/api/agent/session/messages":
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            session_id = (qs.get("id") or [None])[0]
+            if not session_id:
+                self._send(400, {"ok": False, "error": "id required"})
+                return
+            try:
+                data = self._agent_call(
+                    "GET", "/session/" + urllib.parse.quote(session_id) + "/message")
+                self._send(200, {"ok": True, "messages": data if isinstance(data, list) else []})
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+        elif path == "/api/agent/find/file":
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            query = (qs.get("q") or [""])[0]
+            if not query:
+                self._send(200, {"ok": True, "files": []})
+                return
+            try:
+                data = self._agent_call(
+                    "GET", "/find/file?" + urllib.parse.urlencode({"query": query, "limit": "12"}), timeout=10)
+                files = data if isinstance(data, list) else []
+                self._send(200, {"ok": True, "files": files[:12]})
+            except Exception as exc:
+                self._send(200, {"ok": False, "files": [], **self._agent_error(exc)})
         elif path == "/api/wireguard":
             self._send(200, build_wireguard())
         elif path == "/api/crowdsec":
@@ -5772,8 +6091,14 @@ class Handler(BaseHTTPRequestHandler):
 
         identity = _session_identity(self.headers) if path.startswith("/api/") else None
         if path.startswith("/api/") and identity is None:
-            self._send(401, {"ok": False, "error": "Authentication required"})
-            return
+            # local-only exemption so the systemd timer can trigger updates
+            # without a browser session (loopback callers only)
+            if path == "/api/blocklists/update" and \
+                    _client_key(self) in ("127.0.0.1", "::1"):
+                identity = {"username": "system-timer", "role": "admin", "owner": False}
+            else:
+                self._send(401, {"ok": False, "error": "Authentication required"})
+                return
 
         if path == "/api/auth/password":
             try:
@@ -5987,6 +6312,25 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
 
+        elif path == "/api/firewall/enable":
+            try:
+                self._send(200, set_firewall_enabled(bool(body.get("enabled"))))
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/firewall/default":
+            try:
+                self._send(200, set_firewall_default(
+                    body.get("direction"), body.get("policy")))
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/firewall/logging":
+            try:
+                self._send(200, set_firewall_logging(body.get("level")))
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
         elif path == "/api/crowdsec/ban":
             try:
                 self._send(200, ban_crowdsec_ip(body.get("ip"), body.get("duration")))
@@ -6076,6 +6420,282 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, {"ok": False, "error": str(exc)})
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/agent/status":
+            try:
+                health = self._agent_call("GET", "/global/health", timeout=5)
+                self._send(200, {"ok": True, "server": health})
+            except Exception as exc:
+                self._send(200, self._agent_error(exc))
+
+        elif path == "/api/agent/session":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            session_id = (qs.get("id") or [None])[0]
+            try:
+                if session_id:
+                    data = self._agent_call("GET", "/session/" + urllib.parse.quote(session_id))
+                else:
+                    data = self._agent_call("GET", "/session")
+                self._send(200, data)
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
+        elif path == "/api/agent/models":
+            try:
+                data = self._agent_call("GET", "/config/providers", timeout=10)
+                models = []
+                for p in (data.get("providers") or []):
+                    pid = p.get("id")
+                    for mid in (p.get("models") or {}):
+                        models.append({
+                            "id": pid + "/" + mid,
+                            "provider": pid,
+                            "model": mid,
+                            "name": ((p.get("models") or {}).get(mid) or {}).get("name") or mid,
+                        })
+                configured = ""
+                try:
+                    conf = self._agent_call("GET", "/config", timeout=10)
+                    configured = conf.get("model") or ""
+                except Exception:
+                    pass
+                self._send(200, {"ok": True, "models": models,
+                                 "default": data.get("default") or {},
+                                 "configured": configured})
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
+        elif path == "/api/agent/permission":
+            try:
+                data = self._agent_call("GET", "/permission")
+                self._send(200, data)
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
+        elif path == "/api/agent/session/new":
+            try:
+                data = self._agent_call("POST", "/session", {})
+                if isinstance(data, dict):
+                    data = dict(data)
+                    data.setdefault("ok", True)
+                self._send(200, data)
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
+        elif path == "/api/agent/permission/reply":
+            request_id = (body.get("requestID") or "").strip()
+            reply = (body.get("reply") or body.get("response") or "").strip()
+            if not request_id or reply not in ("once", "always", "reject"):
+                self._send(400, {"ok": False, "error": "requestID and reply (once/always/reject) required"})
+                return
+            try:
+                data = self._agent_call(
+                    "POST",
+                    "/permission/" + urllib.parse.quote(request_id) + "/reply",
+                    {"reply": reply},
+                )
+                self._send(200, data if isinstance(data, dict) else {"ok": True})
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
+        elif path == "/api/agent/message":
+            session_id = (body.get("sessionID") or "").strip()
+            text = (body.get("text") or "").strip()
+            if not session_id or not text:
+                self._send(400, {"ok": False, "error": "sessionID and text required"})
+                return
+            payload = {"parts": [{"type": "text", "text": text}]}
+            model = (body.get("model") or "").strip()
+            if model and "/" in model:
+                provider_id, model_id = model.split("/", 1)
+                payload["model"] = {"providerID": provider_id, "modelID": model_id}
+            try:
+                # async fire-and-forget: the browser follows progress via
+                # /api/agent/events (SSE) instead of waiting for this call
+                self._agent_call(
+                    "POST",
+                    "/session/" + urllib.parse.quote(session_id) + "/prompt_async",
+                    payload,
+                    timeout=30,
+                )
+                self._send(200, {"ok": True, "async": True})
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
+        elif path == "/api/agent/shell":
+            # "!command" passthrough: run a shell command inside the session
+            session_id = (body.get("sessionID") or "").strip()
+            command = (body.get("command") or "").strip()
+            if not session_id or not command:
+                self._send(400, {"ok": False, "error": "sessionID and command required"})
+                return
+            payload = {"agent": "build", "command": command}
+            try:
+                data = self._agent_call(
+                    "POST",
+                    "/session/" + urllib.parse.quote(session_id) + "/shell",
+                    payload, timeout=300)
+                self._send(200, {"ok": True, "result": data})
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
+        elif path == "/api/agent/command":
+            # execute an opencode slash command inside the session
+            session_id = (body.get("sessionID") or "").strip()
+            command = (body.get("command") or "").strip()
+            if not session_id or not command:
+                self._send(400, {"ok": False, "error": "sessionID and command required"})
+                return
+            payload = {"command": command}
+            for key in ("arguments", "messageID", "agent"):
+                if body.get(key):
+                    payload[key] = body[key]
+            model = (body.get("model") or "").strip()
+            if model and "/" in model:
+                provider_id, model_id = model.split("/", 1)
+                payload["model"] = {"providerID": provider_id, "modelID": model_id}
+            try:
+                data = self._agent_call(
+                    "POST",
+                    "/session/" + urllib.parse.quote(session_id) + "/command",
+                    payload, timeout=300)
+                self._send(200, {"ok": True, "result": data})
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
+        elif path == "/api/agent/session/abort":
+            session_id = (body.get("sessionID") or "").strip()
+            if not session_id:
+                self._send(400, {"ok": False, "error": "sessionID required"})
+                return
+            try:
+                data = self._agent_call(
+                    "POST",
+                    "/session/" + urllib.parse.quote(session_id) + "/abort")
+                self._send(200, {"ok": True, "result": data})
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
+        elif path == "/api/agent/session/revert":
+            # /undo — revert the last (or given) message
+            session_id = (body.get("sessionID") or "").strip()
+            if not session_id:
+                self._send(400, {"ok": False, "error": "sessionID required"})
+                return
+            payload = {}
+            if body.get("messageID"):
+                payload["messageID"] = body["messageID"]
+            try:
+                data = self._agent_call(
+                    "POST",
+                    "/session/" + urllib.parse.quote(session_id) + "/revert", payload)
+                self._send(200, {"ok": True, "result": data})
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
+        elif path == "/api/agent/session/unrevert":
+            # /redo — restore reverted messages
+            session_id = (body.get("sessionID") or "").strip()
+            if not session_id:
+                self._send(400, {"ok": False, "error": "sessionID required"})
+                return
+            try:
+                data = self._agent_call(
+                    "POST",
+                    "/session/" + urllib.parse.quote(session_id) + "/unrevert")
+                self._send(200, {"ok": True, "result": data})
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
+        elif path == "/api/agent/session/summarize":
+            # /compact
+            session_id = (body.get("sessionID") or "").strip()
+            if not session_id:
+                self._send(400, {"ok": False, "error": "sessionID required"})
+                return
+            payload = {}
+            model = (body.get("model") or "").strip()
+            if model and "/" in model:
+                provider_id, model_id = model.split("/", 1)
+                payload = {"providerID": provider_id, "modelID": model_id}
+            try:
+                data = self._agent_call(
+                    "POST",
+                    "/session/" + urllib.parse.quote(session_id) + "/summarize", payload,
+                    timeout=300)
+                self._send(200, {"ok": True, "result": data})
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
+        elif path == "/api/agent/session/share":
+            session_id = (body.get("sessionID") or "").strip()
+            if not session_id:
+                self._send(400, {"ok": False, "error": "sessionID required"})
+                return
+            try:
+                data = self._agent_call(
+                    "POST", "/session/" + urllib.parse.quote(session_id) + "/share")
+                self._send(200, {"ok": True, "session": data})
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
+        elif path == "/api/agent/session/unshare":
+            session_id = (body.get("sessionID") or "").strip()
+            if not session_id:
+                self._send(400, {"ok": False, "error": "sessionID required"})
+                return
+            try:
+                data = self._agent_call(
+                    "DELETE", "/session/" + urllib.parse.quote(session_id) + "/share")
+                self._send(200, {"ok": True, "session": data})
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
+        elif path == "/api/agent/session/init":
+            # /init — analyze the project and write AGENTS.md
+            session_id = (body.get("sessionID") or "").strip()
+            if not session_id:
+                self._send(400, {"ok": False, "error": "sessionID required"})
+                return
+            payload = {}
+            model = (body.get("model") or "").strip()
+            if model and "/" in model:
+                provider_id, model_id = model.split("/", 1)
+                payload = {"providerID": provider_id, "modelID": model_id}
+            try:
+                data = self._agent_call(
+                    "POST",
+                    "/session/" + urllib.parse.quote(session_id) + "/init", payload,
+                    timeout=300)
+                self._send(200, {"ok": True, "result": data})
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
+        elif path == "/api/agent/session/delete":
+            session_id = (body.get("sessionID") or "").strip()
+            if not session_id:
+                self._send(400, {"ok": False, "error": "sessionID required"})
+                return
+            try:
+                data = self._agent_call(
+                    "DELETE", "/session/" + urllib.parse.quote(session_id))
+                self._send(200, {"ok": True, "result": data})
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
+        elif path == "/api/agent/session/rename":
+            session_id = (body.get("sessionID") or "").strip()
+            title = (body.get("title") or "").strip()
+            if not session_id or not title:
+                self._send(400, {"ok": False, "error": "sessionID and title required"})
+                return
+            try:
+                data = self._agent_call(
+                    "PATCH", "/session/" + urllib.parse.quote(session_id),
+                    {"title": title[:200]})
+                self._send(200, {"ok": True, "session": data})
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
 
         elif path == "/api/ai/chat":
             try:
