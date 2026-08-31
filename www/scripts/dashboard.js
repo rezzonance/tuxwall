@@ -5817,7 +5817,7 @@
 
     function ocRenderStatus() {
       if (!elOcStatus) return;
-      const perms = document.querySelectorAll(".oc-perm:not(.oc-approved):not(.oc-denied)").length;
+      const perms = document.querySelectorAll(".oc-perm:not(.oc-question):not(.oc-approved):not(.oc-denied)").length;
       const dir = agent.directory || "/";
       const git = agent.vcs && agent.vcs.branch ? " · git(" + agent.vcs.branch + ")" : "";
       const model = (elAgentModel && elAgentModel.value) ? elAgentModel.value : agent.model || "";
@@ -5878,7 +5878,7 @@
         bash: "Bash", read: "Read", edit: "Edit", write: "Write", glob: "Glob",
         grep: "Grep", list: "List", webfetch: "Web Fetch", websearch: "Web Search",
         todowrite: "Todo", "todo-write": "Todo", "todo-read": "Todo", task: "Task",
-        ask: "Ask", multiedit: "Multi Edit",
+        ask: "Ask", multiedit: "Multi Edit", question: "Question",
       }[String(name).toLowerCase()] || name.charAt(0).toUpperCase() + name.slice(1);
       return { name, pretty, detail, st };
     }
@@ -6047,6 +6047,140 @@
       } catch (_) { /* agent server may be mid-restart */ }
     }
 
+    // ── agent question cards (opencode question tool) ───────────────
+    function ocQuestionCard(r) {
+      const rid = r.id || r.requestID;
+      if (!rid || document.querySelector(`.oc-question[data-qid="${rid}"]`)) return null;
+      const questions = r.questions || [];
+      if (!questions.length) return null;
+      const card = document.createElement("div");
+      card.className = "oc-perm oc-question";
+      card.dataset.qid = rid;
+      card.innerHTML = `<div class="oc-perm-head">? agent question</div>`;
+      const box = document.createElement("div");
+      box.className = "oc-perm-body";
+      const answers = questions.map(() => []);
+      const blocks = [];
+      let sent = false;
+
+      const allAnswered = () => answers.every((a) => a.length > 0);
+
+      const submit = async () => {
+        if (sent || !allAnswered()) return;
+        sent = true;
+        try {
+          await postJSON("/api/agent/question/reply", { requestID: rid, answers });
+          ocPermResolve(card, "answered");
+        } catch (err) {
+          sent = false;
+          const errEl = card.querySelector(".oc-q-err");
+          if (errEl) errEl.textContent = "reply failed: " + err.message;
+        }
+      };
+
+      questions.forEach((q, qi) => {
+        const blk = document.createElement("div");
+        blk.className = "oc-q-block";
+        const head = questions.length > 1 ? `<div class="oc-q-head">${esc(q.header || "Question " + (qi + 1))}</div>` : "";
+        blk.innerHTML = `${head}<p class="oc-q-text">${esc(q.question || "")}</p>`;
+        const opts = q.options || [];
+        opts.forEach((o) => {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "oc-q-opt";
+          b.innerHTML = `<b>${esc(o.label)}</b>${o.description ? `<span class="oc-q-desc">${esc(o.description)}</span>` : ""}`;
+          b.addEventListener("click", () => {
+            blk.querySelectorAll(".oc-q-opt.oc-sel").forEach((x) => x.classList.remove("oc-sel"));
+            if (!q.multiple && answers[qi][0] === o.label) { answers[qi] = []; return; }
+            if (q.multiple && answers[qi].includes(o.label)) {
+              answers[qi] = answers[qi].filter((l) => l !== o.label);
+              b.classList.remove("oc-sel");
+            } else {
+              answers[qi] = q.multiple ? answers[qi].concat([o.label]) : [o.label];
+              b.classList.add("oc-sel");
+            }
+            if (!q.multiple && q.custom === false) submit();
+          });
+          blk.appendChild(b);
+        });
+        if (q.custom !== false) {
+          const row = document.createElement("div");
+          row.className = "oc-q-custom";
+          const inp = document.createElement("input");
+          inp.type = "text";
+          inp.placeholder = "type your own answer…";
+          inp.autocomplete = "off";
+          const go = () => {
+            const v = inp.value.trim();
+            if (!v) return;
+            blk.querySelectorAll(".oc-q-opt.oc-sel").forEach((x) => x.classList.remove("oc-sel"));
+            answers[qi] = [v];
+            submit();
+          };
+          inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "oc-q-send";
+          b.textContent = "send";
+          b.addEventListener("click", go);
+          row.appendChild(inp);
+          row.appendChild(b);
+          blk.appendChild(row);
+        }
+        box.appendChild(blk);
+        blocks.push(blk);
+      });
+
+      const btns = document.createElement("div");
+      btns.className = "oc-perm-btns";
+      const answerBtn = document.createElement("button");
+      answerBtn.type = "button";
+      answerBtn.className = "oc-perm-btn oc-yes";
+      answerBtn.innerHTML = "<b>↵)</b>answer";
+      answerBtn.addEventListener("click", submit);
+      const skipBtn = document.createElement("button");
+      skipBtn.type = "button";
+      skipBtn.className = "oc-perm-btn oc-no";
+      skipBtn.innerHTML = "<b>x)</b>skip question";
+      skipBtn.addEventListener("click", async () => {
+        if (sent) return;
+        sent = true;
+        try {
+          await postJSON("/api/agent/question/reject", { requestID: rid });
+          ocPermResolve(card, "skipped");
+        } catch (err) {
+          sent = false;
+          const errEl = card.querySelector(".oc-q-err");
+          if (errEl) errEl.textContent = "reject failed: " + err.message;
+        }
+      });
+      btns.appendChild(answerBtn);
+      btns.appendChild(skipBtn);
+      box.appendChild(btns);
+      const errEl = document.createElement("div");
+      errEl.className = "oc-q-err";
+      box.appendChild(errEl);
+      card.appendChild(box);
+      if (elOcScreen) elOcScreen.appendChild(card);
+      ocScroll();
+      ocRenderStatus();
+      return card;
+    }
+
+    async function ocPollQuestions() {
+      if (!agent.enabled || !agent.sessionID) return;
+      try {
+        const d = await fetchJSON("/api/agent/question");
+        const reqs = Array.isArray(d) ? d : (d.requests || []);
+        // only surface questions for the ACTIVE session — stale questions
+        // from old sessions stay on the agent server, untouched
+        reqs.forEach((r) => {
+          if ((r.sessionID || "") !== agent.sessionID) return;
+          ocQuestionCard(r);
+        });
+      } catch (_) { /* agent server may be mid-restart */ }
+    }
+
     async function agentEnsureSession() {
       if (agent.sessionID) return agent.sessionID;
       const d = await postJSON("/api/agent/session/new", {});
@@ -6055,10 +6189,10 @@
       agent.sessionID = sid;
       // start permission polling while a session is active
       if (!agent.pollTimer) {
-        agent.pollTimer = setInterval(() => {
-          if (agent.busy) agentPollPermissions();
-        }, 2000);
-      }
+          agent.pollTimer = setInterval(() => {
+            if (agent.busy) { agentPollPermissions(); ocPollQuestions(); }
+          }, 2000);
+        }
       return sid;
     }
 
@@ -6145,6 +6279,9 @@
       // force-finish the pending turn locally even if the server is slow
       // to confirm: clear any open permission cards and reset the state
       document.querySelectorAll(".oc-perm:not(.oc-approved):not(.oc-denied)").forEach((el) => {
+        if (el.classList.contains("oc-question") && el.dataset.qid) {
+          postJSON("/api/agent/question/reject", { requestID: el.dataset.qid }).catch(() => {});
+        }
         ocPermResolve(el, "cancelled");
       });
       agent.busy = false;
@@ -6573,6 +6710,12 @@
               .filter((r) => !document.querySelector(`.oc-perm[data-perm-id="${r.id}"].oc-denied, .oc-perm[data-perm-id="${r.id}"].oc-approved`));
             if (pending.length) { bumpWatchdog(); return; }
           } catch (_) { /* proceed to timeout */ }
+          // an unanswered question card also means the agent is waiting
+          // on the user, not stuck — keep waiting while it is on screen
+          try {
+            await ocPollQuestions();
+            if (document.querySelector(".oc-question:not(.oc-approved):not(.oc-denied)")) { bumpWatchdog(); return; }
+          } catch (_) { /* proceed to timeout */ }
           finish("Timed out waiting for agent events (is tuxwall-agent.service healthy?). Check: journalctl -u tuxwall.service -t -n 50 | grep agent");
         }, 180000);
       }
@@ -6592,6 +6735,21 @@
             const r = props;
             const rid = r.id || r.requestID;
             if (rid && !document.querySelector(`.oc-perm[data-perm-id="${rid}"]`)) ocPermCard(r);
+            return;
+          }
+          if (type === "question.asked" || type === "question.v2.asked") {
+            bumpWatchdog();
+            ocQuestionCard(props);
+            return;
+          }
+          if (type === "question.replied" || type === "question.v2.replied") {
+            const qc = document.querySelector(`.oc-question[data-qid="${props.requestID}"]`);
+            if (qc) ocPermResolve(qc, "answered");
+            return;
+          }
+          if (type === "question.rejected" || type === "question.v2.rejected") {
+            const qc = document.querySelector(`.oc-question[data-qid="${props.requestID}"]`);
+            if (qc) ocPermResolve(qc, "skipped");
             return;
           }
           if (props.sessionID !== sid) return;

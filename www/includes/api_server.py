@@ -6596,6 +6596,43 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(500, self._agent_error(exc))
 
+        elif path == "/api/agent/question":
+            try:
+                data = self._agent_call("GET", "/question")
+                self._send(200, data)
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
+        elif path == "/api/agent/question/reply":
+            request_id = (body.get("requestID") or "").strip()
+            answers = body.get("answers")
+            if not request_id or not isinstance(answers, list) or not answers:
+                self._send(400, {"ok": False, "error": "requestID and answers required"})
+                return
+            try:
+                data = self._agent_call(
+                    "POST",
+                    "/question/" + urllib.parse.quote(request_id) + "/reply",
+                    {"answers": answers},
+                )
+                self._send(200, data if isinstance(data, dict) else {"ok": True})
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
+        elif path == "/api/agent/question/reject":
+            request_id = (body.get("requestID") or "").strip()
+            if not request_id:
+                self._send(400, {"ok": False, "error": "requestID required"})
+                return
+            try:
+                data = self._agent_call(
+                    "POST",
+                    "/question/" + urllib.parse.quote(request_id) + "/reject",
+                )
+                self._send(200, data if isinstance(data, dict) else {"ok": True})
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+
         elif path == "/api/agent/session/new":
             try:
                 data = self._agent_call("POST", "/session", {})
