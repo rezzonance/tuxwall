@@ -18,6 +18,8 @@
     <input type="text" id="login-user" class="login-input" autocomplete="username" spellcheck="false" value="admin">
     <label class="login-label" for="login-pass">Password</label>
     <input type="password" id="login-pass" class="login-input" autocomplete="current-password">
+    <label class="login-label" for="login-totp" id="login-totp-label" hidden>Verification code</label>
+    <input type="text" id="login-totp" class="login-input" inputmode="numeric" maxlength="6" pattern="[0-9]*" autocomplete="one-time-code" spellcheck="false" hidden>
     <p class="login-error" id="login-error" hidden></p>
     <button type="submit" class="btn login-btn" id="login-btn">Sign in</button>
   </form>
@@ -1706,6 +1708,32 @@
           </div>
           <p class="muted" id="users-msg"></p>
         </div>
+      </div>
+
+      <div class="card" id="totp-card" hidden>
+        <div class="card-head">
+          <h2>Two-Factor Authentication</h2>
+          <span class="badge" id="totp-badge">Not enabled</span>
+        </div>
+        <p class="muted">Require a time-based one-time code (Google Authenticator, Aegis, 1Password, etc.) in addition to your password at sign-in.</p>
+        <button id="totp-start-btn" class="btn btn-primary" type="button">Enable 2FA</button>
+        <div id="totp-enroll" hidden>
+          <canvas id="totp-qr" width="240" height="240"></canvas>
+          <p class="muted">Scan with your authenticator app, or enter the secret manually:</p>
+          <code id="totp-secret"></code>
+          <label class="login-label" for="totp-code">6-digit code from your app</label>
+          <input type="text" id="totp-code" class="login-input" inputmode="numeric" maxlength="6" autocomplete="one-time-code" spellcheck="false">
+          <button id="totp-confirm-btn" class="btn btn-primary" type="button">Confirm &amp; enable</button>
+          <button id="totp-cancel-btn" class="btn" type="button">Cancel</button>
+        </div>
+        <div id="totp-disable-row" hidden>
+          <label class="login-label" for="totp-disable-pass">Current password</label>
+          <input type="password" id="totp-disable-pass" class="login-input" autocomplete="current-password">
+          <label class="login-label" for="totp-disable-code">6-digit code</label>
+          <input type="text" id="totp-disable-code" class="login-input" inputmode="numeric" maxlength="6" autocomplete="one-time-code" spellcheck="false">
+          <button id="totp-disable-btn" class="btn" type="button">Disable 2FA</button>
+        </div>
+        <p class="login-error" id="totp-msg" hidden></p>
       </div>
 
       <div class="modal" id="user-modal" hidden>

@@ -43,6 +43,8 @@ tuxwall is a web-based network dashboard that provides visibility and control ov
 - **WireGuard VPN** management
 - **IPv6 router advertisements** (via radvd)
 - **SQM / traffic shaping** (via CAKE qdisc)
+- **User accounts** (OPNsense-style User Manager: add/edit/disable users, per-user admin rights)
+- **Two-factor authentication** (TOTP — works with Google Authenticator, Aegis, 1Password; QR-code enrollment, replay protection)
 - **AI assistant** (built-in [opencode](https://opencode.ai) agent with shell + file access, permission-gated, local or hosted models)
 
 ---
@@ -243,13 +245,13 @@ sudo apt install -y \
 Install the provided `.deb` package:
 
 ```bash
-sudo dpkg -i tuxwall_2.2.1_all.deb
+sudo dpkg -i tuxwall_2.3.0_all.deb
 ```
 
 If you encounter dependency errors:
 ```bash
 sudo apt -f install
-sudo dpkg -i tuxwall_2.2.1_all.deb
+sudo dpkg -i tuxwall_2.3.0_all.deb
 ```
 
 ### 3. Disable systemd-resolved and configure DNS

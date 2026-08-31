@@ -301,6 +301,8 @@
     loginBtn: document.getElementById("login-btn"),
     loginHeading: document.getElementById("login-heading"),
     loginSub: document.getElementById("login-sub"),
+    loginTotpLabel: document.getElementById("login-totp-label"),
+    loginTotp: document.getElementById("login-totp"),
     logoutBtn: document.getElementById("logout-btn"),
     sideUser: document.getElementById("side-user"),
     sideRole: document.getElementById("side-role"),
@@ -315,6 +317,20 @@
     usersTbody: document.getElementById("users-tbody"),
     nuOpen: document.getElementById("nu-open"),
     usersMsg: document.getElementById("users-msg"),
+    totpCard: document.getElementById("totp-card"),
+    totpBadge: document.getElementById("totp-badge"),
+    totpStartBtn: document.getElementById("totp-start-btn"),
+    totpEnroll: document.getElementById("totp-enroll"),
+    totpQr: document.getElementById("totp-qr"),
+    totpSecret: document.getElementById("totp-secret"),
+    totpCode: document.getElementById("totp-code"),
+    totpConfirmBtn: document.getElementById("totp-confirm-btn"),
+    totpCancelBtn: document.getElementById("totp-cancel-btn"),
+    totpDisableRow: document.getElementById("totp-disable-row"),
+    totpDisablePass: document.getElementById("totp-disable-pass"),
+    totpDisableCode: document.getElementById("totp-disable-code"),
+    totpDisableBtn: document.getElementById("totp-disable-btn"),
+    totpMsg: document.getElementById("totp-msg"),
     userModal: document.getElementById("user-modal"),
     userModalTitle: document.getElementById("user-modal-title"),
     userModalClose: document.getElementById("user-modal-close"),
@@ -6991,6 +7007,7 @@
     }
 
     bindAuthActions();
+    bindTotpActions();
     bindUsersActions();
     bootstrapAuth();
 
@@ -7018,6 +7035,9 @@
       ? "Create the administrator account to secure this dashboard."
       : "Enter your credentials to manage this network";
     els.loginBtn.textContent = setupMode ? "Create & sign in" : "Sign in";
+    els.loginTotpLabel.hidden = true;
+    els.loginTotp.hidden = true;
+    els.loginTotp.value = "";
     setLoginError(errmsg || "");
     document.body.classList.add("locked");
     els.loginGate.hidden = false;
@@ -7047,6 +7067,7 @@
       el.hidden = !isAdmin;
     });
     els.usersCard.hidden = false;
+    updateTotpCard();
     els.usersAdmin.hidden = !state.canManageUsers;
     els.sideUser.textContent = state.username || "";
     els.sideRole.textContent = roleLabel();
@@ -7274,6 +7295,7 @@
     els.sideRole.textContent = "";
     els.loginPass.value = "";
     showLoginGate(false, "Session expired. Sign in again.");
+    updateTotpCard();
   }
 
   function bindAuthActions() {
@@ -7288,12 +7310,27 @@
       els.loginBtn.disabled = true;
       setLoginError("");
       try {
-        const d = await postJSON("/api/auth/login", { username, password });
+        const payload = { username, password };
+        if (!els.loginTotp.hidden) payload.totp_code = els.loginTotp.value.trim();
+        const d = await postJSON("/api/auth/login", payload);
+        if (d.totp_required) {
+          els.loginTotpLabel.hidden = false;
+          els.loginTotp.hidden = false;
+          els.loginBtn.textContent = "Verify & sign in";
+          setLoginError("Enter the 6-digit code from your authenticator app.");
+          try { els.loginTotp.focus(); } catch (err) { }
+          return;
+        }
+        els.loginTotpLabel.hidden = true;
+        els.loginTotp.hidden = true;
+        els.loginTotp.value = "";
+        els.loginBtn.textContent = "Sign in";
         els.loginPass.value = "";
         state.authed = true;
         state.role = d.role || "viewer";
         state.isOwner = !!d.is_owner;
         state.canManageUsers = !!d.can_manage_users;
+        state.totpEnabled = !!d.totp_enabled;
         els.logoutBtn.hidden = false;
         state.username = d.username || username;
         els.acctHint.textContent = `Signed in as ${d.username || username} (${roleLabel()})`;
@@ -7322,6 +7359,105 @@
     });
   }
 
+  function totpMsg(msg) {
+    els.totpMsg.hidden = !msg;
+    els.totpMsg.textContent = msg || "";
+  }
+
+  function updateTotpCard() {
+    if (!els.totpCard) return;
+    els.totpCard.hidden = !state.authed;
+    const on = !!state.totpEnabled;
+    els.totpBadge.textContent = on ? "2FA enabled" : "Not enabled";
+    els.totpBadge.className = "badge" + (on ? " badge-ok" : "");
+    els.totpStartBtn.hidden = on;
+    els.totpEnroll.hidden = true;
+    els.totpDisableRow.hidden = !on;
+    els.totpCode.value = "";
+    els.totpDisablePass.value = "";
+    els.totpDisableCode.value = "";
+    totpMsg("");
+  }
+
+  function renderTotpQr(uri) {
+    const qr = (typeof qrcode !== "undefined") && qrcode(0, "M");
+    if (!qr) return;
+    qr.addData(uri);
+    qr.make();
+    els.totpQr.width = 240;
+    els.totpQr.height = 240;
+    const ctx = els.totpQr.getContext("2d");
+    const img = qr.createDataURL(8, 4);
+    const im = new Image();
+    im.onload = () => {
+      ctx.clearRect(0, 0, 240, 240);
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, 240, 240);
+      ctx.drawImage(im, 0, 0, 240, 240);
+    };
+    im.src = img;
+  }
+
+  function bindTotpActions() {
+    els.totpStartBtn.addEventListener("click", async () => {
+      totpMsg("");
+      els.totpStartBtn.disabled = true;
+      try {
+        const d = await postJSON("/api/auth/totp/setup", {});
+        els.totpSecret.textContent = d.secret;
+        renderTotpQr(d.uri);
+        els.totpEnroll.hidden = false;
+        try { els.totpCode.focus(); } catch (err) { }
+      } catch (err) {
+        totpMsg(err.message);
+      } finally {
+        els.totpStartBtn.disabled = false;
+      }
+    });
+
+    els.totpCancelBtn.addEventListener("click", () => {
+      els.totpEnroll.hidden = true;
+      els.totpCode.value = "";
+      totpMsg("");
+    });
+
+    els.totpConfirmBtn.addEventListener("click", async () => {
+      const code = els.totpCode.value.trim();
+      if (!/^\d{6}$/.test(code)) { totpMsg("Enter the 6-digit code from your app."); return; }
+      els.totpConfirmBtn.disabled = true;
+      totpMsg("");
+      try {
+        await postJSON("/api/auth/totp/confirm", { code });
+        state.totpEnabled = true;
+        updateTotpCard();
+        if (state.canManageUsers) loadUsers();
+      } catch (err) {
+        totpMsg(err.message);
+      } finally {
+        els.totpConfirmBtn.disabled = false;
+      }
+    });
+
+    els.totpDisableBtn.addEventListener("click", async () => {
+      const current = els.totpDisablePass.value;
+      const code = els.totpDisableCode.value.trim();
+      if (!current) { totpMsg("Enter your current password."); return; }
+      if (!/^\d{6}$/.test(code)) { totpMsg("Enter a 6-digit code."); return; }
+      els.totpDisableBtn.disabled = true;
+      totpMsg("");
+      try {
+        await postJSON("/api/auth/totp/disable", { current, code });
+        state.totpEnabled = false;
+        updateTotpCard();
+        if (state.canManageUsers) loadUsers();
+      } catch (err) {
+        totpMsg(err.message);
+      } finally {
+        els.totpDisableBtn.disabled = false;
+      }
+    });
+  }
+
   async function bootstrapAuth() {
     let d;
     try {
@@ -7342,6 +7478,7 @@
     state.role = d.role || "viewer";
     state.isOwner = !!d.is_owner;
     state.canManageUsers = !!d.can_manage_users;
+    state.totpEnabled = !!d.totp_enabled;
     state.routerLat = (d.router_lat != null) ? Number(d.router_lat) : null;
     state.routerLon = (d.router_lon != null) ? Number(d.router_lon) : null;
     els.logoutBtn.hidden = false;

@@ -4375,6 +4375,7 @@ def _save_users(users):
     tmp = AUTH_FILE + ".tmp"
     with open(tmp, "w") as f:
         json.dump({"users": users}, f, indent=2)
+    os.chmod(tmp, 0o600)
     os.replace(tmp, AUTH_FILE)
 
 
@@ -4503,6 +4504,45 @@ def _clear_login_failures(ip):
     _login_fails.pop(ip, None)
 
 
+# ---- TOTP two-factor authentication ----
+TOTP_STEP = 30
+TOTP_DIGITS = 6
+TOTP_WINDOW = 1
+
+
+def _totp_code(secret_b32, step):
+    """RFC 6238 code (SHA-1, 6 digits) for a given 30s timestep."""
+    key = base64.b32decode(secret_b32, casefold=True)
+    digest = hmac.new(key, step.to_bytes(8, "big"), hashlib.sha1).digest()
+    offset = digest[-1] & 0xF
+    value = int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF
+    return str(value % (10 ** TOTP_DIGITS)).zfill(TOTP_DIGITS)
+
+
+def _totp_match(secret_b32, code, last_step=None):
+    """Return the timestep matching a valid 6-digit code, else None.
+
+    Accepts the previous/current/next step (authenticator clock skew) but
+    never a step at or before `last_step`, so a used code cannot be replayed.
+    """
+    if not secret_b32 or not re.fullmatch(r"\d{6}", str(code or "")):
+        return None
+    now_step = int(time.time()) // TOTP_STEP
+    for step in (now_step, now_step - TOTP_WINDOW, now_step + TOTP_WINDOW):
+        if last_step is not None and step <= last_step:
+            continue
+        if hmac.compare_digest(_totp_code(secret_b32, step), code):
+            return step
+    return None
+
+
+def _totp_uri(username, secret_b32):
+    label = urllib.parse.quote("TuxWall:" + username)
+    return "otpauth://totp/{}?secret={}&issuer=TuxWall&algorithm=SHA1&digits={}&period={}".format(
+        label, secret_b32, TOTP_DIGITS, TOTP_STEP
+    )
+
+
 def validate_password_strength(password):
     password = str(password or "")
     if len(password) < MIN_PASSWORD_LEN:
@@ -4535,6 +4575,7 @@ def auth_session_state(identity=None):
         "can_manage_users": _can_manage_users(users, me),
         "setup_required": not users,
         "default_password": bool(me and me.get("default_password")),
+        "totp_enabled": bool(me and me.get("totp_secret")),
     }
     active = load_ui_conf().get("active_theme", "dark")
     theme = None
@@ -4562,7 +4603,8 @@ def attempt_login(body, ip):
     if remaining > 0:
         raise PermissionError("Too many failed attempts. Try again in {}s".format(remaining))
 
-    user = _find_user(_load_users(), username)
+    users = _load_users()
+    user = _find_user(users, username)
     if user is None or not hmac.compare_digest(
         _hash_password(password, user["salt"]), user["hash"]
     ):
@@ -4575,6 +4617,25 @@ def attempt_login(body, ip):
     if user.get("disabled"):
         raise PermissionError("This account is disabled")
 
+    secret = user.get("totp_secret")
+    if secret:
+        matched = _totp_match(secret, body.get("totp_code"), user.get("totp_last_step"))
+        if matched is None:
+            if not str(body.get("totp_code") or "").strip():
+                # Password is correct: ask the client for the second factor.
+                return {"ok": True, "totp_required": True}
+            _record_login_failure(ip)
+            remaining = _login_lock_remaining(ip)
+            hint = " Invalid verification code."
+            if remaining:
+                hint += " Locked for {}s.".format(remaining)
+            raise PermissionError(hint.strip())
+        user["totp_last_step"] = matched
+        try:
+            _save_users(users)  # persist replay guard
+        except OSError:
+            pass  # best-effort; do not block login on a failed write
+
     _clear_login_failures(ip)
     return {
         "ok": True,
@@ -4583,6 +4644,7 @@ def attempt_login(body, ip):
         "is_owner": bool(user.get("owner")),
         "can_manage_users": _can_manage_users(_load_users(), user),
         "default_password": bool(user.get("default_password")),
+        "totp_enabled": bool(user.get("totp_secret")),
     }
 
 
@@ -4602,6 +4664,70 @@ def change_password(body, identity):
     user.pop("default_password", None)
     _save_users(users)
     return {"ok": True}
+
+
+def totp_setup(identity):
+    """Start enrollment: store a pending secret, return it with an otpauth URI."""
+    if not identity:
+        raise PermissionError("Authentication required")
+    users = _load_users()
+    user = _find_user(users, identity["username"])
+    if user is None:
+        raise PermissionError("Account no longer exists")
+    secret = base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
+    user["totp_pending_secret"] = secret
+    try:
+        _save_users(users)
+    except OSError as exc:
+        raise PermissionError("Could not write auth config: %s" % exc.strerror)
+    return {"ok": True, "secret": secret, "uri": _totp_uri(user["username"], secret)}
+
+
+def totp_confirm(body, identity):
+    """Finish enrollment: verify a code against the pending secret and activate."""
+    if not identity:
+        raise PermissionError("Authentication required")
+    users = _load_users()
+    user = _find_user(users, identity["username"])
+    if user is None:
+        raise PermissionError("Account no longer exists")
+    pending = user.get("totp_pending_secret")
+    if not pending:
+        raise PermissionError("No enrollment in progress - start setup again")
+    matched = _totp_match(pending, body.get("code"))
+    if matched is None:
+        raise PermissionError("Invalid verification code")
+    user["totp_secret"] = user.pop("totp_pending_secret")
+    user["totp_last_step"] = matched
+    try:
+        _save_users(users)
+    except OSError as exc:
+        raise PermissionError("Could not save the 2FA secret: %s" % exc.strerror)
+    return {"ok": True, "totp_enabled": True}
+
+
+def totp_disable(body, identity):
+    """Turn off 2FA: requires the current password, plus a code if enrolled."""
+    if not identity:
+        raise PermissionError("Authentication required")
+    users = _load_users()
+    user = _find_user(users, identity["username"])
+    if user is None:
+        raise PermissionError("Account no longer exists")
+    current = str(body.get("current") or "")
+    if not hmac.compare_digest(_hash_password(current, user["salt"]), user["hash"]):
+        raise PermissionError("Current password is incorrect")
+    if user.get("totp_secret") and \
+            _totp_match(user["totp_secret"], body.get("code"), user.get("totp_last_step")) is None:
+        raise PermissionError("Invalid verification code")
+    user.pop("totp_secret", None)
+    user.pop("totp_pending_secret", None)
+    user.pop("totp_last_step", None)
+    try:
+        _save_users(users)
+    except OSError as exc:
+        raise PermissionError("Could not save: %s" % exc.strerror)
+    return {"ok": True, "totp_enabled": False}
 
 
 def _require_owner(identity):
@@ -4632,6 +4758,7 @@ def list_users(identity):
                 "disabled": bool(u.get("disabled")),
                 "fullname": u.get("fullname", ""),
                 "created": u.get("created"),
+                "totp": bool(u.get("totp_secret")),
             }
             for u in users
         ],
@@ -6168,6 +6295,10 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 self._send_auth(500, {"ok": False, "error": "Login failed"})
                 return
+            if result.get("totp_required"):
+                # Password accepted; no session until the second factor is given.
+                self._send_auth(200, result)
+                return
             cookie = "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}".format(
                 SESSION_COOKIE,
                 _create_session(result["username"], result.get("role", "viewer")),
@@ -6213,6 +6344,27 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(403, {"ok": False, "error": str(exc)})
             except ValueError as exc:
                 self._send(400, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/api/auth/totp/setup":
+            try:
+                self._send(200, totp_setup(identity))
+            except PermissionError as exc:
+                self._send(403, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/api/auth/totp/confirm":
+            try:
+                self._send(200, totp_confirm(body, identity))
+            except PermissionError as exc:
+                self._send(403, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/api/auth/totp/disable":
+            try:
+                self._send(200, totp_disable(body, identity))
+            except PermissionError as exc:
+                self._send(403, {"ok": False, "error": str(exc)})
             return
 
         if path == "/api/auth/users/add":
