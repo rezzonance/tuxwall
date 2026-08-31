@@ -4330,6 +4330,7 @@ _login_fails = {}
 
 
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.-]{1,32}$")
+FULLNAME_RE = re.compile(r"^[^\x00-\x1f<>\"'/\\{}$]{0,64}$")
 
 
 def _hash_password(password, salt_hex):
@@ -4377,13 +4378,14 @@ def _save_users(users):
     os.replace(tmp, AUTH_FILE)
 
 
-def _new_user(username, password, role, owner=False, is_default=False):
+def _new_user(username, password, role, owner=False, is_default=False, fullname=""):
     record = {
         "username": username,
         "salt": secrets.token_bytes(32).hex(),
         "created": int(time.time()),
         "role": role,
         "owner": bool(owner),
+        "fullname": fullname or "",
     }
     if is_default:
         record["default_password"] = True
@@ -4453,7 +4455,7 @@ def _session_identity(headers):
         sess["exp"] = now + SESSION_TTL
     users = _load_users()
     user = _find_user(users, username)
-    if user is None:
+    if user is None or user.get("disabled"):
         with _sessions_lock:
             _sessions.pop(token, None)
         return None
@@ -4510,6 +4512,16 @@ def validate_password_strength(password):
     return password
 
 
+def _can_manage_users(users, me):
+    if me is None or me.get("disabled"):
+        return False
+    if me.get("owner"):
+        return True
+    if me.get("role") != "admin":
+        return False
+    return not any(u.get("owner") and not u.get("disabled") for u in users)
+
+
 def auth_session_state(identity=None):
     _ensure_default_auth()
     users = _load_users()
@@ -4520,6 +4532,7 @@ def auth_session_state(identity=None):
         "username": me["username"] if me else "",
         "role": (me.get("role", "viewer") if me else ""),
         "is_owner": bool(me and me.get("owner")),
+        "can_manage_users": _can_manage_users(users, me),
         "setup_required": not users,
         "default_password": bool(me and me.get("default_password")),
     }
@@ -4559,6 +4572,8 @@ def attempt_login(body, ip):
         if remaining:
             hint += " Locked for {}s.".format(remaining)
         raise PermissionError(hint.strip())
+    if user.get("disabled"):
+        raise PermissionError("This account is disabled")
 
     _clear_login_failures(ip)
     return {
@@ -4566,6 +4581,7 @@ def attempt_login(body, ip):
         "username": user["username"],
         "role": user.get("role", "viewer"),
         "is_owner": bool(user.get("owner")),
+        "can_manage_users": _can_manage_users(_load_users(), user),
         "default_password": bool(user.get("default_password")),
     }
 
@@ -4596,7 +4612,11 @@ def _require_owner(identity):
     if me is None:
         raise PermissionError("Account no longer exists")
     if not me.get("owner"):
-        raise PermissionError("Only the primary administrator can manage users")
+        # Fail-open only when the primary admin is disabled or gone:
+        # then any enabled admin can manage users (e.g. re-enable the owner).
+        owner_active = any(u.get("owner") and not u.get("disabled") for u in users)
+        if owner_active or me.get("role") != "admin":
+            raise PermissionError("Only the primary administrator can manage users")
     return users
 
 
@@ -4609,11 +4629,20 @@ def list_users(identity):
                 "username": u["username"],
                 "role": u.get("role", "viewer"),
                 "owner": bool(u.get("owner")),
+                "disabled": bool(u.get("disabled")),
+                "fullname": u.get("fullname", ""),
                 "created": u.get("created"),
             }
             for u in users
         ],
     }
+
+
+def _validate_fullname(fullname):
+    fullname = str(fullname or "").strip()
+    if not FULLNAME_RE.match(fullname):
+        raise ValueError("Full name must be 0-64 characters (no angle brackets or quotes)")
+    return fullname
 
 
 def add_user(body, identity):
@@ -4624,12 +4653,55 @@ def add_user(body, identity):
     if _find_user(users, username):
         raise ValueError("That username already exists")
     password = validate_password_strength(body.get("password"))
+    fullname = _validate_fullname(body.get("fullname"))
     role = body.get("role") or "viewer"
     if role not in ("admin", "viewer"):
         raise ValueError("Role must be admin or viewer")
-    users.append(_new_user(username, password, role))
+    users.append(_new_user(username, password, role, fullname=fullname))
+    if body.get("enabled") is False:
+        users[-1]["disabled"] = True
     _save_users(users)
     return {"ok": True}
+
+
+def update_user(body, identity):
+    users = _require_owner(identity)
+    username = str(body.get("username") or "")
+    user = _find_user(users, username)
+    if user is None:
+        raise ValueError("No such user")
+    changed = {}
+    if "fullname" in body:
+        user["fullname"] = changed["fullname"] = _validate_fullname(body.get("fullname"))
+    if "password" in body and str(body.get("password") or ""):
+        new = validate_password_strength(body.get("password"))
+        user["salt"] = secrets.token_bytes(32).hex()
+        user["hash"] = _hash_password(new, user["salt"])
+        user.pop("default_password", None)
+        changed["password"] = True
+    if "role" in body:
+        role = body.get("role")
+        if role not in ("admin", "viewer"):
+            raise ValueError("Role must be admin or viewer")
+        if user.get("owner") and role != "admin":
+            raise PermissionError("The primary administrator must keep the admin role")
+        user["role"] = changed["role"] = role
+    if "enabled" in body:
+        enabled = bool(body.get("enabled"))
+        if not enabled:
+            _check_disable_allowed(users, user)
+            user["disabled"] = True
+        else:
+            user.pop("disabled", None)
+        changed["enabled"] = enabled
+    if not changed:
+        raise ValueError("Nothing to update")
+    _save_users(users)
+    if user.get("disabled"):
+        _revoke_user_sessions(username)
+    changed["ok"] = True
+    changed["username"] = username
+    return changed
 
 
 def delete_user(body, identity):
@@ -4644,6 +4716,40 @@ def delete_user(body, identity):
     _save_users(users)
     _revoke_user_sessions(username)
     return {"ok": True}
+
+
+def _other_enabled_admins(users, username):
+    return [
+        u for u in users
+        if u["username"] != username and not u.get("disabled") and u.get("role") == "admin"
+    ]
+
+
+def _check_disable_allowed(users, user):
+    """Prevent disabling the last enabled administrator (would lock everyone out)."""
+    if not user.get("disabled") and (user.get("owner") or user.get("role") == "admin"):
+        if not _other_enabled_admins(users, user["username"]):
+            raise PermissionError(
+                "At least one other enabled admin account must exist before disabling this one"
+            )
+
+
+def set_user_enabled(body, identity):
+    users = _require_owner(identity)
+    username = str(body.get("username") or "")
+    user = _find_user(users, username)
+    if user is None:
+        raise ValueError("No such user")
+    enabled = bool(body.get("enabled"))
+    if not enabled:
+        _check_disable_allowed(users, user)
+        user["disabled"] = True
+    else:
+        user.pop("disabled", None)
+    _save_users(users)
+    if not enabled:
+        _revoke_user_sessions(username)
+    return {"ok": True, "username": username, "enabled": enabled}
 
 
 def reset_user_password(body, identity):
@@ -6121,6 +6227,24 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/auth/users/delete":
             try:
                 self._send(200, delete_user(body, identity))
+            except PermissionError as exc:
+                self._send(403, {"ok": False, "error": str(exc)})
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/api/auth/users/update":
+            try:
+                self._send(200, update_user(body, identity))
+            except PermissionError as exc:
+                self._send(403, {"ok": False, "error": str(exc)})
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/api/auth/users/enabled":
+            try:
+                self._send(200, set_user_enabled(body, identity))
             except PermissionError as exc:
                 self._send(403, {"ok": False, "error": str(exc)})
             except ValueError as exc:

@@ -1688,41 +1688,68 @@
 
       <div class="card" id="users-card" hidden>
         <div class="card-head">
-          <h2>Users</h2>
-          <span class="muted">Only you can manage these</span>
+          <h2>User Manager</h2>
+          <span class="muted" id="acct-hint"></span>
+          <button class="btn btn-sm" id="pw-open" type="button">Change password</button>
         </div>
-        <div class="bk-upload">
-          <table class="users-table">
-            <thead><tr><th>User</th><th>Role</th><th></th></tr></thead>
-            <tbody id="users-tbody"></tbody>
-          </table>
-          <div class="acct-grid">
-            <input type="text" id="nu-name" placeholder="Username" autocomplete="off" spellcheck="false" maxlength="32">
-            <input type="password" id="nu-pass" placeholder="Password (min 8)" autocomplete="new-password">
-            <select id="nu-role">
-              <option value="viewer">Viewer (read-only)</option>
-              <option value="admin">Admin (full control)</option>
-            </select>
-            <button class="btn btn-sm" id="nu-add" type="button">Add user</button>
+        <div id="users-admin">
+          <div class="card-toolbar">
+            <input type="search" id="users-search" placeholder="Filter by username or full name..." autocomplete="off">
+            <span class="muted" id="users-count"></span>
+            <button class="btn btn-sm" id="nu-open" type="button">+ Add user</button>
+          </div>
+          <div class="table-wrap">
+            <table class="users-table">
+              <thead><tr><th>Username</th><th>Full name</th><th>Role</th><th>Status</th><th></th></tr></thead>
+              <tbody id="users-tbody"></tbody>
+            </table>
           </div>
           <p class="muted" id="users-msg"></p>
         </div>
       </div>
 
-      <div class="card">
-        <div class="card-head">
-          <h2>Administrator account</h2>
-          <span class="muted" id="acct-hint"></span>
-        </div>
-        <div class="bk-upload">
-          <p class="muted">This password protects the dashboard. Minimum 8 characters.</p>
-          <div class="acct-grid">
-            <input type="password" id="pw-current" placeholder="Current password" autocomplete="current-password">
-            <input type="password" id="pw-new" placeholder="New password (min 8 chars)" autocomplete="new-password">
-            <input type="password" id="pw-confirm" placeholder="Confirm new password" autocomplete="new-password">
-            <button class="btn btn-sm" id="pw-save" type="button">Update password</button>
+      <div class="modal" id="user-modal" hidden>
+        <div class="modal-box">
+          <button type="button" class="modal-close" id="user-modal-close">&times;</button>
+          <h3 id="user-modal-title">Add user</h3>
+          <div class="fw-modal-grid">
+            <label class="fw-field">
+              <span>Username</span>
+              <input type="text" id="um-name" autocomplete="off" spellcheck="false" maxlength="32">
+            </label>
+            <label class="fw-field">
+              <span>Full name</span>
+              <input type="text" id="um-fullname" autocomplete="off" spellcheck="false" maxlength="64" placeholder="e.g. Jeff Smith">
+            </label>
+            <label class="fw-field" id="um-current-field" hidden>
+              <span>Current password</span>
+              <input type="password" id="um-current" autocomplete="current-password" placeholder="your current password">
+            </label>
+            <label class="fw-field" id="um-pass-field">
+              <span id="um-pass-label">Password (min 8)</span>
+              <input type="password" id="um-pass" autocomplete="new-password" placeholder="min 8 characters">
+            </label>
+            <label class="fw-field" id="um-pass2-field">
+              <span>Confirm password</span>
+              <input type="password" id="um-pass2" autocomplete="new-password" placeholder="repeat password">
+            </label>
+            <label class="fw-field" id="um-role-field">
+              <span>Role</span>
+              <select id="um-role">
+                <option value="viewer">Viewer (read-only)</option>
+                <option value="admin">Admin (full control)</option>
+              </select>
+            </label>
+            <label class="fw-field um-check" id="um-enabled-field">
+              <input type="checkbox" id="um-enabled" checked>
+              <span>Account enabled</span>
+            </label>
           </div>
-          <p class="muted" id="pw-msg"></p>
+          <p class="muted" id="um-msg"></p>
+          <div class="wg-modal-actions">
+            <button class="btn" id="um-save" type="button">Save</button>
+            <button class="btn btn-ghost" id="um-cancel" type="button">Cancel</button>
+          </div>
         </div>
       </div>
     </section>

@@ -38,6 +38,8 @@
     username: "",
     role: "viewer",
     isOwner: false,
+    canManageUsers: false,
+    users: [],
     themeBootstrapped: false,
   };
 
@@ -303,18 +305,33 @@
     sideUser: document.getElementById("side-user"),
     sideRole: document.getElementById("side-role"),
     acctHint: document.getElementById("acct-hint"),
-    pwCurrent: document.getElementById("pw-current"),
-    pwNew: document.getElementById("pw-new"),
-    pwConfirm: document.getElementById("pw-confirm"),
-    pwSave: document.getElementById("pw-save"),
-    pwMsg: document.getElementById("pw-msg"),
+    pwOpen: document.getElementById("pw-open"),
+    umCurrent: document.getElementById("um-current"),
+    umCurrentField: document.getElementById("um-current-field"),
     usersCard: document.getElementById("users-card"),
+    usersAdmin: document.getElementById("users-admin"),
+    usersSearch: document.getElementById("users-search"),
+    usersCount: document.getElementById("users-count"),
     usersTbody: document.getElementById("users-tbody"),
-    nuName: document.getElementById("nu-name"),
-    nuPass: document.getElementById("nu-pass"),
-    nuRole: document.getElementById("nu-role"),
-    nuAdd: document.getElementById("nu-add"),
+    nuOpen: document.getElementById("nu-open"),
     usersMsg: document.getElementById("users-msg"),
+    userModal: document.getElementById("user-modal"),
+    userModalTitle: document.getElementById("user-modal-title"),
+    userModalClose: document.getElementById("user-modal-close"),
+    umName: document.getElementById("um-name"),
+    umFullname: document.getElementById("um-fullname"),
+    umPass: document.getElementById("um-pass"),
+    umPass2: document.getElementById("um-pass2"),
+    umPassField: document.getElementById("um-pass-field"),
+    umPass2Field: document.getElementById("um-pass2-field"),
+    umPassLabel: document.getElementById("um-pass-label"),
+    umRole: document.getElementById("um-role"),
+    umRoleField: document.getElementById("um-role-field"),
+    umEnabled: document.getElementById("um-enabled"),
+    umEnabledField: document.getElementById("um-enabled-field"),
+    umMsg: document.getElementById("um-msg"),
+    umSave: document.getElementById("um-save"),
+    umCancel: document.getElementById("um-cancel"),
     routerLat: document.getElementById("router-lat"),
     routerLon: document.getElementById("router-lon"),
     routerLocSave: document.getElementById("router-loc-save"),
@@ -5549,7 +5566,7 @@
       if (view === "settings") {
         loadThemes();
         populateRouterLocation();
-        if (state.isOwner) loadUsers();
+        if (state.canManageUsers) loadUsers();
       }
       els.soon.hidden = true;
       if (view === "ai" && window.__tuxwallAgentEnable) {
@@ -6849,7 +6866,7 @@
 
   function applyDefaultPasswordWarning(flag) {
     if (!flag) return;
-    els.pwMsg.textContent = "You are signed in with the default password (admin / tuxwall) - change it below.";
+    els.usersMsg.textContent = "You are signed in with the default password (admin / tuxwall) - change it with the Change password button.";
   }
 
   function roleLabel() {
@@ -6862,7 +6879,8 @@
     document.querySelectorAll('.nav-item[data-view="settings"]').forEach((el) => {
       el.hidden = !isAdmin;
     });
-    els.usersCard.hidden = !state.isOwner;
+    els.usersCard.hidden = false;
+    els.usersAdmin.hidden = !state.canManageUsers;
     els.sideUser.textContent = state.username || "";
     els.sideRole.textContent = roleLabel();
     if (!isAdmin && state.activeView === "settings") {
@@ -6873,75 +6891,205 @@
   }
 
   async function loadUsers() {
-    if (!state.isOwner) return;
+    if (!state.canManageUsers) return;
     try {
       const d = await fetchJSON("/api/auth/users");
-      renderUsers(d.users || []);
+      state.users = d.users || [];
+      renderUsers();
       els.usersMsg.textContent = "";
     } catch (err) {
       els.usersMsg.textContent = err.message;
     }
   }
 
-  function renderUsers(users) {
+  const ICONS = {
+    edit: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>`,
+    power: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/></svg>`,
+    trash: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>`,
+  };
+
+  function iconBtn(icon, title, attrs) {
+    return `<button class="icon-btn" type="button" title="${title}" ${attrs}>${ICONS[icon]}</button>`;
+  }
+
+  function renderUsers() {
     const me = state.username;
+    const q = (els.usersSearch.value || "").trim().toLowerCase();
+    const users = (state.users || []).filter((u) =>
+      !q || u.username.toLowerCase().includes(q) || (u.fullname || "").toLowerCase().includes(q)
+    );
+    els.usersCount.textContent = `${users.length} of ${(state.users || []).length} users`;
     els.usersTbody.innerHTML = users.map((u) => {
       const badge = u.owner
         ? `<span class="badge badge-static">Primary admin</span>`
         : u.role === "admin"
           ? `<span class="badge badge-ok">Admin</span>`
           : `<span class="badge">Viewer</span>`;
-      const actions = u.owner ? `<span class="muted">—</span>` : `
-        <button class="btn btn-sm" data-reset="${esc(u.username)}" type="button">Reset password</button>
-        <button class="btn btn-sm btn-danger" data-del="${esc(u.username)}" type="button">Remove</button>`;
+      const status = u.disabled
+        ? `<span class="badge badge-err">Disabled</span>`
+        : `<span class="badge badge-ok">Enabled</span>`;
+      const actions = u.owner
+        ? (
+          iconBtn("edit", "Edit", `data-edit="${esc(u.username)}"`) +
+          iconBtn("power", u.disabled ? "Enable" : "Disable", `data-toggle="${esc(u.username)}" data-enabled="${u.disabled ? "0" : "1"}"`)
+        )
+        : (
+          iconBtn("edit", "Edit", `data-edit="${esc(u.username)}"`) +
+          iconBtn("power", u.disabled ? "Enable" : "Disable", `data-toggle="${esc(u.username)}" data-enabled="${u.disabled ? "0" : "1"}"`) +
+          iconBtn("trash", "Remove", `data-del="${esc(u.username)}" class="icon-btn icon-btn-danger"`)
+        );
       return `
         <tr>
           <td><b>${esc(u.username)}</b>${u.username === me ? ` <span class="muted">(you)</span>` : ""}</td>
+          <td>${u.fullname ? esc(u.fullname) : '<span class="muted">—</span>'}</td>
           <td>${badge}</td>
-          <td>${actions}</td>
+          <td>${status}</td>
+          <td class="wg-actions">${actions}</td>
         </tr>`;
     }).join("");
   }
 
+  function closeUserModal() {
+    els.userModal.hidden = true;
+    els.umMsg.textContent = "";
+  }
+
+  function openUserModal(user) {
+    els.umMsg.textContent = "";
+    els.umSave.disabled = false;
+    els.umName.readOnly = !!user;
+    els.umName.value = user ? user.username : "";
+    els.umFullname.value = user ? (user.fullname || "") : "";
+    els.umCurrent.value = "";
+    els.umPass.value = "";
+    els.umPass2.value = "";
+    const isSelf = !!(user && user.username === state.username);
+    const canEditProfile = !user || state.canManageUsers;
+    els.umCurrentField.hidden = !isSelf;
+    els.umPassField.hidden = false;
+    els.umPass2Field.hidden = false;
+    els.umPassLabel.textContent = user ? "New password (blank = keep current)" : "Password (min 8)";
+    els.umPass.placeholder = user ? "leave blank to keep current" : "min 8 characters";
+    els.umFullname.parentElement.hidden = !canEditProfile;
+    els.umRoleField.hidden = isSelf || !!(user && user.owner);
+    els.umEnabledField.hidden = isSelf || !!(user && user.owner);
+    if (user) {
+      els.umRole.value = user.role || "viewer";
+      els.umEnabled.checked = !user.disabled;
+    } else {
+      els.umRole.value = "viewer";
+      els.umEnabled.checked = true;
+    }
+    els.userModalTitle.textContent = isSelf
+      ? "Change your password"
+      : user ? `Edit user — ${user.username}` : "Add user";
+    els.userModal.hidden = false;
+    setTimeout(() => {
+      try { (isSelf ? els.umCurrent : (user ? els.umFullname : els.umName)).focus(); } catch (err) { }
+    }, 60);
+  }
+
   function bindUsersActions() {
-    els.nuAdd.addEventListener("click", async () => {
-      const username = els.nuName.value.trim();
-      const password = els.nuPass.value;
-      if (!username || !password) {
-        els.usersMsg.textContent = "Enter a username and password.";
+    els.nuOpen.addEventListener("click", () => openUserModal(null));
+    els.userModalClose.addEventListener("click", closeUserModal);
+    els.umCancel.addEventListener("click", closeUserModal);
+    els.userModal.addEventListener("click", (e) => {
+      if (e.target === els.userModal) closeUserModal();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !els.userModal.hidden) closeUserModal();
+    });
+    els.usersSearch.addEventListener("input", renderUsers);
+
+    els.umSave.addEventListener("click", async () => {
+      const editing = els.umName.readOnly;
+      const isSelf = els.umCurrentField.hidden === false;
+      const username = els.umName.value.trim();
+      const fullname = els.umFullname.value.trim();
+      const current = els.umCurrent.value;
+      const password = els.umPass.value;
+      els.umMsg.textContent = "";
+      if (!username) {
+        els.umMsg.textContent = "Enter a username.";
         return;
       }
-      els.nuAdd.disabled = true;
+      if (!editing && !password) {
+        els.umMsg.textContent = "Enter a password (min 8 characters).";
+        return;
+      }
+      if (password && password !== els.umPass2.value) {
+        els.umMsg.textContent = "Passwords do not match.";
+        return;
+      }
+      if (isSelf && password && !current) {
+        els.umMsg.textContent = "Enter your current password.";
+        return;
+      }
+      if (isSelf && !password) {
+        els.umMsg.textContent = "Enter a new password.";
+        return;
+      }
+      els.umSave.disabled = true;
       try {
-        await postJSON("/api/auth/users/add", { username, password, role: els.nuRole.value });
-        els.usersMsg.textContent = `Added ${username}.`;
-        els.nuName.value = "";
-        els.nuPass.value = "";
+        if (isSelf) {
+          if (!els.umFullname.parentElement.hidden) {
+            await postJSON("/api/auth/users/update", { username, fullname });
+          }
+          await postJSON("/api/auth/password", { current, new: password });
+          els.usersMsg.textContent = "Your password has been updated.";
+        } else if (editing) {
+          const body = { username, fullname };
+          if (password) body.password = password;
+          if (!els.umRoleField.hidden) body.role = els.umRole.value;
+          if (!els.umEnabledField.hidden) body.enabled = els.umEnabled.checked;
+          await postJSON("/api/auth/users/update", body);
+          els.usersMsg.textContent = `Updated ${username}.`;
+        } else {
+          await postJSON("/api/auth/users/add", {
+            username, password, fullname,
+            role: els.umRole.value,
+            enabled: els.umEnabled.checked,
+          });
+          els.usersMsg.textContent = `Added ${username}.`;
+        }
+        closeUserModal();
         await loadUsers();
       } catch (err) {
-        els.usersMsg.textContent = err.message;
+        els.umMsg.textContent = err.message;
       } finally {
-        els.nuAdd.disabled = false;
+        els.umSave.disabled = false;
       }
     });
 
     els.usersTbody.addEventListener("click", async (e) => {
       const del = e.target.closest("[data-del]");
-      const rst = e.target.closest("[data-reset]");
-      if (!del && !rst) return;
-      const username = del ? del.dataset.del : rst.dataset.reset;
+      const tog = e.target.closest("[data-toggle]");
+      const edt = e.target.closest("[data-edit]");
+      if (!del && !tog && !edt) return;
       try {
         if (del) {
+          const username = del.dataset.del;
           if (!window.confirm(`Remove user "${username}"? Their session ends immediately.`)) return;
           await postJSON("/api/auth/users/delete", { username });
           els.usersMsg.textContent = `Removed ${username}.`;
-        } else {
-          const pw = window.prompt(`New password for ${username} (min 8 characters):`);
-          if (!pw) return;
-          await postJSON("/api/auth/users/password", { username, password: pw });
-          els.usersMsg.textContent = `Password updated for ${username}.`;
+          await loadUsers();
+        } else if (tog) {
+          const username = tog.dataset.toggle;
+          const enabled = tog.dataset.enabled === "1";
+          if (enabled) {
+            const self = username === state.username;
+            const msg = self
+              ? `Disable user "${username}"? This is YOUR account - your session ends immediately and you must sign in as another admin.`
+              : `Disable user "${username}"? Their session ends immediately.`;
+            if (!window.confirm(msg)) return;
+          }
+          await postJSON("/api/auth/users/enabled", { username, enabled: !enabled });
+          els.usersMsg.textContent = `${username} ${enabled ? "disabled" : "enabled"}.`;
+          await loadUsers();
+        } else if (edt) {
+          const user = (state.users || []).find((u) => u.username === edt.dataset.edit);
+          if (user) openUserModal(user);
         }
-        await loadUsers();
       } catch (err) {
         els.usersMsg.textContent = err.message;
       }
@@ -6953,6 +7101,7 @@
     state.authed = false;
     state.role = "viewer";
     state.isOwner = false;
+    state.canManageUsers = false;
     els.logoutBtn.hidden = true;
     els.sideUser.textContent = "";
     els.sideRole.textContent = "";
@@ -6977,11 +7126,13 @@
         state.authed = true;
         state.role = d.role || "viewer";
         state.isOwner = !!d.is_owner;
+        state.canManageUsers = !!d.can_manage_users;
         els.logoutBtn.hidden = false;
         state.username = d.username || username;
         els.acctHint.textContent = `Signed in as ${d.username || username} (${roleLabel()})`;
         applyDefaultPasswordWarning(d.default_password);
         applyRoleUI();
+        if (state.canManageUsers && state.activeView === "settings") loadUsers();
         hideLoginGate();
         startDashboard();
       } catch (err) {
@@ -6998,27 +7149,9 @@
       location.reload();
     });
 
-    els.pwSave.addEventListener("click", async () => {
-      const current = els.pwCurrent.value;
-      const next = els.pwNew.value;
-      if (!current || !next) {
-        els.pwMsg.textContent = "Fill in both fields.";
-        return;
-      }
-      if (next !== els.pwConfirm.value) {
-        els.pwMsg.textContent = "New passwords do not match.";
-        return;
-      }
-      els.pwSave.disabled = true;
-      try {
-        await postJSON("/api/auth/password", { current, new: next });
-        els.pwMsg.textContent = "Password updated.";
-        els.pwCurrent.value = els.pwNew.value = els.pwConfirm.value = "";
-      } catch (err) {
-        els.pwMsg.textContent = err.message;
-      } finally {
-        els.pwSave.disabled = false;
-      }
+    els.pwOpen.addEventListener("click", () => {
+      const me = (state.users || []).find((u) => u.username === state.username);
+      openUserModal(me || { username: state.username, owner: state.isOwner });
     });
   }
 
@@ -7041,6 +7174,7 @@
     state.authed = true;
     state.role = d.role || "viewer";
     state.isOwner = !!d.is_owner;
+    state.canManageUsers = !!d.can_manage_users;
     state.routerLat = (d.router_lat != null) ? Number(d.router_lat) : null;
     state.routerLon = (d.router_lon != null) ? Number(d.router_lon) : null;
     els.logoutBtn.hidden = false;
@@ -7050,6 +7184,7 @@
     }
     applyDefaultPasswordWarning(d.default_password);
     applyRoleUI();
+    if (state.isOwner && state.activeView === "settings") loadUsers();
     startDashboard();
   }
 
