@@ -5886,7 +5886,7 @@
     // live tool rows keyed by part id — like the TUI's └─ tool lines
     const ocToolEls = new Map();
 
-    function ocToolRow(part, afterEl) {
+    function ocToolRow(part, afterEl, beforeEl) {
       const key = part.id || (part.type + ":" + JSON.stringify(part.input || {}).slice(0, 60));
       let entry = ocToolEls.get(key);
       if (!entry) {
@@ -5903,7 +5903,10 @@
         wrap.appendChild(row);
         wrap.appendChild(out);
         if (elOcScreen) {
-          if (afterEl && afterEl.parentNode === elOcScreen) elOcScreen.insertBefore(wrap, afterEl.nextSibling);
+          // beforeEl: keep tool rows ABOVE the assistant message so the
+          // summary always renders last (bottom), like the opencode TUI
+          if (beforeEl && beforeEl.parentNode === elOcScreen) elOcScreen.insertBefore(wrap, beforeEl);
+          else if (afterEl && afterEl.parentNode === elOcScreen) elOcScreen.insertBefore(wrap, afterEl.nextSibling);
           else elOcScreen.appendChild(wrap);
         }
         entry = { wrap, row, out, key };
@@ -6361,7 +6364,7 @@
             body.appendChild(th);
           }
         } else if (t === "tool" || t.startsWith("tool")) {
-          const entry = ocToolRow(p, anchor);
+          const entry = ocToolRow(p, null, el);
           anchor = entry.wrap;
         }
       });
@@ -6601,7 +6604,7 @@
               bumpWatchdog();
             } else if (pt === "tool" || pt.startsWith("tool")) {
               bumpWatchdog();
-              ocToolRow(part, msgEl);
+              ocToolRow(part, null, msgEl);
             }
           } else if (type === "message.part.delta") {
             if (props.messageID && assistantMsgID && props.messageID !== assistantMsgID) return;
@@ -6625,7 +6628,7 @@
           parts.forEach((p) => {
             const pt = p.type || "";
             if (pt === "text" && p.text) body.appendChild(document.createTextNode(p.text));
-            else if (pt === "tool" || pt.startsWith("tool")) anchor = ocToolRow(p, anchor).wrap;
+            else if (pt === "tool" || pt.startsWith("tool")) anchor = ocToolRow(p, null, el).wrap;
           });
           const tok = d.tokens || {};
           const total = (tok.input || 0) + (tok.output || 0) + (tok.reasoning || 0);
