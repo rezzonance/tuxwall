@@ -5971,16 +5971,24 @@
       try {
         await postJSON("/api/agent/permission/reply", { requestID, response });
         const card = btn.closest(".oc-perm");
-        if (card) {
-          card.classList.add(response === "reject" ? "oc-denied" : "oc-approved");
-          const btns = card.querySelector(".oc-perm-btns");
-          if (btns) btns.innerHTML = `<span class="oc-perm-note">${response === "reject" ? "denied" : "approved"}</span>`;
-          ocRenderStatus();
-        }
+        if (card) ocPermResolve(card, response === "reject" ? "denied" : "approved");
       } catch (err) {
         btn.disabled = false;
         btn.textContent = "Error: " + err.message;
       }
+    }
+
+    // collapse a resolved permission card to a one-line note, then remove it
+    // so resolved cards don't pile up and bury the agent's response
+    function ocPermResolve(card, note) {
+      if (!card || card.dataset.resolved) return;
+      card.dataset.resolved = "1";
+      card.classList.add(note === "denied" || note === "cancelled" ? "oc-denied" : "oc-approved");
+      const head = card.querySelector(".oc-perm-head");
+      if (head) card.innerHTML = `<div class="oc-perm-head oc-perm-done">${head.textContent} — ${esc(note)}</div>`;
+      card.classList.add("oc-perm-collapse");
+      ocRenderStatus();
+      setTimeout(() => { card.remove(); ocRenderStatus(); }, 1500);
     }
 
     function ocPermCard(r) {
@@ -6137,9 +6145,7 @@
       // force-finish the pending turn locally even if the server is slow
       // to confirm: clear any open permission cards and reset the state
       document.querySelectorAll(".oc-perm:not(.oc-approved):not(.oc-denied)").forEach((el) => {
-        el.classList.add("oc-denied");
-        const btns = el.querySelector(".oc-perm-btns");
-        if (btns) btns.innerHTML = '<span class="oc-perm-note">cancelled</span>';
+        ocPermResolve(el, "cancelled");
       });
       agent.busy = false;
       ocSetState("idle");

@@ -3094,6 +3094,13 @@ body.light-theme .stat-card.stat-c:hover {
 .oc-perm.oc-approved { border-color: var(--oc-ok); opacity: 0.75; }
 .oc-perm.oc-denied  { border-color: var(--oc-error); opacity: 0.75; }
 .oc-perm-note { font-size: 11.5px; color: var(--oc-muted); margin-top: 6px; }
+.oc-perm-collapse { transition: opacity 0.4s ease, max-height 0.4s ease; opacity: 0.75; }
+.oc-perm-collapse .oc-perm-head.oc-perm-done {
+  border-bottom: none; background: transparent;
+  color: var(--oc-muted); font-weight: 600;
+}
+.oc-perm-collapse.oc-approved .oc-perm-done { color: var(--oc-diff-add, #4fd6be); }
+.oc-perm-collapse.oc-denied .oc-perm-done { color: var(--oc-diff-del, #c53b53); }
 
 /* --- status bar (bottom of terminal) ----------------------------- */
 .oc-statusbar {
