@@ -270,6 +270,8 @@
     ovLatPeak: document.getElementById("ov-lat-peak"),
     ovLatLoss: document.getElementById("ov-lat-loss"),
     ovLatJitter: document.getElementById("ov-lat-jitter"),
+    ovWanIp: document.getElementById("ov-wan-ip"),
+    ovWgPeers: document.getElementById("ov-wg-peers"),
     ovResHint: document.getElementById("ov-res-hint"),
     ovBwHint: document.getElementById("ov-bw-hint"),
     ovLatHint: document.getElementById("ov-lat-hint"),
@@ -5020,6 +5022,18 @@
     els.ovLatLoss.title = "Average packet loss over the last hour";
     els.ovLatJitter.textContent = fmtMs(lat.jitter_ms);
     els.ovLatJitter.title = "Mean deviation of recent ping batches (last 10 min)";
+
+    const wan = sys.wan || {};
+    els.ovWanIp.textContent = wan.ipv4 || "—";
+    els.ovWanIp.title = wan.ifname
+      ? `${wan.ifname}${(wan.ipv6 || [])[0] ? " · v6: " + wan.ipv6[0] : ""}`
+      : "no default route";
+
+    const wgPeers = ((d.wg || {}).peers || []);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const wgOnline = wgPeers.filter((p) => (p.last_handshake || 0) > nowSec - 180).length;
+    els.ovWgPeers.textContent = wgPeers.length ? `${wgOnline}/${wgPeers.length}` : "—";
+    els.ovWgPeers.title = "WireGuard peers with a handshake in the last 3 minutes";
 
     const dnsT = dns.totals || {};
     const dnsOk = !!(dns.ok && dnsT.queries);

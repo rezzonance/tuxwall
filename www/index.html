@@ -6,7 +6,7 @@
   <title>TuxWall - Network Dashboard</title>
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
-  <link rel="stylesheet" href="/css/style.css?v=20260901a">
+  <link rel="stylesheet" href="/css/style.css?v=20260901b">
 </head>
 <body>
 <div id="login-gate" class="login-gate" hidden>
@@ -176,6 +176,14 @@
         <div class="stat-card stat-c stat-c-teal">
           <div class="stat-value" id="ov-lat-jitter">—</div>
           <div class="stat-label">Jitter 10m</div>
+        </div>
+        <div class="stat-card stat-c stat-c-green">
+          <div class="stat-value" id="ov-wan-ip">—</div>
+          <div class="stat-label">WAN IP</div>
+        </div>
+        <div class="stat-card stat-c stat-c-blue">
+          <div class="stat-value" id="ov-wg-peers">—</div>
+          <div class="stat-label">VPN Peers</div>
         </div>
       </div>
 
@@ -1888,7 +1896,7 @@
 
 <script src="/scripts/leaflet.js"></script>
 <script src="/scripts/qrcode.js"></script>
-<script src="/scripts/dashboard.js?v=20260901a"></script>
+<script src="/scripts/dashboard.js?v=20260901b"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>
