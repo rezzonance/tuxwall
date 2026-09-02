@@ -257,8 +257,14 @@ sudo dpkg -i tuxwall_2.4.0_all.deb
 #### APT repository (recommended)
 
 The project publishes a signed APT repository via GitHub Pages, so installed
-routers receive updates with a plain `apt update && apt upgrade`. On each
-router (one-time setup):
+routers receive updates with a plain `apt update && apt upgrade`. One-line
+install on any Debian/Ubuntu box:
+
+```bash
+curl -fsSL https://rezzonance.github.io/tuxwall/install-repo.sh | sudo bash
+```
+
+Or the equivalent manual steps (one-time setup on each router):
 
 ```bash
 curl -fsSL https://rezzonance.github.io/tuxwall/public.asc \

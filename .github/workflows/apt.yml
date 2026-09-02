@@ -71,6 +71,7 @@ jobs:
           mkdir -p apt/pool/main/t/tuxwall apt/dists/stable/main/binary-all
           cp "tuxwall_${VERSION}_all.deb" apt/pool/main/t/tuxwall/
           cp apt-public.asc apt/public.asc
+          cp install-repo.sh apt/
 
           cd apt
           apt-ftparchive packages pool/main \
