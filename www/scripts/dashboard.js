@@ -3580,6 +3580,8 @@
       showBanner(true, d.error || "System info unavailable");
       return;
     }
+    const brandVersion = document.getElementById("brand-version");
+    if (brandVersion && d.tuxwall_version) brandVersion.textContent = "v" + d.tuxwall_version;
     const cpu = d.cpu || {};
     const mem = d.mem || {};
     const swap = d.swap || {};
@@ -7057,6 +7059,16 @@
     updateNetStatus();
     window.addEventListener("online",  updateNetStatus);
     window.addEventListener("offline", updateNetStatus);
+
+    // Sidebar version badge (shown on login-independent init too)
+    const brandVersion = document.getElementById("brand-version");
+    if (brandVersion && !brandVersion.textContent) {
+      fetchJSON("/api/system")
+        .then((d) => {
+          if (d && d.tuxwall_version) brandVersion.textContent = "v" + d.tuxwall_version;
+        })
+        .catch(() => {});
+    }
   }
 
   function setLoginError(msg) {

@@ -5251,6 +5251,19 @@ def save_baselines(data):
         json.dump(filtered, f, indent=2)
 
 
+def _dpkg_version(pkg):
+    try:
+        proc = subprocess.run(
+            ["dpkg-query", "-W", "-f=${Version}", pkg],
+            capture_output=True, text=True, timeout=5,
+        )
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
 def build_system():
     def read(path, default=""):
         try:
@@ -5401,6 +5414,7 @@ def build_system():
     return {
         "ok": True,
         "hostname": uname.nodename,
+        "tuxwall_version": _dpkg_version("tuxwall"),
         "os": os_info.get("PRETTY_NAME", ""),
         "kernel": uname.release,
         "arch": uname.machine,
