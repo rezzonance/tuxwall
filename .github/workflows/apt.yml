@@ -70,7 +70,7 @@ jobs:
           VERSION="${{ steps.ver.outputs.version }}"
           mkdir -p apt/pool/main/t/tuxwall apt/dists/stable/main/binary-all
           cp "tuxwall_${VERSION}_all.deb" apt/pool/main/t/tuxwall/
-          cp apt-public.asc apt/
+          cp apt-public.asc apt/public.asc
 
           cd apt
           apt-ftparchive packages pool/main \
