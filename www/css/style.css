@@ -689,6 +689,14 @@ body.locked > .layout { display: none; }
 .login-card h1 { margin: 2px 0 0; font-size: 20px; text-align: center; }
 .login-sub { margin: -4px 0 8px; font-size: 12.5px; text-align: center; }
 .login-label { font-size: 12px; color: var(--muted); }
+
+/* Two-Factor Authentication card: pad direct children off the card edges */
+#totp-card > *:not(.card-head) { padding-left: 16px; padding-right: 16px; }
+#totp-card > p.muted { margin: 0; padding-top: 12px; }
+#totp-card > button { margin: 14px 0; }
+#totp-card > div { padding-top: 6px; padding-bottom: 16px; }
+#totp-card > div > *:first-child { margin-top: 10px; }
+#totp-card > p.login-error { padding-bottom: 14px; }
 .login-input {
   background: var(--bg-elev);
   border: 1px solid var(--border);
@@ -2829,7 +2837,7 @@ body.light-theme .stat-card.stat-c:hover {
 
 /* Settings pane */
 .fw-settings-grid { display: flex; flex-direction: column; gap: 0; }
-.fw-setting { padding: 14px 0; border-bottom: 1px solid var(--border); }
+.fw-setting { padding: 14px 16px; border-bottom: 1px solid var(--border); }
 .fw-setting:last-child { border-bottom: none; }
 .fw-setting-head {
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
