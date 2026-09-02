@@ -3,6 +3,8 @@ import base64
 import gzip
 import hashlib
 import hmac
+import copy
+import io
 import ipaddress
 import json
 import os
@@ -14,6 +16,7 @@ import socket
 import subprocess
 import sys
 import tarfile
+import tempfile
 import threading
 import time
 import urllib.error
@@ -1404,6 +1407,75 @@ def set_firewall_logging(level):
         raise RuntimeError("Invalid logging level")
     _ufw(["logging", level])
     return build_firewall()
+
+
+FW_BASELINE_DIR = "/etc/tuxwall/fw-baseline"
+
+
+def save_firewall_baseline():
+    """Snapshot the live iptables/ip6tables rulesets (filter/nat/mangle/raw)
+    plus ufw status into /etc/tuxwall/fw-baseline/."""
+    os.makedirs(FW_BASELINE_DIR, exist_ok=True)
+    saved = {}
+    for family, tool in (("iptables", "iptables-save"), ("ip6tables", "ip6tables-save")):
+        proc = subprocess.run(
+            [tool], capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"{tool} failed: {(proc.stderr or '').strip()}")
+        path = os.path.join(FW_BASELINE_DIR, f"{family}.rules")
+        with open(path, "w") as f:
+            f.write(proc.stdout)
+        saved[family] = path
+    ufw_proc = subprocess.run(
+        ["ufw", "status", "verbose"], capture_output=True, text=True, timeout=30,
+    )
+    with open(os.path.join(FW_BASELINE_DIR, "ufw-status.txt"), "w") as f:
+        f.write(ufw_proc.stdout)
+    return {"ok": True, "baseline": saved}
+
+
+def _norm_ruleset(text):
+    """Normalize a ruleset dump for comparison: drop comment lines and
+    zero out packet/byte counters."""
+    lines = []
+    for line in text.splitlines():
+        if line.startswith("#"):
+            continue
+        lines.append(re.sub(r"\[\d+:\d+\]", "[0:0]", line))
+    return lines
+
+
+def restore_firewall_baseline():
+    """Atomically restore all IPv4/IPv6 tables from the saved baseline
+    using iptables-restore/ip6tables-restore, then verify the live ruleset
+    matches the baseline."""
+    paths = {
+        "iptables": os.path.join(FW_BASELINE_DIR, "iptables.rules"),
+        "ip6tables": os.path.join(FW_BASELINE_DIR, "ip6tables.rules"),
+    }
+    missing = [p for p in paths.values() if not os.path.isfile(p)]
+    if missing:
+        raise RuntimeError("Baseline not found — save a baseline first")
+    for tool, path in (("iptables-restore", paths["iptables"]),
+                       ("ip6tables-restore", paths["ip6tables"])):
+        proc = subprocess.run(
+            [tool, "--wait", "5", path],
+            capture_output=True, text=True, timeout=120,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"{tool} failed: {(proc.stderr or '').strip()}")
+    verified = True
+    for family, tool in (("iptables", "iptables-save"),
+                         ("ip6tables", "ip6tables-save")):
+        live = subprocess.run(
+            [tool], capture_output=True, text=True, timeout=30,
+        )
+        with open(paths[family]) as f:
+            if _norm_ruleset(live.stdout) != _norm_ruleset(f.read()):
+                verified = False
+    return {"ok": True, "restored": paths, "verified": verified}
 
 
 CROWDSEC_BIN = shutil.which("cscli") or "/usr/bin/cscli"
@@ -5410,6 +5482,7 @@ def create_backup():
             path = os.path.join(WWW_DIR, entry)
             if os.path.exists(path):
                 tar.add(path, arcname=entry)
+    os.chmod(dest, 0o600)
     st = os.stat(dest)
     return {"ok": True, "backup": {"name": name, "size": st.st_size, "time": int(st.st_mtime)}}
 
@@ -5485,11 +5558,66 @@ def delete_backup(filename):
 SYSTEM_BACKUP_DIR = os.path.join(BACKUP_DIR, "system")
 SYSTEM_BACKUP_RE = re.compile(r"^system-backup-\d{8}-\d{6}\.tar\.gz$")
 SYSTEM_BACKUP_SCRIPT = "/usr/local/sbin/system-backup.sh"
+
+# Catalog of capturable config groups. key = arcname passed to the backup
+# script's -i filter; service = hint shown after a single-file restore.
+SYSTEM_BACKUP_ITEMS = [
+    {"arc": "etc/netplan", "path": "/etc/netplan", "label": "Network interfaces (netplan)", "service": "systemd-networkd"},
+    {"arc": "etc/systemd/network", "path": "/etc/systemd/network", "label": "systemd-networkd", "service": "systemd-networkd"},
+    {"arc": "etc/kea", "path": "/etc/kea", "label": "KEA DHCP server", "service": "kea-dhcp4-server"},
+    {"arc": "etc/unbound", "path": "/etc/unbound", "label": "Unbound DNS resolver", "service": "unbound"},
+    {"arc": "etc/ufw", "path": "/etc/ufw", "label": "UFW firewall", "service": "ufw"},
+    {"arc": "etc/nginx", "path": "/etc/nginx", "label": "nginx web server", "service": "nginx"},
+    {"arc": "etc/systemd/system", "path": "/etc/systemd/system", "label": "systemd units", "service": "daemon-reload"},
+    {"arc": "etc/sysctl.d", "path": "/etc/sysctl.d", "label": "Kernel settings (sysctl.d)", "service": "sysctl --system"},
+    {"arc": "etc/radvd.conf", "path": "/etc/radvd.conf", "label": "RA/NDP daemon (radvd)", "service": "radvd"},
+    {"arc": "etc/wireguard", "path": "/etc/wireguard", "label": "WireGuard VPN", "service": "wg-quick@wg0"},
+    {"arc": "etc/cloudflared", "path": "/etc/cloudflared", "label": "cloudflared", "service": "cloudflared"},
+    {"arc": "etc/tuxwall", "path": "/etc/tuxwall", "label": "TuxWall", "service": "tuxwall"},
+    {"arc": "etc/crowdsec", "path": "/etc/crowdsec", "label": "CrowdSec", "service": "crowdsec"},
+    {"arc": "etc/apt/sources.list", "path": "/etc/apt/sources.list", "label": "APT sources.list", "service": None},
+    {"arc": "etc/apt/sources.list.d", "path": "/etc/apt/sources.list.d", "label": "APT sources.list.d", "service": None},
+    {"arc": "etc/hosts", "path": "/etc/hosts", "label": "/etc/hosts", "service": None},
+    {"arc": "etc/hostname", "path": "/etc/hostname", "label": "/etc/hostname", "service": None},
+    {"arc": "etc/fstab", "path": "/etc/fstab", "label": "/etc/fstab", "service": None},
+    {"arc": "etc/hosts.allow", "path": "/etc/hosts.allow", "label": "/etc/hosts.allow", "service": None},
+    {"arc": "etc/hosts.deny", "path": "/etc/hosts.deny", "label": "/etc/hosts.deny", "service": None},
+    {"arc": "usr/local/bin", "path": "/usr/local/bin", "label": "/usr/local/bin scripts", "service": None},
+    {"arc": "usr/local/sbin", "path": "/usr/local/sbin", "label": "/usr/local/sbin scripts", "service": None},
+    {"arc": "var/www/html", "path": "/var/www/html", "label": "TuxWall dashboard files", "service": "tuxwall"},
+]
+
+# Map from archive arc prefix -> service hint for restores
+_SYSTEM_BACKUP_SERVICE_BY_ARC = {i["arc"]: i["service"] for i in SYSTEM_BACKUP_ITEMS}
+
 _system_backup_job = {"running": False, "pct": 0, "step": "", "result": None, "error": None}
 _system_backup_lock = threading.Lock()
 
 
-def _system_backup_worker():
+def system_backup_items():
+    """List the capturable config groups with existence + rough size."""
+    items = []
+    for item in SYSTEM_BACKUP_ITEMS:
+        try:
+            st = os.stat(item["path"])
+            if os.path.isdir(item["path"]):
+                total = 0
+                for root, dirs, files in os.walk(item["path"]):
+                    for fn in files:
+                        try:
+                            total += os.path.getsize(os.path.join(root, fn))
+                        except OSError:
+                            pass
+                size = total
+            else:
+                size = st.st_size
+            items.append({**item, "exists": True, "size": size})
+        except OSError:
+            items.append({**item, "exists": False, "size": 0})
+    return {"ok": True, "items": items}
+
+
+def _system_backup_worker(include_file=None):
     global _system_backup_job
     try:
         os.makedirs(SYSTEM_BACKUP_DIR, exist_ok=True)
@@ -5498,8 +5626,11 @@ def _system_backup_worker():
             raise FileNotFoundError(
                 "Backup script missing (%s). Install it: sudo bash ~/tuxwall-blocklist/deploy.sh" % script
             )
+        cmd = [script, "-o", SYSTEM_BACKUP_DIR]
+        if include_file:
+            cmd += ["-i", include_file]
         proc = subprocess.Popen(
-            [script, "-o", SYSTEM_BACKUP_DIR],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -5523,6 +5654,8 @@ def _system_backup_worker():
         proc.wait()
         if proc.returncode != 0:
             error = "Backup script exited with status %d" % proc.returncode
+        if not error:
+            _prune_system_backups()
         with _system_backup_lock:
             _system_backup_job["result"] = result if result and not error else None
             _system_backup_job["error"] = error
@@ -5530,17 +5663,33 @@ def _system_backup_worker():
         with _system_backup_lock:
             _system_backup_job["error"] = str(exc)
     finally:
+        if include_file:
+            try:
+                os.unlink(include_file)
+            except OSError:
+                pass
         with _system_backup_lock:
             _system_backup_job["running"] = False
             _system_backup_job["pct"] = 100 if _system_backup_job["error"] else _system_backup_job["pct"]
 
 
-def create_system_backup():
+def create_system_backup(include=None):
+    include_file = None
+    if include is not None:
+        if not isinstance(include, list) or not include:
+            raise ValueError("Invalid include list")
+        valid = {i["arc"] for i in SYSTEM_BACKUP_ITEMS}
+        unknown = [a for a in include if a not in valid]
+        if unknown:
+            raise ValueError("Unknown config item(s): %s" % ", ".join(unknown[:3]))
+        include_file = os.path.join(SYSTEM_BACKUP_DIR, ".include-%d" % int(time.time()))
+        with open(include_file, "w") as f:
+            f.write("\n".join(include) + "\n")
     with _system_backup_lock:
         if _system_backup_job["running"]:
             raise ValueError("A system backup is already running")
         _system_backup_job.update({"pct": 0, "step": "Starting", "result": None, "error": None, "running": True})
-    threading.Thread(target=_system_backup_worker, daemon=True).start()
+    threading.Thread(target=_system_backup_worker, args=(include_file,), daemon=True).start()
     return {"ok": True, "running": True}
 
 
@@ -5583,6 +5732,304 @@ def delete_system_backup(filename):
         raise ValueError("System backup not found")
     os.remove(path)
     return {"ok": True, "deleted": base}
+
+
+def _system_backup_path(filename, sanitized=False):
+    base = os.path.basename(filename or "")
+    if not (SYSTEM_BACKUP_RE.match(base) or UPLOADED_RE.match(base) or
+            (sanitized and SANITIZED_RE.match(base))):
+        raise ValueError("Invalid system backup name")
+    path = os.path.join(SYSTEM_BACKUP_DIR, base)
+    if not os.path.isfile(path):
+        raise ValueError("System backup not found")
+    return base, path
+
+
+UPLOADED_RE = re.compile(r"^uploaded-\d{8}-\d{6}\.tar\.gz$")
+UPLOADED_KEEP = 1
+
+
+def upload_system_backup(raw):
+    """Accept an uploaded system-backup archive, validate it, store it
+    (root-only), and return its examinable contents for selective restore."""
+    if not raw or len(raw) < 64:
+        raise ValueError("Upload is empty")
+    if raw[:2] != b"\x1f\x8b":
+        raise ValueError("Not a .tar.gz archive")
+    name = "uploaded-" + time.strftime("%Y%m%d-%H%M%S") + ".tar.gz"
+    path = os.path.join(SYSTEM_BACKUP_DIR, name)
+    with open(path, "wb") as f:
+        f.write(raw)
+    os.chmod(path, 0o600)
+    try:
+        contents = system_backup_contents(name)
+    except Exception as exc:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise ValueError("Archive unreadable: %s" % exc)
+    # prune older uploads
+    try:
+        names = sorted(n for n in os.listdir(SYSTEM_BACKUP_DIR)
+                       if UPLOADED_RE.match(n))
+        for n in names[:-UPLOADED_KEEP] if len(names) > UPLOADED_KEEP else []:
+            try:
+                os.remove(os.path.join(SYSTEM_BACKUP_DIR, n))
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return {"ok": True, "name": name, "files": contents["files"]}
+
+
+def _system_member_safe(member_name):
+    """A member is safe if it's a regular file, has no traversal, and lands
+    under a known prefix (etc/ or usr/local/ or a top-level dump file)."""
+    name = member_name.replace("\\", "/")
+    while name.startswith("./"):
+        name = name[2:]
+    if not name or ".." in name.split("/"):
+        return None
+    if not (name.startswith("etc/") or name.startswith("usr/local/")
+            or name.startswith("var/www/html/")):
+        if name not in ("iptables-save.txt", "ip6tables-save.txt", "manifest.txt",
+                        "dpkg-selections.txt", "apt-manual.txt", "package-versions.txt"):
+            return None
+    return name
+
+
+def system_backup_contents(filename):
+    """List the files inside a system backup archive."""
+    base, path = _system_backup_path(filename)
+    files = []
+    with tarfile.open(path, "r:gz") as tar:
+        for m in tar.getmembers():
+            name = _system_member_safe(m.name)
+            if not name or not m.isreg():
+                continue
+            service = None
+            for arc, svc in _SYSTEM_BACKUP_SERVICE_BY_ARC.items():
+                if name.startswith(arc + "/") or name == arc:
+                    service = svc
+                    break
+            if name == "iptables-save.txt":
+                service = "iptables-restore"
+            elif name == "ip6tables-save.txt":
+                service = "ip6tables-restore"
+            files.append({"name": name, "size": m.size, "service": service})
+    files.sort(key=lambda f: f["name"])
+    return {"ok": True, "backup": base, "files": files}
+
+
+def system_backup_member_path(filename, member):
+    """Validate name/member, open archive, return (base, tar, member)."""
+    base, path = _system_backup_path(filename)
+    name = _system_member_safe(member or "")
+    if not name:
+        raise ValueError("Invalid file name")
+    tar = tarfile.open(path, "r:gz")
+    try:
+        m = tar.getmember(name)
+    except KeyError:
+        try:
+            m = tar.getmember("./" + name)
+        except KeyError:
+            tar.close()
+            raise ValueError("File not found in backup")
+    if not m.isreg():
+        tar.close()
+        raise ValueError("Not a regular file")
+    return base, tar, m
+
+
+def download_system_backup_member(filename, member):
+    base, tar, m = system_backup_member_path(filename, member)
+    out = os.path.join(tempfile.gettempdir(), "tuxwall-dl-" + os.path.basename(m.name))
+    try:
+        with tar.extractfile(m) as src, open(out, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+    finally:
+        tar.close()
+    return out
+
+
+def restore_system_backup_member(filename, member):
+    """Restore a single file from a system backup to its live location.
+    Firewall rule dumps are applied with iptables-restore (atomic + verified);
+    config files are copied to their /etc or /usr/local path with a timestamped
+    .bak of the current file. Services are NOT restarted automatically."""
+    base, tar, m = system_backup_member_path(filename, member)
+    name = _system_member_safe(member)
+    try:
+        if name == "iptables-save.txt":
+            proc = subprocess.run(
+                ["iptables-restore", "--wait", "5", "/dev/stdin"],
+                input=_extract_text(tar, m), capture_output=True, text=True, timeout=120)
+            if proc.returncode != 0:
+                raise RuntimeError((proc.stderr or "iptables-restore failed").strip())
+            return {"ok": True, "restored": name, "restart_required": None,
+                    "note": "IPv4 rules applied atomically; no service restart needed"}
+        if name == "ip6tables-save.txt":
+            proc = subprocess.run(
+                ["ip6tables-restore", "--wait", "5", "/dev/stdin"],
+                input=_extract_text(tar, m), capture_output=True, text=True, timeout=120)
+            if proc.returncode != 0:
+                raise RuntimeError((proc.stderr or "ip6tables-restore failed").strip())
+            return {"ok": True, "restored": name, "restart_required": None,
+                    "note": "IPv6 rules applied atomically; no service restart needed"}
+        dest = "/" + name
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        bak = None
+        if os.path.exists(dest):
+            bak = dest + ".bak-" + time.strftime("%Y%m%d%H%M%S")
+            shutil.copy2(dest, bak)
+        with tar.extractfile(m) as src, open(dest, "wb") as out:
+            shutil.copyfileobj(src, out)
+    finally:
+        tar.close()
+    restart_required = None
+    for arc, svc in _SYSTEM_BACKUP_SERVICE_BY_ARC.items():
+        if (name.startswith(arc + "/") or name == arc) and svc:
+            restart_required = svc
+            break
+    if name.startswith("etc/systemd/"):
+        restart_required = "daemon-reload"
+    return {"ok": True, "restored": name, "restart_required": restart_required,
+            "backup_of_previous": bak}
+
+
+def _extract_text(tar, member):
+    with tar.extractfile(member) as f:
+        return f.read().decode("utf-8", errors="replace")
+
+
+# ---- Sanitized exports (secrets stripped, safe to share) ----
+
+SANITIZED_RE = re.compile(r"^sanitized-\d{8}-\d{6}\.tar\.gz$")
+SANITIZED_KEEP = 3
+
+# Name fragments that mark a member as secret -> dropped from sanitized export
+SANITIZE_DROP_SUBSTR = (
+    "llm.json", "auth.json", "opencode.json", "credentials",
+    "cert.pem", "privatekey", "publickey",
+)
+# (arc prefix, regex pattern, replacement) applied to text files
+SANITIZE_TEXT_RULES = [
+    ("etc/wireguard/",
+     re.compile(r"(?m)^(\s*(?:PrivateKey|PresharedKey)\s*=\s*).*$"),
+     r"\1<REDACTED>"),
+    ("etc/cloudflared/",
+     re.compile(r'("TunnelSecret"\s*:\s*")[^"]*(")'),
+     r"\1<REDACTED>\2"),
+    ("etc/kea/",
+     re.compile(r'("secret"\s*:\s*")[^"]*(")'),
+     r"\1<REDACTED>\2"),
+    ("etc/crowdsec/",
+     re.compile(r"(?mi)^(\s*#?\s*(?:password|api_key|api-key|secret|token|"
+                r"credentials?)\s*:\s*).*$"),
+     r"\1<REDACTED>"),
+    ("etc/systemd/",
+     re.compile(r"(?mi)^(\s*Environment=[A-Za-z0-9_]*"
+                r"(?:PASSWORD|SECRET|TOKEN|KEY)[A-Za-z0-9_]*=).*$"),
+     r"\1<REDACTED>"),
+]
+
+
+def _member_is_secret(name):
+    low = name.lower()
+    return any(frag in low for frag in SANITIZE_DROP_SUBSTR)
+
+
+def sanitize_system_backup(filename):
+    """Create a sanitized copy of a system backup with secrets removed,
+    suitable for sharing (e.g. as an AI setup template)."""
+    base, path = _system_backup_path(filename)
+    out_name = "sanitized-" + time.strftime("%Y%m%d-%H%M%S") + ".tar.gz"
+    out_path = os.path.join(SYSTEM_BACKUP_DIR, out_name)
+    dropped = []
+    redacted = 0
+    with tarfile.open(path, "r:gz") as src, \
+            tarfile.open(out_path, "w:gz") as dst:
+        for m in src.getmembers():
+            name = _system_member_safe(m.name)
+            if not name:
+                continue
+            if _member_is_secret(name):
+                if m.isreg():
+                    dropped.append(name)
+                continue
+            body = None
+            if m.isreg():
+                for prefix, pattern, repl in SANITIZE_TEXT_RULES:
+                    if name.startswith(prefix):
+                        text = _extract_text(src, m)
+                        new_text, n = pattern.subn(repl, text)
+                        if n:
+                            redacted += n
+                            body = new_text.encode("utf-8")
+                        break
+            if body is not None:
+                info = copy.copy(m)
+                info.name = m.name
+                info.size = len(body)
+                dst.addfile(info, io.BytesIO(body))
+            elif m.isreg():
+                with src.extractfile(m) as f:
+                    dst.addfile(m, f)
+            else:
+                dst.addfile(m)
+        note = ("TuxWall sanitized export\n"
+                "Created: %s\nSource: %s\n"
+                "Dropped %d secret file(s); redacted %d key(s)/secret(s).\n"
+                "WireGuard PrivateKey/PresharedKey, cloudflared TunnelSecret, "
+                "KEA secrets, and credential files were removed or replaced "
+                "with <REDACTED>. Verify before sharing.\n"
+                % (time.strftime("%Y-%m-%d %H:%M:%S"), base, len(dropped), redacted))
+        info = tarfile.TarInfo("SANITIZED.txt")
+        info.size = len(note.encode())
+        dst.addfile(info, io.BytesIO(note.encode()))
+    os.chmod(out_path, 0o600)
+    _prune_sanitized()
+    return {"ok": True, "name": out_name, "dropped": dropped, "redacted": redacted}
+
+
+def _prune_sanitized():
+    try:
+        names = sorted(n for n in os.listdir(SYSTEM_BACKUP_DIR)
+                      if SANITIZED_RE.match(n))
+    except OSError:
+        return
+    for n in names[:-SANITIZED_KEEP] if len(names) > SANITIZED_KEEP else []:
+        try:
+            os.remove(os.path.join(SYSTEM_BACKUP_DIR, n))
+        except OSError:
+            pass
+
+
+# ---- Auto-prune: keep only the newest N system backups ----
+
+SYSTEM_BACKUP_KEEP = 1
+
+
+def _prune_system_backups():
+    """After a successful backup, delete older system backups beyond
+    SYSTEM_BACKUP_KEEP (newest kept). Download anything you want preserved."""
+    try:
+        names = sorted(n for n in os.listdir(SYSTEM_BACKUP_DIR)
+                       if SYSTEM_BACKUP_RE.match(n))
+    except OSError:
+        return []
+    keep = names[-SYSTEM_BACKUP_KEEP:] if SYSTEM_BACKUP_KEEP > 0 else names
+    removed = []
+    for n in names:
+        if n not in keep:
+            try:
+                os.remove(os.path.join(SYSTEM_BACKUP_DIR, n))
+                removed.append(n)
+            except OSError:
+                pass
+    return removed
 
 
 CONFIG_FILES = {
@@ -6178,11 +6625,43 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/backups/system":
             self._send(200, system_backup_status())
 
+        elif path == "/api/backups/system/items":
+            self._send(200, system_backup_items())
+
+        elif path == "/api/backups/system/contents":
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            name = (qs.get("name") or [None])[0] or ""
+            try:
+                self._send(200, system_backup_contents(name))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/backups/system/file":
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            name = (qs.get("name") or [None])[0] or ""
+            member = (qs.get("file") or [None])[0] or ""
+            try:
+                tmp = download_system_backup_member(name, member)
+                try:
+                    self._send_file(tmp, os.path.basename(member))
+                finally:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
         elif path == "/api/backups/system/download":
             qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             name = (qs.get("name") or [None])[0] or ""
             base = os.path.basename(name)
-            if not SYSTEM_BACKUP_RE.match(base):
+            if not (SYSTEM_BACKUP_RE.match(base) or SANITIZED_RE.match(base)
+                    or UPLOADED_RE.match(base)):
                 self._send(400, {"ok": False, "error": "Invalid system backup name"})
                 return
             fpath = os.path.join(SYSTEM_BACKUP_DIR, base)
@@ -6270,7 +6749,8 @@ class Handler(BaseHTTPRequestHandler):
         raw = b""
         body = {}
         if length:
-            maxlen = 104857600 if path == "/api/backups/restore" else 262144
+            maxlen = 104857600 if path in ("/api/backups/restore",
+                                           "/api/backups/system/upload") else 262144
             if length > maxlen:
                 self._send(413, {"ok": False, "error": "Payload too large"})
                 return
@@ -6607,6 +7087,24 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
 
+        elif path == "/api/firewall/reset":
+            action = (body.get("action") or "").lower()
+            if action == "save":
+                try:
+                    self._send(200, save_firewall_baseline())
+                except Exception as exc:
+                    self._send(500, {"ok": False, "error": str(exc)})
+            elif action == "restore":
+                try:
+                    self._send(200, restore_firewall_baseline())
+                except Exception as exc:
+                    self._send(500, {"ok": False, "error": str(exc)})
+            else:
+                self._send(400, {
+                    "ok": False,
+                    "error": "unknown action; use 'save' or 'restore'",
+                })
+
         elif path == "/api/crowdsec/ban":
             try:
                 self._send(200, ban_crowdsec_ip(body.get("ip"), body.get("duration")))
@@ -6669,13 +7167,48 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/api/backups/system/create":
             try:
-                self._send(200, create_system_backup())
+                self._send(200, create_system_backup(body.get("include")))
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/backups/system/restore-file":
+            try:
+                self._send(200, restore_system_backup_member(
+                    body.get("name"), body.get("file")))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/backups/system/sanitize":
+            try:
+                self._send(200, sanitize_system_backup(body.get("name")))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/backups/system/upload":
+            try:
+                self._send(200, upload_system_backup(raw))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
 
         elif path == "/api/backups/system/delete":
+            name = (body.get("name") or "").strip()
+            base = os.path.basename(name)
+            if SANITIZED_RE.match(base) or UPLOADED_RE.match(base):
+                fpath = os.path.join(SYSTEM_BACKUP_DIR, base)
+                if not os.path.isfile(fpath):
+                    self._send(404, {"ok": False, "error": "Backup not found"})
+                    return
+                os.remove(fpath)
+                self._send(200, {"ok": True, "deleted": base})
+                return
             try:
-                self._send(200, delete_system_backup(body.get("name")))
+                self._send(200, delete_system_backup(name))
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
 

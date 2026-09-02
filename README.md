@@ -245,13 +245,13 @@ sudo apt install -y \
 Install the provided `.deb` package:
 
 ```bash
-sudo dpkg -i tuxwall_2.3.0_all.deb
+sudo dpkg -i tuxwall_2.4.0_all.deb
 ```
 
 If you encounter dependency errors:
 ```bash
 sudo apt -f install
-sudo dpkg -i tuxwall_2.3.0_all.deb
+sudo dpkg -i tuxwall_2.4.0_all.deb
 ```
 
 ### 3. Disable systemd-resolved and configure DNS

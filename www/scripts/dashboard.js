@@ -220,17 +220,20 @@
     logFollow: document.getElementById("log-follow"),
     logView: document.getElementById("log-view"),
     logMeta: document.getElementById("log-meta"),
-    bkBody: document.getElementById("bk-body"),
-    bkCreate: document.getElementById("bk-create"),
-    bkRestore: document.getElementById("bk-restore"),
-    bkFile: document.getElementById("bk-file"),
-    bkMsg: document.getElementById("bk-msg"),
     bkSysCreate: document.getElementById("bk-sys-create"),
     bkSysBody: document.getElementById("bk-sys-body"),
     bkSysMsg: document.getElementById("bk-sys-msg"),
     bkSysProgress: document.getElementById("bk-sys-progress"),
     bkSysBar: document.getElementById("bk-sys-bar"),
     bkSysStatus: document.getElementById("bk-sys-status"),
+    bkSysItems: document.getElementById("bk-sys-items"),
+    bkSysAll: document.getElementById("bk-sys-all"),
+    bkSysNone: document.getElementById("bk-sys-none"),
+    bkSysContents: document.getElementById("bk-sys-contents"),
+    bkSysFile: document.getElementById("bk-sys-file"),
+    bkSysUpload: document.getElementById("bk-sys-upload"),
+    bkSysContentsTitle: document.getElementById("bk-sys-contents-title"),
+    bkSysFiles: document.getElementById("bk-sys-files"),
     sysCpu: document.getElementById("sys-cpu"),
     sysMem: document.getElementById("sys-mem"),
     sysUptime: document.getElementById("sys-uptime"),
@@ -1725,9 +1728,7 @@
       els.fwHint.textContent = "Working…";
       const res = await postJSON("/api/firewall/reset", payload);
       if (!res.ok) throw new Error(res.error || "request failed");
-      els.fwHint.textContent = (res.cleared ? "All rules flushed, " : "") +
-        "baseline restored" +
-        (res.baseline_created ? " (baseline captured from current settings)" : "") +
+      els.fwHint.textContent = "baseline restored" +
         (res.verified ? "" : " — live rules differ from baseline, verify manually");
       await refreshFirewall();
       return res;
@@ -1830,14 +1831,15 @@
 
     els.fwReset.addEventListener("click", async () => {
       if (!window.confirm(
-        "Reset the firewall?\n\nThis flushes ALL iptables/ip6tables rules " +
-        "(IPv4 + IPv6, filter/nat/mangle/raw) and restores the saved baseline. " +
-        "A snapshot of the current rules is kept as a backup first. " +
+        "Restore the saved baseline?\n\n" +
+        "This atomically replaces all IPv4/IPv6 tables " +
+        "(filter/nat/mangle/raw) with the saved baseline rules. " +
+        "Any rules added since the baseline was saved will be lost. " +
         "Your SSH session and internet should survive, but use the LAN connection to be safe."
       )) return;
       els.fwReset.disabled = true;
       try {
-        await firewallOp({ action: "reset", clear: true });
+        await firewallOp({ action: "restore" });
       } catch (err) {
         els.fwHint.textContent = "Error: " + err.message;
       } finally {
@@ -3722,50 +3724,8 @@
     });
   }
 
-  function setBkMsg(msg, err) {
-    els.bkMsg.textContent = msg || "";
-    els.bkMsg.className = "muted" + (err ? " bk-msg-err" : msg ? " bk-msg-ok" : "");
-  }
-
-  function renderBackups(d) {
-    els.bkBody.innerHTML = (d.backups || []).map((b) => `
-      <tr>
-        <td class="mono">${esc(b.name)}</td>
-        <td>${formatBytes(b.size)}</td>
-        <td>${new Date(b.time * 1000).toLocaleString()}</td>
-        <td class="td-right">
-          <button class="btn btn-sm bk-dl" data-name="${esc(b.name)}" type="button">Download</button>
-          <button class="btn btn-sm btn-danger bk-res" data-name="${esc(b.name)}" type="button">Restore</button>
-          <button class="btn btn-sm bk-del" data-name="${esc(b.name)}" type="button" title="Delete this backup">Delete</button>
-        </td>
-      </tr>`).join("") || `<tr><td colspan="4" class="muted">No backups yet.</td></tr>`;
-  }
-
-  async function refreshBackups() {
-    try {
-      const data = await fetchJSON("/api/backups");
-      renderBackups(data);
-    } catch (err) {
-      showBanner(true, "Backups: " + err.message);
-    }
-  }
-
-  async function downloadBackup(name) {
-    const res = await fetch("/api/backups/download?name=" + encodeURIComponent(name), { cache: "no-store" });
-    if (!res.ok) throw new Error("Download failed");
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = name;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
-  }
-
-  async function uploadRestore(name, buf) {
-    const res = await fetch("/api/backups/restore?name=" + encodeURIComponent(name), {
+  async function uploadSystemBackupExamine(buf) {
+    const res = await fetch("/api/backups/system/upload", {
       method: "POST",
       headers: { "Content-Type": "application/gzip" },
       body: buf,
@@ -3774,11 +3734,6 @@
     const data = await res.json();
     if (!data.ok) throw new Error(data.error || `HTTP ${res.status}`);
     return data;
-  }
-
-  function restoreMsg(data) {
-    const n = data.restored ? data.restored.length : 0;
-    return `Restored ${n} file(s).` + (data.restart_required ? " API server changed — run: sudo systemctl restart tuxwall" : "");
   }
 
   function setBkSysMsg(msg, err) {
@@ -3794,9 +3749,63 @@
         <td>${new Date(b.time * 1000).toLocaleString()}</td>
         <td class="td-right">
           <button class="btn btn-sm bk-sys-dl" data-name="${esc(b.name)}" type="button">Download</button>
+          <button class="btn btn-sm bk-sys-browse" data-name="${esc(b.name)}" type="button">Browse</button>
+          <button class="btn btn-sm bk-sys-san" data-name="${esc(b.name)}" type="button" title="Create a sanitized copy with secrets (WireGuard keys, credentials, API keys) removed — safe to share as a setup template">Export sanitized</button>
           <button class="btn btn-sm bk-sys-del" data-name="${esc(b.name)}" type="button" title="Delete this backup">Delete</button>
         </td>
       </tr>`).join("") || `<tr><td colspan="4" class="muted">No system backups yet.</td></tr>`;
+  }
+
+  let bkSysItemsCache = [];
+
+  function renderSystemBackupItems(items) {
+    bkSysItemsCache = items || [];
+    els.bkSysItems.innerHTML = (items || []).map((it) => `
+      <label class="bk-item">
+        <input type="checkbox" class="bk-item-chk" data-arc="${esc(it.arc)}" ${it.exists ? "checked" : " disabled"} />
+        <span class="bk-item-label">${esc(it.label)} <span class="muted mono">${esc(it.arc)}</span></span>
+        <span class="muted">${it.exists ? formatBytes(it.size) : "not present"}</span>
+      </label>`).join("") ||
+      `<p class="muted">No config items available.</p>`;
+  }
+
+  function selectedSystemBackupItems() {
+    return Array.from(els.bkSysItems.querySelectorAll(".bk-item-chk:checked"))
+      .map((c) => c.dataset.arc);
+  }
+
+  async function refreshSystemBackupItems() {
+    try {
+      const data = await fetchJSON("/api/backups/system/items");
+      renderSystemBackupItems(data.items);
+    } catch (err) {
+      els.bkSysItems.innerHTML = `<p class="muted bk-msg-err">Could not load config items: ${esc(err.message)}</p>`;
+    }
+  }
+
+  function renderSystemBackupContents(data) {
+    els.bkSysContentsTitle.textContent = "Contents of " + data.backup;
+    els.bkSysFiles.innerHTML = (data.files || []).map((f) => `
+      <tr>
+        <td class="mono">${esc(f.name)}</td>
+        <td>${formatBytes(f.size)}</td>
+        <td class="muted">${esc(f.service || "—")}</td>
+        <td class="td-right">
+          <button class="btn btn-sm bk-file-dl" data-name="${esc(data.backup)}" data-file="${esc(f.name)}" type="button">Download</button>
+          <button class="btn btn-sm bk-file-restore" data-name="${esc(data.backup)}" data-file="${esc(f.name)}" data-service="${esc(f.service || "")}" type="button">Restore</button>
+        </td>
+      </tr>`).join("") || `<tr><td colspan="4" class="muted">No files.</td></tr>`;
+    els.bkSysContents.hidden = false;
+  }
+
+  async function browseSystemBackup(name) {
+    try {
+      const data = await fetchJSON("/api/backups/system/contents?name=" + encodeURIComponent(name));
+      renderSystemBackupContents(data);
+      setBkSysMsg("");
+    } catch (err) {
+      setBkSysMsg("Browse: " + err.message, true);
+    }
   }
 
   async function refreshSystemBackups() {
@@ -3850,79 +3859,46 @@
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   }
 
-  function bindBackups() {
-    els.bkCreate.addEventListener("click", async () => {
-      try {
-        await postJSON("/api/backups/create", {});
-        setBkMsg("Backup created.", false);
-        await refreshBackups();
-      } catch (err) {
-        setBkMsg(err.message, true);
-      }
-    });
-
-    els.bkRestore.addEventListener("click", async () => {
-      const file = els.bkFile.files && els.bkFile.files[0];
-      if (!file) {
-        setBkMsg("Choose a .tar.gz backup file first.", true);
-        return;
-      }
-      if (!window.confirm(`Restore dashboard from "${file.name}"? Current files will be overwritten.`)) return;
-      try {
-        const buf = await file.arrayBuffer();
-        const data = await uploadRestore(file.name, buf);
-        setBkMsg(restoreMsg(data), false);
-        els.bkFile.value = "";
-        await refreshBackups();
-      } catch (err) {
-        setBkMsg(err.message, true);
-      }
-    });
-
-    els.bkBody.addEventListener("click", async (e) => {
-      const dl = e.target.closest(".bk-dl");
-      if (dl) {
-        try {
-          await downloadBackup(dl.dataset.name);
-        } catch (err) {
-          setBkMsg(err.message, true);
-        }
-        return;
-      }
-      const res = e.target.closest(".bk-res");
-      if (res) {
-        if (!window.confirm(`Restore dashboard from "${res.dataset.name}"? Current files will be overwritten.`)) return;
-        try {
-          const data = await postJSON("/api/backups/restore", { name: res.dataset.name });
-          setBkMsg(restoreMsg(data), false);
-          await refreshBackups();
-        } catch (err) {
-          setBkMsg(err.message, true);
-        }
-        return;
-      }
-      const del = e.target.closest(".bk-del");
-      if (del) {
-        if (!window.confirm(`Delete backup "${del.dataset.name}"?`)) return;
-        try {
-          await postJSON("/api/backups/delete", { name: del.dataset.name });
-          setBkMsg("Backup deleted.", false);
-          await refreshBackups();
-        } catch (err) {
-          setBkMsg(err.message, true);
-        }
-      }
-    });
-  }
-
   function bindSystemBackups() {
+    els.bkSysAll.addEventListener("click", () => {
+      els.bkSysItems.querySelectorAll(".bk-item-chk:not(:disabled)").forEach((c) => { c.checked = true; });
+    });
+    els.bkSysNone.addEventListener("click", () => {
+      els.bkSysItems.querySelectorAll(".bk-item-chk").forEach((c) => { c.checked = false; });
+    });
+
     els.bkSysCreate.addEventListener("click", async () => {
+      const include = selectedSystemBackupItems();
+      if (!include.length) {
+        setBkSysMsg("Select at least one config item to back up.", true);
+        return;
+      }
       try {
-        await postJSON("/api/backups/system/create", {});
+        await postJSON("/api/backups/system/create", { include });
         setBkSysMsg("Starting system backup...", false);
         await pollSystemBackup();
       } catch (err) {
         setBkSysMsg(err.message, true);
+      }
+    });
+
+    els.bkSysUpload.addEventListener("click", async () => {
+      const file = els.bkSysFile.files && els.bkSysFile.files[0];
+      if (!file) {
+        setBkSysMsg("Choose a .tar.gz system backup file first.", true);
+        return;
+      }
+      try {
+        setBkSysMsg("Uploading and examining " + file.name + "…", false);
+        const buf = await file.arrayBuffer();
+        const data = await uploadSystemBackupExamine(buf);
+        els.bkSysFile.value = "";
+        renderSystemBackupContents({ backup: data.name, files: data.files });
+        setBkSysMsg(
+          `Examined "${data.name}" — ${(data.files || []).length} restorable file(s) listed below. ` +
+          "Choose which to restore; current files get a timestamped .bak.", false);
+      } catch (err) {
+        setBkSysMsg("Upload: " + err.message, true);
       }
     });
 
@@ -3936,15 +3912,75 @@
         }
         return;
       }
+      const browse = e.target.closest(".bk-sys-browse");
+      if (browse) {
+        await browseSystemBackup(browse.dataset.name);
+        return;
+      }
+      const san = e.target.closest(".bk-sys-san");
+      if (san) {
+        if (!window.confirm(
+          `Create a sanitized export of "${san.dataset.name}"?\n\n` +
+          "Secrets (WireGuard keys, CrowdSec/cloudflared credentials, tuxwall auth) are removed or redacted. " +
+          "The export downloads automatically and a copy stays on this server."
+        )) return;
+        try {
+          const res = await postJSON("/api/backups/system/sanitize", { name: san.dataset.name });
+          if (!res.ok || !res.name) throw new Error(res.error || "sanitize failed");
+          await downloadSystemBackup(res.name);
+          setBkSysMsg(
+            `Sanitized export ${res.name} downloaded — ` +
+            `${(res.dropped || []).length} secret file(s) dropped, ${res.redacted || 0} key(s) redacted. ` +
+            "Verify SANITIZED.txt inside before sharing.", false);
+        } catch (err) {
+          setBkSysMsg("Sanitize: " + err.message, true);
+        }
+        return;
+      }
       const del = e.target.closest(".bk-sys-del");
       if (del) {
         if (!window.confirm(`Delete system backup "${del.dataset.name}"?`)) return;
         try {
           await postJSON("/api/backups/system/delete", { name: del.dataset.name });
           setBkSysMsg("System backup deleted.", false);
+          els.bkSysContents.hidden = true;
           await refreshSystemBackups();
         } catch (err) {
           setBkSysMsg(err.message, true);
+        }
+      }
+    });
+
+    els.bkSysFiles.addEventListener("click", async (e) => {
+      const dl = e.target.closest(".bk-file-dl");
+      if (dl) {
+        const url = "/api/backups/system/file?name=" + encodeURIComponent(dl.dataset.name) +
+          "&file=" + encodeURIComponent(dl.dataset.file);
+        window.location.href = url;
+        return;
+      }
+      const rst = e.target.closest(".bk-file-restore");
+      if (rst) {
+        const svc = rst.dataset.service;
+        const isFw = rst.dataset.file === "iptables-save.txt" || rst.dataset.file === "ip6tables-save.txt";
+        if (!window.confirm(
+          `Restore "${rst.dataset.file}" from this backup?\n\n` +
+          (isFw
+            ? "This atomically replaces the ENTIRE live ruleset (IPv4 or IPv6) with the rules from the backup. Do this from a LAN connection."
+            : "The current file is kept as a timestamped .bak alongside it." +
+              (svc ? `\nAfterwards, apply it with: sudo systemctl restart ${svc}` : ""))
+        )) return;
+        try {
+          const res = await postJSON("/api/backups/system/restore-file", {
+            name: rst.dataset.name, file: rst.dataset.file,
+          });
+          if (!res.ok) throw new Error(res.error || "restore failed");
+          setBkSysMsg(
+            `Restored ${res.restored}.` +
+            (res.restart_required ? ` To apply, run: sudo systemctl restart ${res.restart_required}` : "") +
+            (res.note ? ` (${res.note})` : ""), false);
+        } catch (err) {
+          setBkSysMsg("Restore: " + err.message, true);
         }
       }
     });
@@ -5576,8 +5612,8 @@
       }
       if (view === "wireguard") refreshWireguard();
       if (view === "backups") {
-        refreshBackups();
         refreshSystemBackups();
+        refreshSystemBackupItems();
       }
       if (view === "settings") {
         loadThemes();
@@ -6986,7 +7022,6 @@
     bindConfigEdit();
     bindUpdates();
     bindLogs();
-    bindBackups();
     bindSystemBackups();
     bindWireguardActions();
     bindFirewallActions();

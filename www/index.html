@@ -645,7 +645,7 @@
             <span class="muted" id="fw-hint"></span>
             <span class="toolbar-spacer"></span>
             <button id="fw-baseline" class="btn" type="button" title="Save the current live iptables/ip6tables ruleset as the restore baseline (re-capture after intentional rule changes)">Save baseline</button>
-            <button id="fw-reset" class="btn btn-danger" type="button" title="Flush ALL iptables/ip6tables rules (IPv4+IPv6, filter/nat/mangle/raw) and restore the saved baseline. UFW is restored as part of the same snapshot.">Reset all rules</button>
+            <button id="fw-reset" class="btn" type="button" title="Atomically restore all IPv4/IPv6 tables (filter/nat/mangle/raw) from the saved baseline. Current live rules are replaced — save a new baseline first if you've made changes you want to keep.">Restore baseline</button>
           </div>
         </div>
       </div>
@@ -1566,51 +1566,49 @@
       </div>
     </div>
 
-     <section id="view-backups" class="view" hidden>
-      <div class="card">
-        <div class="card-head">
-          <h2>Backups</h2>
-          <div class="card-toolbar">
-            <button class="btn btn-sm" id="bk-create" type="button">Create backup now</button>
-          </div>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Backup</th><th>Size</th><th>Created</th><th class="td-right">Actions</th></tr></thead>
-            <tbody id="bk-body"></tbody>
-          </table>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-head"><h2>Restore from upload</h2></div>
-        <div class="bk-upload">
-          <p class="muted">Upload a <b>.tar.gz</b> backup to restore the dashboard files (index.html, css, scripts, includes, images). Uploaded files are also kept in the backup list above.</p>
-          <div class="bk-upload-row">
-            <input type="file" id="bk-file" accept=".tar.gz,application/gzip">
-            <button class="btn btn-sm" id="bk-restore" type="button">Upload &amp; restore</button>
-          </div>
-          <p class="muted" id="bk-msg"></p>
-        </div>
-      </div>
-
-      <div class="card">
+      <section id="view-backups" class="view" hidden>
+       <div class="card">
         <div class="card-head">
           <h2>System Configuration Backup</h2>
           <div class="card-toolbar">
             <button class="btn btn-sm" id="bk-sys-create" type="button">Create system backup</button>
           </div>
         </div>
-        <p class="muted">Snapshot of critical server configs (netplan, systemd/network, kea, unbound, ufw, nginx, systemd units, sysctl.d, radvd, wireguard, cloudflared, crowdsec, apt sources) plus installed-package state. Download and store it on another computer.</p>
+        <p class="muted">Snapshot of the configs selected below into a single archive, saved to <code>/var/lib/tuxwall/backups/system</code> on this server. Includes live firewall rules, installed-package state, and the dashboard files. Download and store a copy on another computer. <b>Warning:</b> archives contain secrets (WireGuard keys, CrowdSec keys) — never share them as-is; use <b>Export sanitized</b> instead.</p>
         <div class="upd-progress" id="bk-sys-progress" hidden>
           <div class="bar upd-bar"><div class="bar-fill" id="bk-sys-bar" style="width:0%"></div></div>
           <p class="muted upd-status" id="bk-sys-status"></p>
         </div>
+        <h3>Include in backup</h3>
+        <div class="card-toolbar">
+          <button class="btn btn-sm" id="bk-sys-all" type="button">Select all</button>
+          <button class="btn btn-sm" id="bk-sys-none" type="button">Select none</button>
+        </div>
+        <div class="bk-items" id="bk-sys-items"><p class="muted">Loading…</p></div>
+        <h3>Existing backups</h3>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Backup</th><th>Size</th><th>Created</th><th class="td-right">Actions</th></tr></thead>
             <tbody id="bk-sys-body"></tbody>
           </table>
+        </div>
+        <div id="bk-sys-contents" hidden>
+          <h3 id="bk-sys-contents-title"></h3>
+          <p class="muted">Download any file, or restore a single file to its live location. Restores never auto-restart services — apply the suggested restart yourself when ready.</p>
+          <div class="table-wrap" style="max-height:340px;overflow:auto">
+            <table>
+              <thead><tr><th>File</th><th>Size</th><th>Service</th><th class="td-right">Actions</th></tr></thead>
+              <tbody id="bk-sys-files"></tbody>
+            </table>
+          </div>
+        </div>
+        <h3>Restore from uploaded backup</h3>
+        <div class="bk-upload">
+          <p class="muted">Upload a system backup <b>.tar.gz</b> to examine it and choose which files to restore (e.g. KEA config, Unbound config, firewall rules). The archive is kept on this server until replaced.</p>
+          <div class="bk-upload-row">
+            <input type="file" id="bk-sys-file" accept=".tar.gz,application/gzip">
+            <button class="btn btn-sm" id="bk-sys-upload" type="button">Upload &amp; examine</button>
+          </div>
         </div>
         <p class="muted" id="bk-sys-msg"></p>
       </div>

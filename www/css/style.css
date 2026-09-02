@@ -482,6 +482,25 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.03); }
 .bk-upload { padding: 14px; }
 .bk-upload-row { display: flex; align-items: center; gap: 10px; margin: 10px 0; flex-wrap: wrap; }
 .bk-upload-row input[type="file"] { flex: 1; min-width: 200px; color: var(--muted); font-size: 13px; }
+.bk-items { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 6px 16px; padding: 10px 14px; }
+.bk-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; font-size: 13px; }
+.bk-item input[type="checkbox"] { flex: none; }
+.bk-item-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bk-item .muted { font-size: 12px; }
+
+/* Backups view: give card-level sections breathing room */
+#view-backups .card > h3 {
+  margin: 14px 0 0; padding: 0 14px 4px;
+  font-size: 14px; border-top: 1px solid var(--border); padding-top: 14px;
+}
+#view-backups .card > h3:first-of-type { border-top: none; margin-top: 10px; }
+#view-backups .card > p { margin: 0; padding: 12px 14px 0; }
+#view-backups .card > p.muted:last-child { padding-bottom: 14px; }
+#view-backups .card > .table-wrap { margin-top: 8px; }
+#view-backups .card > #bk-sys-contents { padding: 0 14px; }
+#view-backups .card > .upd-progress { padding: 0 14px; }
+#view-backups .card > #bk-sys-contents .table-wrap { margin-top: 8px; }
+#view-backups .card > .card-toolbar:not(:first-child) { border-bottom: none; padding-bottom: 2px; }
 input[type="file"]::file-selector-button {
   background: linear-gradient(135deg, var(--accent) 0%, color-mix(in srgb, var(--accent) 75%, #000) 100%);
   color: #fff; border: none;
