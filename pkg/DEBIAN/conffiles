@@ -1,0 +1,4 @@
+/etc/tuxwall/llm.json.example
+/etc/nginx/sites-available/tuxwall
+/etc/tuxwall/opencode.json
+/etc/systemd/system/tuxwall-agent.service

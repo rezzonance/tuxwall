@@ -254,6 +254,34 @@ sudo apt -f install
 sudo dpkg -i tuxwall_2.4.0_all.deb
 ```
 
+#### APT repository (recommended)
+
+The project publishes a signed APT repository via GitHub Pages, so installed
+routers receive updates with a plain `apt update && apt upgrade`. On each
+router (one-time setup):
+
+```bash
+curl -fsSL https://rezzonance.github.io/tuxwall/public.asc \
+  | sudo gpg --dearmor -o /usr/share/keyrings/tuxwall.gpg
+echo "deb [signed-by=/usr/share/keyrings/tuxwall.gpg] https://rezzonance.github.io/tuxwall stable main" \
+  | sudo tee /etc/apt/sources.list.d/tuxwall.list
+sudo apt update
+sudo apt install tuxwall
+```
+
+Ongoing updates:
+
+```bash
+sudo apt update && sudo apt upgrade tuxwall
+```
+
+Releases are published by the `Publish APT repository` GitHub Actions
+workflow: bump `Version:` in `pkg/DEBIAN/control`, commit to `main`, then tag
+the release (`git tag v2.4.0 && git push origin v2.4.0`). The tag must match
+the package version or the build fails. Signing uses the GPG keypair
+committed as `apt-public.asc` (private key lives in the repository secret
+`APT_GPG_PRIVATE_KEY`).
+
 ### 3. Disable systemd-resolved and configure DNS
 
 `systemd-resolved` conflicts with unbound on port 53. Disable it and point `/etc/resolv.conf` to unbound:

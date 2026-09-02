@@ -1,0 +1,107 @@
+name: Publish APT repository
+
+# Builds the tuxwall .deb from pkg/ + www/ and publishes a signed APT
+# repository to GitHub Pages (gh-pages branch) on every version tag.
+#
+# One-time setup (see README "APT repository" section):
+#   1. Add repository secret APT_GPG_PRIVATE_KEY (armored private key,
+#      exported from the maintainer's GPG keyring; the matching public
+#      key is committed as apt-public.asc)
+#   2. Enable GitHub Pages for the gh-pages branch (repo Settings ->
+#      Pages -> Deploy from a branch -> gh-pages / root)
+#
+# Requires the pushed tag to match the version in pkg/DEBIAN/control
+# (e.g. tag v2.4.0 for "Version: 2.4.0") so a release can never silently
+# ship an untagged version.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version from pkg/DEBIAN/control
+        id: ver
+        run: |
+          VERSION="$(sed -n 's/^Version: //p' pkg/DEBIAN/control)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [ "$TAG" != "v${{ steps.ver.outputs.version }}" ]; then
+            echo "::error::Tag $TAG does not match pkg/DEBIAN/control Version: ${{ steps.ver.outputs.version }}"
+            exit 1
+          fi
+
+      - name: Install build tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq apt-utils rsync
+
+      - name: Sync www/ into package tree
+        run: |
+          mkdir -p pkg/var/www/html
+          cp -r www/. pkg/var/www/html/
+
+      - name: Build .deb
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          dpkg-deb --root-owner-group --build pkg "tuxwall_${VERSION}_all.deb"
+          dpkg-deb --info "tuxwall_${VERSION}_all.deb" | head -8
+
+      - name: Import signing key
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "GPG_FPR=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')" >> "$GITHUB_ENV"
+
+      - name: Build APT repository tree
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          mkdir -p apt/pool/main/t/tuxwall apt/dists/stable/main/binary-all
+          cp "tuxwall_${VERSION}_all.deb" apt/pool/main/t/tuxwall/
+          cp apt-public.asc apt/
+
+          cd apt
+          apt-ftparchive packages pool/main \
+            > dists/stable/main/binary-all/Packages
+          gzip -kf dists/stable/main/binary-all/Packages
+
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin="TuxWall" \
+            -o APT::FTPArchive::Release::Label="TuxWall APT Repository" \
+            -o APT::FTPArchive::Release::Suite="stable" \
+            -o APT::FTPArchive::Release::Codename="stable" \
+            -o APT::FTPArchive::Release::Architectures="all" \
+            -o APT::FTPArchive::Release::Components="main" \
+            -o APT::FTPArchive::Release::Description="TuxWall network firewall dashboard" \
+            release dists/stable > dists/stable/Release
+
+          gpg --batch --local-user "$GPG_FPR" \
+            --armor --detach-sign \
+            --output dists/stable/Release.gpg dists/stable/Release
+          gpg --batch --local-user "$GPG_FPR" \
+            --clearsign \
+            --output dists/stable/InRelease dists/stable/Release
+
+          echo "--- tree ---"
+          find . -type f | sort
+
+      - name: Publish to GitHub Pages (gh-pages branch)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./apt
+          force_orphan: true
+          commit_message: "apt: publish tuxwall ${{ steps.ver.outputs.version }}"

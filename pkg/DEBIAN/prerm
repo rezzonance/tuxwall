@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# tuxwall prerm: stop/disable services before the package is removed.
+set -euo pipefail
+
+case "$1" in
+  remove|upgrade|deconfigure)
+    systemctl stop tuxwall.service 2>/dev/null || true
+    systemctl disable tuxwall.service 2>/dev/null || true
+    systemctl disable tuxwall-blocklist-update.timer 2>/dev/null || true
+    ;;
+esac
+
+exit 0

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# tuxwall postrm: cleanup on purge (files dpkg can't track are removed here).
+set -euo pipefail
+
+case "$1" in
+  purge)
+    rm -f /etc/unbound/unbound.conf.d/99-blocklists.conf
+    rm -f /etc/unbound/unbound.conf.d/router-dns.conf
+    rm -f /etc/nginx/sites-enabled/tuxwall
+    rm -f /var/lib/unbound/blocklist.conf
+    rm -f /var/lib/unbound/client-bans.conf
+    rm -rf /var/lib/tuxwall
+    systemctl daemon-reload 2>/dev/null || true
+    ;;
+esac
+
+exit 0
