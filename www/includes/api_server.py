@@ -4220,7 +4220,7 @@ def get_system_monitor():
         return _SYSTEM
 
 
-LATENCY_TARGET = "75.75.75.75"
+LATENCY_TARGET = "1.1.1.1"
 LATENCY_WINDOW = 48 * 3600
 LATENCY_HISTORY_FILE = "/var/lib/tuxwall/latency_history.jsonl"
 
@@ -5264,6 +5264,43 @@ def _dpkg_version(pkg):
     return ""
 
 
+def _wan_info():
+    """Current WAN state: default-route interface, its addresses, gateways."""
+    wan = {"ifname": "", "state": "", "ipv4": "", "ipv6": [],
+           "gateway4": "", "gateway6": ""}
+    try:
+        proc = subprocess.run(["ip", "-j", "route", "show", "default"],
+                               capture_output=True, text=True, timeout=5)
+        routes = json.loads(proc.stdout or "[]")
+        if routes:
+            wan["ifname"] = routes[0].get("dev", "")
+            wan["gateway4"] = routes[0].get("gateway", "")
+            wan["ipv4"] = routes[0].get("prefsrc", "")
+    except Exception:
+        pass
+    try:
+        proc = subprocess.run(["ip", "-j", "-6", "route", "show", "default"],
+                               capture_output=True, text=True, timeout=5)
+        routes = json.loads(proc.stdout or "[]")
+        if routes:
+            wan["gateway6"] = routes[0].get("gateway", "")
+    except Exception:
+        pass
+    if wan["ifname"]:
+        try:
+            proc = subprocess.run(["ip", "-j", "addr", "show", "dev", wan["ifname"]],
+                                  capture_output=True, text=True, timeout=5)
+            ifaces = json.loads(proc.stdout or "[]")
+            if ifaces:
+                wan["state"] = ifaces[0].get("operstate", "")
+                for a in ifaces[0].get("addr_info", []):
+                    if a.get("family") == "inet6" and a.get("scope") == "global":
+                        wan["ipv6"].append(a.get("local", ""))
+        except Exception:
+            pass
+    return wan
+
+
 def build_system():
     def read(path, default=""):
         try:
@@ -5425,6 +5462,7 @@ def build_system():
         "swap": swap,
         "disk": disk,
         "interfaces": interfaces,
+        "wan": _wan_info(),
         "dhcp": dhcp,
         "dns": dns,
         "latency": latency,

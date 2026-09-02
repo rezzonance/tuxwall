@@ -64,6 +64,17 @@ body {
 .brand-mark svg { width: 22px; height: 22px; fill: #fff; }
 .brand-name { font-weight: 700; font-size: 15px; }
 .brand-version { font-weight: 400; font-size: 11px; color: var(--muted); margin-left: 6px; }
+
+/* Overview WAN / WireGuard cards */
+.ov-kv { padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+.ov-kv-row { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; }
+.ov-kv-row .ov-kv-label { color: var(--muted); flex: none; }
+.ov-kv-row .ov-kv-value { font-family: var(--mono, monospace); text-align: right; overflow-wrap: anywhere; }
+.ov-kv-row .ov-kv-value.ok { color: var(--ok, #3fb96d); }
+.ov-kv-row .ov-kv-value.down { color: var(--danger, #e05555); }
+.ov-wg-peers { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.ov-wg-peer { display: flex; justify-content: space-between; gap: 10px; }
+.ov-wg-peer .muted { font-size: 11px; }
 .brand-sub { color: var(--muted); font-size: 12px; }
 
 .nav {

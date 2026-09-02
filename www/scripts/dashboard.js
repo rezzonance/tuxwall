@@ -5137,11 +5137,81 @@
           <td>${formatNumber(a.count)}</td>
         </tr>`).join("")
       : `<tr><td colspan="3" class="empty">${esc(sur.hint || "No Suricata alerts.")}</td></tr>`;
+
+    renderWanCard(sys);
+    renderWgCard(d.wg || {});
+  }
+
+  function renderWanCard(sys) {
+    const body = document.getElementById("ov-wan-body");
+    const hint = document.getElementById("ov-wan-hint");
+    const wan = sys.wan || {};
+    if (!body) return;
+    if (!wan.ifname) {
+      hint.textContent = "no default route";
+      body.innerHTML = `<p class="muted">No WAN interface detected.</p>`;
+      return;
+    }
+    const up = (wan.state || "").toUpperCase() === "UP";
+    hint.textContent = wan.ifname;
+    const rows = [];
+    const row = (label, value, cls) => `
+      <div class="ov-kv-row">
+        <span class="ov-kv-label">${esc(label)}</span>
+        <span class="ov-kv-value ${cls || ""}">${esc(value || "—")}</span>
+      </div>`;
+    rows.push(row("Link", `${wan.ifname} · ${(wan.state || "—").toUpperCase()}`, up ? "ok" : "down"));
+    rows.push(row("IPv4", wan.ipv4));
+    for (const a of (wan.ipv6 || []).slice(0, 3)) rows.push(row("IPv6", a));
+    if ((wan.ipv6 || []).length > 3) rows.push(row("", `+${wan.ipv6.length - 3} more global v6 addrs`));
+    rows.push(row("Gateway v4", wan.gateway4));
+    rows.push(row("Gateway v6", wan.gateway6));
+    body.innerHTML = rows.join("");
+  }
+
+  function renderWgCard(wg) {
+    const body = document.getElementById("ov-wg-body");
+    const hint = document.getElementById("ov-wg-hint");
+    if (!body) return;
+    if (!wg || !wg.configured) {
+      hint.textContent = "not configured";
+      body.innerHTML = `<p class="muted">WireGuard is not configured.</p>`;
+      return;
+    }
+    const iface = wg.interface || {};
+    const peers = wg.peers || [];
+    const now = Math.floor(Date.now() / 1000);
+    const ONLINE_WINDOW = 180;
+    const online = peers.filter((p) => (p.last_handshake || 0) > now - ONLINE_WINDOW);
+    hint.textContent = iface.up
+      ? `up · ${online.length}/${peers.length} peers online`
+      : "interface down";
+    const rows = [];
+    const row = (label, value, cls) => `
+      <div class="ov-kv-row">
+        <span class="ov-kv-label">${esc(label)}</span>
+        <span class="ov-kv-value ${cls || ""}">${esc(value || "—")}</span>
+      </div>`;
+    rows.push(row("Interface", `${iface.name || "wg0"} · port ${iface.listen_port || "—"}`, iface.up ? "ok" : "down"));
+    rows.push(row("Peers online", `${online.length} of ${peers.length}`, online.length ? "ok" : ""));
+    rows.push(row("Transfer", `↓ ${formatBytes(iface.rx || 0)} · ↑ ${formatBytes(iface.tx || 0)}`));
+    const peerRows = peers.slice(0, 5).map((p) => {
+      const age = (p.last_handshake || 0) > 0 ? formatUptime(now - p.last_handshake) : "never";
+      const isOn = (p.last_handshake || 0) > now - ONLINE_WINDOW;
+      return `
+        <div class="ov-wg-peer">
+          <span>${esc(p.name || p.address)}${isOn ? ' <span class="badge badge-ok">on</span>' : ""}</span>
+          <span class="muted">hs ${esc(age)} · ↓${formatBytes(p.rx || 0)} ↑${formatBytes(p.tx || 0)}</span>
+        </div>`;
+    }).join("");
+    body.innerHTML = rows.join("") + (peers.length
+      ? `<div class="ov-wg-peers" style="margin-top:6px">${peerRows}</div>`
+      : `<p class="muted" style="margin-top:6px">No peers configured.</p>`);
   }
 
   async function refreshOverview() {
     try {
-      const [sys, bw, dns, sec, fw, sur, leaseResp, latHist] = await Promise.all([
+      const [sys, bw, dns, sec, fw, sur, leaseResp, latHist, wg] = await Promise.all([
         fetchJSON("/api/system"),
         fetchJSON("/api/bandwidth"),
         fetchJSON("/api/dns"),
@@ -5150,8 +5220,9 @@
         fetchJSON("/api/security/suricata"),
         fetchJSON("/api/leases"),
         fetchJSON("/api/latency/history?hours=24").catch(() => ({ series: [] })),
+        fetchJSON("/api/wireguard").catch(() => ({})),
       ]);
-      renderOverview({ sys, bw, dns, sec, fw, sur, leases: leaseResp.leases || [], latHistory: latHist.series || [] });
+      renderOverview({ sys, bw, dns, sec, fw, sur, leases: leaseResp.leases || [], latHistory: latHist.series || [], wg });
     } catch (err) {
       showBanner(true, "Overview error: " + err.message);
     }
