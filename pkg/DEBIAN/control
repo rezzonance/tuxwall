@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.5.0
+Version: 2.5.1
 Section: admin
 Priority: optional
 Architecture: all
@@ -38,5 +38,9 @@ Description: TuxWall Network Firewall Dashboard
   hover glow on all buttons (primary, ghost, danger, segmented tabs, service
   tabs, login, icon buttons and file-selector buttons), light-theme contrast
   overrides, and cache-bust bump.
+  .
+  v2.5.1 adds: attack map tile fix — CARTO now watermarks keyless raster
+  basemaps; tiles now carry a registered CARTO key (?key= param, the
+  documented parameter name), plus cache-bust bump.
   Served by nginx from /var/www/html, backed by a Python API server running
  as the systemd unit tuxwall.service on port 8008.

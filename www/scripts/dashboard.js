@@ -1887,7 +1887,8 @@
     // Zoom control bottom-right
     L.control.zoom({ position: "bottomright" }).addTo(m.map);
 
-    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+    // CARTO dark basemap with registered API key (keyless tiles are watermarked)
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=cb1_2tvx_1_e55a010f34e5e3603b0ff643", {
       maxZoom: 18,
       subdomains: "abcd",
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
