@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.4.0
+Version: 2.5.0
 Section: admin
 Priority: optional
 Architecture: all
@@ -31,6 +31,12 @@ Description: TuxWall Network Firewall Dashboard
  service-restart hints, sanitized exports for safe sharing (WireGuard/CrowdSec/
  cloudflared/tuxwall secrets dropped or redacted), upload-and-examine restore
  flow, auto-prune retention, root-only archive permissions, and dashboard files
- now captured in the system backup.
- Served by nginx from /var/www/html, backed by a Python API server running
+  now captured in the system backup.
+  .
+  v2.5.0 adds: unified glassmorphism button system matching the sidebar nav —
+  accent-tinted translucent gradients with backdrop blur, glowing borders and
+  hover glow on all buttons (primary, ghost, danger, segmented tabs, service
+  tabs, login, icon buttons and file-selector buttons), light-theme contrast
+  overrides, and cache-bust bump.
+  Served by nginx from /var/www/html, backed by a Python API server running
  as the systemd unit tuxwall.service on port 8008.

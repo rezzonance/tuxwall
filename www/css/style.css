@@ -249,13 +249,15 @@ body {
 
 .btn {
   position: relative; overflow: hidden;
-  background: linear-gradient(135deg, var(--accent) 0%, color-mix(in srgb, var(--accent) 75%, #000) 100%);
-  color: #fff; border: none;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 22%, transparent) 0%, color-mix(in srgb, var(--accent) 10%, transparent) 100%);
+  color: color-mix(in srgb, var(--accent) 40%, #fff);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
   padding: 8px 16px; border-radius: 8px;
   font-size: 13px; font-weight: 600; cursor: pointer;
-  transition: filter var(--transition), box-shadow var(--transition), transform var(--transition);
-  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 35%, transparent),
-              inset 0 1px 0 rgba(255,255,255,0.15);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  transition: color var(--transition), background var(--transition), border-color var(--transition), box-shadow var(--transition), transform var(--transition);
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--accent) 20%, transparent),
+              inset 0 1px 0 color-mix(in srgb, var(--accent) 14%, transparent);
   letter-spacing: 0.01em;
 }
 /* Shimmer sweep on hover */
@@ -269,41 +271,54 @@ body {
 }
 .btn:hover::before { transform: translateX(100%); }
 .btn:hover {
-  filter: brightness(1.12);
-  box-shadow: 0 5px 20px color-mix(in srgb, var(--accent) 45%, transparent),
-              inset 0 1px 0 rgba(255,255,255,0.2);
+  color: color-mix(in srgb, var(--accent) 25%, #fff);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 32%, transparent) 0%, color-mix(in srgb, var(--accent) 16%, transparent) 100%);
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  box-shadow: 0 2px 16px color-mix(in srgb, var(--accent) 35%, transparent),
+              inset 0 1px 0 color-mix(in srgb, var(--accent) 20%, transparent);
   transform: translateY(-2px);
 }
-.btn:active { transform: translateY(0); filter: brightness(0.95); box-shadow: 0 1px 6px color-mix(in srgb, var(--accent) 25%, transparent); }
+.btn:active {
+  transform: translateY(0);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 28%, transparent) 0%, color-mix(in srgb, var(--accent) 14%, transparent) 100%);
+  box-shadow: 0 1px 8px color-mix(in srgb, var(--accent) 20%, transparent),
+              inset 0 1px 0 color-mix(in srgb, var(--accent) 12%, transparent);
+}
 .btn[disabled] { opacity: 0.45; cursor: not-allowed; transform: none !important; filter: none !important; }
 
 /* Ghost button */
 .btn-ghost {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--muted);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  color: var(--text);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 rgba(255,255,255,0.08);
 }
 .btn-ghost::before { display: none; }
 .btn-ghost:hover {
   color: var(--text);
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-  box-shadow: 0 3px 12px color-mix(in srgb, var(--accent) 15%, transparent),
-              inset 0 1px 0 rgba(255,255,255,0.06);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 14%, transparent) 0%, color-mix(in srgb, var(--accent) 7%, transparent) 100%);
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--accent) 20%, transparent),
+              inset 0 1px 0 rgba(255,255,255,0.10);
   filter: none;
 }
 .btn-ghost:active { background: color-mix(in srgb, var(--accent) 12%, transparent); transform: translateY(0); }
 
 /* Danger button */
 .btn-danger {
-  background: linear-gradient(135deg, var(--red) 0%, color-mix(in srgb, var(--red) 75%, #000) 100%);
-  box-shadow: 0 2px 10px color-mix(in srgb, var(--red) 30%, transparent),
-              inset 0 1px 0 rgba(255,255,255,0.12);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--red) 22%, transparent) 0%, color-mix(in srgb, var(--red) 10%, transparent) 100%);
+  color: color-mix(in srgb, var(--red) 40%, #fff);
+  border-color: color-mix(in srgb, var(--red) 40%, transparent);
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--red) 20%, transparent),
+              inset 0 1px 0 color-mix(in srgb, var(--red) 14%, transparent);
 }
 .btn-danger:hover {
-  box-shadow: 0 5px 20px color-mix(in srgb, var(--red) 45%, transparent),
-              inset 0 1px 0 rgba(255,255,255,0.18);
+  color: color-mix(in srgb, var(--red) 25%, #fff);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--red) 32%, transparent) 0%, color-mix(in srgb, var(--red) 16%, transparent) 100%);
+  border-color: color-mix(in srgb, var(--red) 60%, transparent);
+  box-shadow: 0 2px 16px color-mix(in srgb, var(--red) 35%, transparent),
+              inset 0 1px 0 color-mix(in srgb, var(--red) 20%, transparent);
 }
 
 /* Small button */
@@ -324,10 +339,12 @@ body {
 }
 .seg-btn:hover { color: var(--text); background: rgba(255,255,255,0.06); }
 .seg-btn.active {
-  background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 78%, #000));
-  color: #fff;
-  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 40%, transparent),
-              inset 0 1px 0 rgba(255,255,255,0.15);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 18%, transparent) 0%, color-mix(in srgb, var(--accent) 8%, transparent) 100%);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  color: color-mix(in srgb, var(--accent) 40%, #fff);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--accent) 20%, transparent),
+              inset 0 1px 0 color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .seg-btn .seg-count { opacity: 0.75; font-weight: 500; margin-left: 5px; }
 
@@ -514,15 +531,28 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.03); }
 #view-backups .card > #bk-sys-contents .table-wrap { margin-top: 8px; }
 #view-backups .card > .card-toolbar:not(:first-child) { border-bottom: none; padding-bottom: 2px; }
 input[type="file"]::file-selector-button {
-  background: linear-gradient(135deg, var(--accent) 0%, color-mix(in srgb, var(--accent) 75%, #000) 100%);
-  color: #fff; border: none;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 22%, transparent) 0%, color-mix(in srgb, var(--accent) 10%, transparent) 100%);
+  color: color-mix(in srgb, var(--accent) 40%, #fff);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
   padding: 7px 14px; border-radius: 7px; margin-right: 10px;
   font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.15);
-  transition: filter var(--transition);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--accent) 20%, transparent),
+              inset 0 1px 0 color-mix(in srgb, var(--accent) 14%, transparent);
+  transition: color var(--transition), background var(--transition), border-color var(--transition), box-shadow var(--transition);
 }
-input[type="file"]::file-selector-button:hover { filter: brightness(1.12); }
-input[type="file"]::file-selector-button:active { filter: brightness(0.95); }
+input[type="file"]::file-selector-button:hover {
+  color: color-mix(in srgb, var(--accent) 25%, #fff);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 32%, transparent) 0%, color-mix(in srgb, var(--accent) 16%, transparent) 100%);
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  box-shadow: 0 2px 16px color-mix(in srgb, var(--accent) 35%, transparent),
+              inset 0 1px 0 color-mix(in srgb, var(--accent) 20%, transparent);
+}
+input[type="file"]::file-selector-button:active {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 28%, transparent) 0%, color-mix(in srgb, var(--accent) 14%, transparent) 100%);
+  box-shadow: 0 1px 8px color-mix(in srgb, var(--accent) 20%, transparent),
+              inset 0 1px 0 color-mix(in srgb, var(--accent) 12%, transparent);
+}
 .bk-msg-ok { color: var(--green); }
 .bk-msg-err { color: var(--red); }
 
@@ -729,9 +759,10 @@ body.locked > .layout { display: none; }
 }
 .login-btn {
   margin-top: 6px; padding: 10px; font-size: 13.5px;
-  background: linear-gradient(135deg, var(--accent) 0%, color-mix(in srgb, var(--accent) 70%, var(--green)) 100%);
-  box-shadow: 0 4px 18px color-mix(in srgb, var(--accent) 40%, transparent),
-              inset 0 1px 0 rgba(255,255,255,0.18);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 26%, transparent) 0%, color-mix(in srgb, var(--accent) 12%, transparent) 100%);
+  color: color-mix(in srgb, var(--accent) 30%, #fff);
+  box-shadow: 0 2px 16px color-mix(in srgb, var(--accent) 30%, transparent),
+              inset 0 1px 0 color-mix(in srgb, var(--accent) 18%, transparent);
   letter-spacing: 0.02em;
 }
 .login-foot { font-size: 11.5px; }
@@ -772,13 +803,21 @@ body.locked > .layout { display: none; }
 .icon-btn {
   display: inline-flex; align-items: center; justify-content: center;
   width: 30px; height: 30px; padding: 0;
-  background: var(--bg-elev); border: 1px solid var(--border);
+  background: linear-gradient(165deg, rgba(255,255,255,0.10) 0%, rgba(255,255,255,0.03) 100%);
+  border: 1px solid var(--glass-border);
   border-radius: 7px; color: var(--muted); cursor: pointer;
-  transition: border-color var(--transition), color var(--transition);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.10);
+  transition: border-color var(--transition), color var(--transition), box-shadow var(--transition);
 }
 .icon-btn svg { width: 15px; height: 15px; display: block; }
-.icon-btn:hover { border-color: var(--accent); color: var(--accent); }
-.icon-btn-danger:hover { border-color: var(--red); color: var(--red); }
+.icon-btn:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 35%, transparent),
+              inset 0 1px 0 rgba(255,255,255,0.18);
+}
+.icon-btn-danger:hover { border-color: var(--red); color: var(--red); box-shadow: 0 0 14px color-mix(in srgb, var(--red) 35%, transparent); }
 .um-check { flex-direction: row; align-items: center; gap: 8px; }
 .um-check input { accent-color: var(--accent); width: 16px; height: 16px; }
 .um-check span { font-size: 13px; font-weight: 500; color: var(--text); }
@@ -807,10 +846,12 @@ body.locked > .layout { display: none; }
   transform: translateY(-1px);
 }
 .svc-tab.active {
-  background: var(--svc-color, var(--accent));
-  border-color: var(--svc-color, var(--accent)); color: #fff;
-  box-shadow: 0 2px 12px color-mix(in srgb, var(--svc-color, var(--accent)) 35%, transparent),
-              inset 0 1px 0 rgba(255,255,255,0.15);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--svc-color, var(--accent)) 18%, transparent) 0%, color-mix(in srgb, var(--svc-color, var(--accent)) 8%, transparent) 100%);
+  border-color: color-mix(in srgb, var(--svc-color, var(--accent)) 40%, transparent);
+  color: color-mix(in srgb, var(--svc-color, var(--accent)) 85%, var(--text));
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--svc-color, var(--accent)) 20%, transparent),
+              inset 0 1px 0 color-mix(in srgb, var(--svc-color, var(--accent)) 12%, transparent);
 }
 table .btn { margin-left: 8px; }
 
@@ -1655,6 +1696,18 @@ body.light-theme .badge-static { background: rgba(90, 105, 130, 0.14); color: #5
 body.light-theme .sev-MEDIUM { color: #8a6508; }
 body.light-theme .sec-map,
 body.light-theme .sec-map .leaflet-container { background: #10151b; }
+body.light-theme .btn,
+body.light-theme .seg-btn.active,
+body.light-theme .svc-tab.active,
+body.light-theme .login-btn {
+  color: color-mix(in srgb, var(--accent) 55%, #0b1220);
+}
+body.light-theme .btn-danger {
+  color: color-mix(in srgb, var(--red) 60%, #1a0505);
+}
+body.light-theme .icon-btn {
+  background: linear-gradient(165deg, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0.25) 100%);
+}
 
 /* ---------- Sidebar footer (user + logout) ---------- */
 .sidebar-foot {
