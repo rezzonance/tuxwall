@@ -68,14 +68,24 @@ jobs:
       - name: Build APT repository tree
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
-          mkdir -p apt/pool/main/t/tuxwall apt/dists/stable/main/binary-all
+          # The package is Architecture: all. Publish the index under
+          # binary-amd64 (what amd64 clients fetch by default) as well as
+          # binary-all, and declare both in Release::Architectures — otherwise
+          # apt on amd64 prints "Skipping acquire of configured file
+          # 'main/binary-amd64/Packages' ... doesn't support architecture".
+          mkdir -p apt/pool/main/t/tuxwall \
+                   apt/dists/stable/main/binary-all \
+                   apt/dists/stable/main/binary-amd64
           cp "tuxwall_${VERSION}_all.deb" apt/pool/main/t/tuxwall/
           cp apt-public.asc apt/public.asc
           cp install-repo.sh apt/
 
           cd apt
           apt-ftparchive packages pool/main \
-            > dists/stable/main/binary-all/Packages
+            > dists/stable/main/binary-amd64/Packages
+          gzip -kf dists/stable/main/binary-amd64/Packages
+          cp dists/stable/main/binary-amd64/Packages \
+             dists/stable/main/binary-all/Packages
           gzip -kf dists/stable/main/binary-all/Packages
 
           apt-ftparchive \
@@ -83,7 +93,7 @@ jobs:
             -o APT::FTPArchive::Release::Label="TuxWall APT Repository" \
             -o APT::FTPArchive::Release::Suite="stable" \
             -o APT::FTPArchive::Release::Codename="stable" \
-            -o APT::FTPArchive::Release::Architectures="all" \
+            -o APT::FTPArchive::Release::Architectures="all amd64" \
             -o APT::FTPArchive::Release::Components="main" \
             -o APT::FTPArchive::Release::Description="TuxWall network firewall dashboard" \
             release dists/stable > dists/stable/Release
