@@ -1,0 +1,46 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Architectures: all amd64
+Codename: stable
+Components: main
+Date: Fri, 04 Sep 2026 02:38:52 +0000
+Description: TuxWall network firewall dashboard
+Label: TuxWall APT Repository
+Origin: TuxWall
+Suite: stable
+MD5Sum:
+ 2f1ae7baf1cc03ecc82796d36cb20855              205 Release
+ 76efba2348d694d9ea4cc1727a153989             2966 main/binary-all/Packages
+ 3e45ecb831bbf1e0ad1a62a0521916a9             1745 main/binary-all/Packages.gz
+ 76efba2348d694d9ea4cc1727a153989             2966 main/binary-amd64/Packages
+ 3e45ecb831bbf1e0ad1a62a0521916a9             1745 main/binary-amd64/Packages.gz
+SHA1:
+ 53d3d14a56bc075031d83a3624f9e994a902bd08              205 Release
+ 00d11f4cb7f53bb5b8ba5df748c855aacefbecde             2966 main/binary-all/Packages
+ 412d16d79e88581e9deed023cdc2b981bbf4c4ae             1745 main/binary-all/Packages.gz
+ 00d11f4cb7f53bb5b8ba5df748c855aacefbecde             2966 main/binary-amd64/Packages
+ 412d16d79e88581e9deed023cdc2b981bbf4c4ae             1745 main/binary-amd64/Packages.gz
+SHA256:
+ 39e5dc301ba3e04757f34b92e22ee26f686f46b9e5e790e3fe8c1a26d0eb61f2              205 Release
+ e0193fdfe3ecfd924e7fd973be4626fa235a6109c98ac17eecadecb5e53c5aff             2966 main/binary-all/Packages
+ cc5cf4d73dc8a36c09599705d6634740d9c697df1e40d33dc275552f28d7e2c7             1745 main/binary-all/Packages.gz
+ e0193fdfe3ecfd924e7fd973be4626fa235a6109c98ac17eecadecb5e53c5aff             2966 main/binary-amd64/Packages
+ cc5cf4d73dc8a36c09599705d6634740d9c697df1e40d33dc275552f28d7e2c7             1745 main/binary-amd64/Packages.gz
+SHA512:
+ 146e02bd63f9d476eb44ed6644072a1f27a40306830ab5c0415df6cbe96dd26c13696517182591b282f2591c22dd0fa7ba0f65460b8784b6ed1b5f5087533d54              205 Release
+ 93846e577f86e7a1e4592bbb760b3418599b34bf10fe870752be24eaedab1b55c243925a3eba0a6526e38b1c6553c293092f90777a2d91cc9e32cd23226c7d61             2966 main/binary-all/Packages
+ a12b2e747806f598c1a12b8dcce54fdbef5e7f6779e9434948a886669f30948a2a0fb0f8d507ad18e47a105e0cfc9ebf45861052f14400fdff4110df5246d537             1745 main/binary-all/Packages.gz
+ 93846e577f86e7a1e4592bbb760b3418599b34bf10fe870752be24eaedab1b55c243925a3eba0a6526e38b1c6553c293092f90777a2d91cc9e32cd23226c7d61             2966 main/binary-amd64/Packages
+ a12b2e747806f598c1a12b8dcce54fdbef5e7f6779e9434948a886669f30948a2a0fb0f8d507ad18e47a105e0cfc9ebf45861052f14400fdff4110df5246d537             1745 main/binary-amd64/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iQEzBAEBCgAdFiEEXXm5CC3K65zLcxOC9dgjVxa9vdEFAmqaLzwACgkQ9dgjVxa9
+vdGtFwgAj6yH35Kfa0VQippVy3QL6qURnsV2av+mvp0s5/kgCSc2ddFiWAaj8mA2
+Ayenu6obGs1oKAWhysJr/WVw4TkBP/Gydy/upjnCwvK8OJQDRW8COllzg7CKg63V
+6bucYnqqe4C1+Hcusp6VXQJHc/XsHukn+6LCMQXuJtCWg0W9txZzFc/rjzp5+fGF
+jp6FZ6Yxzov/sn3HQq2YmQ2qguFLVnYsFm5EpT5kj+qmewvDbYuT3nckgbfNDK92
+O8hF308aBmgb+ylcH5sDy+pfK0HmCf7a5FqX4hU9+8TrzZ4fUBvGb1Hkr2gW8cK6
+DDEAGuq53Hf7fmB47RyIB7f1XXM58w==
+=6rTI
+-----END PGP SIGNATURE-----

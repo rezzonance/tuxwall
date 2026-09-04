@@ -1,0 +1,53 @@
+Package: tuxwall
+Architecture: all
+Version: 2.5.1
+Priority: optional
+Section: admin
+Maintainer: jeff <jeff@localhost>
+Depends: python3, nginx, unbound, kea-dhcp4-server, wireguard-tools, ufw, nftables, curl, jq, ieee-data, iproute2
+Suggests: crowdsec, python3-maxminddb
+Filename: pool/main/t/tuxwall/tuxwall_2.5.1_all.deb
+Size: 2497958
+MD5sum: 3ad577613fcd57db14e8af1bec828fbb
+SHA1: 76ac8acff37476475e71864c4b5a17e75cacb4de
+SHA256: 8abfcbba22b1f4db6521c02df407067ffd1eceabbe2918c43e0e25c97f36b09b
+SHA512: f8e79dd2dcb8a8f2205455a2b7e155c86d969629cfa310532c132ee5008268273cdfc6187f25716a34576773c264c375705c5917220d6a4a0fd42138465496d1
+Description: TuxWall Network Firewall Dashboard
+ Modern web dashboard for a home/edge router featuring DHCP lease management,
+ Unbound DNS and blocklist control, UFW firewall rules, WireGuard VPN status,
+ CrowdSec integration, live attack map with animated arcs, bandwidth charts,
+ AI Assistant (Claude/Ollama/OpenAI) with live system context and one-click
+ rule changes, themed UI with glassmorphism effects, and dark/light themes.
+ .
+ v2.2.0 adds: DHCP static IP reservation management (add/edit/delete via
+ kea-dhcp4.conf with live Kea reload, click-to-fill from leases table),
+ fetchJSON options fix (POST body was silently dropped causing 404 on all
+ VLAN/PF/DMZ actions), CrowdSec main window overflow fix, scrollbar theming,
+ mobile layout fix for full-width main panel.
+ .
+ v2.3.0 adds: embedded opencode AI agent with interactive permission
+ prompts, OPNsense-style User Manager (add/edit/disable users, per-user
+ admin rights), and TOTP two-factor authentication (QR-code enrollment
+ with Google Authenticator/Aegis/1Password, per-step replay protection).
+ .
+ v2.4.0 adds: firewall restore baseline (save/restore live rulesets, atomic
+ iptables-restore with verification) replacing the destructive flush-all reset;
+ system backup overhaul — include/exclude config checklist, browse archive
+ contents, per-file download and single-file restore with .bak snapshots and
+ service-restart hints, sanitized exports for safe sharing (WireGuard/CrowdSec/
+ cloudflared/tuxwall secrets dropped or redacted), upload-and-examine restore
+ flow, auto-prune retention, root-only archive permissions, and dashboard files
+  now captured in the system backup.
+  .
+  v2.5.0 adds: unified glassmorphism button system matching the sidebar nav —
+  accent-tinted translucent gradients with backdrop blur, glowing borders and
+  hover glow on all buttons (primary, ghost, danger, segmented tabs, service
+  tabs, login, icon buttons and file-selector buttons), light-theme contrast
+  overrides, and cache-bust bump.
+  .
+  v2.5.1 adds: attack map tile fix — CARTO now watermarks keyless raster
+  basemaps; tiles now carry a registered CARTO key (?key= param, the
+  documented parameter name), plus cache-bust bump.
+  Served by nginx from /var/www/html, backed by a Python API server running
+ as the systemd unit tuxwall.service on port 8008.
+
