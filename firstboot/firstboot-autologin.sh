@@ -66,8 +66,12 @@ echo
 #   0  = completed and configured
 #   2  = user chose to EXIT setup (not configured, but wants a normal login)
 #   other = failure (keep autologin so setup can be retried)
+# NOTE: guarded against `set -e` — a nonzero wizard exit must reach `rc=$?`
+# below instead of aborting the script first.
+set +e
 "$WIZARD"
 rc=$?
+set -e
 
 disable_autologin() {
     rm -f "$DROPIN_TTY1" "$DROPIN_SERIAL" 2>/dev/null || true

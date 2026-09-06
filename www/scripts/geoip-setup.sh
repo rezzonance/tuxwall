@@ -53,7 +53,7 @@ install -m 0644 "$DB" "$DEST"
 echo "Installed $DEST"
 
 echo "[3/3] Restarting the dashboard API..."
-systemctl restart tuxwall
+systemctl try-restart tuxwall 2>/dev/null || systemctl start tuxwall 2>/dev/null || true
 
 echo
 echo "Done. The Security page will now show attacker locations on the map."

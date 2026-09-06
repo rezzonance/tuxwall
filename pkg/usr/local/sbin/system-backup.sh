@@ -12,7 +12,7 @@
 # entries are captured. Empty or missing file = include everything.
 set -euo pipefail
 
-OUTDIR="/home/jeff/backups/system"
+OUTDIR="/var/lib/tuxwall/backups/system"
 INCLUDE_FILE=""
 while getopts "o:i:" opt; do
   case "$opt" in
@@ -143,12 +143,15 @@ if [ -f apt-manual.txt ]; then
 fi
 
 echo "==> Enabling and restarting key services"
-for svc in kea-dhcp4-server unbound nginx radvd cloudflared crowdsec tuxwall; do
+for svc in kea-dhcp4-server unbound nginx radvd crowdsec tuxwall; do
   systemctl enable "$svc" 2>/dev/null || true
   systemctl restart "$svc" 2>/dev/null || true
 done
-systemctl restart systemd-networkd 2>/dev/null || true
-systemctl restart ufw 2>/dev/null || true
+# NOTE: ufw is not a systemd unit — reload its rules instead of restarting.
+ufw reload 2>/dev/null || true
+# NOTE: systemd-networkd restart can sever SSH on a live gateway; the
+# restored netplan is applied on next reboot (or manually).
+echo "    NOTE: network config restored but NOT applied - reboot (or netplan apply) to activate."
 
 echo "==> Done. Manual follow-ups if needed:"
 echo "    sudo netplan apply"

@@ -1,10 +1,10 @@
 Package: tuxwall
-Version: 2.5.1
+Version: 2.5.2
 Section: admin
 Priority: optional
 Architecture: all
-Depends: python3, nginx, unbound, kea-dhcp4-server, wireguard-tools, ufw, nftables, curl, jq, ieee-data, iproute2
-Suggests: crowdsec, python3-maxminddb
+Depends: python3, nginx, unbound, unbound-anchor, kea-dhcp4-server, kea-common, radvd, suricata, suricata-update, wireguard-tools, ufw, iptables, nftables, curl, jq, gzip, ieee-data, iproute2, rsync
+Suggests: crowdsec, crowdsec-firewall-bouncer-iptables, python3-maxminddb
 Maintainer: jeff <jeff@localhost>
 Description: TuxWall Network Firewall Dashboard
  Modern web dashboard for a home/edge router featuring DHCP lease management,
@@ -42,5 +42,15 @@ Description: TuxWall Network Firewall Dashboard
   v2.5.1 adds: attack map tile fix — CARTO now watermarks keyless raster
   basemaps; tiles now carry a registered CARTO key (?key= param, the
   documented parameter name), plus cache-bust bump.
+  .
+  v2.5.2 adds: hostname endpoint fix (moved from GET, where it crashed on
+  an undefined body, to admin-gated POST matching the dashboard); postinst
+  no longer truncates the blocklist on upgrade and tolerates a missing
+  agent-setup script; system-backup defaults to /var/lib/tuxwall/backups;
+  packaging refresh (full Depends, complete conffiles, tuxwall-sqm unit
+  shipped, stale web-root junk removed); first-boot networking fixes
+  (no bogus LAN default route, ULA-based AAAA, random ULA /48, correct
+  CrowdSec bouncer, non-clobbering config install); AI context now reads
+  real backend keys; sidebar-style glass buttons with neon glow.
   Served by nginx from /var/www/html, backed by a Python API server running
  as the systemd unit tuxwall.service on port 8008.

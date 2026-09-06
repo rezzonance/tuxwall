@@ -6,7 +6,7 @@
 #  it into a TuxWall gateway. It:
 #    1. Installs the appliance runtime to /opt/tuxwall-appliance.
 #    2. Installs the first-boot AUTOLOGIN mechanism so the WAN/LAN wizard runs
-#       interactively on your next login (ttyst alone - no custom ISO needed).
+#       interactively on your next login (tty alone - no custom ISO needed).
 #    3. Applies optional multipathd hardening (guarded, best-effort).
 #
 #  Usage:

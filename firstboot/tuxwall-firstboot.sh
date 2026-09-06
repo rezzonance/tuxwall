@@ -26,7 +26,7 @@ LAN=""
 LAN_SUBNET="192.168.1.0/24"
 LAN_STATIC_IP="192.168.1.1"
 LAN_GATEWAY_IP="192.168.1.1"
-DOMAIN="localdomain"
+DOMAIN="home.arpa"
 INSTALLED_MARK="/etc/tuxwall/.appliance-configured"
 
 # ── Colours ─────────────────────────────────────────────────────────────────
@@ -81,9 +81,9 @@ pick_interface() {
     for i in "${!ifaces[@]}"; do
         local idx=$(( i + 1 ))
         local mac state carrier
-        mac=$(ip -o link show "${ifaces[$i]}" 2>/dev/null | awk '{print $NF}')
+        mac=$(ip -o link show "${ifaces[$i]}" 2>/dev/null | grep -o 'link/ether [^ ]*' | awk '{print $2}')
         state=$(ip -o link show "${ifaces[$i]}" 2>/dev/null | grep -o 'state [A-Z]*' | awk '{print $2}')
-        carrier=$(cat "/sys/class/net/${ifaces[$i]}/carrier" 2>/dev/null && echo " (LINK/UP)" || echo "")
+        carrier=$(cat "/sys/class/net/${ifaces[$i]}/carrier" >/dev/null 2>&1 && echo " (LINK/UP)" || echo "")
         printf "  ${C}%2d)${NC} %-12s ${DIM}%s  %s${carrier}${NC}\n" "$idx" "${ifaces[$i]}" "$mac" "$state"
     done
     echo -e "  ${C} 0)${NC} Exit setup (abort, keep current system as-is)"
@@ -111,14 +111,24 @@ pick_interface() {
 # ── Convert a /24 subnet to a static IP in that subnet (host .1) ────────────
 derive_ips() {
     # Given 192.168.5.0/24 -> static 192.168.5.1, prefix 24
+    # NOTE: only /24 is supported (pool math + awk below assume 4 octets).
     local base="${LAN_SUBNET%/*}"
     local prefix="${LAN_SUBNET#*/}"
+    if [[ "$prefix" != "24" ]]; then
+        err "Only /24 LAN subnets are supported (got $LAN_SUBNET)."
+        return 1
+    fi
     LAN_PREFIX="$prefix"
     # Replace the last octet of the base with .1
     LAN_STATIC_IP="$(echo "$base" | awk -F. '{print $1"."$2"."$3".1"}')"
     LAN_GATEWAY_IP="$LAN_STATIC_IP"
-    # IPv6 ULA derived roughly from subnet for radvd, stable enough for a gateway
-    LAN_PREFIX6="fd$(printf '%02x' $(( ${base//./} % 256 )))"
+    # Random RFC 4193 ULA /48 global ID (stable per install, no collisions)
+    local gid
+    gid=$(od -An -tx1 -N5 /dev/urandom 2>/dev/null | tr -d ' \n')
+    if [[ ${#gid} -ne 10 ]]; then
+        gid="0011223344"  # non-random fallback (urandom unavailable)
+    fi
+    LAN_PREFIX6="fd${gid:0:2}:${gid:2:4}:${gid:6:4}"
 }
 
 # ── Disable services that conflict with the TuxWall gateway stack ───────────
@@ -194,12 +204,8 @@ network:
       dhcp4: false
       addresses:
         - $LAN_STATIC_IP/$LAN_PREFIX
-      # optional IPv6 ULA address
-      # - $LAN_PREFIX6::1/64
-      routes:
-        - to: 0.0.0.0/0
-          via: $(default_route_via)
-          metric: 100
+      # NOTE: no default route on LAN — the WAN (DHCP) interface provides
+      # the system default route. A static via: here would hijack it.
       nameservers:
         addresses: [127.0.0.1, ::1]
         search: [$DOMAIN]
@@ -207,10 +213,6 @@ NETPLAN
 
     install_file "$TMP" "$NETPLAN" 600
     rm -f "$TMP"
-}
-
-default_route_via() {
-    ip route show default 2>/dev/null | awk '/default/ {print $3; exit}' || echo ""
 }
 
 install_file() {
@@ -350,7 +352,7 @@ config_unbound() {
 server:
     local-zone: "$DOMAIN" static
     local-data: "gateway.$DOMAIN. IN A $LAN_STATIC_IP"
-    local-data: "gateway.$DOMAIN. IN AAAA ::1"
+    local-data: "gateway.$DOMAIN. IN AAAA ${LAN_PREFIX6}::1"
     local-data-ptr: "$LAN_STATIC_IP gateway.$DOMAIN."
 UNB
     install_file "$TMP" "$UNBOUND_DOM" 644
@@ -410,7 +412,11 @@ setup_unbound_rootkey() {
 # ── Configure Suricata to run on the WAN interface ──────────────────────────
 config_suricata() {
     local SURICATA="/etc/suricata/suricata.yaml"
-    local WAN_NIC="${WAN:=wan0}"
+    if [[ -z "${WAN:-}" ]]; then
+        err "config_suricata: WAN interface is not set - aborting."
+        return 1
+    fi
+    local WAN_NIC="$WAN"
     # Suricata runs in IDS (monitor) mode on WAN by default.
     # Rewrite HOME_NET to the LAN subnet AND point the af-packet capture at the
     # actual WAN interface. The stock 26.04 config ships placeholder NIC names
@@ -495,13 +501,13 @@ setup_geoip() {
 }
 
 # ── Configure UFW: NAT + forwarding + allow services ────────────────────────
- config_ufw() {
+config_ufw() {
     log "Configuring UFW default forwarding policy + NAT"
 
     if [[ $DRY_RUN -eq 0 ]]; then
         sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
         # Enable UFW IPv6 support (README: required so the v6 firewall is active)
-        sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw
+        sed -i 's/^#\?IPV6=.*/IPV6=yes/' /etc/default/ufw
         # Enable IP forwarding inside ufw
         grep -q '^net/ipv4/ip_forward' /etc/ufw/sysctl.conf \
             || echo 'net/ipv4/ip_forward=1' >> /etc/ufw/sysctl.conf
@@ -538,7 +544,7 @@ wait_for_network() {
     local i
     log "Waiting for network connectivity before installing packages..."
     for i in $(seq 1 15); do
-        if ip route show default >/dev/null 2>&1 && \
+        if ip route show default 2>/dev/null | grep -q '^default' && \
            getent hosts archive.ubuntu.com >/dev/null 2>&1; then
             log "Network is up (default route + DNS resolved)."
             return 0
@@ -547,11 +553,11 @@ wait_for_network() {
     done
 
     # We have a link but resolution may still be broken. Try to repair DNS.
-    if ip route show default >/dev/null 2>&1; then
+    if ip route show default 2>/dev/null | grep -q '^default'; then
         log "Default route present but DNS not resolving - attempting resolver repair..."
         # Point resolv.conf at a public resolver so apt can work regardless of
         # resolved/unbound state (the gateway will reconfigure DNS properly later).
-        if [[ $(command -v systemctl >/dev/null 2>&1 && systemctl is-system-running 2>/dev/null || true) != "" ]] \
+        if [[ "$(ps -p 1 -o comm= 2>/dev/null)" == "systemd" ]] \
            && command -v systemd-resolve >/dev/null 2>&1; then
             systemctl enable --now systemd-resolved 2>/dev/null || true
             resolvectl flush-caches 2>/dev/null || true
@@ -580,7 +586,7 @@ install_tuxwall_stack() {
         radvd
         wireguard wireguard-tools
         suricata suricata-update
-        crowdsec crowdsec-firewall-bouncer-nftables
+        crowdsec crowdsec-firewall-bouncer-iptables
         nginx
         python3 curl jq gzip ca-certificates ieee-data python3-maxminddb
     )
@@ -663,7 +669,7 @@ run_firstboot() {
 
     # 1. Install packages if this is a fresh base (skip if already present)
     wait_for_network
-    if [[ $(detect_interfaces) != "" ]] && ! command -v unbound >/dev/null 2>&1; then
+    if [[ -n "$(detect_interfaces)" ]] && ! command -v unbound >/dev/null 2>&1; then
         install_tuxwall_stack || warn "Package install failed - continuing with what's available."
     fi
 
@@ -694,7 +700,7 @@ run_firstboot() {
     if [[ -f "$STAGE_DEB" ]]; then
         log "Installing TuxWall package: $STAGE_DEB"
         if [[ $DRY_RUN -eq 0 ]]; then
-            dpkg -i "$STAGE_DEB" 2>/dev/null || apt-get install -f -y 2>/dev/null || true
+            dpkg -i "$STAGE_DEB" 2>/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -f -y 2>/dev/null || true
         else
             echo -e "${DIM}  (dry-run) dpkg -i $STAGE_DEB${NC}"
         fi
@@ -712,9 +718,14 @@ run_firstboot() {
         for unit in tuxwall.service tuxwall-blocklist-update.service tuxwall-blocklist-update.timer; do
             [[ -f "$STAGE_REPO/systemd/$unit" ]] && cp -f "$STAGE_REPO/systemd/$unit" /etc/systemd/system/
         done
-        cp -f "$STAGE_REPO/config/custom-blocklist.txt" /etc/tuxwall/ 2>/dev/null || true
-        cp -f "$STAGE_REPO/config/llm.json.example"     /etc/tuxwall/ 2>/dev/null || true
-        cp -f "$STAGE_REPO/config/ui.json"              /etc/tuxwall/ 2>/dev/null || true
+        mkdir -p /etc/tuxwall
+        # Never clobber existing config (llm.json holds real API keys).
+        [[ -f /etc/tuxwall/custom-blocklist.txt ]] || \
+            cp -f "$STAGE_REPO/config/custom-blocklist.txt" /etc/tuxwall/ 2>/dev/null || true
+        [[ -f /etc/tuxwall/llm.json ]] || \
+            cp -f "$STAGE_REPO/config/llm.json.example" /etc/tuxwall/llm.json 2>/dev/null || true
+        [[ -f /etc/tuxwall/ui.json ]] || \
+            cp -f "$STAGE_REPO/config/ui.json" /etc/tuxwall/ 2>/dev/null || true
         systemctl daemon-reload
     fi
 
@@ -722,6 +733,7 @@ run_firstboot() {
     log "Enabling systemd services"
     local svcs=(
         kea-dhcp4-server unbound radvd suricata crowdsec nginx tuxwall
+        tuxwall-agent.service
         tuxwall-blocklist-update.timer
     )
     for svc in "${svcs[@]}"; do
@@ -816,7 +828,7 @@ BANNER
         exit 1
     fi
 
-    derive_ips
+    derive_ips || exit 1
 
     echo -e "${DIM}  Configuration: WAN=$WAN LAN=$LAN subnet=$LAN_SUBNET ...${NC}"
 

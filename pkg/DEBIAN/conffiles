@@ -1,4 +1,7 @@
 /etc/tuxwall/llm.json.example
 /etc/nginx/sites-available/tuxwall
 /etc/tuxwall/opencode.json
+/etc/systemd/system/tuxwall.service
 /etc/systemd/system/tuxwall-agent.service
+/etc/systemd/system/tuxwall-blocklist-update.service
+/etc/systemd/system/tuxwall-blocklist-update.timer

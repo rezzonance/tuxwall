@@ -18,11 +18,14 @@ case "$1" in
     echo "[3/9] Creating empty blocklist configs (so Unbound includes are valid)..."
     # Must live under /var/lib/unbound/ - Unbound's AppArmor profile only allows
     # it to read /etc/unbound/** and /var/lib/unbound/**
-    : > /var/lib/unbound/blocklist.conf
+    mkdir -p /var/lib/unbound
+    [[ -f /var/lib/unbound/blocklist.conf ]] || : > /var/lib/unbound/blocklist.conf
+    if [[ ! -s /var/lib/unbound/client-bans.conf ]]; then
     cat > /var/lib/unbound/client-bans.conf <<'EOF'
 # Managed by the tuxwall DHCP Clients page - DO NOT EDIT
 server:
 EOF
+    fi
 
     echo "[4/9] Wiring blocklists into Unbound..."
     cat > /etc/unbound/unbound.conf.d/99-blocklists.conf <<'EOF'
@@ -95,13 +98,21 @@ EOF
     echo "[9/9] Setting up the opencode AI agent (dashboard AI assistant)..."
     # Best-effort: needs internet for the opencode installer. The dashboard
     # works fine without it; re-run the script later if it fails.
-    if bash /var/www/html/scripts/setup-opencode-agent.sh \
+    AGENT_SETUP=""
+    for cand in /var/www/html/scripts/setup-opencode-agent.sh \
+                /usr/local/share/tuxwall/scripts/setup-opencode-agent.sh; do
+      [[ -f "$cand" ]] && AGENT_SETUP="$cand" && break
+    done
+    if [[ -z "$AGENT_SETUP" ]]; then
+      echo "     SKIP: setup-opencode-agent.sh not shipped - agent step deferred."
+      echo "     (tuxwall-agent.service already active; no action needed.)"
+    elif bash "$AGENT_SETUP" \
             /etc/tuxwall/opencode.json \
             /etc/systemd/system/tuxwall-agent.service; then
       echo "     opencode agent ready (tuxwall-agent.service, 127.0.0.1:4096)"
     else
       echo "     WARNING: opencode agent setup failed (offline?). Re-run later:"
-      echo "       sudo bash /var/www/html/scripts/setup-opencode-agent.sh"
+      echo "       sudo bash $AGENT_SETUP"
     fi
 
     echo

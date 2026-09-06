@@ -51,14 +51,19 @@ fi
 # ── 3. Config (models + permission allowlist) ───────────────────────────────
 mkdir -p /etc/tuxwall
 if [[ -n "$CFG_SRC" && -f "$CFG_SRC" ]]; then
-    [[ -f /etc/tuxwall/opencode.json ]] && cp -a /etc/tuxwall/opencode.json /etc/tuxwall/opencode.json.bak-$(date +%Y%m%d%H%M%S)
+    # Single rolling backup (not one per run — those litter /etc/tuxwall).
+    [[ -f /etc/tuxwall/opencode.json ]] && cp -a /etc/tuxwall/opencode.json /etc/tuxwall/opencode.json.bak
     install -m 644 "$CFG_SRC" /etc/tuxwall/opencode.json
 fi
 # opencode's global config (per-user) wins for provider/model settings, so
 # keep it in sync with the tuxwall-managed copy
 install -d -m 700 -o "$AGENT_USER" -g "$AGENT_USER" "$AGENT_HOME/.config/opencode"
-install -m 644 -o "$AGENT_USER" -g "$AGENT_USER" \
-    /etc/tuxwall/opencode.json "$AGENT_HOME/.config/opencode/opencode.json"
+if [[ -f /etc/tuxwall/opencode.json ]]; then
+    install -m 644 -o "$AGENT_USER" -g "$AGENT_USER" \
+        /etc/tuxwall/opencode.json "$AGENT_HOME/.config/opencode/opencode.json"
+else
+    echo "[!] /etc/tuxwall/opencode.json missing and no config source given - skipping agent config sync"
+fi
 
 # ── 4. systemd unit ─────────────────────────────────────────────────────────
 if [[ -n "$UNIT_SRC" && -f "$UNIT_SRC" ]]; then

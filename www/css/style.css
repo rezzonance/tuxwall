@@ -3360,3 +3360,142 @@ body.light-theme .stat-card.stat-c:hover {
   .oc-logo { font-size: 13px; }
   .oc-term-title { display: none; }
 }
+/* ===== BUTTON-GLOW-FLAIR (appended 2026-09-06): sidebar-style glass + neon glow ===== */
+/* Base: frosted glass pill like .nav-item hover, with a blue aura */
+.btn {
+  --btn-blue: #63a5ff;
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid color-mix(in srgb, var(--btn-blue) 45%, transparent);
+  color: color-mix(in srgb, var(--btn-blue) 35%, #fff);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--btn-blue) 60%, transparent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--btn-blue) 28%, transparent),
+              0 2px 12px rgba(0, 0, 0, 0.3),
+              inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+.btn:hover {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--btn-blue) 22%, transparent) 0%, color-mix(in srgb, var(--btn-blue) 10%, transparent) 100%);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-color: color-mix(in srgb, var(--btn-blue) 65%, transparent);
+  color: #fff;
+  text-shadow: 0 0 12px color-mix(in srgb, var(--btn-blue) 90%, transparent);
+  box-shadow: 0 0 8px var(--btn-blue),
+              0 0 26px color-mix(in srgb, var(--btn-blue) 45%, transparent),
+              0 4px 16px rgba(0, 0, 0, 0.35),
+              inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+.btn:active {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--btn-blue) 18%, transparent) 0%, color-mix(in srgb, var(--btn-blue) 8%, transparent) 100%);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--btn-blue) 35%, transparent),
+              0 1px 8px rgba(0, 0, 0, 0.35),
+              inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+.btn:focus-visible {
+  outline: 2px solid var(--btn-blue, #63a5ff);
+  outline-offset: 2px;
+}
+.btn[disabled] {
+  box-shadow: none;
+  text-shadow: none;
+}
+/* Ghost: neutral glass, halo blooms on hover */
+.btn-ghost {
+  border-color: var(--glass-border);
+  color: var(--text);
+  text-shadow: none;
+  box-shadow: var(--glass-shadow), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.btn-ghost:hover {
+  color: #fff;
+  border-color: color-mix(in srgb, var(--btn-blue, #63a5ff) 55%, transparent);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--btn-blue, #63a5ff) 18%, transparent) 0%, color-mix(in srgb, var(--btn-blue, #63a5ff) 8%, transparent) 100%);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--btn-blue, #63a5ff) 80%, transparent);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--btn-blue, #63a5ff) 35%, transparent),
+              inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+/* Danger: red-tinted glass with red neon */
+.btn-danger {
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-color: color-mix(in srgb, var(--red) 45%, transparent);
+  color: color-mix(in srgb, var(--red) 35%, #fff);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--red) 60%, transparent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--red) 28%, transparent),
+              0 2px 12px rgba(0, 0, 0, 0.3),
+              inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+.btn-danger:hover {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--red) 22%, transparent) 0%, color-mix(in srgb, var(--red) 10%, transparent) 100%);
+  border-color: color-mix(in srgb, var(--red) 65%, transparent);
+  color: #fff;
+  text-shadow: 0 0 12px color-mix(in srgb, var(--red) 90%, transparent);
+  box-shadow: 0 0 8px var(--red),
+              0 0 26px color-mix(in srgb, var(--red) 45%, transparent),
+              0 4px 16px rgba(0, 0, 0, 0.35),
+              inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+/* Active segmented tab: glass + glow, like .nav-item.active */
+.seg-btn.active {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 80%, transparent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 35%, transparent),
+              0 0 24px color-mix(in srgb, var(--accent) 20%, transparent),
+              inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+/* Bare icon buttons (User Manager edit/power/delete): glass + aura at rest,
+   blue bloom on hover, red for danger. Scoped :not(.btn) so combos like
+   `btn btn-sm icon-btn` don't stack two glows. */
+.icon-btn:not(.btn) {
+  border-color: color-mix(in srgb, var(--btn-blue, #63a5ff) 35%, transparent);
+  color: color-mix(in srgb, var(--btn-blue, #63a5ff) 30%, var(--text));
+  box-shadow: 0 0 8px color-mix(in srgb, var(--btn-blue, #63a5ff) 22%, transparent),
+              inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+.icon-btn:not(.btn):hover {
+  border-color: color-mix(in srgb, var(--btn-blue, #63a5ff) 65%, transparent);
+  color: #fff;
+  box-shadow: 0 0 8px var(--btn-blue, #63a5ff),
+              0 0 20px color-mix(in srgb, var(--btn-blue, #63a5ff) 45%, transparent),
+              inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+.icon-btn:not(.btn):hover svg {
+  filter: drop-shadow(0 0 4px var(--btn-blue, #63a5ff));
+}
+.icon-btn-danger:not(.btn) {
+  border-color: color-mix(in srgb, var(--red) 35%, transparent);
+  color: color-mix(in srgb, var(--red) 30%, var(--text));
+  box-shadow: 0 0 8px color-mix(in srgb, var(--red) 22%, transparent),
+              inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+.icon-btn-danger:not(.btn):hover {
+  border-color: var(--red);
+  color: #fff;
+  box-shadow: 0 0 8px var(--red),
+              0 0 20px color-mix(in srgb, var(--red) 45%, transparent),
+              inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+.icon-btn-danger:not(.btn):hover svg {
+  filter: drop-shadow(0 0 4px var(--red));
+}
+/* Light theme: glass vars already adapt; just deepen tints for contrast */
+body.light-theme .btn {
+  background: linear-gradient(135deg, color-mix(in srgb, #63a5ff 20%, transparent) 0%, color-mix(in srgb, #63a5ff 8%, transparent) 100%);
+  color: color-mix(in srgb, #2b6fd4 60%, #000);
+  text-shadow: 0 0 8px rgba(99, 165, 255, 0.5);
+}
+body.light-theme .btn:hover {
+  color: #fff;
+  background: linear-gradient(135deg, #63a5ff 0%, #3b82f6 100%);
+  text-shadow: 0 0 10px rgba(255, 255, 255, 0.6);
+}
+body.light-theme .btn-danger {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--red) 18%, transparent) 0%, color-mix(in srgb, var(--red) 8%, transparent) 100%);
+  color: color-mix(in srgb, var(--red) 60%, #000);
+}
+body.light-theme .btn-danger:hover {
+  color: #fff;
+}
+/* ===== END BUTTON-GLOW-FLAIR ===== */

@@ -2392,7 +2392,7 @@ def _limit_summary(prose):
     'Top action:' line is always kept.
     """
     lines = [l.strip() for l in prose.splitlines() if l.strip()]
-    bullets, top, heading, seen_bullet = [], [], [], False
+    bullets, top, heading, seen_bullet, dropped = [], [], [], False, 0
     for l in lines:
         if re.search(r"\|\s*(HIGH|MEDIUM|LOW)\s*\|", l, re.I):
             seen_bullet = True
@@ -2400,12 +2400,14 @@ def _limit_summary(prose):
                 if not re.match(r"^[-*\u2022]", l):
                     l = "- " + l
                 bullets.append(l)
+            else:
+                dropped += 1
         elif re.match(r"^top action:", l, re.I):
             top.append(l)
         elif not seen_bullet:
             heading.append(l)
-    if seen_bullet and len(bullets) == 5:
-        bullets.append("- (further findings omitted \u2014 see map and top attackers)")
+    if dropped:
+        bullets.append(f"- ({dropped} further finding(s) omitted \u2014 see map and top attackers)")
     return "\n".join(heading + bullets + top).strip()
 
 
@@ -2425,7 +2427,7 @@ def collect_ai_context():
                      "Default outgoing: " + defaults.get("outgoing", "?"),
                      "Rules:"]
             for r in rules[:30]:
-                lines.append(f"  [{r.get('num')}] {r.get('action','?')} {r.get('to','?')} from {r.get('from','any')}  # {r.get('comment','')}")
+                lines.append(f"  [{r.get('number')}] {r.get('action','?')} {r.get('to','?')} from {r.get('from','any')}")
             sections.append("\n".join(lines))
     except Exception as e:
         sections.append(f"=== FIREWALL ===\nUnavailable: {e}")
@@ -2446,11 +2448,12 @@ def collect_ai_context():
         dns = build_dns()
         if dns.get("ok"):
             lines = ["=== DNS (Unbound) ==="]
-            upstreams = dns.get("upstreams") or []
-            lines.append("Upstreams: " + (", ".join(upstreams) if upstreams else "none"))
-            stats = dns.get("stats") or {}
-            if stats:
-                lines.append(f"Queries total: {stats.get('total',0)}  blocked: {stats.get('blocked',0)}  cache_hit: {stats.get('cache_hit',0)}")
+            totals = dns.get("totals") or {}
+            lines.append(f"Queries: {totals.get('queries',0)}  NXDOMAIN(blocked): {totals.get('nxdomain',0)}  "
+                         f"hit-rate: {totals.get('hitrate',0):.1%}  uptime: {dns.get('uptime',0)}s")
+            qtypes = dns.get("qtypes") or []
+            if qtypes:
+                lines.append("Top qtypes: " + ", ".join(f"{q.get('label')}:{q.get('count')}" for q in qtypes[:5]))
             sections.append("\n".join(lines))
     except Exception as e:
         sections.append(f"=== DNS ===\nUnavailable: {e}")
@@ -2469,23 +2472,27 @@ def collect_ai_context():
     try:
         st = build_status()
         if st.get("ok"):
+            load = st.get("load") or [0, 0, 0]
+            svc_states = st.get("services") or {}
+            down = sorted(k for k, v in svc_states.items() if not v)
             lines = ["=== SYSTEM ===",
                      f"Hostname: {st.get('hostname','')}",
-                     f"Uptime: {st.get('uptime_str','')}",
-                     f"CPU: {st.get('cpu_percent',0):.1f}%  RAM: {st.get('mem_percent',0):.1f}%  Disk: {st.get('disk_percent',0):.1f}%",
-                     f"Load: {st.get('load_1',0):.2f} / {st.get('load_5',0):.2f} / {st.get('load_15',0):.2f}"]
+                     f"Time: {st.get('time','')}",
+                     f"Load: {' / '.join(f'{x:.2f}' for x in load[:3])}",
+                     "Services down: " + (", ".join(down) if down else "none")]
             sections.append("\n".join(lines))
     except Exception as e:
         sections.append(f"=== SYSTEM ===\nUnavailable: {e}")
 
-    # Blocked domains count
+    # Local DNS domains (managed overrides + discovered unbound records)
     try:
         doms = build_domains()
-        blocked = [d for d in (doms.get("domains") or []) if d.get("kind") == "block"]
-        allowed = [d for d in (doms.get("domains") or []) if d.get("kind") == "allow"]
-        sections.append(f"=== DNS DOMAINS ===\nBlocked: {len(blocked)}  Allowed overrides: {len(allowed)}")
-        if blocked[:10]:
-            sections[-1] += "\nRecent blocks: " + ", ".join(d.get("name","") for d in blocked[:10])
+        all_doms = doms.get("domains") or []
+        managed = [d for d in all_doms if d.get("managed")]
+        discovered = [d for d in all_doms if not d.get("managed")]
+        sections.append(f"=== DNS DOMAINS ===\nManaged: {len(managed)}  Discovered: {len(discovered)}")
+        if managed[:10]:
+            sections[-1] += "\nManaged: " + ", ".join(d.get("domain","") for d in managed[:10])
     except Exception as e:
         sections.append(f"=== DNS DOMAINS ===\nUnavailable: {e}")
 
@@ -6775,17 +6782,6 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send_file(fpath, base)
 
-        elif path == "/api/system/hostname":
-            name = (body.get("hostname") or "").strip()
-            try:
-                new_name = set_hostname(name)
-            except ValueError as exc:
-                self._send(400, {"ok": False, "error": str(exc)})
-                return
-            except Exception as exc:
-                self._send(500, {"ok": False, "error": str(exc)})
-                return
-            self._send(200, {"ok": True, "hostname": new_name})
         elif path == "/api/themes":
             self._send(200, list_themes())
 
@@ -7665,6 +7661,17 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
 
+        elif path == "/api/system/hostname":
+            try:
+                new_name = set_hostname((body.get("hostname") or "").strip())
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+                return
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+                return
+            self._send(200, {"ok": True, "hostname": new_name})
+
         elif path == "/api/backups/restore":
             if body and body.get("name"):
                 try:
@@ -7950,10 +7957,14 @@ def build_diagnose(target):
         except Exception:
             pass
         if not blocked_by_dns:
-            # Also check custom blocklist file
+            # Also check custom blocklist file (exact line match — a
+            # substring test would false-positive, e.g. ample.com in
+            # example.com, and match #-commented lines)
             try:
-                custom = open("/etc/tuxwall/custom-blocklist.txt").read()
-                if target in custom:
+                with open("/etc/tuxwall/custom-blocklist.txt") as f:
+                    entries = {ln.strip().lower() for ln in f
+                               if ln.strip() and not ln.strip().startswith("#")}
+                if target.lower() in entries:
                     blocked_by_dns = True
             except Exception:
                 pass

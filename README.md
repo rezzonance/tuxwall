@@ -51,7 +51,7 @@ tuxwall is a web-based network dashboard that provides visibility and control ov
 
 ## Tested Environment
 
-- **OS:** Ubuntu 25.04 (noble)
+- **OS:** Ubuntu 25.04 (plucky)
 - **Kernel:** 6.x
 - **Architecture:** x86_64
 - **Role:** Dedicated gateway/router (not a desktop — a headless server connected between your modem and LAN switch)
@@ -198,14 +198,34 @@ ip -6 route show
 
 ## Installation
 
-### Automated installer (recommended)
+### Appliance installer (fresh gateway with first-boot wizard)
 
-The `install.sh` script handles everything: installs dependencies, disables conflicting services, configures Unbound/nginx, installs the `.deb`, and starts all services.
+The `install.sh` script stages the appliance payload and installs a first-boot
+autologin mechanism: on your next login the WAN/LAN setup wizard
+(`firstboot/tuxwall-firstboot.sh`) runs once interactively, then normal login
+is restored. Use this on a freshly-installed stock Ubuntu (server) machine
+you want to turn into a TuxWall gateway.
 
 ```bash
 git clone https://github.com/rezzonance/tuxwall.git
 cd tuxwall
 sudo bash install.sh
+```
+
+After it finishes, log out (or reboot) — the next login drops you into the
+one-time WAN/LAN wizard, which installs packages, writes the network config,
+and enables services.
+
+### Full provisioning on an existing host
+
+The `setup.sh` script handles everything on the current machine: installs
+dependencies, disables conflicting services, configures Unbound/nginx,
+installs the dashboard files and systemd units, and starts all services.
+
+```bash
+git clone https://github.com/rezzonance/tuxwall.git
+cd tuxwall
+sudo bash setup.sh
 ```
 
 The script will:
@@ -245,13 +265,13 @@ sudo apt install -y \
 Install the provided `.deb` package:
 
 ```bash
-sudo dpkg -i tuxwall_2.4.0_all.deb
+sudo dpkg -i tuxwall_2.5.2_all.deb
 ```
 
 If you encounter dependency errors:
 ```bash
 sudo apt -f install
-sudo dpkg -i tuxwall_2.4.0_all.deb
+sudo dpkg -i tuxwall_2.5.2_all.deb
 ```
 
 #### APT repository (recommended)
@@ -283,7 +303,7 @@ sudo apt update && sudo apt upgrade tuxwall
 
 Releases are published by the `Publish APT repository` GitHub Actions
 workflow: bump `Version:` in `pkg/DEBIAN/control`, commit to `main`, then tag
-the release (`git tag v2.4.0 && git push origin v2.4.0`). The tag must match
+the release (`git tag v2.5.2 && git push origin v2.5.2`). The tag must match
 the package version or the build fails. Signing uses the GPG keypair
 committed as `apt-public.asc` (private key lives in the repository secret
 `APT_GPG_PRIVATE_KEY`).
@@ -496,4 +516,4 @@ systemctl status tuxwall tuxwall-sqm kea-dhcp4-server unbound radvd suricata cro
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+This project is licensed under the MIT License.

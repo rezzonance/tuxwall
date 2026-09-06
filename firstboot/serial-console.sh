@@ -15,11 +15,16 @@ set -euo pipefail
 
 CMDLINE="$(cat /proc/cmdline 2>/dev/null || true)"
 
-# Find a console= argument. Prefer ttyS* (serial).
+# Find a console= argument. Prefer ttyS* (serial). Accept both
+# `console=ttyS0,115200` / `console=ttyS0,115200n8` and bare
+# `console=ttyS0` (falls back to BAUD=115200) forms.
 SERIAL_TTY=""
+BAUD="115200"
 if [[ "$CMDLINE" =~ console=(ttyS[0-9]+),([0-9]+) ]]; then
     SERIAL_TTY="${BASH_REMATCH[1]}"
     BAUD="${BASH_REMATCH[2]}"
+elif [[ "$CMDLINE" =~ console=(ttyS[0-9]+)([[:space:]]|$) ]]; then
+    SERIAL_TTY="${BASH_REMATCH[1]}"
 fi
 
 if [[ -z "$SERIAL_TTY" ]]; then
@@ -31,13 +36,18 @@ fi
 echo "serial-console.sh: configuring serial console $SERIAL_TTY @ $BAUD"
 
 # ── GRUB: put console= on both the default and the linux cmdline ──────────
-sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"console=$SERIAL_TTY,${BAUD}n8\"|" /etc/default/grub
-sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=\"console=$SERIAL_TTY,${BAUD}n8\"|" /etc/default/grub
-sed -i "s|^#GRUB_TERMINAL=.*|GRUB_TERMINAL=serial|" /etc/default/grub
-if ! grep -q '^GRUB_SERIAL_COMMAND' /etc/default/grub; then
-    printf 'GRUB_SERIAL_COMMAND="serial --speed=%s --unit=0 --word=8 --parity=no --stop=1"\n' "$BAUD" >> /etc/default/grub
+# Skip on non-GRUB systems (systemd-boot, extlinux, ...).
+if [[ ! -f /etc/default/grub ]] || ! command -v update-grub >/dev/null 2>&1; then
+    echo "serial-console.sh: no GRUB config found - skipping bootloader update" >&2
+else
+    sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"console=$SERIAL_TTY,${BAUD}n8\"|" /etc/default/grub
+    sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=\"console=$SERIAL_TTY,${BAUD}n8\"|" /etc/default/grub
+    sed -i "s|^#GRUB_TERMINAL=.*|GRUB_TERMINAL=serial|" /etc/default/grub
+    if ! grep -q '^GRUB_SERIAL_COMMAND' /etc/default/grub; then
+        printf 'GRUB_SERIAL_COMMAND="serial --speed=%s --unit=0 --word=8 --parity=no --stop=1"\n' "$BAUD" >> /etc/default/grub
+    fi
+    update-grub
 fi
-update-grub
 
 # ── Enable a login getty on the serial port ────────────────────────────────
 systemctl enable "serial-getty@$SERIAL_TTY.service" 2>/dev/null || true

@@ -126,9 +126,13 @@ ok "Web files installed"
 # ============================================================================
 info "Installing config files to /etc/tuxwall/..."
 
-cp "$REPO_DIR/config/ui.json"              /etc/tuxwall/ui.json
-cp "$REPO_DIR/config/llm.json.example"     /etc/tuxwall/llm.json
-cp "$REPO_DIR/config/custom-blocklist.txt" /etc/tuxwall/custom-blocklist.txt
+# Never clobber existing config on re-run (llm.json holds real API keys).
+[[ -f /etc/tuxwall/ui.json ]] || \
+    cp "$REPO_DIR/config/ui.json"              /etc/tuxwall/ui.json
+[[ -f /etc/tuxwall/llm.json ]] || \
+    cp "$REPO_DIR/config/llm.json.example"     /etc/tuxwall/llm.json
+[[ -f /etc/tuxwall/custom-blocklist.txt ]] || \
+    cp "$REPO_DIR/config/custom-blocklist.txt" /etc/tuxwall/custom-blocklist.txt
 
 # Auth is generated at first run by api_server.py; ensure dir is writable
 chmod 755 /etc/tuxwall
@@ -144,12 +148,17 @@ info "Installing scripts..."
 cp "$REPO_DIR/scripts/tuxwall-sqm.sh" /usr/local/sbin/tuxwall-sqm.sh
 chmod 755 /usr/local/sbin/tuxwall-sqm.sh
 
-# System backup script (if present in repo)
-[[ -f "$REPO_DIR/scripts/system-backup.sh" ]] && {
-    cp "$REPO_DIR/scripts/system-backup.sh" /usr/local/sbin/system-backup.sh
+# System backup script (canonical source: pkg/usr/local/sbin/)
+BACKUP_SRC=""
+[[ -f "$REPO_DIR/pkg/usr/local/sbin/system-backup.sh" ]] && BACKUP_SRC="$REPO_DIR/pkg/usr/local/sbin/system-backup.sh"
+[[ -z "$BACKUP_SRC" && -f "$REPO_DIR/scripts/system-backup.sh" ]] && BACKUP_SRC="$REPO_DIR/scripts/system-backup.sh"
+if [[ -n "$BACKUP_SRC" ]]; then
+    cp "$BACKUP_SRC" /usr/local/sbin/system-backup.sh
     chmod 755 /usr/local/sbin/system-backup.sh
     ok "system-backup.sh installed"
-}
+else
+    warn "system-backup.sh not found in repo - backup endpoints will fail"
+fi
 
 # GeoIP setup (can be run later)
 chmod 755 "$REPO_DIR/www/scripts/geoip-setup.sh" 2>/dev/null || true
@@ -230,11 +239,19 @@ ok "Unbound configured"
 # ============================================================================
 info "Configuring UFW rules..."
 
+# SSH first — never lock ourselves out of a remote gateway
+ufw allow OpenSSH 2>/dev/null || true
+
 # Allow HTTP (dashboard)
 ufw allow 80/tcp comment "TuxWall dashboard" 2>/dev/null || true
 
 # Allow WireGuard default port
 ufw allow 51820/udp comment "WireGuard" 2>/dev/null || true
+
+# Enable the firewall if it isn't already (mirrors pkg postinst)
+if ! ufw status 2>/dev/null | grep -q 'Status: active'; then
+    ufw --force enable 2>/dev/null || warn "Could not enable UFW"
+fi
 
 ok "UFW rules added"
 
@@ -262,26 +279,16 @@ done
 ok "Services enabled and started"
 
 # ============================================================================
-# 13. FIX HARDCODED PATHS IN api_server.py
+# 13. BACKUP DIRS (match api_server.py BACKUP_DIR)
 # ============================================================================
-info "Patching hardcoded paths in api_server.py..."
+info "Ensuring backup directories exist..."
 
-API_SERVER="/var/www/html/includes/api_server.py"
+# Canonical locations expected by www/includes/api_server.py:
+#   BACKUP_DIR = /var/lib/tuxwall/backups
+mkdir -p /var/lib/tuxwall/backups/system
+chmod 755 /var/lib/tuxwall/backups /var/lib/tuxwall/backups/system
 
-if [[ -f "$API_SERVER" ]]; then
-    # Fix BACKUP_DIR
-    sed -i 's|BACKUP_DIR = "/home/jeff/backups"|BACKUP_DIR = "/var/backups/tuxwall"|g' "$API_SERVER"
-
-    # Fix SOURCE_DIR
-    sed -i 's|SOURCE_DIR = "/home/jeff/tuxwall-blocklist"|SOURCE_DIR = "/var/lib/tuxwall"|g' "$API_SERVER"
-
-    # Create the backup dir
-    mkdir -p /var/backups/tuxwall
-
-    ok "Hardcoded paths patched"
-else
-    warn "api_server.py not found at $API_SERVER — skipping path patch"
-fi
+ok "Backup directories ready"
 
 # ============================================================================
 # 14. PERMISSIONS
