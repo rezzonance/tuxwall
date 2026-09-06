@@ -1359,6 +1359,18 @@ def add_firewall_rule(rule_text):
     args = (rule_text or "").split()
     if not args:
         raise RuntimeError("Rule is empty")
+    # Whitelist: only single-rule verbs may pass through here. Destructive /
+    # global subcommands (reset, disable, enable, default, logging, route,
+    # delete, --force, ...) must go through their dedicated API functions.
+    verb = args[0].lower()
+    if verb not in ("allow", "deny", "reject", "limit"):
+        raise RuntimeError(
+            "Unsupported rule verb %r (use allow/deny/reject/limit)" % args[0])
+    for tok in args:
+        if tok.startswith("-"):
+            raise RuntimeError("Flag-style tokens are not allowed in firewall rules")
+        if any(c in tok for c in ";|&$`!(){}<>\\\n\r"):
+            raise RuntimeError("Invalid character in firewall rule")
     _ufw(args)
     return build_firewall()
 
@@ -3635,6 +3647,46 @@ def ensure_blocklist_config():
     return seed
 
 
+# --- Blocklist SSRF guard (live patch 2026-09-06) ---
+class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects that point at non-public hosts."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        loc = headers.get("Location") or newurl
+        try:
+            host = urllib.parse.urlsplit(
+                urllib.parse.urljoin(req.full_url, loc)).hostname or ""
+        except ValueError:
+            raise RuntimeError("Blocked redirect: malformed Location")
+        if not _blocklist_host_is_public(host):
+            raise RuntimeError(
+                "Blocked redirect to non-public host %r" % host)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _blocklist_host_is_public(host):
+    """Resolve host and require every address to be globally reachable."""
+    host = (host or "").strip().rstrip(".")
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None, family=socket.AF_UNSPEC,
+                                   type=socket.SOCK_STREAM)
+    except (socket.gaierror, UnicodeError):
+        return False  # fail closed on unresolvable names
+    addrs = {info[4][0] for info in infos}
+    if not addrs:
+        return False
+    for raw in addrs:
+        try:
+            ip = ipaddress.ip_address(raw)
+        except ValueError:
+            return False
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_multicast or ip.is_reserved or ip.is_unspecified):
+            return False
+    return True
+
+
 def valid_blocklist_url(url):
     try:
         parts = urllib.parse.urlsplit(url.strip())
@@ -3644,11 +3696,21 @@ def valid_blocklist_url(url):
 
 
 def fetch_blocklist(url):
+    try:
+        parts = urllib.parse.urlsplit((url or "").strip())
+    except ValueError:
+        raise RuntimeError("Invalid blocklist URL")
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise RuntimeError("Invalid blocklist URL (http/https only)")
+    if not _blocklist_host_is_public(parts.hostname):
+        raise RuntimeError(
+            "Refusing to fetch from non-public host %r" % parts.hostname)
     req = urllib.request.Request(url, headers={
         "User-Agent": "tuxwall-blocklist/1.0",
         "Accept-Encoding": "gzip",
     })
-    with urllib.request.urlopen(req, timeout=BLOCKLIST_FETCH_TIMEOUT) as resp:
+    opener = urllib.request.build_opener(_SSRFRedirectHandler)
+    with opener.open(req, timeout=BLOCKLIST_FETCH_TIMEOUT) as resp:
         data = resp.read(BLOCKLIST_MAX_BYTES + 1)
         if len(data) > BLOCKLIST_MAX_BYTES:
             raise RuntimeError(
@@ -4397,7 +4459,23 @@ THEMES_DIR = "/var/www/html/themes"
 # ---- Web authentication ----
 AUTH_FILE = "/etc/tuxwall/auth.json"
 SESSION_COOKIE = "tuxwall_session"
+
+
+def _session_cookie_value(headers, token):
+    """Build the session Set-Cookie value. Adds `; Secure` only when the
+    request came in over HTTPS (X-Forwarded-Proto from nginx) — live
+    patch 2026-09-06, dual-mode so HTTP logins keep working pre-TLS."""
+    value = "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}".format(
+        SESSION_COOKIE, token, SESSION_TTL)
+    try:
+        proto = (headers.get("X-Forwarded-Proto") or "").split(",")[0]
+    except Exception:
+        proto = ""
+    if proto.strip().lower() == "https":
+        value += "; Secure"
+    return value
 SESSION_TTL = 12 * 3600
+SESSION_IDLE_TIMEOUT = 30 * 60  # live patch 2026-09-06: idle sessions expire after 30 min
 PBKDF2_ITERATIONS = 200000
 MIN_PASSWORD_LEN = 8
 DEFAULT_ADMIN_USER = "admin"
@@ -4481,23 +4559,22 @@ def _find_user(users, username):
 
 
 def _ensure_default_auth():
-    if _load_users():
-        return
-    try:
-        _save_users([
-            _new_user(DEFAULT_ADMIN_USER, DEFAULT_ADMIN_PASSWORD, "admin", owner=True, is_default=True)
-        ])
-    except OSError:
-        pass
+    # Live patch 2026-09-06: default credentials removed. This is now a
+    # no-op kept for its call sites. No users -> setup_required (fail
+    # closed); the first admin is created via POST /api/auth/setup.
+    # DEFAULT_ADMIN_PASSWORD is no longer used anywhere.
+    return
 
 
 def _create_session(username, role):
     token = secrets.token_urlsafe(32)
     now = time.time()
     with _sessions_lock:
-        for t in [t for t, s in _sessions.items() if s["exp"] < now]:
+        for t in [t for t, s in list(_sessions.items())
+                 if s["exp"] < now or now - s.get("last", now) > SESSION_IDLE_TIMEOUT]:
             del _sessions[t]
-        _sessions[token] = {"exp": now + SESSION_TTL, "username": username, "role": role}
+        _sessions[token] = {"exp": now + SESSION_TTL, "last": now,
+                            "username": username, "role": role}
     return token
 
 
@@ -4531,7 +4608,11 @@ def _session_identity(headers):
         if sess is None or sess["exp"] < now:
             _sessions.pop(token, None)
             return None
+        if now - sess.get("last", now) > SESSION_IDLE_TIMEOUT:
+            _sessions.pop(token, None)
+            return None
         username = sess["username"]
+        sess["last"] = now
         sess["exp"] = now + SESSION_TTL
     users = _load_users()
     user = _find_user(users, username)
@@ -4558,8 +4639,22 @@ def _drop_session(headers):
 
 
 def _client_key(handler):
-    real = handler.headers.get("X-Real-IP")
-    return real.strip() if real else handler.client_address[0]
+    # Only trust X-Real-IP when the connection itself came from the local
+    # nginx proxy (loopback). Otherwise a LAN client could spoof the header
+    # and rotate identities to bypass login rate limiting.
+    try:
+        direct = handler.client_address[0]
+    except Exception:
+        direct = ""
+    if direct in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        real = handler.headers.get("X-Real-IP")
+        if real and real.strip():
+            return real.strip()
+        fwd = handler.headers.get("X-Forwarded-For")
+        if fwd and fwd.strip():
+            return fwd.split(",")[0].strip()
+        return direct
+    return direct
 
 
 def _login_lock_remaining(ip):
@@ -4724,6 +4819,39 @@ def attempt_login(body, ip):
         "can_manage_users": _can_manage_users(_load_users(), user),
         "default_password": bool(user.get("default_password")),
         "totp_enabled": bool(user.get("totp_secret")),
+    }
+
+
+def setup_first_admin(body, ip):
+    """Create the initial owner-admin when no users exist yet.
+
+    Fail-closed: refuses (and counts against login rate limiting) when
+    any user already exists. Returns a login-style result dict."""
+    remaining = _login_lock_remaining(ip)
+    if remaining > 0:
+        raise PermissionError(
+            "Too many failed attempts. Try again in {}s".format(remaining))
+    if _load_users():
+        _record_login_failure(ip)
+        raise PermissionError("Setup already completed")
+    username = str(body.get("username") or "").strip()
+    if not USERNAME_RE.match(username):
+        raise ValueError(
+            "Invalid username (1-32 chars: letters, digits, _ . -)")
+    password = validate_password_strength(body.get("password"))
+    if _load_users():
+        raise PermissionError("Setup already completed")
+    user = _new_user(username, password, "admin", owner=True)
+    _save_users([user])
+    _clear_login_failures(ip)
+    return {
+        "ok": True,
+        "username": user["username"],
+        "role": "admin",
+        "is_owner": True,
+        "can_manage_users": True,
+        "default_password": False,
+        "totp_enabled": False,
     }
 
 
@@ -5510,6 +5638,11 @@ BACKUP_RE = re.compile(r"^[A-Za-z0-9._-]+\.tar\.gz$")
 BACKUP_TARGETS = ("index.html", "css", "scripts", "includes", "images")
 SOURCE_SYNC = ("index.html", "css/style.css", "scripts/dashboard.js", "includes/api_server.py")
 
+# --- Restore confirmation gate (live patch 2026-09-06) ---
+# Archive members under these prefixes replace executable code and need
+# an explicit confirm_code_replace flag before restore proceeds.
+RESTORE_CODE_PREFIXES = ("includes/", "scripts/")
+
 
 def list_backups():
     try:
@@ -5601,6 +5734,61 @@ def restore_backup(filename, raw=None):
         "restored": sorted(restored),
         "restart_required": "includes/api_server.py" in restored,
     }
+
+
+def _preview_backup_file(path):
+    """Inspect a .tar.gz without extracting: sha256, safe member list,
+    and whether it touches executable code. Raises ValueError if invalid."""
+    import hashlib as _hl
+    h = _hl.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1048576), b""):
+            h.update(chunk)
+    try:
+        tar = tarfile.open(path, "r:gz")
+    except (tarfile.TarError, OSError, EOFError):
+        raise ValueError("Not a valid .tar.gz backup")
+    members = []
+    with tar:
+        for member in tar.getmembers():
+            if not _tar_member_safe(member):
+                continue
+            top = member.name.split("/", 1)[0]
+            if top not in BACKUP_TARGETS:
+                continue
+            members.append(member.name)
+    members.sort()
+    touches_code = any(m.startswith(RESTORE_CODE_PREFIXES) for m in members)
+    return {"sha256": h.hexdigest(), "members": members,
+            "touches_code": touches_code}
+
+
+def _stage_restore_upload(filename, raw):
+    """Persist uploaded bytes as a staged backup file, return its basename."""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    base = os.path.basename(filename or "") or "tuxwall-restore.tar.gz"
+    if not base.endswith(".tar.gz"):
+        base += ".tar.gz"
+    if not BACKUP_RE.match(base):
+        base = "tuxwall-restore-upload.tar.gz"
+    path = os.path.join(BACKUP_DIR, base)
+    with open(path, "wb") as f:
+        f.write(raw)
+    return base, path
+
+
+def _snapshot_live_code():
+    """Snapshot the running backend before it can be overwritten."""
+    src = os.path.join(WWW_DIR, "includes", "api_server.py")
+    if not os.path.isfile(src):
+        return None
+    dst = os.path.join(BACKUP_DIR, "api_server.py.bak-"
+                        + time.strftime("%Y%m%d%H%M%S"))
+    try:
+        shutil.copy2(src, dst)
+        return dst
+    except OSError:
+        return None
 
 
 def delete_backup(filename):
@@ -5913,13 +6101,26 @@ def download_system_backup_member(filename, member):
     return out
 
 
-def restore_system_backup_member(filename, member):
+# Archive prefixes whose restore replaces executable dashboard code.
+# Restoring these requires body.confirm_code_replace (wired in the
+# /api/backups/system/restore-file handler below).
+SYSTEM_RESTORE_CODE_PREFIXES = ("var/www/html/includes/",
+                                "var/www/html/scripts/")
+
+
+def restore_system_backup_member(filename, member, allow_code=False):
     """Restore a single file from a system backup to its live location.
     Firewall rule dumps are applied with iptables-restore (atomic + verified);
     config files are copied to their /etc or /usr/local path with a timestamped
     .bak of the current file. Services are NOT restarted automatically."""
     base, tar, m = system_backup_member_path(filename, member)
     name = _system_member_safe(member)
+    if (not allow_code and name
+            and name.startswith(SYSTEM_RESTORE_CODE_PREFIXES)):
+        tar.close()
+        raise ValueError(
+            "Refusing to overwrite executable dashboard code %r without "
+            "confirm_code_replace. The current file is untouched." % name)
     try:
         if name == "iptables-save.txt":
             proc = subprocess.run(
@@ -6089,6 +6290,303 @@ def _prune_system_backups():
             except OSError:
                 pass
     return removed
+
+
+UNBOUND_ROUTER_CONF = "/etc/unbound/unbound.conf.d/router-dns.conf"
+
+
+def _kea_single_subnet():
+    """Return (kea_data, d4, subnet); only single-subnet setups are
+    form-editable — anything else must use the raw editor."""
+    kea = _read_kea()
+    d4 = kea.get("Dhcp4", {})
+    subnets = d4.get("subnet4", [])
+    if len(subnets) != 1:
+        raise ValueError(
+            "Form editing covers a single subnet (found %d) — "
+            "use the raw file editor." % len(subnets))
+    return kea, d4, subnets[0]
+
+
+def _kea_opt(subnet, d4, name):
+    for o in subnet.get("option-data", []):
+        if o.get("name") == name:
+            return o.get("data", "")
+    for o in d4.get("option-data", []):
+        if o.get("name") == name:
+            return o.get("data", "")
+    return ""
+
+
+def _kea_set_opt(subnet, name, data):
+    for o in subnet.setdefault("option-data", []):
+        if o.get("name") == name:
+            o["data"] = data
+            return
+    subnet["option-data"].append({"name": name, "data": data})
+
+
+def get_dhcp_form():
+    kea, d4, subnet = _kea_single_subnet()
+    pools = subnet.get("pools", [])
+    if len(pools) != 1 or "-" not in str(pools[0].get("pool", "")):
+        raise ValueError(
+            "Form editing covers a single START-END pool — "
+            "use the raw file editor.")
+    start, end = [p.strip() for p in
+                  str(pools[0]["pool"]).split("-", 1)]
+    lifetime = subnet.get("valid-lifetime", d4.get("valid-lifetime", ""))
+    return {
+        "ok": True,
+        "subnet": subnet.get("subnet", ""),
+        "pool_start": start,
+        "pool_end": end,
+        "router": _kea_opt(subnet, d4, "routers"),
+        "dns": _kea_opt(subnet, d4, "domain-name-servers"),
+        "domain": _kea_opt(subnet, d4, "domain-name"),
+        "valid_lifetime": str(lifetime),
+        "reservations": len(subnet.get("reservations", [])),
+    }
+
+
+def save_dhcp_form(body):
+    kea, d4, subnet = _kea_single_subnet()
+    pools = subnet.get("pools", [])
+    if len(pools) != 1:
+        raise ValueError("Expected a single pool — use the raw file editor.")
+
+    try:
+        net = ipaddress.IPv4Network((body.get("subnet") or "").strip(),
+                                    strict=False)
+    except ValueError:
+        raise ValueError("Invalid subnet CIDR (e.g. 192.168.1.0/24)")
+    try:
+        start = ipaddress.IPv4Address((body.get("pool_start") or "").strip())
+        end = ipaddress.IPv4Address((body.get("pool_end") or "").strip())
+    except ValueError:
+        raise ValueError("Pool start/end must be IPv4 addresses")
+    if start not in net or end not in net:
+        raise ValueError("Pool must lie inside the subnet")
+    if int(start) > int(end):
+        raise ValueError("Pool start must not exceed pool end")
+    try:
+        router = ipaddress.IPv4Address((body.get("router") or "").strip())
+    except ValueError:
+        raise ValueError("Invalid router IP address")
+    if router not in net:
+        raise ValueError("Router must lie inside the subnet")
+    dns_list = [d.strip() for d in
+                str(body.get("dns") or "").replace(",", " ").split()]
+    if not dns_list:
+        raise ValueError("At least one DNS server is required")
+    for d in dns_list:
+        try:
+            ipaddress.ip_address(d)
+        except ValueError:
+            raise ValueError("Invalid DNS server address: %s" % d)
+    domain = (body.get("domain") or "").strip()
+    if domain and not HOSTNAME_RE.match(domain):
+        raise ValueError("Invalid domain name")
+    lifetime_raw = str(body.get("valid_lifetime") or "").strip()
+    try:
+        lifetime = int(lifetime_raw)
+    except ValueError:
+        raise ValueError("Lease time must be a number of seconds")
+    if not 60 <= lifetime <= 31536000:
+        raise ValueError("Lease time must be 60..31536000 seconds")
+
+    subnet["subnet"] = str(net)
+    pools[0]["pool"] = "%s-%s" % (start, end)
+    _kea_set_opt(subnet, "routers", str(router))
+    _kea_set_opt(subnet, "domain-name-servers", ", ".join(dns_list))
+    if domain:
+        _kea_set_opt(subnet, "domain-name", domain)
+    else:
+        subnet["option-data"] = [o for o in subnet.get("option-data", [])
+                                 if o.get("name") != "domain-name"]
+    if "valid-lifetime" in subnet:
+        subnet["valid-lifetime"] = lifetime
+    elif "valid-lifetime" in d4:
+        d4["valid-lifetime"] = lifetime
+    else:
+        subnet["valid-lifetime"] = lifetime
+
+    warnings = []
+    for r in subnet.get("reservations", []):
+        try:
+            rip = ipaddress.IPv4Address(r.get("ip-address", ""))
+        except ValueError:
+            continue
+        if rip not in net:
+            warnings.append(
+                "Reservation %s is outside the new subnet" % rip)
+
+    bak = KEA_CONF + ".bak-" + time.strftime("%Y%m%d%H%M%S")
+    shutil.copy2(KEA_CONF, bak)
+    _write_kea(kea)
+    try:
+        _reload_kea()
+    except Exception as exc:
+        shutil.copy2(bak, KEA_CONF)
+        try:
+            _reload_kea()
+        except Exception:
+            pass
+        raise RuntimeError("Kea rejected the config, restored backup: %s"
+                           % exc)
+    out = get_dhcp_form()
+    out["backup"] = bak
+    out["warnings"] = warnings
+    return out
+
+
+def _unbound_read_lines():
+    try:
+        with open(UNBOUND_ROUTER_CONF) as f:
+            return f.read().splitlines()
+    except OSError as exc:
+        raise RuntimeError(str(exc))
+
+
+def get_unbound_form():
+    lines = _unbound_read_lines()
+    interfaces, forwarders, fz_names = [], [], []
+    port, do_ip4, do_ip6 = 53, True, True
+    in_fz = False
+    for raw in lines:
+        ls = raw.strip()
+        if not ls or ls.startswith("#"):
+            if in_fz and not raw[:1].isspace():
+                in_fz = False
+            continue
+        if ls.startswith("forward-zone:"):
+            in_fz = True
+            continue
+        if in_fz:
+            if ls.startswith("name:"):
+                fz_names.append(ls.split(":", 1)[1].strip().strip('"'))
+            elif ls.startswith("forward-addr:"):
+                forwarders.append(ls.split(":", 1)[1].strip())
+            continue
+        if ls.startswith("interface:"):
+            interfaces.append(ls.split(":", 1)[1].strip())
+        elif ls.startswith("port:"):
+            try:
+                port = int(ls.split(":", 1)[1].strip())
+            except ValueError:
+                pass
+        elif ls.startswith("do-ip4:"):
+            do_ip4 = ls.split(":", 1)[1].strip().lower() == "yes"
+        elif ls.startswith("do-ip6:"):
+            do_ip6 = ls.split(":", 1)[1].strip().lower() == "yes"
+    foreign = [n for n in fz_names if n not in ('"."', ".")]
+    if foreign:
+        raise ValueError(
+            "Custom forward zones present (%s) — use the raw file editor."
+            % ", ".join(foreign))
+    return {
+        "ok": True,
+        "interfaces": interfaces,
+        "port": port,
+        "do_ip4": do_ip4,
+        "do_ip6": do_ip6,
+        "forwarders": forwarders,
+        "mode": "forward" if forwarders else "recursive",
+    }
+
+
+def save_unbound_form(body):
+    ifaces = []
+    for line in str(body.get("interfaces") or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ipaddress.ip_address(line)
+        except ValueError:
+            raise ValueError("Invalid listen address: %s" % line)
+        if line not in ifaces:
+            ifaces.append(line)
+    if not ifaces:
+        raise ValueError("At least one listen address is required")
+    try:
+        port = int(str(body.get("port") or "").strip())
+    except ValueError:
+        raise ValueError("Port must be a number")
+    if not 1 <= port <= 65535:
+        raise ValueError("Port must be 1..65535")
+    do_ip4 = bool(body.get("do_ip4"))
+    do_ip6 = bool(body.get("do_ip6"))
+    if not (do_ip4 or do_ip6):
+        raise ValueError("Enable at least one of IPv4 / IPv6")
+    forwarders = []
+    for line in str(body.get("forwarders") or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ipaddress.ip_address(line)
+        except ValueError:
+            raise ValueError("Invalid forwarder address: %s" % line)
+        if line not in forwarders:
+            forwarders.append(line)
+
+    lines = _unbound_read_lines()
+    out, seen_iface, seen_port = [], False, False
+    in_fz, skip_fz = False, False
+    for raw in lines:
+        ls = raw.strip()
+        if ls.startswith("forward-zone:"):
+            in_fz, skip_fz = True, True
+            continue
+        if in_fz:
+            if raw[:1].isspace() or not ls or ls.startswith("#"):
+                continue
+            in_fz, skip_fz = False, False
+        if skip_fz:
+            continue
+        if ls.startswith("interface:"):
+            if not seen_iface:
+                out.extend("    interface: %s" % i for i in ifaces)
+                seen_iface = True
+            continue
+        if ls.startswith("port:") and not seen_port:
+            out.append("    port: %d" % port)
+            seen_port = True
+            continue
+        if ls.startswith("do-ip4:"):
+            out.append("    do-ip4: %s" % ("yes" if do_ip4 else "no"))
+            continue
+        if ls.startswith("do-ip6:"):
+            out.append("    do-ip6: %s" % ("yes" if do_ip6 else "no"))
+            continue
+        out.append(raw)
+    if not seen_iface:
+        out.append("server:")
+        out.extend("    interface: %s" % i for i in ifaces)
+    if not seen_port:
+        out.append("    port: %d" % port)
+    if forwarders:
+        out.append("")
+        out.append('forward-zone:')
+        out.append('    name: "."')
+        out.extend("    forward-addr: %s" % f for f in forwarders)
+
+    bak = UNBOUND_ROUTER_CONF + ".bak-" + time.strftime("%Y%m%d%H%M%S")
+    shutil.copy2(UNBOUND_ROUTER_CONF, bak)
+    tmp = UNBOUND_ROUTER_CONF + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(out) + "\n")
+    os.replace(tmp, UNBOUND_ROUTER_CONF)
+    try:
+        reload_unbound()
+    except Exception as exc:
+        shutil.copy2(bak, UNBOUND_ROUTER_CONF)
+        raise RuntimeError("Unbound rejected the config, restored backup: %s"
+                           % exc)
+    form = get_unbound_form()
+    form["backup"] = bak
+    return form
 
 
 CONFIG_FILES = {
@@ -6769,6 +7267,22 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
 
+        elif path == "/api/system/dhcp-form":
+            try:
+                self._send(200, get_dhcp_form())
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/system/unbound-form":
+            try:
+                self._send(200, get_unbound_form())
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
         elif path == "/api/backups/download":
             qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             name = (qs.get("name") or [None])[0] or ""
@@ -6793,6 +7307,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?")[0]
         qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        # Lightweight CSRF check: when the browser sends Origin/Referer, its
+        # host must match the Host we were reached on. Same-origin dashboard
+        # traffic is unaffected; cross-site form posts are rejected.
+        origin = self.headers.get("Origin") or self.headers.get("Referer")
+        if origin and path.startswith("/api/"):
+            try:
+                o_host = urllib.parse.urlsplit(origin).hostname or ""
+            except Exception:
+                o_host = ""
+            h_host = (self.headers.get("Host") or "").split(":")[0].strip().lower()
+            if o_host and o_host.lower() != h_host:
+                self._send(403, {"ok": False, "error": "Cross-site request rejected"})
+                return
         length = int(self.headers.get("Content-Length") or 0)
         raw = b""
         body = {}
@@ -6827,10 +7354,9 @@ class Handler(BaseHTTPRequestHandler):
                 # Password accepted; no session until the second factor is given.
                 self._send_auth(200, result)
                 return
-            cookie = "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}".format(
-                SESSION_COOKIE,
+            cookie = _session_cookie_value(
+                self.headers,
                 _create_session(result["username"], result.get("role", "viewer")),
-                SESSION_TTL,
             )
             self._send_auth(200, result, cookie=cookie)
             return
@@ -6838,6 +7364,26 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/auth/logout":
             _drop_session(self.headers)
             self._send_auth(200, {"ok": True}, clear_cookie=True)
+            return
+
+        if path == "/api/auth/setup":
+            ip = _client_key(self)
+            try:
+                result = setup_first_admin(body, ip)
+            except PermissionError as exc:
+                self._send_auth(403, {"ok": False, "error": str(exc)})
+                return
+            except ValueError as exc:
+                self._send_auth(400, {"ok": False, "error": str(exc)})
+                return
+            except Exception:
+                self._send_auth(500, {"ok": False, "error": "Setup failed"})
+                return
+            cookie = _session_cookie_value(
+                self.headers,
+                _create_session(result["username"], "admin"),
+            )
+            self._send_auth(200, result, cookie=cookie)
             return
 
         # Internal self-restart: localhost only, no auth required
@@ -7222,7 +7768,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/backups/system/restore-file":
             try:
                 self._send(200, restore_system_backup_member(
-                    body.get("name"), body.get("file")))
+                    body.get("name"), body.get("file"),
+                    allow_code=bool(body.get("confirm_code_replace"))))
             except ValueError as exc:
                 self._send(400, {"ok": False, "error": str(exc)})
             except Exception as exc:
@@ -7273,6 +7820,22 @@ class Handler(BaseHTTPRequestHandler):
             kind = "kea" if path.endswith("kea-config") else "unbound"
             try:
                 self._send(200, {"ok": True, **write_config(kind, body.get("content") or "")})
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/system/dhcp-form":
+            try:
+                self._send(200, save_dhcp_form(body or {}))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/system/unbound-form":
+            try:
+                self._send(200, save_unbound_form(body or {}))
             except ValueError as exc:
                 self._send(400, {"ok": False, "error": str(exc)})
             except Exception as exc:
@@ -7673,24 +8236,65 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True, "hostname": new_name})
 
         elif path == "/api/backups/restore":
-            if body and body.get("name"):
+            # Two-step restore: without {"confirm": true} this only stages
+            # (uploads) and previews the archive. Nothing is extracted.
+            upload_raw = raw if not (body and body.get("name")) else None
+            if upload_raw:
+                filename = ((qs.get("name") or [None])[0]
+                            or self.headers.get("X-Filename")
+                            or "tuxwall-restore.tar.gz")
                 try:
-                    result = restore_backup(body["name"])
+                    base, path = _stage_restore_upload(filename, upload_raw)
+                    preview = _preview_backup_file(path)
+                except ValueError as exc:
+                    self._send(400, {"ok": False, "error": str(exc)})
+                    return
                 except Exception as exc:
                     self._send(500, {"ok": False, "error": str(exc)})
                     return
-                self._send(200, {"ok": True, **result})
+                self._send(200, {"ok": True, "staged": True, "name": base,
+                                 "confirm_required": True, **preview})
                 return
-            filename = (qs.get("name") or [None])[0] or self.headers.get("X-Filename") or "tuxwall-restore.tar.gz"
-            if not raw:
+            name = (body.get("name") or "").strip() if body else ""
+            if not name:
                 self._send(400, {"ok": False, "error": "No file uploaded"})
                 return
+            base = os.path.basename(name)
+            if not BACKUP_RE.match(base):
+                self._send(400, {"ok": False, "error": "Invalid backup name"})
+                return
+            if not os.path.isfile(os.path.join(BACKUP_DIR, base)):
+                self._send(404, {"ok": False, "error": "Backup not found"})
+                return
+            if not (body and body.get("confirm")):
+                try:
+                    preview = _preview_backup_file(os.path.join(BACKUP_DIR, base))
+                except ValueError as exc:
+                    self._send(400, {"ok": False, "error": str(exc)})
+                    return
+                self._send(200, {"ok": True, "staged": False, "name": base,
+                                 "confirm_required": True, **preview})
+                return
             try:
-                result = restore_backup(filename, raw=raw)
+                preview = _preview_backup_file(os.path.join(BACKUP_DIR, base))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+                return
+            if preview["touches_code"] and not (body and body.get("confirm_code_replace")):
+                self._send(409, {"ok": False,
+                                 "error": "Backup replaces executable code "
+                                 "(includes/scripts). Resubmit with "
+                                 "confirm_code_replace: true.",
+                                 "confirm_required": True, **preview})
+                return
+            if preview["touches_code"]:
+                _snapshot_live_code()
+            try:
+                result = restore_backup(base)
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
                 return
-            self._send(200, {"ok": True, **result})
+            self._send(200, {"ok": True, **result, **preview})
 
         elif path == "/api/reservations/add":
             try:

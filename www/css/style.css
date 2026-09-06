@@ -605,6 +605,8 @@ input[type="file"]::file-selector-button:active {
 .upd-bar { height: 14px; }
 .upd-bar .bar-fill { transition: width 0.5s ease; }
 .upd-status { margin: 8px 0 0; font-size: 12px; }
+.upd-note { align-self: center; font-size: 12px; }
+.upd-note-ok { color: var(--green); font-weight: 600; }
 .upd-log {
   margin: 8px 0 0; max-height: 200px; overflow-y: auto;
   background: var(--bg-elev); border: 1px solid var(--border); border-radius: 6px;
@@ -2885,14 +2887,22 @@ body.light-theme .stat-card.stat-c:hover {
 }
 .fw-field { display: flex; flex-direction: column; gap: 5px; }
 .fw-field > span { color: var(--muted); font-size: 12px; font-weight: 600; }
-.fw-field select, .fw-field input[type="text"] {
+.fw-field select, .fw-field input[type="text"],
+.fw-field input[type="number"], .fw-field textarea {
   background: var(--bg-elev); color: var(--text);
   border: 1px solid var(--border); border-radius: 8px;
   font: inherit; padding: 8px 10px; width: 100%;
 }
-.fw-field select:focus, .fw-field input[type="text"]:focus {
+.fw-field select:focus, .fw-field input[type="text"]:focus,
+.fw-field input[type="number"]:focus, .fw-field textarea:focus {
   border-color: var(--accent); outline: none;
 }
+.fw-field textarea { resize: vertical; min-height: 56px; }
+.fw-field input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+.fw-field input[type="number"]::-webkit-inner-spin-button,
+.fw-field input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
+.fw-field input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; }
+.fw-field label { display: inline-flex; align-items: center; gap: 5px; }
 .fw-raw-details { margin: 12px 0 0; }
 .fw-raw-details summary { color: var(--muted); cursor: pointer; font-size: 13px; }
 .fw-raw-row { display: flex; gap: 8px; margin-top: 8px; }

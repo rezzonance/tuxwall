@@ -208,6 +208,7 @@
     sysUpdCount: document.getElementById("sys-upd-count"),
     sysUpdCheck: document.getElementById("sys-upd-check"),
     sysUpdApply: document.getElementById("sys-upd-apply"),
+    sysUpdNote: document.getElementById("sys-upd-note"),
     sysUpdProgress: document.getElementById("sys-upd-progress"),
     sysUpdBar: document.getElementById("sys-upd-bar"),
     sysUpdStatus: document.getElementById("sys-upd-status"),
@@ -3698,8 +3699,105 @@
       els.cfgModalSave.disabled = false;
     };
 
-    els.sysEditKea.addEventListener("click", () => openCfg("kea", "Edit Kea DHCP config"));
-    els.sysEditUnbound.addEventListener("click", () => openCfg("unbound", "Edit Unbound config"));
+    const openDhcpForm = async () => {
+      const modal = document.getElementById("dhcp-form-modal");
+      const hint = document.getElementById("dhcp-form-hint");
+      hint.textContent = "Loading…";
+      modal.hidden = false;
+      try {
+        const d = await fetchJSON("/api/system/dhcp-form");
+        if (!d.ok) throw new Error(d.error || "load failed");
+        document.getElementById("dhcp-f-subnet").value = d.subnet || "";
+        document.getElementById("dhcp-f-start").value = d.pool_start || "";
+        document.getElementById("dhcp-f-end").value = d.pool_end || "";
+        document.getElementById("dhcp-f-router").value = d.router || "";
+        document.getElementById("dhcp-f-dns").value = d.dns || "";
+        document.getElementById("dhcp-f-domain").value = d.domain || "";
+        document.getElementById("dhcp-f-lease").value = d.valid_lifetime || "";
+        hint.textContent = (d.reservations ? d.reservations + " static reservation(s) kept. " : "") + "Changes reload Kea automatically.";
+      } catch (err) {
+        hint.textContent = err.message;
+      }
+    };
+    const closeDhcpForm = () => {
+      document.getElementById("dhcp-form-modal").hidden = true;
+    };
+    const openUnboundForm = async () => {
+      const modal = document.getElementById("unbound-form-modal");
+      const hint = document.getElementById("unbound-form-hint");
+      hint.textContent = "Loading…";
+      modal.hidden = false;
+      try {
+        const d = await fetchJSON("/api/system/unbound-form");
+        if (!d.ok) throw new Error(d.error || "load failed");
+        document.getElementById("unbound-f-ifaces").value = (d.interfaces || []).join("\n");
+        document.getElementById("unbound-f-port").value = d.port != null ? d.port : 53;
+        document.getElementById("unbound-f-ip4").checked = !!d.do_ip4;
+        document.getElementById("unbound-f-ip6").checked = !!d.do_ip6;
+        document.getElementById("unbound-f-fwd").value = (d.forwarders || []).join("\n");
+        hint.textContent = "Mode: " + (d.mode || "recursive") + ". Empty forwarders = recursive resolution.";
+      } catch (err) {
+        hint.textContent = err.message;
+      }
+    };
+    const closeUnboundForm = () => {
+      document.getElementById("unbound-form-modal").hidden = true;
+    };
+
+    els.sysEditKea.addEventListener("click", openDhcpForm);
+    els.sysEditUnbound.addEventListener("click", openUnboundForm);
+    document.getElementById("dhcp-form-close").addEventListener("click", closeDhcpForm);
+    document.getElementById("dhcp-form-cancel").addEventListener("click", closeDhcpForm);
+    document.getElementById("unbound-form-close").addEventListener("click", closeUnboundForm);
+    document.getElementById("unbound-form-cancel").addEventListener("click", closeUnboundForm);
+    document.getElementById("dhcp-raw-btn").addEventListener("click", () => {
+      closeDhcpForm();
+      openCfg("kea", "Edit Kea DHCP config");
+    });
+    document.getElementById("unbound-raw-btn").addEventListener("click", () => {
+      closeUnboundForm();
+      openCfg("unbound", "Edit Unbound config");
+    });
+    document.getElementById("dhcp-form-save").addEventListener("click", async () => {
+      const hint = document.getElementById("dhcp-form-hint");
+      hint.textContent = "Saving…";
+      try {
+        const d = await postJSON("/api/system/dhcp-form", {
+          subnet: document.getElementById("dhcp-f-subnet").value.trim(),
+          pool_start: document.getElementById("dhcp-f-start").value.trim(),
+          pool_end: document.getElementById("dhcp-f-end").value.trim(),
+          router: document.getElementById("dhcp-f-router").value.trim(),
+          dns: document.getElementById("dhcp-f-dns").value.trim(),
+          domain: document.getElementById("dhcp-f-domain").value.trim(),
+          valid_lifetime: document.getElementById("dhcp-f-lease").value.trim(),
+        });
+        if (!d.ok) throw new Error(d.error || "save failed");
+        hint.textContent = "Saved." + ((d.warnings || []).length ? " " + d.warnings.join(" ") : "");
+        closeDhcpForm();
+        refreshSystem();
+      } catch (err) {
+        hint.textContent = err.message;
+      }
+    });
+    document.getElementById("unbound-form-save").addEventListener("click", async () => {
+      const hint = document.getElementById("unbound-form-hint");
+      hint.textContent = "Saving…";
+      try {
+        const d = await postJSON("/api/system/unbound-form", {
+          interfaces: document.getElementById("unbound-f-ifaces").value,
+          port: document.getElementById("unbound-f-port").value.trim(),
+          do_ip4: document.getElementById("unbound-f-ip4").checked,
+          do_ip6: document.getElementById("unbound-f-ip6").checked,
+          forwarders: document.getElementById("unbound-f-fwd").value,
+        });
+        if (!d.ok) throw new Error(d.error || "save failed");
+        hint.textContent = "Saved.";
+        closeUnboundForm();
+        refreshSystem();
+      } catch (err) {
+        hint.textContent = err.message;
+      }
+    });
     els.cfgModalClose.addEventListener("click", closeCfg);
     els.cfgModalCancel.addEventListener("click", closeCfg);
     els.cfgModal.addEventListener("click", (e) => {
@@ -3968,6 +4066,8 @@
       if (rst) {
         const svc = rst.dataset.service;
         const isFw = rst.dataset.file === "iptables-save.txt" || rst.dataset.file === "ip6tables-save.txt";
+        const isCode = rst.dataset.file.startsWith("var/www/html/includes/") ||
+          rst.dataset.file.startsWith("var/www/html/scripts/");
         if (!window.confirm(
           `Restore "${rst.dataset.file}" from this backup?\n\n` +
           (isFw
@@ -3975,9 +4075,14 @@
             : "The current file is kept as a timestamped .bak alongside it." +
               (svc ? `\nAfterwards, apply it with: sudo systemctl restart ${svc}` : ""))
         )) return;
+        if (isCode && !window.confirm(
+          `SECOND CONFIRMATION — "${rst.dataset.file}" is executable dashboard code.\n\n` +
+          "Restoring it changes what the dashboard itself runs. Only proceed if you trust this backup."
+        )) return;
         try {
           const res = await postJSON("/api/backups/system/restore-file", {
             name: rst.dataset.name, file: rst.dataset.file,
+            confirm_code_replace: isCode,
           });
           if (!res.ok) throw new Error(res.error || "restore failed");
           setBkSysMsg(
@@ -4001,6 +4106,19 @@
     els.sysUpdProgress.hidden = !running;
     els.sysUpdCheck.disabled = running;
     els.sysUpdApply.disabled = running;
+    const note = els.sysUpdNote;
+    if (!running && d.last_check && d.upgradable >= 0) {
+      if (d.upgradable > 0) {
+        note.textContent = `${formatNumber(d.upgradable)} update${d.upgradable === 1 ? "" : "s"} available`;
+        note.className = "upd-note upd-note-ok";
+      } else {
+        note.textContent = "System is up to date";
+        note.className = "upd-note";
+      }
+    } else {
+      note.textContent = "";
+      note.className = "upd-note";
+    }
     if (running) {
       const pct = d.percent != null ? Math.max(0, Math.min(100, d.percent)) : 0;
       els.sysUpdBar.style.width = pct + "%";
@@ -7163,6 +7281,7 @@
   }
 
   function showLoginGate(setupMode, errmsg) {
+    state.loginSetupMode = !!setupMode;
     els.loginHeading.textContent = setupMode ? "Welcome to TuxWall" : "TuxWall";
     els.loginSub.textContent = setupMode
       ? "Create the administrator account to secure this dashboard."
@@ -7445,7 +7564,7 @@
       try {
         const payload = { username, password };
         if (!els.loginTotp.hidden) payload.totp_code = els.loginTotp.value.trim();
-        const d = await postJSON("/api/auth/login", payload);
+        const d = await postJSON(state.loginSetupMode ? "/api/auth/setup" : "/api/auth/login", payload);
         if (d.totp_required) {
           els.loginTotpLabel.hidden = false;
           els.loginTotp.hidden = false;

@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.5.2
+Version: 2.5.3
 Section: admin
 Priority: optional
 Architecture: all
@@ -51,6 +51,17 @@ Description: TuxWall Network Firewall Dashboard
   shipped, stale web-root junk removed); first-boot networking fixes
   (no bogus LAN default route, ULA-based AAAA, random ULA /48, correct
   CrowdSec bouncer, non-clobbering config install); AI context now reads
-  real backend keys; sidebar-style glass buttons with neon glow.
-  Served by nginx from /var/www/html, backed by a Python API server running
+ real backend keys; sidebar-style glass buttons with neon glow.
+ .
+ v2.5.3 adds: security hardening — default admin/tuxwall credentials no
+ longer auto-create (fail-closed setup gate with working first-admin
+ enrollment), UFW raw-rule verb whitelist, CSRF Origin check, login
+ rate-limit identity spoof fix, blocklist SSRF guard, 30-minute session
+ idle timeout, two-step backup restore with code-replace confirmation
+ (web + single-file paths, backend snapshotted first), login rate limit
+ and security headers in nginx (dual-mode Secure cookie ready for TLS);
+ System page gains structured DHCP (Kea) and DNS (Unbound) config forms
+ with validation and automatic rollback, themed form-field styling, an
+ updates-available indicator, and cache-bust bump.
+ Served by nginx from /var/www/html, backed by a Python API server running
  as the systemd unit tuxwall.service on port 8008.

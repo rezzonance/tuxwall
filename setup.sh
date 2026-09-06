@@ -199,6 +199,7 @@ info "Installing nginx site config..."
 rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
 
 cp "$REPO_DIR/nginx/tuxwall.conf" /etc/nginx/sites-available/tuxwall
+cp "$REPO_DIR/nginx/tuxwall-limits.conf" /etc/nginx/conf.d/tuxwall-limits.conf
 
 # Create symlink if not present
 ln -sf /etc/nginx/sites-available/tuxwall /etc/nginx/sites-enabled/tuxwall
