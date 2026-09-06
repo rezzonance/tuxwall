@@ -22,8 +22,22 @@ if ! command -v apt-get >/dev/null 2>&1; then
   exit 1
 fi
 
+for tool in curl gpg; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "This installer needs '$tool' (try: sudo apt install -y curl gnupg)." >&2
+    exit 1
+  fi
+done
+
 echo "==> Adding TuxWall signing key (${KEYRING})"
-curl -fsSL "${REPO_URL}/public.asc" | gpg --dearmor -o "${KEYRING}"
+[[ -f "${KEYRING}" ]] && cp -a "${KEYRING}" "${KEYRING}.bak"
+if ! curl -fsSL --max-time 60 --retry 3 "${REPO_URL}/public.asc" \
+    | gpg --dearmor -o "${KEYRING}"; then
+  echo "Failed to fetch the TuxWall signing key (network?)." >&2
+  [[ -f "${KEYRING}.bak" ]] && mv -f "${KEYRING}.bak" "${KEYRING}"
+  exit 1
+fi
+rm -f "${KEYRING}.bak"
 
 echo "==> Adding APT source (${LIST})"
 echo "deb [signed-by=${KEYRING}] ${REPO_URL} stable main" > "${LIST}"

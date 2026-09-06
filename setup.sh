@@ -42,13 +42,38 @@ apt-get install -y --no-install-recommends \
     suricata suricata-update \
     crowdsec crowdsec-firewall-bouncer-iptables \
     nginx \
-    python3 curl jq gzip ieee-data \
+    python3 curl jq gzip ieee-data gnupg \
     || fail "apt install failed"
 
 # Optional but nice to have
 apt-get install -y --no-install-recommends python3-maxminddb python3-netifaces 2>/dev/null || true
 
 ok "System packages installed"
+
+# ============================================================================
+# 1B. TUXWALL APT REPO (update track)
+# ============================================================================
+# setup.sh places files directly (no .deb involved), so register the repo for
+# future updates. Best-effort: never fail the setup over this.
+info "Registering TuxWall APT repo (for future updates)..."
+
+if grep -rq "rezzonance.github.io/tuxwall" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+    ok "TuxWall APT repo already present"
+else
+    TW_KEYRING=/usr/share/keyrings/tuxwall.gpg
+    if curl -fsSL --max-time 30 --retry 3 \
+            https://rezzonance.github.io/tuxwall/public.asc 2>/dev/null \
+        | gpg --dearmor > "$TW_KEYRING" 2>/dev/null \
+        && [[ -s "$TW_KEYRING" ]]; then
+        echo "deb [signed-by=${TW_KEYRING}] https://rezzonance.github.io/tuxwall stable main" \
+            > /etc/apt/sources.list.d/tuxwall.list
+        apt-get update -qq 2>/dev/null || warn "apt-get update failed - run it manually later"
+        ok "TuxWall APT repo registered (updates via: apt upgrade tuxwall)"
+    else
+        warn "Could not fetch TuxWall signing key - skipping repo (updates via apt won't work)"
+        warn "Add it later: curl -fsSL https://rezzonance.github.io/tuxwall/install-repo.sh | sudo bash"
+    fi
+fi
 
 # ============================================================================
 # 2. DISABLE systemd-resolved (conflicts with unbound on port 53)

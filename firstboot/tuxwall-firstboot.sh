@@ -647,6 +647,28 @@ install_tuxwall_stack() {
         log "crowdsec already installed - skipping repo setup."
     fi
 
+    # ── TuxWall repo (GitHub Pages) ─────────────────────────────────────────
+    # Installed .deb comes from the staged file below, but registering the
+    # repo here puts the box on the update track (apt upgrade tuxwall).
+    # Best-effort: never fail the wizard over this.
+    if grep -rq "rezzonance.github.io/tuxwall" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+        log "TuxWall APT repo already present."
+    else
+        log "Adding TuxWall APT repo (for future updates)..."
+        TW_KEYRING=/usr/share/keyrings/tuxwall.gpg
+        if curl -fsSL --max-time 30 --retry 3 \
+                https://rezzonance.github.io/tuxwall/public.asc 2>/dev/null \
+            | gpg --dearmor > "$TW_KEYRING" 2>/dev/null \
+            && [[ -s "$TW_KEYRING" ]]; then
+            echo "deb [signed-by=${TW_KEYRING}] https://rezzonance.github.io/tuxwall stable main" \
+                > /etc/apt/sources.list.d/tuxwall.list
+            log "  TuxWall repo added."
+        else
+            warn "  Could not fetch TuxWall signing key - skipping repo (updates via apt won't work)."
+            warn "  Add it later: curl -fsSL https://rezzonance.github.io/tuxwall/install-repo.sh | sudo bash"
+        fi
+    fi
+
     log "Installing dependency packages..."
     if ! apt-get update -qq; then
         warn "apt-get update failed (network). Retrying once after a wait..."
