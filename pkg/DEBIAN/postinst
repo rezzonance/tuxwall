@@ -79,8 +79,10 @@ EOF
     fi
 
     echo "[6/9] Setting up firewall (ufw)..."
-    ufw allow OpenSSH >/dev/null 2>&1 || true
-    ufw allow 80/tcp >/dev/null 2>&1 || true
+    # Only open SSH/HTTP when no such rule exists yet: upgrades must not
+    # re-add a WAN-wide OpenSSH allow after the admin scoped it to LAN/VPN.
+    ufw status 2>/dev/null | grep -q '22/tcp' || ufw allow OpenSSH >/dev/null 2>&1 || true
+    ufw status 2>/dev/null | grep -q '80/tcp' || ufw allow 80/tcp >/dev/null 2>&1 || true
     if ! ufw status 2>/dev/null | grep -q 'Status: active'; then
       ufw --force enable >/dev/null 2>&1 || true
     fi
