@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.5.3
+Version: 2.5.4
 Section: admin
 Priority: optional
 Architecture: all
@@ -63,5 +63,10 @@ Description: TuxWall Network Firewall Dashboard
  System page gains structured DHCP (Kea) and DNS (Unbound) config forms
  with validation and automatic rollback, themed form-field styling, an
  updates-available indicator, and cache-bust bump.
+ .
+ v2.5.4 adds: postinst retires any WAN-wide OpenSSH allow on upgrade when
+ scoped SSH access (LAN/VPN interface rules) already exists, and only
+ adds SSH/HTTP allows when missing — upgrades no longer reopen or keep
+ internet-facing SSH.
  Served by nginx from /var/www/html, backed by a Python API server running
  as the systemd unit tuxwall.service on port 8008.

@@ -83,6 +83,17 @@ EOF
     # re-add a WAN-wide OpenSSH allow after the admin scoped it to LAN/VPN.
     ufw status 2>/dev/null | grep -q '22/tcp' || ufw allow OpenSSH >/dev/null 2>&1 || true
     ufw status 2>/dev/null | grep -q '80/tcp' || ufw allow 80/tcp >/dev/null 2>&1 || true
+    # Retire any WAN-wide OpenSSH allow, but only when scoped SSH access
+    # already exists (LAN/VPN interface rules) — upgrades must neither
+    # re-add it nor lock out fresh installs that have nothing else.
+    # Numbers shift on delete, so remove in descending order.
+    if ufw status numbered 2>/dev/null | grep -qiE '22/tcp.* on '; then
+      for n in $(ufw status numbered 2>/dev/null \
+          | grep -i 'openssh' | grep -vi ' on ' \
+          | grep -o '\[[ 0-9]*\]' | tr -d '[] ' | sort -rn); do
+        ufw --force delete "$n" >/dev/null 2>&1 || true
+      done
+    fi
     if ! ufw status 2>/dev/null | grep -q 'Status: active'; then
       ufw --force enable >/dev/null 2>&1 || true
     fi
