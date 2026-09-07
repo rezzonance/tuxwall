@@ -118,7 +118,7 @@ EOF
     echo
     echo "tuxwall installed. Dashboard: http://<this-host>/"
     echo "Watch blocklist progress on the Blocklists page, then verify:"
-    echo "    dig doubleclick.net @<this-host>   (should return NXDOMAIN)"
+    echo "    dig adnxs.com @<this-host>   (should return NXDOMAIN)"
     echo
     echo "Optional extras:"
     echo "  - Security (attack map):   sudo bash /var/www/html/scripts/geoip-setup.sh"
