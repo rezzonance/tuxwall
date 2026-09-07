@@ -13,6 +13,14 @@ UP_RATE="95mbit"
 # Set to ~92% of your provisioned download speed
 DOWN_RATE="920mbit"
 
+# Dashboard-managed override: System > Traffic Shaping writes /etc/tuxwall/sqm.conf
+# (WAN=, UP_RATE=, DOWN_RATE=). Values there win over the defaults above.
+SQM_CONF="/etc/tuxwall/sqm.conf"
+if [ -r "$SQM_CONF" ]; then
+    # shellcheck disable=SC1090
+    . "$SQM_CONF"
+fi
+
 # Wait up to 30s for the WAN port (reboot ordering)
 n=0
 while ! ip link show "$WAN" >/dev/null 2>&1; do

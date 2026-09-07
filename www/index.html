@@ -6,7 +6,7 @@
   <title>TuxWall - Network Dashboard</title>
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
-  <link rel="stylesheet" href="/css/style.css?v=20260906b">
+  <link rel="stylesheet" href="/css/style.css?v=20260907c">
 </head>
 <body>
 <div id="login-gate" class="login-gate" hidden>
@@ -1480,20 +1480,52 @@
           </div>
         </div>
 
-        <div class="card">
+        <div class="card card-wide" id="sqm-card">
           <div class="card-head">
-            <h2>DHCP Pool (Kea)</h2>
-            <button class="card-edit" id="sys-edit-kea" type="button" title="Edit Kea DHCP config" aria-label="Edit Kea DHCP config">
+            <h2>Traffic Shaping (CAKE SQM)</h2>
+            <span class="card-head-note muted" id="sqm-status-note">Loading…</span>
+          </div>
+          <div class="cache-grid">
+            <div class="cache-item"><span>Status</span><b id="sqm-status">—</b></div>
+            <div class="cache-item"><span>WAN</span><b id="sqm-wan">—</b></div>
+            <div class="cache-item"><span>Download cap</span><b id="sqm-down">—</b></div>
+            <div class="cache-item"><span>Upload cap</span><b id="sqm-up">—</b></div>
+            <div class="cache-item"><span>Ingress drops</span><b id="sqm-drops">—</b></div>
+          </div>
+          <div class="card-toolbar bl-toolbar sqm-form">
+            <label class="muted" for="sqm-down-in">Down (Mbps)</label>
+            <input type="number" id="sqm-down-in" min="1" max="10000" autocomplete="off">
+            <label class="muted" for="sqm-up-in">Up (Mbps)</label>
+            <input type="number" id="sqm-up-in" min="1" max="10000" autocomplete="off">
+            <button id="sqm-apply" class="btn btn-primary" type="button">Apply</button>
+            <span class="toolbar-spacer"></span>
+            <button id="sqm-test" class="btn" type="button" title="Briefly removes shaping, runs Ookla speedtest, then restores shaping">Run speedtest</button>
+            <span class="muted" id="sqm-hint"></span>
+          </div>
+          <div id="sqm-test-box" hidden>
+            <p class="muted" id="sqm-test-stage"></p>
+            <div id="sqm-test-result"></div>
+          </div>
+          <p class="muted bl-note sqm-note">Shape to ~93% of measured line speed so CAKE engages before ISP buffers do. If measured speed is far below your plan (e.g. ~960 Mbps on a 2 Gbps plan), the ISP may have provisioned the wrong tier — fix that before raising caps.</p>
+        </div>
+
+        <div class="card card-wide">
+          <div class="card-head">
+            <h2>DHCP Pools per Interface</h2>
+            <span class="card-head-note muted" id="sys-pools-note"></span>
+            <span class="toolbar-spacer"></span>
+            <button class="btn btn-sm btn-primary" id="sys-pool-add" type="button">Add pool</button>
+            <button class="card-edit" id="sys-edit-kea" type="button" title="Edit raw Kea DHCP config" aria-label="Edit raw Kea DHCP config">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
             </button>
           </div>
-          <div class="cache-grid">
-            <div class="cache-item"><span>Subnet</span><b id="sys-dhcp-subnet">—</b></div>
-            <div class="cache-item"><span>Range</span><b id="sys-dhcp-range">—</b></div>
-            <div class="cache-item"><span>Router</span><b id="sys-dhcp-router">—</b></div>
-            <div class="cache-item"><span>DNS</span><b id="sys-dhcp-dns">—</b></div>
-            <div class="cache-item"><span>Domain</span><b id="sys-dhcp-domain">—</b></div>
+          <div class="table-wrap">
+            <table id="sys-pools">
+              <thead><tr><th>Interface</th><th>Subnet</th><th>Pool</th><th>Router</th><th>DNS</th><th>Reserv.</th><th style="width:80px"></th></tr></thead>
+              <tbody></tbody>
+            </table>
           </div>
+          <p class="muted bl-note sqm-note">Each pool is bound to the interface whose address lies in its subnet — Kea only serves a subnet where the interface actually holds an address. Changes reload Kea automatically (backup kept on every save). No pool needed for WireGuard (peer addresses are static in their configs) or the WAN (ISP-assigned).</p>
         </div>
 
         <div class="card">
@@ -1589,8 +1621,11 @@
     <div id="dhcp-form-modal" class="modal" hidden>
       <div class="modal-box">
         <button type="button" class="modal-close" id="dhcp-form-close">&times;</button>
-        <h3>DHCP Pool (Kea)</h3>
+        <h3 id="dhcp-form-title">DHCP Pool</h3>
+        <input type="hidden" id="dhcp-f-key">
         <div class="fw-modal-grid">
+          <label class="fw-field"><span>Interface</span>
+            <select id="dhcp-f-iface"></select></label>
           <label class="fw-field"><span>Subnet (CIDR)</span>
             <input type="text" id="dhcp-f-subnet" placeholder="192.168.1.0/24" autocomplete="off" spellcheck="false"></label>
           <label class="fw-field"><span>Lease time (seconds)</span>
@@ -1950,7 +1985,7 @@
 
 <script src="/scripts/leaflet.js"></script>
 <script src="/scripts/qrcode.js"></script>
-<script src="/scripts/dashboard.js?v=20260906b"></script>
+<script src="/scripts/dashboard.js?v=20260907c"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>

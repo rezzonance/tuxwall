@@ -97,10 +97,16 @@ find /var/www/html -type f -exec chmod 664 {} +
 chmod 755 /var/www/html/includes/api_server.py /var/www/html/scripts/*.sh 2>/dev/null || true
 
 # ── 7. Restricted sudo for read-only gateway diagnostics ────────────────────
-# Mirrors the "allow" list in opencode.json permission.bash
+# NOTE: Ubuntu 26.04 ships sudo-rs, which rejects wildcards in sudoers
+# command arguments — so every allowed invocation is enumerated exactly
+# (no `*`). Mirrors the "allow" list in opencode.json permission.bash.
 SUDOERS_FILE=/etc/sudoers.d/tuxwall-agent
 cat > "$SUDOERS_FILE" <<'EOF'
-tuxwall-agent ALL=(root) NOPASSWD: /usr/bin/systemctl status *, /usr/bin/systemctl is-active *, /usr/bin/journalctl *, /usr/sbin/ufw status*, /usr/sbin/ip *, /usr/bin/ss *, /usr/bin/cat /var/log/*, /usr/bin/tail *, /usr/bin/head *, /usr/bin/grep *, /usr/bin/ls *, /usr/bin/df *, /usr/bin/free *, /usr/bin/uptime, /usr/sbin/unbound-control status, /usr/sbin/unbound-control stats_noreset, /usr/bin/cscli decisions list, /usr/bin/cscli alerts list, /usr/bin/wg show
+Cmnd_Alias TUXWALL_SVC = /usr/bin/systemctl status tuxwall, /usr/bin/systemctl status tuxwall-agent, /usr/bin/systemctl status unbound, /usr/bin/systemctl status kea-dhcp4-server, /usr/bin/systemctl status nginx, /usr/bin/systemctl status suricata, /usr/bin/systemctl status crowdsec, /usr/bin/systemctl status crowdsec-firewall-bouncer, /usr/bin/systemctl status systemd-networkd, /usr/bin/systemctl status tuxwall-nat, /usr/bin/systemctl is-active tuxwall, /usr/bin/systemctl is-active tuxwall-agent, /usr/bin/systemctl is-active unbound, /usr/bin/systemctl is-active kea-dhcp4-server, /usr/bin/systemctl is-active nginx, /usr/bin/systemctl is-active suricata, /usr/bin/systemctl is-active crowdsec, /usr/bin/systemctl is-active systemd-networkd
+Cmnd_Alias TUXWALL_LOGS = /usr/bin/journalctl -u tuxwall, /usr/bin/journalctl -u tuxwall-agent, /usr/bin/journalctl -u unbound, /usr/bin/journalctl -u kea-dhcp4-server, /usr/bin/journalctl -u nginx, /usr/bin/journalctl -u suricata, /usr/bin/journalctl -u crowdsec, /usr/bin/journalctl -u systemd-networkd, /usr/bin/journalctl --no-pager -u tuxwall, /usr/bin/journalctl --no-pager -u tuxwall-agent, /usr/bin/journalctl --no-pager -u unbound, /usr/bin/journalctl --no-pager -u kea-dhcp4-server, /usr/bin/journalctl --no-pager -u nginx, /usr/bin/journalctl --no-pager -u suricata, /usr/bin/journalctl --no-pager -u crowdsec, /usr/bin/journalctl --no-pager -u systemd-networkd
+Cmnd_Alias TUXWALL_NET = /usr/sbin/ufw status, /usr/sbin/ufw status numbered, /usr/sbin/ufw status verbose, /usr/sbin/ip addr, /usr/sbin/ip route, /usr/sbin/ip -s link, /usr/sbin/ip -6 route, /usr/sbin/ip rule, /usr/sbin/ip neigh, /usr/bin/ss, /usr/bin/ss -tulpn, /usr/bin/df, /usr/bin/free, /usr/bin/uptime, /usr/bin/ls /var/log, /usr/bin/ls /var/log/suricata
+Cmnd_Alias TUXWALL_SVC_CTL = /usr/sbin/unbound-control status, /usr/sbin/unbound-control stats_noreset, /usr/bin/cscli decisions list, /usr/bin/cscli alerts list, /usr/bin/wg show
+tuxwall-agent ALL=(root) NOPASSWD: TUXWALL_SVC, TUXWALL_LOGS, TUXWALL_NET, TUXWALL_SVC_CTL
 EOF
 chmod 440 "$SUDOERS_FILE"
 visudo -cf "$SUDOERS_FILE" >/dev/null || { echo "[!] sudoers syntax error — removing"; rm -f "$SUDOERS_FILE"; }

@@ -242,15 +242,27 @@
     sysDisk: document.getElementById("sys-disk"),
     sysSwap: document.getElementById("sys-swap"),
     sysOs: document.getElementById("sys-os"),
+    sqmStatus: document.getElementById("sqm-status"),
+    sqmStatusNote: document.getElementById("sqm-status-note"),
+    sqmWan: document.getElementById("sqm-wan"),
+    sqmDown: document.getElementById("sqm-down"),
+    sqmUp: document.getElementById("sqm-up"),
+    sqmDrops: document.getElementById("sqm-drops"),
+    sqmDownIn: document.getElementById("sqm-down-in"),
+    sqmUpIn: document.getElementById("sqm-up-in"),
+    sqmApply: document.getElementById("sqm-apply"),
+    sqmTest: document.getElementById("sqm-test"),
+    sqmHint: document.getElementById("sqm-hint"),
+    sqmTestBox: document.getElementById("sqm-test-box"),
+    sqmTestStage: document.getElementById("sqm-test-stage"),
+    sqmTestResult: document.getElementById("sqm-test-result"),
     sysInterfacesBody: document.querySelector("#sys-interfaces tbody"),
     sysServicesBody: document.querySelector("#sys-services tbody"),
     sysSvcRefresh: document.getElementById("sys-svc-refresh"),
     svcTabs: document.getElementById("svc-tabs"),
-    sysDhcpSubnet: document.getElementById("sys-dhcp-subnet"),
-    sysDhcpRange: document.getElementById("sys-dhcp-range"),
-    sysDhcpRouter: document.getElementById("sys-dhcp-router"),
-    sysDhcpDns: document.getElementById("sys-dhcp-dns"),
-    sysDhcpDomain: document.getElementById("sys-dhcp-domain"),
+    sysPoolsBody: document.querySelector("#sys-pools tbody"),
+    sysPoolsNote: document.getElementById("sys-pools-note"),
+    sysPoolAdd: document.getElementById("sys-pool-add"),
     sysDnsIface: document.getElementById("sys-dns-iface"),
     sysDnsPort: document.getElementById("sys-dns-port"),
     sysCpuModel: document.getElementById("sys-cpu-model"),
@@ -3612,12 +3624,6 @@
         <td class="mono">${(i.addrs || []).map((a) => `${esc(a.addr)}/${a.mask}`).join("<br>") || "—"}</td>
       </tr>`).join("");
 
-    els.sysDhcpSubnet.textContent = d.dhcp.subnet || "—";
-    els.sysDhcpRange.textContent = (d.dhcp.pools || []).join(", ") || "—";
-    els.sysDhcpRouter.textContent = d.dhcp.router || "—";
-    els.sysDhcpDns.textContent = d.dhcp.dns || "—";
-    els.sysDhcpDomain.textContent = d.dhcp.domain || "—";
-
     els.sysDnsIface.textContent = (d.dns.interfaces || []).join(", ") || "—";
     els.sysDnsPort.textContent = d.dns.port != null ? d.dns.port : "—";
 
@@ -3636,7 +3642,192 @@
     } catch (err) {
       showBanner(true, "System info error: " + err.message);
     }
+    refreshSqm();
+    refreshPools();
   }
+
+  async function refreshSqm() {
+    if (!els.sqmStatus) return;
+    try {
+      const d = await fetchJSON("/api/sqm");
+      if (!d.ok) throw new Error(d.error || "SQM unavailable");
+      els.sqmStatus.textContent = d.active ? "Active" : "Inactive";
+      els.sqmStatusNote.textContent = d.active
+        ? `CAKE on ${d.wan} + ${d.ifb}`
+        : "shaping not applied — run Apply to enable";
+      els.sqmWan.textContent = d.wan || "—";
+      els.sqmDown.textContent = d.down_mbit != null ? `${d.down_mbit} Mbps` : "—";
+      els.sqmUp.textContent = d.up_mbit != null ? `${d.up_mbit} Mbps` : "—";
+      els.sqmDrops.textContent = d.down_drops != null
+        ? `${formatNumber(d.down_drops)} drops${d.down_overlimits != null ? ` / ${formatNumber(d.down_overlimits)} overlimits` : ""}`
+        : "—";
+      if (document.activeElement !== els.sqmDownIn) els.sqmDownIn.value = d.down_mbit ?? "";
+      if (document.activeElement !== els.sqmUpIn) els.sqmUpIn.value = d.up_mbit ?? "";
+    } catch (err) {
+      els.sqmStatus.textContent = "Error";
+      els.sqmStatusNote.textContent = err.message;
+    }
+  }
+
+  function bindSqm() {
+    if (!els.sqmApply) return;
+    els.sqmApply.addEventListener("click", async () => {
+      const down = parseInt(els.sqmDownIn.value, 10);
+      const up = parseInt(els.sqmUpIn.value, 10);
+      els.sqmHint.textContent = "Applying…";
+      try {
+        const d = await postJSON("/api/sqm", { down_mbit: down, up_mbit: up });
+        if (!d.ok) throw new Error(d.error || "apply failed");
+        els.sqmHint.textContent = "Applied — shaping active.";
+        refreshSqm();
+      } catch (err) {
+        els.sqmHint.textContent = err.message;
+      }
+    });
+    let pollTimer = null;
+    const pollTest = async () => {
+      try {
+        const s = await fetchJSON("/api/sqm/speedtest/status");
+        if (s.running) {
+          els.sqmTestStage.textContent = s.stage || "Running…";
+          pollTimer = setTimeout(pollTest, 3000);
+          return;
+        }
+        clearTimeout(pollTimer);
+        pollTimer = null;
+        els.sqmTest.disabled = false;
+        if (s.error) {
+          els.sqmTestStage.textContent = "Error: " + s.error;
+          return;
+        }
+        const r = s.result;
+        if (!r) {
+          els.sqmTestStage.textContent = "No result.";
+          return;
+        }
+        els.sqmTestStage.textContent = `Done — via ${esc(r.server || "speedtest")} at ${esc(r.measured_at || "")}`;
+        const sug = r.suggestion || {};
+        const warns = (sug.warnings || []).map((w) => `<p class="sqm-warn">${esc(w)}</p>`).join("");
+        els.sqmTestResult.innerHTML = `
+          <div class="cache-grid">
+            <div class="cache-item"><span>Download</span><b>${r.down_mbps != null ? esc(String(r.down_mbps)) + " Mbps" : "—"}</b></div>
+            <div class="cache-item"><span>Upload</span><b>${r.up_mbps != null ? esc(String(r.up_mbps)) + " Mbps" : "—"}</b></div>
+            <div class="cache-item"><span>Packet loss</span><b>${r.packet_loss != null ? esc(String(r.packet_loss)) + "%" : "—"}</b></div>
+            <div class="cache-item"><span>Suggested down</span><b>${sug.down_suggested != null ? esc(String(sug.down_suggested)) + " Mbps" : "—"}</b></div>
+            <div class="cache-item"><span>Suggested up</span><b>${sug.up_suggested != null ? esc(String(sug.up_suggested)) + " Mbps" : "—"}</b></div>
+          </div>
+          ${warns}
+          <div class="card-toolbar bl-toolbar">
+            <button class="btn btn-primary" id="sqm-use-suggested" type="button">Use suggested rates</button>
+            ${r.result_url ? `<a class="muted" href="${esc(r.result_url)}" target="_blank" rel="noopener">speedtest result</a>` : ""}
+          </div>`;
+        const useBtn = document.getElementById("sqm-use-suggested");
+        if (useBtn && sug.down_suggested && sug.up_suggested) {
+          useBtn.addEventListener("click", async () => {
+            els.sqmDownIn.value = sug.down_suggested;
+            els.sqmUpIn.value = sug.up_suggested;
+            els.sqmApply.click();
+          });
+        }
+      } catch (err) {
+        els.sqmTestStage.textContent = "Poll error: " + err.message;
+        els.sqmTest.disabled = false;
+      }
+    };
+    els.sqmTest.addEventListener("click", async () => {
+      if (!window.confirm("Run speedtest? Shaping is briefly removed for a clean measurement (~1 min), then restored automatically.")) return;
+      els.sqmTest.disabled = true;
+      els.sqmTestBox.hidden = false;
+      els.sqmTestResult.innerHTML = "";
+      els.sqmTestStage.textContent = "Starting…";
+      try {
+        await postJSON("/api/sqm/speedtest/start", {});
+        pollTimer = setTimeout(pollTest, 3000);
+      } catch (err) {
+        els.sqmTestStage.textContent = err.message;
+        els.sqmTest.disabled = false;
+      }
+    });
+  }
+
+  async function refreshPools() {
+    if (!els.sysPoolsBody) return;
+    try {
+      const d = await fetchJSON("/api/dhcp/subnets");
+      if (!d.ok) throw new Error(d.error || "pools unavailable");
+      state.poolCandidates = d.interfaces || [];
+      els.sysPoolsBody.innerHTML = (d.subnets || []).map((s) => {
+        const svc = s.serving_ifaces || [];
+        let ifaceCell;
+        if (!s.interface) {
+          ifaceCell = `<span class="muted" title="No interface bound — Kea serves this on any matching interface">auto</span>`;
+        } else if (svc.length && !svc.includes(s.interface)) {
+          ifaceCell = `<b class="mono">${esc(s.interface)}</b> <span class="badge badge-err" title="Bound interface holds no address in this subnet">stale</span>`;
+        } else {
+          ifaceCell = `<b class="mono">${esc(s.interface)}</b>`;
+        }
+        return `
+      <tr>
+        <td>${ifaceCell}</td>
+        <td class="mono">${esc(s.subnet || "—")}</td>
+        <td class="mono">${(s.pools || []).map(esc).join("<br>") || "—"}</td>
+        <td class="mono">${esc(s.router || "—")}</td>
+        <td class="mono">${esc(s.dns || "—")}</td>
+        <td>${s.reservations != null ? s.reservations : "—"}</td>
+        <td><button class="btn btn-sm pool-edit" data-key="${s.key}" type="button">Edit</button></td>
+      </tr>`;
+      }).join("") || `<tr><td colspan="7" class="muted">No DHCP pools configured. Add one for a LAN interface.</td></tr>`;
+      els.sysPoolsNote.textContent = `${(d.subnets || []).length} pool(s)`;
+      els.sysPoolsBody.querySelectorAll(".pool-edit").forEach((btn) => {
+        btn.addEventListener("click", () => openPoolForm(btn.dataset.key));
+      });
+    } catch (err) {
+      els.sysPoolsBody.innerHTML = `<tr><td colspan="7" class="muted">Pools error: ${esc(err.message)}</td></tr>`;
+    }
+  }
+
+  function fillPoolIfaces(selected) {
+    const sel = document.getElementById("dhcp-f-iface");
+    sel.innerHTML = (state.poolCandidates || []).map((c) =>
+      `<option value="${esc(c.name)}"${c.name === selected ? " selected" : ""}>${esc(c.name)}${c.is_wan ? " (WAN)" : ""} — ${(c.nets || []).map(esc).join(", ")}</option>`).join("");
+    if (selected && ![...(sel.options)].some((o) => o.value === selected)) {
+      const opt = document.createElement("option");
+      opt.value = selected;
+      opt.textContent = selected + " (not currently addressed)";
+      sel.appendChild(opt);
+      sel.value = selected;
+    }
+  }
+
+  const openPoolForm = async (key) => {
+    const modal = document.getElementById("dhcp-form-modal");
+    const hint = document.getElementById("dhcp-form-hint");
+    document.getElementById("dhcp-form-title").textContent =
+      (key === undefined || key === null || key === "") ? "Add DHCP Pool" : "Edit DHCP Pool";
+    document.getElementById("dhcp-f-key").value = (key === undefined || key === null) ? "" : key;
+    hint.textContent = "Loading…";
+    modal.hidden = false;
+    try {
+      const d = await fetchJSON("/api/dhcp/subnets");
+      if (!d.ok) throw new Error(d.error || "load failed");
+      state.poolCandidates = d.interfaces || [];
+      const s = (d.subnets || []).find((x) => String(x.key) === String(key));
+      fillPoolIfaces(s ? s.interface : ((d.interfaces || []).find((c) => !c.is_wan) || {}).name);
+      const pool = s && s.pools && s.pools[0] ? String(s.pools[0]).split("-") : ["", ""];
+      document.getElementById("dhcp-f-subnet").value = (s && s.subnet) || "";
+      document.getElementById("dhcp-f-start").value = (pool[0] || "").trim();
+      document.getElementById("dhcp-f-end").value = (pool[1] || "").trim();
+      document.getElementById("dhcp-f-router").value = (s && s.router) || "";
+      document.getElementById("dhcp-f-dns").value = (s && s.dns) || "";
+      document.getElementById("dhcp-f-domain").value = (s && s.domain) || "";
+      document.getElementById("dhcp-f-lease").value = (s && s.lease_time) || "";
+      hint.textContent = s
+        ? `${s.reservations || 0} static reservation(s) kept. Changes reload Kea automatically.`
+        : "The interface must already hold an address in the subnet. Changes reload Kea automatically.";
+    } catch (err) {
+      hint.textContent = err.message;
+    }
+  };
 
   function bindHostEdit() {
     els.sysHostEdit.addEventListener("click", () => {
@@ -3698,27 +3889,6 @@
       state.cfgTarget = null;
       els.cfgModalSave.disabled = false;
     };
-
-    const openDhcpForm = async () => {
-      const modal = document.getElementById("dhcp-form-modal");
-      const hint = document.getElementById("dhcp-form-hint");
-      hint.textContent = "Loading…";
-      modal.hidden = false;
-      try {
-        const d = await fetchJSON("/api/system/dhcp-form");
-        if (!d.ok) throw new Error(d.error || "load failed");
-        document.getElementById("dhcp-f-subnet").value = d.subnet || "";
-        document.getElementById("dhcp-f-start").value = d.pool_start || "";
-        document.getElementById("dhcp-f-end").value = d.pool_end || "";
-        document.getElementById("dhcp-f-router").value = d.router || "";
-        document.getElementById("dhcp-f-dns").value = d.dns || "";
-        document.getElementById("dhcp-f-domain").value = d.domain || "";
-        document.getElementById("dhcp-f-lease").value = d.valid_lifetime || "";
-        hint.textContent = (d.reservations ? d.reservations + " static reservation(s) kept. " : "") + "Changes reload Kea automatically.";
-      } catch (err) {
-        hint.textContent = err.message;
-      }
-    };
     const closeDhcpForm = () => {
       document.getElementById("dhcp-form-modal").hidden = true;
     };
@@ -3744,7 +3914,8 @@
       document.getElementById("unbound-form-modal").hidden = true;
     };
 
-    els.sysEditKea.addEventListener("click", openDhcpForm);
+    els.sysEditKea.addEventListener("click", () => openCfg("kea", "Edit Kea DHCP config"));
+    els.sysPoolAdd.addEventListener("click", () => openPoolForm(null));
     els.sysEditUnbound.addEventListener("click", openUnboundForm);
     document.getElementById("dhcp-form-close").addEventListener("click", closeDhcpForm);
     document.getElementById("dhcp-form-cancel").addEventListener("click", closeDhcpForm);
@@ -3762,19 +3933,21 @@
       const hint = document.getElementById("dhcp-form-hint");
       hint.textContent = "Saving…";
       try {
-        const d = await postJSON("/api/system/dhcp-form", {
+        const d = await postJSON("/api/dhcp/subnets", {
+          key: document.getElementById("dhcp-f-key").value.trim(),
+          interface: document.getElementById("dhcp-f-iface").value,
           subnet: document.getElementById("dhcp-f-subnet").value.trim(),
           pool_start: document.getElementById("dhcp-f-start").value.trim(),
           pool_end: document.getElementById("dhcp-f-end").value.trim(),
           router: document.getElementById("dhcp-f-router").value.trim(),
           dns: document.getElementById("dhcp-f-dns").value.trim(),
           domain: document.getElementById("dhcp-f-domain").value.trim(),
-          valid_lifetime: document.getElementById("dhcp-f-lease").value.trim(),
+          lease_time: document.getElementById("dhcp-f-lease").value.trim(),
         });
         if (!d.ok) throw new Error(d.error || "save failed");
         hint.textContent = "Saved." + ((d.warnings || []).length ? " " + d.warnings.join(" ") : "");
         closeDhcpForm();
-        refreshSystem();
+        refreshPools();
       } catch (err) {
         hint.textContent = err.message;
       }
@@ -7226,6 +7399,7 @@
     bindDomainActions();
     bindHostEdit();
     bindConfigEdit();
+    bindSqm();
     bindUpdates();
     bindLogs();
     bindSystemBackups();

@@ -598,6 +598,17 @@ input[type="file"]::file-selector-button:active {
 .cfg-hint { margin: 10px 0 0; font-size: 12px; word-break: break-all; }
 .cfg-hint-ok { color: var(--green); }
 .cfg-hint-err { color: var(--red); }
+.sqm-warn { color: var(--amber, #f5a742); font-size: 12.5px; margin: 6px 0; }
+.sqm-form { flex-wrap: wrap; row-gap: 8px; }
+.sqm-form input[type="number"] {
+  flex: 0 1 110px; min-width: 90px;
+  background: var(--bg-elev); border: 1px solid var(--border);
+  color: var(--text); border-radius: 7px; padding: 8px 12px;
+  font-size: 13px; font-family: inherit; outline: none;
+}
+.sqm-form input[type="number"]:focus { border-color: var(--accent); }
+.sqm-form label { font-size: 12.5px; }
+.sqm-note { margin: 0; padding: 4px 14px 14px; font-size: 12px; }
 .upd-body { padding: 14px; }
 .upd-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
 .upd-actions { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }

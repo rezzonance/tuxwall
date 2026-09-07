@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.5.4
+Version: 2.5.5
 Section: admin
 Priority: optional
 Architecture: all
@@ -68,5 +68,14 @@ Description: TuxWall Network Firewall Dashboard
  scoped SSH access (LAN/VPN interface rules) already exists, and only
  adds SSH/HTTP allows when missing — upgrades no longer reopen or keep
  internet-facing SSH.
+ .
+ v2.5.5 adds: System page gains a Traffic Shaping (CAKE SQM) card — live
+ caps/status/drop counters, rate editing via /etc/tuxwall/sqm.conf, and a
+ guided Ookla speedtest (shaping lifted for a clean reading, then
+ restored) with ~93% suggested rates and provisioning-mismatch warnings;
+ per-interface DHCP pools with multi-subnet Kea APIs, interface binding
+ and validation (replacing the single-subnet DHCP Pool card); agent
+ sudoers rewritten without wildcards for sudo-rs; setup.sh stamps asset
+ versions so browsers never run stale dashboard JS after upgrades.
  Served by nginx from /var/www/html, backed by a Python API server running
  as the systemd unit tuxwall.service on port 8008.

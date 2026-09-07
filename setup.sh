@@ -144,6 +144,11 @@ cp -r "$REPO_DIR/www/images"          /var/www/html/images
 # Ensure api_server.py is executable
 chmod 755 /var/www/html/includes/api_server.py
 
+# Cache-bust dashboard assets: browsers cache ?v= URLs hard, so stamp a
+# fresh version every deploy (otherwise stale JS/CSS survives upgrades).
+ASSET_V="$(date +%Y%m%d%H%M)"
+sed -i -E "s/\.(js|css)\?v=[A-Za-z0-9]+/.\1?v=${ASSET_V}/g" /var/www/html/index.html
+
 ok "Web files installed"
 
 # ============================================================================
@@ -172,6 +177,13 @@ info "Installing scripts..."
 # SQM script
 cp "$REPO_DIR/scripts/tuxwall-sqm.sh" /usr/local/sbin/tuxwall-sqm.sh
 chmod 755 /usr/local/sbin/tuxwall-sqm.sh
+# Seed SQM rates file (dashboard System > Traffic Shaping manages it afterwards).
+# Never overwrite an existing conf — it holds the site's tuned rates.
+[[ -f /etc/tuxwall/sqm.conf ]] || printf '%s\n' \
+    '# TuxWall SQM rates (Mbit). Managed by dashboard System > Traffic Shaping.' \
+    'WAN=eth0' \
+    'UP_RATE=95mbit' \
+    'DOWN_RATE=920mbit' > /etc/tuxwall/sqm.conf
 
 # System backup script (canonical source: pkg/usr/local/sbin/)
 BACKUP_SRC=""

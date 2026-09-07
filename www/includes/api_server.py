@@ -5981,6 +5981,229 @@ def delete_system_backup(filename):
     return {"ok": True, "deleted": base}
 
 
+# --- SQM / traffic shaping (CAKE on WAN + IFB) -------------------------------
+SQM_CONF = "/etc/tuxwall/sqm.conf"
+SQM_SCRIPT = "/usr/local/sbin/tuxwall-sqm.sh"
+SQM_DEFAULTS = {"wan": "enp5s0", "ifb": "ifb4wan", "up_mbit": 285, "down_mbit": 1850}
+
+
+def load_sqm_conf():
+    conf = dict(SQM_DEFAULTS)
+    try:
+        with open(SQM_CONF, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                k, v = k.strip().lower(), v.strip().strip('"')
+                if k in ("wan", "ifb"):
+                    if re.match(r"^[a-zA-Z0-9_.-]{1,16}$", v):
+                        conf[k] = v
+                elif k in ("up_mbit", "down_mbit", "up_rate", "down_rate"):
+                    m = re.match(r"^(\d+)", v)
+                    if m:
+                        key = "up_mbit" if k.startswith("up") else "down_mbit"
+                        conf[key] = max(1, min(10000, int(m.group(1))))
+    except OSError:
+        pass
+    return conf
+
+
+def save_sqm_conf(conf):
+    os.makedirs(os.path.dirname(SQM_CONF), exist_ok=True)
+    tmp = SQM_CONF + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("# TuxWall SQM rates (Mbit). Managed by dashboard System > Traffic Shaping.\n")
+        f.write("WAN=%s\n" % conf.get("wan", SQM_DEFAULTS["wan"]))
+        f.write("UP_RATE=%dmbit\n" % int(conf["up_mbit"]))
+        f.write("DOWN_RATE=%dmbit\n" % int(conf["down_mbit"]))
+    os.replace(tmp, SQM_CONF)
+    os.chmod(SQM_CONF, 0o644)
+
+
+def _tc_qdisc_show():
+    try:
+        proc = subprocess.run(["tc", "-s", "qdisc", "show"],
+                              capture_output=True, text=True, timeout=10)
+        return proc.stdout if proc.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def sqm_status():
+    conf = load_sqm_conf()
+    tc = _tc_qdisc_show()
+    wan = conf["wan"]
+    ifb = conf.get("ifb", SQM_DEFAULTS["ifb"])
+    # Active if a cake root qdisc is present on WAN and IFB.
+    wan_cake = bool(re.search(r"qdisc cake \S+: dev %s root" % re.escape(wan), tc))
+    ifb_cake = bool(re.search(r"qdisc cake \S+: dev %s root" % re.escape(ifb), tc))
+    drops = {"up_drops": None, "down_drops": None, "down_overlimits": None}
+    m = re.search(r"qdisc cake \S+: dev %s root.*?Sent \S+ bytes \S+ pkt \(dropped (\d+)"
+                  % re.escape(wan), tc, re.S)
+    if m:
+        drops["up_drops"] = int(m.group(1))
+    m = re.search(r"qdisc cake \S+: dev %s root.*?Sent \S+ bytes \S+ pkt \(dropped (\d+), overlimits (\d+)"
+                  % re.escape(ifb), tc, re.S)
+    if m:
+        drops["down_drops"] = int(m.group(1))
+        drops["down_overlimits"] = int(m.group(2))
+    return {"ok": True, "wan": wan, "ifb": ifb,
+            "up_mbit": conf["up_mbit"], "down_mbit": conf["down_mbit"],
+            "active": bool(wan_cake and ifb_cake),
+            "wan_shaped": wan_cake, "ifb_shaped": ifb_cake, **drops}
+
+
+def sqm_apply(up_mbit, down_mbit, wan=None):
+    try:
+        up = int(up_mbit)
+        down = int(down_mbit)
+    except (TypeError, ValueError):
+        raise ValueError("Rates must be numbers (Mbit)")
+    if not 1 <= up <= 10000:
+        raise ValueError("Upload rate must be between 1 and 10000 Mbit")
+    if not 1 <= down <= 10000:
+        raise ValueError("Download rate must be between 1 and 10000 Mbit")
+    conf = load_sqm_conf()
+    if wan:
+        if not re.match(r"^[a-zA-Z0-9_.-]{1,16}$", wan):
+            raise ValueError("Invalid WAN interface")
+        conf["wan"] = wan
+    conf["up_mbit"] = up
+    conf["down_mbit"] = down
+    save_sqm_conf(conf)
+    if not os.path.isfile(SQM_SCRIPT):
+        raise FileNotFoundError("SQM script missing (%s)" % SQM_SCRIPT)
+    proc = subprocess.run(["bash", SQM_SCRIPT], capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "SQM script failed").strip()[-500:])
+    return {"ok": True, **sqm_status(), "applied_output": (proc.stdout or "").strip()[-500:]}
+
+
+def sqm_suggest(measured_down, measured_up, cfg_down=None, cfg_up=None):
+    """Suggested shaping rates (~93% of measured) + mismatch warnings."""
+    out = {}
+    for label, meas in (("down", measured_down), ("up", measured_up)):
+        if meas and meas > 0:
+            out[label + "_suggested"] = max(1, int(meas * 0.93))
+        else:
+            out[label + "_suggested"] = None
+    warnings = []
+    try:
+        if measured_down and cfg_down:
+            if measured_down < 0.7 * cfg_down:
+                warnings.append(
+                    "Measured download (%d Mbps) is far below the configured cap (%d Mbps) — "
+                    "the ISP may have provisioned a slower tier (or the line is congested). "
+                    "Consider shaping to ~%d Mbps."
+                    % (int(measured_down), int(cfg_down), out["down_suggested"] or 0))
+            elif measured_down > cfg_down * 1.05:
+                warnings.append(
+                    "Measured download (%d Mbps) exceeds the configured cap (%d Mbps) — "
+                    "shaping is throttling you. Raise the cap to ~%d Mbps."
+                    % (int(measured_down), int(cfg_down), out["down_suggested"] or 0))
+        if measured_up and cfg_up:
+            if measured_up < 0.7 * cfg_up:
+                warnings.append(
+                    "Measured upload (%d Mbps) is far below the configured cap (%d Mbps)."
+                    % (int(measured_up), int(cfg_up)))
+            elif measured_up > cfg_up * 1.05:
+                warnings.append(
+                    "Measured upload (%d Mbps) exceeds the configured cap (%d Mbps) — "
+                    "raise it to ~%d Mbps."
+                    % (int(measured_up), int(cfg_up), out["up_suggested"] or 0))
+    except (TypeError, ValueError):
+        pass
+    out["warnings"] = warnings
+    return out
+
+
+_sqm_test_job = {"running": False, "stage": "", "result": None, "error": None}
+_sqm_test_lock = threading.Lock()
+
+
+def _sqm_test_worker():
+    try:
+        conf = load_sqm_conf()
+        wan, ifb = conf["wan"], conf.get("ifb", SQM_DEFAULTS["ifb"])
+        with _sqm_test_lock:
+            _sqm_test_job["stage"] = "Removing shaping for clean measurement"
+        # Best-effort removal; ignore failures (already unshaped).
+        subprocess.run(["tc", "qdisc", "del", "dev", wan, "root"],
+                       capture_output=True, timeout=15)
+        subprocess.run(["tc", "qdisc", "del", "dev", wan, "ingress"],
+                       capture_output=True, timeout=15)
+        subprocess.run(["tc", "qdisc", "del", "dev", ifb, "root"],
+                       capture_output=True, timeout=15)
+        with _sqm_test_lock:
+            _sqm_test_job["stage"] = "Running speedtest (this takes ~30-60s)"
+        # Ookla speedtest aborts with std::logic_error (basic_string null)
+        # when HOME is unset, as under systemd — always provide one.
+        _st_env = dict(os.environ)
+        _st_env.setdefault("HOME", "/root")
+        proc = subprocess.run(
+            ["speedtest", "--accept-license", "--accept-gdpr", "-f", "json"],
+            capture_output=True, text=True, timeout=180, env=_st_env)
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or "speedtest failed").strip()[-300:])
+        data = json.loads(proc.stdout or "{}")
+        # Ookla CLI schema: top-level "download"/"upload" objects, each with
+        # "bandwidth" in bytes/sec; "ping" has latency/jitter in ms.
+        dl = (data.get("download") or {}).get("bandwidth")
+        ul = (data.get("upload") or {}).get("bandwidth")
+        down_mbps = round(dl * 8 / 1e6, 1) if dl else None
+        up_mbps = round(ul * 8 / 1e6, 1) if ul else None
+        ping = data.get("ping") or {}
+        result = {
+            "down_mbps": down_mbps, "up_mbps": up_mbps,
+            "idle_ms": ping.get("latency"), "jitter_ms": ping.get("jitter"),
+            "packet_loss": data.get("packetLoss"),
+            "server": (data.get("server") or {}).get("name"),
+            "isp": (data.get("isp") or {}),
+            "result_url": (data.get("result") or {}).get("url"),
+            "suggestion": sqm_suggest(down_mbps, up_mbps, conf["down_mbit"], conf["up_mbit"]),
+            "measured_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        with _sqm_test_lock:
+            _sqm_test_job["stage"] = "Restoring shaping"
+            _sqm_test_job["result"] = result
+        proc = subprocess.run(["bash", SQM_SCRIPT], capture_output=True, text=True, timeout=60)
+        if proc.returncode != 0:
+            with _sqm_test_lock:
+                _sqm_test_job["error"] = "Speedtest OK, but shaping restore FAILED: %s. Re-run: sudo %s" % (
+                    (proc.stderr or proc.stdout or "").strip()[-200:], SQM_SCRIPT)
+    except Exception as exc:
+        try:
+            subprocess.run(["bash", SQM_SCRIPT], capture_output=True, timeout=60)
+        except Exception:
+            pass
+        with _sqm_test_lock:
+            _sqm_test_job["error"] = str(exc)
+    finally:
+        with _sqm_test_lock:
+            _sqm_test_job["running"] = False
+            if not _sqm_test_job["error"]:
+                _sqm_test_job["stage"] = "Done"
+
+
+def sqm_speedtest_start():
+    with _sqm_test_lock:
+        if _sqm_test_job["running"]:
+            raise ValueError("A speedtest is already running")
+        _sqm_test_job.update({"running": True, "stage": "Starting", "result": None, "error": None})
+    threading.Thread(target=_sqm_test_worker, daemon=True).start()
+    return {"ok": True, "running": True}
+
+
+def sqm_speedtest_status():
+    with _sqm_test_lock:
+        return {"ok": True, "running": _sqm_test_job["running"],
+                "stage": _sqm_test_job["stage"],
+                "result": _sqm_test_job["result"],
+                "error": _sqm_test_job["error"]}
+
+
 def _system_backup_path(filename, sanitized=False):
     base = os.path.basename(filename or "")
     if not (SYSTEM_BACKUP_RE.match(base) or UPLOADED_RE.match(base) or
@@ -6435,6 +6658,216 @@ def save_dhcp_form(body):
         raise RuntimeError("Kea rejected the config, restored backup: %s"
                            % exc)
     out = get_dhcp_form()
+    out["backup"] = bak
+    out["warnings"] = warnings
+    return out
+
+
+def _iface_ipv4_addrs():
+    """Map interface name -> list of IPv4Network its addresses belong to."""
+    out = {}
+    try:
+        proc = subprocess.run(["ip", "-j", "addr"], capture_output=True,
+                              text=True, timeout=5)
+        for iface in json.loads(proc.stdout or "[]"):
+            name = iface.get("ifname", "")
+            nets = []
+            for a in iface.get("addr_info", []):
+                if a.get("family") != "inet":
+                    continue
+                try:
+                    nets.append(ipaddress.IPv4Interface(
+                        "%s/%s" % (a.get("local"), a.get("prefixlen"))).network)
+                except ValueError:
+                    continue
+            out[name] = nets
+    except Exception:
+        pass
+    return out
+
+
+def _wan_ifname():
+    try:
+        proc = subprocess.run(["ip", "-j", "route", "show", "default"],
+                              capture_output=True, text=True, timeout=5)
+        routes = json.loads(proc.stdout or "[]")
+        if routes:
+            return routes[0].get("dev", "")
+    except Exception:
+        pass
+    return ""
+
+
+def list_dhcp_subnets():
+    """All Kea subnet4 entries with pool/option summary + live interface match."""
+    kea = _read_kea()
+    d4 = kea.get("Dhcp4", {})
+    ifaces = _iface_ipv4_addrs()
+    wan = _wan_ifname()
+    subnets = []
+    for idx, subnet in enumerate(d4.get("subnet4", [])):
+        try:
+            net = ipaddress.IPv4Network(subnet.get("subnet", ""), strict=False)
+            net_s = str(net)
+        except ValueError:
+            net, net_s = None, subnet.get("subnet", "")
+        bound = subnet.get("interface", "")
+        serving = [n for n, nets in ifaces.items()
+                   if net and any(x == net for x in nets)]
+        pools = []
+        for p in subnet.get("pools", []):
+            pools.append(p.get("pool", "") if isinstance(p, dict) else str(p))
+        subnets.append({
+            "key": idx,
+            "id": subnet.get("id"),
+            "subnet": net_s,
+            "interface": bound,
+            "serving_ifaces": serving,
+            "pools": pools,
+            "router": _kea_opt(subnet, d4, "routers"),
+            "dns": _kea_opt(subnet, d4, "domain-name-servers"),
+            "domain": _kea_opt(subnet, d4, "domain-name"),
+            "lease_time": str(subnet.get("valid-lifetime",
+                                         d4.get("valid-lifetime", ""))),
+            "reservations": len(subnet.get("reservations", [])),
+        })
+    candidates = [{"name": n, "nets": [str(x) for x in nets],
+                   "is_wan": n == wan}
+                  for n, nets in sorted(ifaces.items())
+                  if n != "lo" and nets]
+    return {"ok": True, "subnets": subnets, "interfaces": candidates,
+            "wan": wan}
+
+
+def save_dhcp_subnet(body):
+    """Create or update one Kea subnet4 bound to an interface.
+
+    body: {key?, interface, subnet, pool_start, pool_end, router, dns,
+           domain?, lease_time?}. Backup + reload with rollback on failure.
+    """
+    kea = _read_kea()
+    d4 = kea.get("Dhcp4", {})
+    subnets = d4.setdefault("subnet4", [])
+    raw_key = body.get("key")
+    if raw_key in (None, ""):
+        target = None
+    else:
+        try:
+            target = subnets[int(raw_key)]
+        except (ValueError, IndexError):
+            raise ValueError("Unknown subnet")
+    iface = (body.get("interface") or "").strip()
+    if not re.match(r"^[a-zA-Z0-9_.-]{1,16}$", iface):
+        raise ValueError("Invalid interface name")
+    ifaces = _iface_ipv4_addrs()
+    if iface not in ifaces:
+        raise ValueError("Interface %s not found" % iface)
+    try:
+        net = ipaddress.IPv4Network((body.get("subnet") or "").strip(),
+                                    strict=False)
+    except ValueError:
+        raise ValueError("Invalid subnet CIDR (e.g. 192.168.10.0/24)")
+    if not any(x == net for x in ifaces[iface]):
+        raise ValueError(
+            "Interface %s has no address in %s — assign it first" % (iface, net))
+    try:
+        start = ipaddress.IPv4Address((body.get("pool_start") or "").strip())
+        end = ipaddress.IPv4Address((body.get("pool_end") or "").strip())
+    except ValueError:
+        raise ValueError("Pool start/end must be IPv4 addresses")
+    if start not in net or end not in net:
+        raise ValueError("Pool must lie inside the subnet")
+    if int(start) > int(end):
+        raise ValueError("Pool start must not exceed pool end")
+    if int(start) == int(net.network_address) or \
+            int(end) == int(net.broadcast_address):
+        raise ValueError("Pool must not include network/broadcast address")
+    try:
+        router = ipaddress.IPv4Address((body.get("router") or "").strip())
+    except ValueError:
+        raise ValueError("Invalid router IP address")
+    if router not in net:
+        raise ValueError("Router must lie inside the subnet")
+    dns_list = [d.strip() for d in
+                str(body.get("dns") or "").replace(",", " ").split()]
+    if not dns_list:
+        raise ValueError("At least one DNS server is required")
+    for d in dns_list:
+        try:
+            ipaddress.ip_address(d)
+        except ValueError:
+            raise ValueError("Invalid DNS server address: %s" % d)
+    domain = (body.get("domain") or "").strip()
+    if domain and not HOSTNAME_RE.match(domain):
+        raise ValueError("Invalid domain name")
+    lease_raw = str(body.get("lease_time") or body.get("valid_lifetime")
+                    or "").strip()
+    lease = None
+    if lease_raw:
+        try:
+            lease = int(lease_raw)
+        except ValueError:
+            raise ValueError("Lease time must be a number of seconds")
+        if not 60 <= lease <= 31536000:
+            raise ValueError("Lease time must be 60..31536000 seconds")
+    for idx, other in enumerate(subnets):
+        if target is not None and other is target:
+            continue
+        try:
+            onet = ipaddress.IPv4Network(other.get("subnet", ""), strict=False)
+        except ValueError:
+            continue
+        if net.overlaps(onet):
+            raise ValueError("Subnet overlaps %s" % onet)
+        if (other.get("interface", "") or "") == iface and \
+                str(other.get("subnet", "")) != str(net):
+            raise ValueError("Interface %s already serves %s" %
+                             (iface, other.get("subnet", "")))
+
+    entry = target if target is not None else {}
+    entry["subnet"] = str(net)
+    entry["interface"] = iface
+    if "id" not in entry:
+        used = {s.get("id") for s in subnets if isinstance(s.get("id"), int)}
+        nid = 1
+        while nid in used:
+            nid += 1
+        entry["id"] = nid
+    entry["pools"] = [{"pool": "%s-%s" % (start, end)}]
+    _kea_set_opt(entry, "routers", str(router))
+    _kea_set_opt(entry, "domain-name-servers", ", ".join(dns_list))
+    if domain:
+        _kea_set_opt(entry, "domain-name", domain)
+    else:
+        entry["option-data"] = [o for o in entry.get("option-data", [])
+                                if o.get("name") != "domain-name"]
+    if lease is not None:
+        entry["valid-lifetime"] = lease
+    if target is None:
+        subnets.append(entry)
+
+    warnings = []
+    for r in entry.get("reservations", []):
+        try:
+            rip = ipaddress.IPv4Address(r.get("ip-address", ""))
+        except ValueError:
+            continue
+        if rip not in net:
+            warnings.append("Reservation %s is outside the subnet" % rip)
+    bak = KEA_CONF + ".bak-" + time.strftime("%Y%m%d%H%M%S")
+    shutil.copy2(KEA_CONF, bak)
+    _write_kea(kea)
+    try:
+        _reload_kea()
+    except Exception as exc:
+        shutil.copy2(bak, KEA_CONF)
+        try:
+            _reload_kea()
+        except Exception:
+            pass
+        raise RuntimeError("Kea rejected the config, restored backup: %s"
+                           % exc)
+    out = list_dhcp_subnets()
     out["backup"] = bak
     out["warnings"] = warnings
     return out
@@ -7176,6 +7609,20 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/baselines":
             self._send(200, load_baselines())
 
+        elif path == "/api/sqm":
+            try:
+                self._send(200, sqm_status())
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+        elif path == "/api/sqm/speedtest/status":
+            self._send(200, sqm_speedtest_status())
+
+        elif path == "/api/dhcp/subnets":
+            try:
+                self._send(200, list_dhcp_subnets())
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
         elif path == "/api/backups":
             self._send(200, list_backups())
 
@@ -7493,6 +7940,40 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/baselines":
             save_baselines(body)
             self._send(200, {"ok": True})
+            return
+
+        if path == "/api/sqm":
+            try:
+                self._send(200, sqm_apply(body.get("up_mbit"), body.get("down_mbit"),
+                                          (body.get("wan") or "").strip() or None))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+                return
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+                return
+            return
+
+        if path == "/api/sqm/speedtest/start":
+            try:
+                self._send(200, sqm_speedtest_start())
+            except ValueError as exc:
+                self._send(409, {"ok": False, "error": str(exc)})
+                return
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+                return
+            return
+
+        if path == "/api/dhcp/subnets":
+            try:
+                self._send(200, save_dhcp_subnet(body or {}))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+                return
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+                return
             return
 
         if path == "/api/blocklists/add":
