@@ -5985,6 +5985,16 @@ def delete_system_backup(filename):
 SQM_CONF = "/etc/tuxwall/sqm.conf"
 SQM_SCRIPT = "/usr/local/sbin/tuxwall-sqm.sh"
 SQM_DEFAULTS = {"wan": "enp5s0", "ifb": "ifb4wan", "up_mbit": 285, "down_mbit": 1850}
+# Ookla speedtest is NOT in the Ubuntu archives — typically installed via
+# snap (`sudo snap install speedtest`) or Ookla's own apt repo. The guided
+# test degrades to a clear error when it is absent.
+SQM_SPEEDTEST_HINT = ("speedtest binary not found — install it for guided "
+                      "tests: `sudo snap install speedtest` or Ookla's apt "
+                      "repo (https://www.speedtest.net/apps/cli)")
+
+
+def sqm_speedtest_available():
+    return shutil.which("speedtest") is not None
 
 
 def load_sqm_conf():
@@ -6052,7 +6062,10 @@ def sqm_status():
     return {"ok": True, "wan": wan, "ifb": ifb,
             "up_mbit": conf["up_mbit"], "down_mbit": conf["down_mbit"],
             "active": bool(wan_cake and ifb_cake),
-            "wan_shaped": wan_cake, "ifb_shaped": ifb_cake, **drops}
+            "wan_shaped": wan_cake, "ifb_shaped": ifb_cake,
+            "speedtest_available": sqm_speedtest_available(),
+            "speedtest_hint": "" if sqm_speedtest_available() else SQM_SPEEDTEST_HINT,
+            **drops}
 
 
 def sqm_apply(up_mbit, down_mbit, wan=None):
@@ -6125,6 +6138,8 @@ _sqm_test_lock = threading.Lock()
 
 def _sqm_test_worker():
     try:
+        if not sqm_speedtest_available():
+            raise RuntimeError(SQM_SPEEDTEST_HINT)
         conf = load_sqm_conf()
         wan, ifb = conf["wan"], conf.get("ifb", SQM_DEFAULTS["ifb"])
         with _sqm_test_lock:

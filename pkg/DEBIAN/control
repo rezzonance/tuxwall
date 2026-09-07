@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.5.5
+Version: 2.5.6
 Section: admin
 Priority: optional
 Architecture: all
@@ -77,5 +77,10 @@ Description: TuxWall Network Firewall Dashboard
  and validation (replacing the single-subnet DHCP Pool card); agent
  sudoers rewritten without wildcards for sudo-rs; setup.sh stamps asset
  versions so browsers never run stale dashboard JS after upgrades.
+ .
+ v2.5.6 adds: speedtest dependency handling for the guided SQM test —
+ backend availability detection with a clear install hint, disabled
+ Run button when absent, and README install notes (Ookla speedtest is
+ not in the Ubuntu archives: snap or Ookla's apt repo).
  Served by nginx from /var/www/html, backed by a Python API server running
  as the systemd unit tuxwall.service on port 8008.

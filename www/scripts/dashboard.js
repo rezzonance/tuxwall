@@ -3663,6 +3663,13 @@
         : "—";
       if (document.activeElement !== els.sqmDownIn) els.sqmDownIn.value = d.down_mbit ?? "";
       if (document.activeElement !== els.sqmUpIn) els.sqmUpIn.value = d.up_mbit ?? "";
+      if (d.speedtest_available === false) {
+        els.sqmTest.disabled = true;
+        els.sqmTest.title = d.speedtest_hint || "speedtest not installed";
+        els.sqmHint.textContent = d.speedtest_hint || "speedtest not installed";
+      } else if (!state.sqmTestRunning) {
+        els.sqmTest.disabled = false;
+      }
     } catch (err) {
       els.sqmStatus.textContent = "Error";
       els.sqmStatusNote.textContent = err.message;
@@ -3689,12 +3696,14 @@
       try {
         const s = await fetchJSON("/api/sqm/speedtest/status");
         if (s.running) {
+          state.sqmTestRunning = true;
           els.sqmTestStage.textContent = s.stage || "Running…";
           pollTimer = setTimeout(pollTest, 3000);
           return;
         }
         clearTimeout(pollTimer);
         pollTimer = null;
+        state.sqmTestRunning = false;
         els.sqmTest.disabled = false;
         if (s.error) {
           els.sqmTestStage.textContent = "Error: " + s.error;
@@ -3730,6 +3739,7 @@
           });
         }
       } catch (err) {
+        state.sqmTestRunning = false;
         els.sqmTestStage.textContent = "Poll error: " + err.message;
         els.sqmTest.disabled = false;
       }
@@ -3742,8 +3752,10 @@
       els.sqmTestStage.textContent = "Starting…";
       try {
         await postJSON("/api/sqm/speedtest/start", {});
+        state.sqmTestRunning = true;
         pollTimer = setTimeout(pollTest, 3000);
       } catch (err) {
+        state.sqmTestRunning = false;
         els.sqmTestStage.textContent = err.message;
         els.sqmTest.disabled = false;
       }

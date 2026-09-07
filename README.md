@@ -153,6 +153,7 @@ All of the following must be installed and working **before** tuxwall will funct
 | `python3-netifaces` | Enhanced network interface detection |
 | `python3-maxminddb` | GeoIP lookups in the dashboard (installed by `geoip-setup.sh`) |
 | `python3-pip` | Fallback installer for `maxminddb` if the deb package is unavailable |
+| `speedtest` (Ookla) | Guided line-speed test behind the System → Traffic Shaping "Run speedtest" button. **Not in the Ubuntu archives** — install via `sudo snap install speedtest` or [Ookla's apt repo](https://www.speedtest.net/apps/cli). Without it the button is disabled with an install hint; manual caps still work. |
 
 > **Note:** Node.js and Java are **not** required by tuxwall. If you have them installed for other purposes, they will not interfere.
 
