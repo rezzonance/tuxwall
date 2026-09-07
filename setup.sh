@@ -277,14 +277,16 @@ ok "Unbound configured"
 # ============================================================================
 info "Configuring UFW rules..."
 
-# SSH first — never lock ourselves out of a remote gateway
-ufw allow OpenSSH 2>/dev/null || true
+# SSH first — only if no SSH rule exists yet, so re-runs never widen
+# scoped (LAN/VPN) access back to WAN-wide
+ufw status 2>/dev/null | grep -q '22/tcp' || ufw allow OpenSSH 2>/dev/null || true
 
-# Allow HTTP (dashboard)
-ufw allow 80/tcp comment "TuxWall dashboard" 2>/dev/null || true
+# Allow HTTP (dashboard) — only if no port-80 rule exists yet, so a
+# deliberately removed WAN-wide rule is not re-added on re-runs
+ufw status 2>/dev/null | grep -q '80/tcp' || ufw allow 80/tcp comment "TuxWall dashboard" 2>/dev/null || true
 
-# Allow WireGuard default port
-ufw allow 51820/udp comment "WireGuard" 2>/dev/null || true
+# Allow WireGuard default port — same guard
+ufw status 2>/dev/null | grep -q '51820' || ufw allow 51820/udp comment "WireGuard" 2>/dev/null || true
 
 # Enable the firewall if it isn't already (mirrors pkg postinst)
 if ! ufw status 2>/dev/null | grep -q 'Status: active'; then

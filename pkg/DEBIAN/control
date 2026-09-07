@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.5.6
+Version: 2.5.7
 Section: admin
 Priority: optional
 Architecture: all
@@ -82,5 +82,9 @@ Description: TuxWall Network Firewall Dashboard
  backend availability detection with a clear install hint, disabled
  Run button when absent, and README install notes (Ookla speedtest is
  not in the Ubuntu archives: snap or Ookla's apt repo).
+ .
+ v2.5.7 adds: setup.sh UFW step only adds SSH/HTTP/WireGuard rules when no
+ matching rule exists — re-runs no longer re-open a deliberately removed
+ WAN-wide rule (e.g. global port 80).
  Served by nginx from /var/www/html, backed by a Python API server running
  as the systemd unit tuxwall.service on port 8008.
