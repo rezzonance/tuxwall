@@ -7620,15 +7620,17 @@
 
   function applyRoleUI() {
     const isAdmin = state.role === "admin";
-    document.querySelectorAll('.nav-item[data-view="settings"]').forEach((el) => {
-      el.hidden = !isAdmin;
-    });
+    // The AI Assistant reaches the opencode agent, which runs shell commands
+    // and holds sudo, so it is admin-only server-side. Hide it for viewers
+    // rather than leaving a panel that only returns 403.
+    document.querySelectorAll('.nav-item[data-view="settings"], .nav-item[data-view="ai"]')
+      .forEach((el) => { el.hidden = !isAdmin; });
     els.usersCard.hidden = false;
     updateTotpCard();
     els.usersAdmin.hidden = !state.canManageUsers;
     els.sideUser.textContent = state.username || "";
     els.sideRole.textContent = roleLabel();
-    if (!isAdmin && state.activeView === "settings") {
+    if (!isAdmin && (state.activeView === "settings" || state.activeView === "ai")) {
       switchView("overview");
     }
     if (state.data) render();

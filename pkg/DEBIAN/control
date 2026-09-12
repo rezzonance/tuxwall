@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.6.1
+Version: 2.7.0
 Section: admin
 Priority: optional
 Architecture: all
@@ -123,5 +123,21 @@ Description: TuxWall Network Firewall Dashboard
  their position in time. Together these cut line travel by ~63% and
  zigzag reversals by ~67%; single-sample peaks are damped by about 5%
  in the drawing only — numeric readouts still show raw samples.
+ .
+ v2.7.0 is a security release fixing broken access control. The read-only
+ "viewer" role was enforced only by hiding controls in the browser: of 101
+ POST endpoints just 9 could check role at all, so any signed-in viewer
+ could reboot the router, rewrite firewall rules, read WireGuard peer
+ configs, restore backups, or drive the AI agent — which runs shell
+ commands and holds sudo — while also being able to approve the agent's
+ own permission prompts. Role gating is now default-deny: admin is
+ required unless an endpoint is explicitly listed, viewers keep only
+ self-service password and TOTP actions, and /api/backups/** and
+ /api/agent/** are admin-only on GET too (raw backups contain auth.json
+ and WireGuard private keys). Also fixes /api/system/self-restart, whose
+ loopback check read client_address — always 127.0.0.1 behind nginx
+ proxy_pass, leaving it reachable unauthenticated from the LAN or VPN;
+ it now resolves the real peer via nginx's X-Real-IP. The AI Assistant
+ is hidden from non-admins in the UI to match the server-side rule.
  Served by nginx from /var/www/html, backed by a Python API server running
  as the systemd unit tuxwall.service on port 8008.

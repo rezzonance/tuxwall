@@ -4631,6 +4631,40 @@ def _valid_session(headers):
     return _session_identity(headers) is not None
 
 
+def _is_admin(identity):
+    return bool(identity) and identity.get("role") == "admin"
+
+
+# Role gating (2026-09-12). Previously any authenticated session could call
+# every state-changing endpoint; the read-only "viewer" role was enforced
+# only by hiding controls in the browser, so a viewer could reboot the
+# router, rewrite firewall rules, read WireGuard peer configs or drive the
+# AI agent (which holds sudo). Both tables below are default-deny: a newly
+# added endpoint is admin-only until it is deliberately listed here.
+
+# POSTs a viewer may make. These are self-service account actions, and each
+# one additionally verifies inside its handler that the caller is operating
+# on their own account. Login/logout/setup are handled before the gate.
+VIEWER_POST_PATHS = frozenset({
+    "/api/auth/password",
+    "/api/auth/totp/setup",
+    "/api/auth/totp/confirm",
+    "/api/auth/totp/disable",
+})
+
+# GETs that disclose credentials or grant shell reach, so admin-only.
+# /api/backups/** ships raw archives containing auth.json and WireGuard
+# private keys; /api/agent/** reaches the opencode agent.
+ADMIN_GET_PREFIXES = (
+    "/api/backups",
+    "/api/agent",
+    "/api/system/kea-config",
+    "/api/system/unbound-config",
+    "/api/system/dhcp-form",
+    "/api/system/unbound-form",
+)
+
+
 def _drop_session(headers):
     token = _cookie_token(headers)
     if token:
@@ -7671,6 +7705,11 @@ class Handler(BaseHTTPRequestHandler):
             if identity is None:
                 self._send(401, {"ok": False, "error": "Authentication required"})
                 return
+            # Handled before the ADMIN_GET_PREFIXES gate below, so it needs
+            # its own check: this stream carries the agent's command output.
+            if not _is_admin(identity):
+                self._send(403, {"ok": False, "error": "Administrator role required"})
+                return
             self._agent_events_sse()
             return
         if path == "/api/auth/session":
@@ -7679,6 +7718,9 @@ class Handler(BaseHTTPRequestHandler):
         identity = _session_identity(self.headers) if path.startswith("/api/") else None
         if path.startswith("/api/") and identity is None:
             self._send(401, {"ok": False, "error": "Authentication required"})
+            return
+        if (path.startswith(ADMIN_GET_PREFIXES) and not _is_admin(identity)):
+            self._send(403, {"ok": False, "error": "Administrator role required"})
             return
         if path == "/api/auth/users":
             try:
@@ -8063,7 +8105,13 @@ class Handler(BaseHTTPRequestHandler):
 
         # Internal self-restart: localhost only, no auth required
         if path == "/api/system/self-restart":
-            if self.client_address[0] not in ("127.0.0.1", "::1"):
+            # Must use _client_key, not client_address: every request arrives
+            # through nginx's proxy_pass, so client_address is ALWAYS
+            # 127.0.0.1 and the old check passed for any LAN/VPN caller,
+            # leaving this unauthenticated. _client_key resolves the real
+            # peer from nginx's X-Real-IP (which nginx overwrites, so it
+            # cannot be spoofed) and only trusts it on a loopback connection.
+            if _client_key(self) not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
                 self._send(403, {"ok": False, "error": "Forbidden"})
                 return
             try:
@@ -8084,6 +8132,14 @@ class Handler(BaseHTTPRequestHandler):
                 identity = {"username": "system-timer", "role": "admin", "owner": False}
             else:
                 self._send(401, {"ok": False, "error": "Authentication required"})
+                return
+
+        # Default-deny role gate. Everything that changes state, reads
+        # credentials, or reaches the AI agent requires an admin; viewers are
+        # limited to the self-service account actions listed above.
+        if path.startswith("/api/") and not _is_admin(identity):
+            if path not in VIEWER_POST_PATHS:
+                self._send(403, {"ok": False, "error": "Administrator role required"})
                 return
 
         if path == "/api/auth/password":
