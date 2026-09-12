@@ -1,9 +1,9 @@
 Package: tuxwall
-Version: 2.7.1
+Version: 2.7.2
 Section: admin
 Priority: optional
 Architecture: all
-Depends: python3, nginx, unbound, unbound-anchor, kea-dhcp4-server, kea-common, radvd, suricata, suricata-update, wireguard-tools, ufw, iptables, nftables, curl, jq, gzip, ieee-data, iproute2, rsync, fastfetch
+Depends: python3, nginx, unbound, unbound-anchor, kea-dhcp4-server, kea-common, radvd, avahi-daemon, suricata, suricata-update, wireguard-tools, ufw, iptables, nftables, curl, jq, gzip, ieee-data, iproute2, rsync, fastfetch
 Suggests: crowdsec, crowdsec-firewall-bouncer-iptables, python3-maxminddb, speedtest
 Maintainer: jeff <jeff@localhost>
 Description: TuxWall Network Firewall Dashboard
@@ -152,3 +152,13 @@ Description: TuxWall Network Firewall Dashboard
  a delegated global prefix, which changes whenever the ISP rotates it.
  Served by nginx from /var/www/html, backed by a Python API server running
  as the systemd unit tuxwall.service on port 8008.
+ .
+ v2.7.2 adds an Avahi mDNS reflector for Music Assistant / AirPlay /
+ Chromecast discovery across segments. mDNS is link-local, so without a
+ reflector Home Assistant on one segment cannot discover players on another
+ (LAN <-> WireGuard VPN). setup.sh, the first-boot wizard and postinst now
+ install avahi-daemon, set enable-reflector=yes under [reflector], deny the
+ WAN interface so mDNS never leaks to the internet, and allow UDP 5353
+ inbound on LAN/VPN interfaces only. Also: opencode agent gains bounded
+ service-control sudo rights (named restarts/reloads, tc, speedtest and
+ tuxwall's own scripts — no blanket admin) with matching permission prompts.

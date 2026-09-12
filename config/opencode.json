@@ -53,7 +53,20 @@
       "unbound-control stats_noreset": "allow",
       "cscli decisions list": "allow",
       "cscli alerts list": "allow",
-      "wg show": "allow"
+      "wg show": "allow",
+      "sudo systemctl restart tuxwall": "allow",
+      "sudo systemctl restart unbound": "allow",
+      "sudo systemctl restart kea-dhcp4-server": "allow",
+      "sudo systemctl restart nginx": "allow",
+      "sudo systemctl restart suricata": "allow",
+      "sudo systemctl restart crowdsec": "allow",
+      "sudo systemctl reload *": "allow",
+      "sudo systemctl reload-or-restart *": "allow",
+      "sudo systemctl daemon-reload": "allow",
+      "sudo tc *": "allow",
+      "sudo speedtest *": "allow",
+      "sudo /usr/local/sbin/tuxwall-sqm.sh": "allow",
+      "sudo /usr/local/sbin/system-backup.sh *": "allow"
     }
   }
 }
