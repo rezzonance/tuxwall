@@ -1,0 +1,32 @@
+Architectures: all amd64
+Codename: stable
+Components: main
+Date: Sat, 12 Sep 2026 18:43:06 +0000
+Description: TuxWall network firewall dashboard
+Label: TuxWall APT Repository
+Origin: TuxWall
+Suite: stable
+MD5Sum:
+ c4645b0d6b98b6d45588f6c9fcbfc36b              205 Release
+ 9ed5122cf38d09e126155d17d9cc7685            10445 main/binary-all/Packages
+ a19eba75b605ec966a667072c09807cd             5154 main/binary-all/Packages.gz
+ 9ed5122cf38d09e126155d17d9cc7685            10445 main/binary-amd64/Packages
+ a19eba75b605ec966a667072c09807cd             5154 main/binary-amd64/Packages.gz
+SHA1:
+ 7574897a4f732acbef08205319b6bf01198a61a3              205 Release
+ 499e0ede42574408935ea59664cb86367095c30c            10445 main/binary-all/Packages
+ 58e00b2e7163f63a00290964917657ec6066d49f             5154 main/binary-all/Packages.gz
+ 499e0ede42574408935ea59664cb86367095c30c            10445 main/binary-amd64/Packages
+ 58e00b2e7163f63a00290964917657ec6066d49f             5154 main/binary-amd64/Packages.gz
+SHA256:
+ ebb5fdce261679d4cb782dad7c3f8a7a034f363521acd5d18cabdc2b25f4f21e              205 Release
+ 19717e284856eef364e8f1af362f68860cee7bd397b81c5c432fdf14b6b32977            10445 main/binary-all/Packages
+ 3dbb2e037dedb3408665ecd83628d7a6ecacd856adf4e54fe7339758838756c9             5154 main/binary-all/Packages.gz
+ 19717e284856eef364e8f1af362f68860cee7bd397b81c5c432fdf14b6b32977            10445 main/binary-amd64/Packages
+ 3dbb2e037dedb3408665ecd83628d7a6ecacd856adf4e54fe7339758838756c9             5154 main/binary-amd64/Packages.gz
+SHA512:
+ 743d6138ac7e324ef6a87d7d562348bcd3c78ad1457308e9c79bc478fcf36d137f3dc96a979f1909d7ff9dc05557cc98d883344158dd75a2de0c1eb2d4d50dfc              205 Release
+ e196f6ff6a64a89d41759ec4eb8592808830e35f7b195c6658e0c5d147d9dcdc604cad16c7a1d902dc96f9965ec683bb71bde494c13271703547d25c49211591            10445 main/binary-all/Packages
+ 88b285f1b128108ca76aa1225c40cd2aebd7fdc8d5fc4d36136948c0d9e3013e934a61628549cc809b17187a7d3aaef2b5eb1a71e908be5b2cc6ccdbbbffb235             5154 main/binary-all/Packages.gz
+ e196f6ff6a64a89d41759ec4eb8592808830e35f7b195c6658e0c5d147d9dcdc604cad16c7a1d902dc96f9965ec683bb71bde494c13271703547d25c49211591            10445 main/binary-amd64/Packages
+ 88b285f1b128108ca76aa1225c40cd2aebd7fdc8d5fc4d36136948c0d9e3013e934a61628549cc809b17187a7d3aaef2b5eb1a71e908be5b2cc6ccdbbbffb235             5154 main/binary-amd64/Packages.gz
