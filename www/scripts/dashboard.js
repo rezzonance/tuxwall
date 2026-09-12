@@ -5827,6 +5827,52 @@
     }
   }
 
+  // ---- Layout recovery ---------------------------------------------------
+  // Anything measured while the login gate is up comes back 0x0, because
+  // `body.locked > .layout` is display:none. Leaflet then caches that zero
+  // size and never lays out tiles, and every chart's
+  // `if (rect.width < 10) return` guard drops the frame with no retry
+  // scheduled. Re-measure once the layout is back on screen.
+  function remeasureLayout() {
+    if (state.activeView === "overview") initOverviewMap();
+    if (state.activeView === "security") initSecurityMap();
+    [ovMap, secMap].forEach((m) => {
+      if (!m) return;
+      try { m.map.invalidateSize(); } catch (err) { /* map not on screen yet */ }
+    });
+    repaintCharts();
+  }
+
+  // Safety net for the whole bug class: watch the map containers and chart
+  // canvases, and re-measure whenever one goes from zero-size back to
+  // visible. Covers view switches and anything else that measures while
+  // hidden, not just the login path.
+  function observeSizeRecovery() {
+    if (typeof ResizeObserver === "undefined") return;
+    const wasZero = new WeakSet();
+    const ro = new ResizeObserver((entries) => {
+      let recovered = false;
+      entries.forEach((e) => {
+        const { width, height } = e.contentRect;
+        if (width < 10 || height < 10) {
+          wasZero.add(e.target);
+        } else if (wasZero.has(e.target)) {
+          wasZero.delete(e.target);
+          recovered = true;
+        }
+      });
+      // Redraws only touch canvas width/height attributes, never CSS box
+      // size, so this cannot feed back into the observer.
+      if (recovered) remeasureLayout();
+    });
+    ["ov-map", "sec-map"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) ro.observe(el);
+    });
+    document.querySelectorAll("canvas.bw-canvas, canvas.pie-canvas")
+      .forEach((c) => ro.observe(c));
+  }
+
   async function applyTheme(id, opts) {
     const options = opts || {};
     const theme = findTheme(id);
@@ -7462,6 +7508,7 @@
     bindAuthActions();
     bindTotpActions();
     bindUsersActions();
+    observeSizeRecovery();
     bootstrapAuth();
 
     // Online / Offline status indicator
@@ -7513,6 +7560,9 @@
   function hideLoginGate() {
     els.loginGate.hidden = true;
     document.body.classList.remove("locked");
+    // Two frames: one for the browser to apply the class removal, one for it
+    // to lay the dashboard out. Measuring any earlier just reads zeros again.
+    requestAnimationFrame(() => requestAnimationFrame(remeasureLayout));
   }
 
   function applyDefaultPasswordWarning(flag) {

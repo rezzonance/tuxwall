@@ -6,7 +6,7 @@
   <title>TuxWall - Network Dashboard</title>
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
-  <link rel="stylesheet" href="/css/style.css?v=20260907c">
+  <link rel="stylesheet" href="/css/style.css?v=202609120934">
 </head>
 <body>
 <div id="login-gate" class="login-gate" hidden>
@@ -1537,15 +1537,30 @@
             <div class="ff-logo-svg" title="Ubuntu">
               <svg viewBox="0 0 100 100" role="img" aria-label="Ubuntu logo">
                 <defs>
-                  <g id="ubu-seg">
-                    <path d="M 24.0 28.1 A 34 34 0 0 1 76.0 28.1"
-                          fill="none" stroke="#E95420" stroke-width="10"/>
-                    <circle cx="50" cy="16" r="8.5" fill="#ffffff"/>
-                  </g>
+                  <!-- userSpaceOnUse so one light source spans the whole
+                       mark instead of restarting inside every segment -->
+                  <linearGradient id="ubu-grad" gradientUnits="userSpaceOnUse"
+                                  x1="14" y1="10" x2="86" y2="90">
+                    <stop offset="0%"   stop-color="#F9B38C"/>
+                    <stop offset="40%"  stop-color="#E95420"/>
+                    <stop offset="100%" stop-color="#B8330F"/>
+                  </linearGradient>
                 </defs>
-                <use href="#ubu-seg"/>
-                <use href="#ubu-seg" transform="rotate(120 50 50)"/>
-                <use href="#ubu-seg" transform="rotate(240 50 50)"/>
+                <!-- Circle of Friends: three 66deg arcs on r=33, each head
+                     centred in the 54deg gap. Segments are written out
+                     explicitly (no use/rotate) so every renderer agrees. -->
+                <g class="ubu-spin" fill="url(#ubu-grad)" stroke="url(#ubu-grad)">
+                  <g stroke-width="8.5" fill="none">
+                    <path d="M 64.98 20.60 A 33 33 0 0 1 82.95 51.73"/>
+                    <path d="M 67.97 77.68 A 33 33 0 0 1 32.03 77.68"/>
+                    <path d="M 17.05 51.73 A 33 33 0 0 1 35.02 20.60"/>
+                  </g>
+                  <g stroke="none">
+                    <circle cx="50.00" cy="17.00" r="7.6"/>
+                    <circle cx="78.58" cy="66.50" r="7.6"/>
+                    <circle cx="21.42" cy="66.50" r="7.6"/>
+                  </g>
+                </g>
               </svg>
             </div>
             <pre id="sys-ff-info" class="ff-pre ff-info">Loading…</pre>
@@ -1984,7 +1999,7 @@
 
 <script src="/scripts/leaflet.js"></script>
 <script src="/scripts/qrcode.js"></script>
-<script src="/scripts/dashboard.js?v=20260907c"></script>
+<script src="/scripts/dashboard.js?v=202609120934"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>

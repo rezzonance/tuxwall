@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.5.9
+Version: 2.6.0
 Section: admin
 Priority: optional
 Architecture: all
@@ -97,5 +97,20 @@ Description: TuxWall Network Firewall Dashboard
  speed test but ships neither in the Ubuntu archives nor the TuxWall repo
  (snap or Ookla's apt repo), so it must stay out of Depends; the dashboard
  keeps its availability detection with install hint.
+ .
+ v2.6.0 fixes the blank attack map and charts after login: the login gate
+ hides the whole layout, so the map and every canvas were measured at 0x0
+ and never re-measured — Leaflet cached the zero size and each chart's
+ small-size guard dropped its frame with no retry, leaving a manual page
+ refresh as the only cure. Login now re-measures on the next frame, and a
+ ResizeObserver re-draws anything returning from zero size, covering view
+ switches too. Also: accessibility and theming pass — prefers-reduced-motion
+ support that stops decorative animation while keeping progress spinners
+ alive (and without hiding attack-map markers, whose keyframes end at
+ opacity 0), light-theme contrast fixes bringing all 8 stat colours and all
+ 15 nav colours to WCAG AA 4.5:1 (several were as low as 1.9:1), an
+ undefined --fg variable that silently broke three rules, a duplicate
+ .icon-btn block, and a redrawn Ubuntu mark that no longer vanishes on
+ light themes.
  Served by nginx from /var/www/html, backed by a Python API server running
  as the systemd unit tuxwall.service on port 8008.
