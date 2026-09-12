@@ -4475,7 +4475,7 @@ def _session_cookie_value(headers, token):
         value += "; Secure"
     return value
 SESSION_TTL = 12 * 3600
-SESSION_IDLE_TIMEOUT = 30 * 60  # live patch 2026-09-06: idle sessions expire after 30 min
+SESSION_IDLE_TIMEOUT = 120 * 60  # raised 2026-09-11: dashboard polls pause when tab hidden
 PBKDF2_ITERATIONS = 200000
 MIN_PASSWORD_LEN = 8
 DEFAULT_ADMIN_USER = "admin"
@@ -5434,6 +5434,217 @@ def _wan_info():
         except Exception:
             pass
     return wan
+
+
+_FASTFETCH_CACHE = {"ts": 0, "output": "", "html": ""}
+
+FASTFETCH_BIN = shutil.which("fastfetch") or "/usr/bin/fastfetch"
+
+_FF_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
+_FF_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+# xterm palette for standard / bright foreground/background colors.
+_FF_STD = {
+    30: "#000000", 31: "#cd0000", 32: "#00cd00", 33: "#cdcd00",
+    34: "#0000ee", 35: "#cd00cd", 36: "#00cdcd", 37: "#e5e5e5",
+    90: "#7f7f7f", 91: "#ff0000", 92: "#00ff00", 93: "#ffff00",
+    94: "#5c5cff", 95: "#ff00ff", 96: "#00ffff", 97: "#ffffff",
+}
+
+
+def _ff_256_color(n):
+    """Map a 256-color palette index to a hex color."""
+    n = n % 256
+    if n < 8:
+        return _FF_STD[30 + n]
+    if n < 16:
+        return _FF_STD[90 + (n - 8)]
+    if 16 <= n <= 231:
+        n -= 16
+        r = (n // 36) % 6
+        g = (n // 6) % 6
+        b = n % 6
+        conv = lambda v: 0 if v == 0 else 55 + v * 40
+        return "#%02x%02x%02x" % (conv(r), conv(g), conv(b))
+    v = 8 + (n - 232) * 10
+    return "#%02x%02x%02x" % (v, v, v)
+
+
+def _ff_html_escape(s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def ansi_to_html(text):
+    """Convert terminal output with SGR color escapes to styled HTML.
+
+    Only <span style="..."> tags are emitted; all text is HTML-escaped.
+    Non-SGR escape sequences (cursor movement etc.) are stripped.
+    """
+    out = []
+    fg = None
+    bg = None
+    bold = False
+    open_span = False
+
+    def close():
+        nonlocal open_span
+        if open_span:
+            out.append("</span>")
+            open_span = False
+
+    def reopen():
+        nonlocal open_span
+        styles = []
+        if fg:
+            styles.append("color:" + fg)
+        if bg:
+            styles.append("background:" + bg)
+        if bold:
+            styles.append("font-weight:bold")
+        if styles:
+            out.append('<span style="' + ";".join(styles) + '">')
+            open_span = True
+
+    pos = 0
+    for m in _FF_SGR_RE.finditer(text):
+        if m.start() > pos:
+            chunk = _FF_CSI_RE.sub("", text[pos:m.start()])
+            out.append(_ff_html_escape(chunk))
+        params = m.group(1)
+        codes = [int(c) if c else 0 for c in params.split(";")] if params else [0]
+        close()
+        i = 0
+        while i < len(codes):
+            c = codes[i]
+            if c == 0:
+                fg, bg, bold = None, None, False
+            elif c == 1:
+                bold = True
+            elif c == 22:
+                bold = False
+            elif c in _FF_STD and c < 50:
+                fg = _FF_STD[c]
+            elif 90 <= c <= 97:
+                fg = _FF_STD[c]
+            elif c == 39:
+                fg = None
+            elif 40 <= c <= 47:
+                bg = _FF_STD.get(c - 10)
+            elif 100 <= c <= 107:
+                bg = _FF_STD.get(c - 10)
+            elif c == 49:
+                bg = None
+            elif c in (38, 48):
+                is_fg = c == 38
+                if i + 1 < len(codes) and codes[i + 1] == 5 and i + 2 < len(codes):
+                    col = _ff_256_color(codes[i + 2])
+                    if is_fg:
+                        fg = col
+                    else:
+                        bg = col
+                    i += 2
+                elif (i + 1 < len(codes) and codes[i + 1] == 2
+                        and i + 4 < len(codes)):
+                    col = "#%02x%02x%02x" % (
+                        codes[i + 2] % 256, codes[i + 3] % 256, codes[i + 4] % 256)
+                    if is_fg:
+                        fg = col
+                    else:
+                        bg = col
+                    i += 4
+            i += 1
+        reopen()
+        pos = m.end()
+    if pos < len(text):
+        out.append(_ff_html_escape(_FF_CSI_RE.sub("", text[pos:])))
+    close()
+    return "".join(out)
+
+
+def build_fastfetch():
+    """Run fastfetch (distro logo on top, colors forced) and return its output.
+
+    Returns both plain text ("output") and an ANSI-to-HTML conversion
+    ("html") so the dashboard can render the logo in color like a terminal.
+    Cached for a few seconds so the System page can poll without spawning
+    a process on every request.
+    """
+    now = time.time()
+    if _FASTFETCH_CACHE["output"] and now - _FASTFETCH_CACHE["ts"] < 10:
+        return {"ok": True, "output": _FASTFETCH_CACHE["output"],
+                "logo": _FASTFETCH_CACHE.get("logo", ""),
+                "info": _FASTFETCH_CACHE.get("info", ""),
+                "html": _FASTFETCH_CACHE["html"],
+                "html_logo": _FASTFETCH_CACHE.get("html_logo", ""),
+                "html_info": _FASTFETCH_CACHE.get("html_info", ""),
+                "cached": True}
+    if not FASTFETCH_BIN or not os.path.isfile(FASTFETCH_BIN):
+        return {"ok": False, "error": "fastfetch is not installed"}
+    try:
+        proc = subprocess.run(
+            [FASTFETCH_BIN, "--pipe", "false", "--logo-position", "top",
+             "--separator", ": ", "-s",
+             "Title:Separator:OS:Host:Kernel:Uptime:Packages:Shell:CPU:Memory:Swap:Disk:LocalIP:Locale"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    if proc.returncode != 0:
+        return {"ok": False, "error": (proc.stderr or "fastfetch failed").strip()}
+    raw = proc.stdout or ""
+    # Split logo (everything before the first blank line) from the spec
+    # block so the dashboard can lay them out side by side.
+    logo_raw, info_raw = [], []
+    seen_blank = False
+    for line in raw.splitlines():
+        if not _FF_CSI_RE.sub("", line).strip():
+            seen_blank = True
+            continue
+        (info_raw if seen_blank else logo_raw).append(line.rstrip())
+    # Plain-text variant: strip all escapes, drop the trailing color-palette
+    # blocks (lines of only block characters).
+    def _plain(lines):
+        out = []
+        for line in lines:
+            s = _FF_CSI_RE.sub("", line).rstrip()
+            if not s.strip():
+                continue
+            if re.fullmatch(r"[█▓▒░ ]+", s.strip()):
+                continue
+            out.append(s)
+        return "\n".join(out).strip()
+
+    # Colored variant: same filtering, then ANSI -> HTML per line so a
+    # stray span can never leak across a dropped line.
+    def _colored(lines):
+        out = []
+        for line in lines:
+            if not _FF_CSI_RE.sub("", line).strip():
+                continue
+            if re.fullmatch(r"[█▓▒░ ]+",
+                             _FF_CSI_RE.sub("", line).strip()):
+                continue
+            out.append(ansi_to_html(line.rstrip()))
+        return "\n".join(out).strip()
+
+    logo = _plain(logo_raw)
+    info = _plain(info_raw)
+    output = (logo + "\n\n" + info).strip()
+    if not output:
+        return {"ok": False, "error": "fastfetch produced no output"}
+    html_logo = _colored(logo_raw)
+    html_info = _colored(info_raw)
+    _FASTFETCH_CACHE["ts"] = now
+    _FASTFETCH_CACHE["output"] = output
+    _FASTFETCH_CACHE["logo"] = logo
+    _FASTFETCH_CACHE["info"] = info
+    _FASTFETCH_CACHE["html"] = (html_logo + "\n\n" + html_info).strip()
+    _FASTFETCH_CACHE["html_logo"] = html_logo
+    _FASTFETCH_CACHE["html_info"] = html_info
+    return {"ok": True, "output": output, "logo": logo, "info": info,
+            "html": _FASTFETCH_CACHE["html"],
+            "html_logo": html_logo, "html_info": html_info,
+            "cached": False}
 
 
 def build_system():
@@ -7609,6 +7820,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_blocklists())
         elif path == "/api/system":
             self._send(200, build_system())
+        elif path == "/api/system/fastfetch":
+            self._send(200, build_fastfetch())
         elif path == "/api/system/services":
             try:
                 self._send(200, list_system_services())
@@ -8956,8 +9169,17 @@ def _ensure_unbound_local_actions():
     except Exception:
         pass
 
+_TRAFFIC_CACHE = {"ts": 0, "data": None}
+_TRAFFIC_CACHE_TTL = 5  # seconds; one snapshot shared by all tabs/pollers
+_TRAFFIC_CACHE_LOCK = threading.Lock()
+
+
 def build_traffic_monitor():
     """Return merged, time-sorted traffic events from UFW log + Unbound local-actions."""
+    now = time.time()
+    with _TRAFFIC_CACHE_LOCK:
+        if _TRAFFIC_CACHE["data"] is not None and now - _TRAFFIC_CACHE["ts"] < _TRAFFIC_CACHE_TTL:
+            return _TRAFFIC_CACHE["data"]
     _ensure_unbound_local_actions()
     entries = []
 
@@ -9033,7 +9255,11 @@ def build_traffic_monitor():
     entries.sort(key=lambda x: x["ts"], reverse=True)
     entries = entries[:150]
 
-    return {"ok": True, "entries": entries}
+    result = {"ok": True, "entries": entries}
+    with _TRAFFIC_CACHE_LOCK:
+        _TRAFFIC_CACHE["ts"] = time.time()
+        _TRAFFIC_CACHE["data"] = result
+    return result
 
 
 def build_diagnose(target):

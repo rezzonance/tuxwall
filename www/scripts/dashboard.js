@@ -3,13 +3,15 @@
 
   const REFRESH_MS = 30000;
   const BANDWIDTH_POLL_MS = 5000;
-  const SECURITY_POLL_MS = 5000;
+  const SECURITY_POLL_MS = 15000;
   const WG_POLL_MS = 5000;
   const OV_POLL_MS = 5000;
   const SYSTEM_WINDOW = 600;
 
   const state = {
     leases: [],
+    lastOk: Date.now(),
+    idleWarn: false,
     sortKey: "ip",
     sortDir: 1,
     filter: "",
@@ -193,7 +195,6 @@
     sysHost: document.getElementById("sys-host"),
     sysHostEdit: document.getElementById("sys-host-edit"),
     sysEditKea: document.getElementById("sys-edit-kea"),
-    sysEditUnbound: document.getElementById("sys-edit-unbound"),
     cfgModal: document.getElementById("cfg-modal"),
     cfgModalTitle: document.getElementById("cfg-modal-title"),
     cfgModalText: document.getElementById("cfg-modal-text"),
@@ -263,14 +264,7 @@
     sysPoolsBody: document.querySelector("#sys-pools tbody"),
     sysPoolsNote: document.getElementById("sys-pools-note"),
     sysPoolAdd: document.getElementById("sys-pool-add"),
-    sysDnsIface: document.getElementById("sys-dns-iface"),
-    sysDnsPort: document.getElementById("sys-dns-port"),
-    sysCpuModel: document.getElementById("sys-cpu-model"),
-    sysCpuCores: document.getElementById("sys-cpu-cores"),
-    sysMemDetail: document.getElementById("sys-mem-detail"),
-    sysSwapDetail: document.getElementById("sys-swap-detail"),
-    sysKernel: document.getElementById("sys-kernel"),
-    sysArch: document.getElementById("sys-arch"),
+    sysFfInfo: document.getElementById("sys-ff-info"),
     ovCpu: document.getElementById("ov-cpu"),
     ovMem: document.getElementById("ov-mem"),
     ovDisk: document.getElementById("ov-disk"),
@@ -628,8 +622,33 @@
     const res = await fetch(url, { cache: "no-store", ...opts });
     if (res.status === 401) handleSessionExpired();
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    state.lastOk = Date.now();
     return res.json();
   }
+
+  // ---- Session idle nudge (matches SESSION_IDLE_TIMEOUT server-side) ----
+  const SESSION_IDLE_MS = 2 * 3600 * 1000;
+  const SESSION_WARN_MS = 15 * 60 * 1000;
+  function checkSessionIdle() {
+    if (!state.authed || state.idleWarn || document.hidden) return;
+    if (Date.now() - (state.lastOk || Date.now()) < SESSION_IDLE_MS - SESSION_WARN_MS) return;
+    state.idleWarn = true;
+    els.banner.textContent = "Session idle — expiring soon. Click anywhere to stay signed in.";
+    els.banner.hidden = false;
+  }
+  async function pokeSession() {
+    if (!state.idleWarn) return;
+    try {
+      const r = await fetch("/api/auth/session", { cache: "no-store" });
+      if (r.ok) {
+        state.lastOk = Date.now();
+        state.idleWarn = false;
+        els.banner.hidden = true;
+      }
+    } catch (e) { /* next poll shows login gate if truly expired */ }
+  }
+  ["pointerdown", "keydown"].forEach((ev) => document.addEventListener(ev, pokeSession, { passive: true }));
+  setInterval(checkSessionIdle, 60000);
 
   function showBanner(show, msg) {
     els.banner.hidden = !show;
@@ -2759,13 +2778,14 @@
 
   async function refreshTrafficMonitor() {
     if (tmPaused) return;
+    if (document.hidden) return;
     try {
       const d = await fetchJSON("/api/traffic-monitor");
       if (!d.ok) return;
       tmEntries = d.entries || [];
       renderTrafficMonitor();
       document.getElementById("tm-status").textContent =
-        `Last updated ${new Date().toLocaleTimeString()} · auto-refresh every 5s`;
+        `Last updated ${new Date().toLocaleTimeString()} · auto-refresh every 15s`;
     } catch (e) {
       document.getElementById("tm-status").textContent = "Error fetching traffic data: " + e.message;
     }
@@ -2794,7 +2814,7 @@
 
     refreshTrafficMonitor();
     if (tmInterval) clearInterval(tmInterval);
-    tmInterval = setInterval(refreshTrafficMonitor, 5000);
+    tmInterval = setInterval(refreshTrafficMonitor, 15000);
   }
 
   // ===================== DIAGNOSE TOOL =====================
@@ -3623,16 +3643,22 @@
         <td class="mono">${esc(i.mac || "—")}</td>
         <td class="mono">${(i.addrs || []).map((a) => `${esc(a.addr)}/${a.mask}`).join("<br>") || "—"}</td>
       </tr>`).join("");
+  }
 
-    els.sysDnsIface.textContent = (d.dns.interfaces || []).join(", ") || "—";
-    els.sysDnsPort.textContent = d.dns.port != null ? d.dns.port : "—";
-
-    els.sysCpuModel.textContent = cpu.model || "—";
-    els.sysCpuCores.textContent = cpu.cores ? cpu.cores + (cpu.temp != null ? ` · ${cpu.temp}°C` : "") : "—";
-    els.sysMemDetail.textContent = mem.total ? `${formatBytes(mem.used)} / ${formatBytes(mem.total)}${pct(mem.used, mem.total)}` : "—";
-    els.sysSwapDetail.textContent = swap.total ? `${formatBytes(swap.used)} / ${formatBytes(swap.total)}` : "—";
-    els.sysKernel.textContent = d.kernel || "—";
-    els.sysArch.textContent = d.arch || "—";
+  async function refreshFastfetch() {
+    if (!els.sysFfInfo) return;
+    try {
+      const d = await fetchJSON("/api/system/fastfetch");
+      if (!d.ok) {
+        els.sysFfInfo.textContent = `Error: ${d.error || "fastfetch unavailable"}`;
+      } else if (d.html_info || d.html) {
+        els.sysFfInfo.innerHTML = d.html_info || d.html;
+      } else {
+        els.sysFfInfo.textContent = d.info || d.output;
+      }
+    } catch (err) {
+      els.sysFfInfo.textContent = `Error: ${err.message}`;
+    }
   }
 
   async function refreshSystem() {
@@ -3644,6 +3670,7 @@
     }
     refreshSqm();
     refreshPools();
+    refreshFastfetch();
   }
 
   async function refreshSqm() {
@@ -3928,7 +3955,6 @@
 
     els.sysEditKea.addEventListener("click", () => openCfg("kea", "Edit Kea DHCP config"));
     els.sysPoolAdd.addEventListener("click", () => openPoolForm(null));
-    els.sysEditUnbound.addEventListener("click", openUnboundForm);
     document.getElementById("dhcp-form-close").addEventListener("click", closeDhcpForm);
     document.getElementById("dhcp-form-cancel").addEventListener("click", closeDhcpForm);
     document.getElementById("unbound-form-close").addEventListener("click", closeUnboundForm);

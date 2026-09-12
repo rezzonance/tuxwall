@@ -588,7 +588,7 @@ install_tuxwall_stack() {
         suricata suricata-update
         crowdsec crowdsec-firewall-bouncer-iptables
         nginx
-        python3 curl jq gzip ca-certificates ieee-data python3-maxminddb
+        python3 curl jq gzip ca-certificates ieee-data python3-maxminddb fastfetch
     )
 
     if [[ $DRY_RUN -eq 1 ]]; then

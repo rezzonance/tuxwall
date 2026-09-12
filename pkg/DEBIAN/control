@@ -1,9 +1,9 @@
 Package: tuxwall
-Version: 2.5.7
+Version: 2.5.8
 Section: admin
 Priority: optional
 Architecture: all
-Depends: python3, nginx, unbound, unbound-anchor, kea-dhcp4-server, kea-common, radvd, suricata, suricata-update, wireguard-tools, ufw, iptables, nftables, curl, jq, gzip, ieee-data, iproute2, rsync
+Depends: python3, nginx, unbound, unbound-anchor, kea-dhcp4-server, kea-common, radvd, suricata, suricata-update, wireguard-tools, ufw, iptables, nftables, curl, jq, gzip, ieee-data, iproute2, rsync, fastfetch
 Suggests: crowdsec, crowdsec-firewall-bouncer-iptables, python3-maxminddb
 Maintainer: jeff <jeff@localhost>
 Description: TuxWall Network Firewall Dashboard
@@ -86,5 +86,11 @@ Description: TuxWall Network Firewall Dashboard
  v2.5.7 adds: setup.sh UFW step only adds SSH/HTTP/WireGuard rules when no
  matching rule exists — re-runs no longer re-open a deliberately removed
  WAN-wide rule (e.g. global port 80).
+ .
+ v2.5.8 adds: System page replaces the DNS (Unbound) and CPU/Memory cards
+ with a single System Info card — fastfetch logo plus specs via a new
+ /api/system/fastfetch endpoint (ANSI-to-HTML color conversion, logo left
+ and specs right side-by-side); fastfetch added to Depends and install
+ package lists.
  Served by nginx from /var/www/html, backed by a Python API server running
  as the systemd unit tuxwall.service on port 8008.

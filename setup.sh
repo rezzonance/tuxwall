@@ -42,7 +42,7 @@ apt-get install -y --no-install-recommends \
     suricata suricata-update \
     crowdsec crowdsec-firewall-bouncer-iptables \
     nginx \
-    python3 curl jq gzip ieee-data gnupg \
+    python3 curl jq gzip ieee-data gnupg fastfetch \
     || fail "apt install failed"
 
 # Optional but nice to have
