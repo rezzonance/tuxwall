@@ -1,10 +1,10 @@
 Package: tuxwall
-Version: 2.5.8
+Version: 2.5.9
 Section: admin
 Priority: optional
 Architecture: all
 Depends: python3, nginx, unbound, unbound-anchor, kea-dhcp4-server, kea-common, radvd, suricata, suricata-update, wireguard-tools, ufw, iptables, nftables, curl, jq, gzip, ieee-data, iproute2, rsync, fastfetch
-Suggests: crowdsec, crowdsec-firewall-bouncer-iptables, python3-maxminddb
+Suggests: crowdsec, crowdsec-firewall-bouncer-iptables, python3-maxminddb, speedtest
 Maintainer: jeff <jeff@localhost>
 Description: TuxWall Network Firewall Dashboard
  Modern web dashboard for a home/edge router featuring DHCP lease management,
@@ -92,5 +92,10 @@ Description: TuxWall Network Firewall Dashboard
  /api/system/fastfetch endpoint (ANSI-to-HTML color conversion, logo left
  and specs right side-by-side); fastfetch added to Depends and install
  package lists.
+ .
+ v2.5.9 adds: Ookla speedtest to Suggests — it powers the guided SQM line-
+ speed test but ships neither in the Ubuntu archives nor the TuxWall repo
+ (snap or Ookla's apt repo), so it must stay out of Depends; the dashboard
+ keeps its availability detection with install hint.
  Served by nginx from /var/www/html, backed by a Python API server running
  as the systemd unit tuxwall.service on port 8008.
