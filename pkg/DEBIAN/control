@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.7.0
+Version: 2.7.1
 Section: admin
 Priority: optional
 Architecture: all
@@ -139,5 +139,16 @@ Description: TuxWall Network Firewall Dashboard
  proxy_pass, leaving it reachable unauthenticated from the LAN or VPN;
  it now resolves the real peer via nginx's X-Real-IP. The AI Assistant
  is hidden from non-admins in the UI to match the server-side rule.
+ .
+ v2.7.1 fixes the dashboard returning a blank page over IPv6. The nginx
+ site listens on [fd00:1::1]:80 but its access lists allowed only
+ 127.0.0.1, ::1 and the RFC1918 IPv4 ranges, so any client arriving over
+ IPv6 hit "deny all" and, via error_page 403 =200, received an empty
+ 200 rather than an error. It stayed hidden because bare-IP access is
+ IPv4-only; it appears as soon as the dashboard is reached by a hostname
+ carrying an AAAA record, when browsers prefer IPv6. All four access
+ lists now also allow fd00::/8, covering the fd00:1::/64 LAN and the
+ fd00:2::/64 WireGuard range. fd00::/8 is used deliberately rather than
+ a delegated global prefix, which changes whenever the ISP rotates it.
  Served by nginx from /var/www/html, backed by a Python API server running
  as the systemd unit tuxwall.service on port 8008.
