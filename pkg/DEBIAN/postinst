@@ -97,6 +97,55 @@ EOF
     if ! ufw status 2>/dev/null | grep -q 'Status: active'; then
       ufw --force enable >/dev/null 2>&1 || true
     fi
+    # mDNS reflector firewall: allow UDP 5353 inbound on VPN + RFC1918 LAN
+    # interfaces (never WAN — default deny covers it). Guarded so upgrades
+    # never duplicate rules.
+    for iface in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -Ev '^(lo|ifb.*|docker.*|veth.*)$'); do
+      case "$iface" in
+        wg0) : ;;
+        *) ip addr show "$iface" 2>/dev/null | grep -q 'inet 192\.168\.\|inet 10\.\|inet 172\.\(1[6-9]\|2[0-9]\|3[01]\)\.' || continue ;;
+      esac
+      ip route show default 2>/dev/null | grep -q "dev $iface" && continue
+      ufw status 2>/dev/null | grep -q "5353.* on ${iface}" || \
+        ufw allow in on "$iface" to any port 5353 proto udp comment 'mDNS reflector' >/dev/null 2>&1 || true
+    done
+
+    echo "[6b/9] Configuring Avahi mDNS reflector (Music Assistant discovery)..."
+    # Best-effort: avahi-daemon is a hard Depends, but don't fail upgrades.
+    if [[ -f /etc/avahi/avahi-daemon.conf ]]; then
+      WAN_IF="$(ip route show default 2>/dev/null | awk '{print $5}' | head -n1)"
+      python3 - /etc/avahi/avahi-daemon.conf "${WAN_IF:-}" <<'PY' 2>/dev/null || true
+import re, sys
+path, wan = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")
+with open(path) as f: text = f.read()
+def set_key(text, section, key, value):
+    m = re.search(r'(?m)^\[%s\]\s*$' % re.escape(section), text)
+    assert m, "missing [%s]" % section
+    start = m.end()
+    nxt = re.search(r'(?m)^\[', text[start:])
+    end = start + nxt.start() if nxt else len(text)
+    block = text[start:end]
+    new_line = "%s=%s" % (key, value)
+    if re.search(r'(?m)^#?%s=' % re.escape(key), block):
+        block = re.sub(r'(?m)^#?%s=.*' % re.escape(key), new_line, block, count=1)
+    else:
+        block = block.rstrip("\n") + "\n" + new_line + "\n"
+    return text[:start] + block + text[end:]
+# Remove any stray enable-reflector= outside [reflector] (e.g. [rlimits])
+# left by earlier naive sed edits — avahi refuses to start with those.
+parts = re.split(r'(?m)^(\[.*\])\s*$', text)
+for i in range(2, len(parts), 2):
+    if parts[i-1].strip().lower() != '[reflector]':
+        parts[i] = re.sub(r'(?m)^enable-reflector=.*\n?', '', parts[i])
+text = ''.join(parts)
+text = set_key(text, "reflector", "enable-reflector", "yes")
+if wan:
+    text = set_key(text, "server", "deny-interfaces", wan)
+with open(path, "w") as f: f.write(text)
+PY
+      systemctl enable --now avahi-daemon >/dev/null 2>&1 || true
+      systemctl restart avahi-daemon >/dev/null 2>&1 || true
+    fi
 
     echo "[7/9] Enabling dashboard service and daily blocklist updates..."
     systemctl daemon-reload

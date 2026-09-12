@@ -10,7 +10,6 @@ https://tuxwall.org
 A Linux network dashboard providing a web UI for managing DHCP leases, DNS, firewall rules, VPN (WireGuard), and security — designed to run on a dedicated Linux gateway/router.
 
 > **Note:** TuxWall may not work out of the box. It is a dashboard that sits on top of a carefully assembled stack of Linux networking services. Getting everything working together — especially IPv6 — requires time and patience. This README documents a known-working configuration. I have added a APT package to make installation easier. There are multiple factors that go into configuration of Ubuntu Server to run as a router/firewall, every case will be different depending on your ISP and system hardware, you can try the config generator on tuxwall.org it should get you close. To support the project please share your suggestions and your support is always welcome.
-> 
 
 [![Donate with PayPal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/ncp/payment/GY6799FZ4ZPB2)
 

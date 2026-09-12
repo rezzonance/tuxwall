@@ -500,6 +500,60 @@ setup_geoip() {
     systemctl restart tuxwall 2>/dev/null || true
 }
 
+# ── Configure Avahi/mDNS reflector (Music Assistant, AirPlay, Chromecast) ──
+# mDNS (224.0.0.251:5353/udp, ff02::fb) is link-local: it never crosses the
+# gateway on its own. Avahi with enable-reflector=yes re-announces records
+# between LAN and WireGuard VPN so Home Assistant / Music Assistant can
+# discover players across segments. WAN is explicitly denied so we never
+# leak mDNS to the internet; the firewall (default deny incoming) is the
+# second layer.
+config_avahi() {
+    log "Configuring Avahi mDNS reflector (LAN <-> VPN)"
+    if [[ $DRY_RUN -eq 1 ]]; then
+        echo -e "${DIM}  (dry-run) avahi-daemon: enable-reflector=yes, deny-interfaces=$WAN, allow 5353/udp on $LAN + wg0${NC}"
+        return 0
+    fi
+    command -v avahi-daemon >/dev/null 2>&1 || {
+        warn "avahi-daemon not installed - skipping mDNS (install avahi-daemon to enable)"
+        return 0
+    }
+    local CONF="/etc/avahi/avahi-daemon.conf"
+    [[ -f "$CONF" ]] || { warn "avahi config not found at $CONF"; return 0; }
+    # Section-aware edit (a naive sed would hit the commented key in the
+    # wrong group, e.g. [rlimits], which makes avahi-daemon refuse to start).
+    python3 - "$CONF" "${WAN:-}" <<'PY' 2>/dev/null || true
+import re, sys
+path, wan = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")
+with open(path) as f: text = f.read()
+def set_key(text, section, key, value):
+    m = re.search(r'(?m)^\[%s\]\s*$' % re.escape(section), text)
+    assert m, "missing [%s]" % section
+    start = m.end()
+    nxt = re.search(r'(?m)^\[', text[start:])
+    end = start + nxt.start() if nxt else len(text)
+    block = text[start:end]
+    new_line = "%s=%s" % (key, value)
+    if re.search(r'(?m)^#?%s=' % re.escape(key), block):
+        block = re.sub(r'(?m)^#?%s=.*' % re.escape(key), new_line, block, count=1)
+    else:
+        block = block.rstrip("\n") + "\n" + new_line + "\n"
+    return text[:start] + block + text[end:]
+text = set_key(text, "reflector", "enable-reflector", "yes")
+if wan:
+    text = set_key(text, "server", "deny-interfaces", wan)
+with open(path, "w") as f: f.write(text)
+PY
+    # Firewall: let LAN + VPN reach the reflector (gateway INPUT).
+    for iface in "$LAN" wg0; do
+        [[ -n "$iface" ]] || continue
+        ip link show "$iface" >/dev/null 2>&1 || continue
+        ufw allow in on "$iface" to any port 5353 proto udp comment 'mDNS reflector' 2>/dev/null || true
+    done
+    systemctl enable --now avahi-daemon 2>/dev/null || \
+        warn "could not enable avahi-daemon"
+    systemctl restart avahi-daemon 2>/dev/null || true
+}
+
 # ── Configure UFW: NAT + forwarding + allow services ────────────────────────
 config_ufw() {
     log "Configuring UFW default forwarding policy + NAT"
@@ -585,6 +639,7 @@ install_tuxwall_stack() {
         unbound unbound-anchor dns-root-data
         radvd
         wireguard wireguard-tools
+        avahi-daemon
         suricata suricata-update
         crowdsec crowdsec-firewall-bouncer-iptables
         nginx
@@ -717,6 +772,7 @@ run_firstboot() {
     config_suricata
     setup_geoip
     config_ufw
+    config_avahi
 
     # 5. Install the .deb if present in the stage dir
     if [[ -f "$STAGE_DEB" ]]; then

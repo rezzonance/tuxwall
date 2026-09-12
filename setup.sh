@@ -39,6 +39,7 @@ apt-get install -y --no-install-recommends \
     unbound unbound-anchor \
     radvd \
     wireguard wireguard-tools \
+    avahi-daemon \
     suricata suricata-update \
     crowdsec crowdsec-firewall-bouncer-iptables \
     nginx \
@@ -296,6 +297,59 @@ fi
 ok "UFW rules added"
 
 # ============================================================================
+# 11B. AVAHI/mDNS REFLECTOR (Music Assistant, AirPlay, Chromecast)
+# ============================================================================
+# mDNS is link-local; without a reflector Home Assistant on one segment
+# cannot discover players on another (LAN <-> WireGuard VPN). Enable the
+# reflector, deny the WAN interface so mDNS never leaks to the internet,
+# and allow UDP 5353 inbound on LAN/VPN interfaces.
+info "Configuring Avahi mDNS reflector..."
+
+AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
+if [[ -f "$AVAHI_CONF" ]]; then
+    # Section-aware edit (a naive sed would hit the commented key in the
+    # wrong group, e.g. [rlimits], which makes avahi-daemon refuse to start).
+    WAN_IF="$(ip route show default 2>/dev/null | awk '{print $5}' | head -n1)"
+    python3 - "$AVAHI_CONF" "${WAN_IF:-}" <<'PY' 2>/dev/null || warn "avahi config edit failed"
+import re, sys
+path, wan = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")
+with open(path) as f: text = f.read()
+def set_key(text, section, key, value):
+    m = re.search(r'(?m)^\[%s\]\s*$' % re.escape(section), text)
+    assert m, "missing [%s]" % section
+    start = m.end()
+    nxt = re.search(r'(?m)^\[', text[start:])
+    end = start + nxt.start() if nxt else len(text)
+    block = text[start:end]
+    new_line = "%s=%s" % (key, value)
+    if re.search(r'(?m)^#?%s=' % re.escape(key), block):
+        block = re.sub(r'(?m)^#?%s=.*' % re.escape(key), new_line, block, count=1)
+    else:
+        block = block.rstrip("\n") + "\n" + new_line + "\n"
+    return text[:start] + block + text[end:]
+text = set_key(text, "reflector", "enable-reflector", "yes")
+if wan:
+    text = set_key(text, "server", "deny-interfaces", wan)
+with open(path, "w") as f: f.write(text)
+PY
+    for iface in wg0; do
+        ip link show "$iface" >/dev/null 2>&1 || continue
+        ufw status 2>/dev/null | grep -q "5353.* on ${iface}" || \
+            ufw allow in on "$iface" to any port 5353 proto udp comment "mDNS reflector" 2>/dev/null || true
+    done
+    # LAN interface(s): allow 5353 explicitly so the rule survives even if a
+    # broad LAN allow is later tightened. Best-effort, never fail setup.
+    for iface in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -Ev '^(lo|wg0|enp5s0|ifb.*|docker.*|veth.*)$' | cut -d@ -f1); do
+        ip addr show "$iface" 2>/dev/null | grep -q 'inet 192\.168\.' || continue
+        ufw status 2>/dev/null | grep -q "5353.* on ${iface}" || \
+            ufw allow in on "$iface" to any port 5353 proto udp comment "mDNS reflector" 2>/dev/null || true
+    done
+    ok "Avahi mDNS reflector configured"
+else
+    warn "avahi-daemon.conf not found - is avahi-daemon installed?"
+fi
+
+# ============================================================================
 # 12. ENABLE AND START SERVICES
 # ============================================================================
 info "Enabling services..."
@@ -305,6 +359,7 @@ for svc in \
     kea-dhcp4-server \
     unbound \
     radvd \
+    avahi-daemon \
     suricata \
     crowdsec \
     nginx \
