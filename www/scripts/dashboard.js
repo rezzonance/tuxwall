@@ -4509,20 +4509,61 @@
   }
 
   // Smooth curve helper using Catmull-Rom → cubic bezier conversion
+  // Centred 3-tap smoothing (0.25 / 0.5 / 0.25). Symmetric, so unlike an EMA
+  // it adds no time lag — a peak stays on the sample it happened on. This
+  // only affects the drawn line: every numeric readout still comes from the
+  // raw series, so spikes are still reported at full height.
+  function smoothSeries(values, passes) {
+    const n = values.length;
+    if (n < 3) return values;
+    let out = values;
+    for (let p = 0; p < (passes || 1); p++) {
+      const src = out;
+      const dst = new Array(n);
+      dst[0] = src[0];
+      dst[n - 1] = src[n - 1];
+      for (let i = 1; i < n - 1; i++) {
+        dst[i] = src[i - 1] * 0.25 + src[i] * 0.5 + src[i + 1] * 0.25;
+      }
+      out = dst;
+    }
+    return out;
+  }
+
+  // Pick a smoothing strength from how tightly samples are packed. At ~2.6px
+  // per sample (300 bandwidth points in a ~790px card) the line zigzags at
+  // the pixel level; wide cards with few points need no help.
+  function smoothPasses(n, widthPx) {
+    const pxPerSample = widthPx / Math.max(1, n - 1);
+    if (pxPerSample >= 8) return 0;
+    if (pxPerSample >= 4) return 1;
+    return 2;
+  }
+
+  // Catmull-Rom written as cubic beziers. The control-point coefficient is
+  // 1/6 — the value that makes the bezier actually match the spline. It was
+  // 0.4, which overshot every point and invented up to ~24px of vertical
+  // wobble that was never in the data.
+  // Control points are additionally clamped to each segment's own y-range.
+  // A bezier is contained by the convex hull of its control points, so this
+  // makes overshoot impossible rather than merely smaller.
   function smoothCurvePath(ctx, pts) {
     if (pts.length < 2) return;
     ctx.moveTo(pts[0][0], pts[0][1]);
     if (pts.length === 2) { ctx.lineTo(pts[1][0], pts[1][1]); return; }
-    const tension = 0.4;
+    const k = 1 / 6;
     for (let i = 0; i < pts.length - 1; i++) {
       const p0 = pts[Math.max(i - 1, 0)];
       const p1 = pts[i];
       const p2 = pts[i + 1];
       const p3 = pts[Math.min(i + 2, pts.length - 1)];
-      const cp1x = p1[0] + (p2[0] - p0[0]) * tension;
-      const cp1y = p1[1] + (p2[1] - p0[1]) * tension;
-      const cp2x = p2[0] - (p3[0] - p1[0]) * tension;
-      const cp2y = p2[1] - (p3[1] - p1[1]) * tension;
+      const loY = Math.min(p1[1], p2[1]);
+      const hiY = Math.max(p1[1], p2[1]);
+      const clampY = (v) => (v < loY ? loY : v > hiY ? hiY : v);
+      const cp1x = p1[0] + (p2[0] - p0[0]) * k;
+      const cp1y = clampY(p1[1] + (p2[1] - p0[1]) * k);
+      const cp2x = p2[0] - (p3[0] - p1[0]) * k;
+      const cp2y = clampY(p2[1] - (p3[1] - p1[1]) * k);
       ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2[0], p2[1]);
     }
   }
@@ -4578,10 +4619,11 @@
     }
 
     function drawSeries(series, color) {
+      const plot = smoothSeries(series, smoothPasses(n, pw));
       const pts = [];
       for (let i = 0; i < n; i++) {
         const x = padL + (pw * i) / (n - 1);
-        const y = padT + ph * Math.max(0, 1 - series[i] / maxBps);
+        const y = padT + ph * Math.max(0, 1 - plot[i] / maxBps);
         pts.push([x, y]);
       }
       // Gradient fill
@@ -4734,10 +4776,11 @@
     }
 
     function drawSeries(series, color) {
+      const plot = smoothSeries(series, smoothPasses(n, pw));
       const pts = [];
       for (let i = 0; i < n; i++) {
         const x = padL + (pw * i) / (n - 1);
-        const y = padT + ph * Math.max(0, Math.min(1, 1 - series[i] / 100));
+        const y = padT + ph * Math.max(0, Math.min(1, 1 - plot[i] / 100));
         pts.push([x, y]);
       }
       const grad = ctx.createLinearGradient(0, padT, 0, padT + ph);

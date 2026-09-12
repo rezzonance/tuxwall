@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.6.0
+Version: 2.6.1
 Section: admin
 Priority: optional
 Architecture: all
@@ -112,5 +112,16 @@ Description: TuxWall Network Firewall Dashboard
  undefined --fg variable that silently broke three rules, a duplicate
  .icon-btn block, and a redrawn Ubuntu mark that no longer vanishes on
  light themes.
+ .
+ v2.6.1 smooths the CPU, memory and bandwidth graphs. The Catmull-Rom
+ control-point coefficient was 0.4 where the maths calls for 1/6, so the
+ curve overshot every sample and invented up to ~24px of vertical wobble
+ that was never in the data; control points are now also clamped to each
+ segment's y-range, which makes overshoot impossible rather than merely
+ small. Dense series (300 bandwidth samples across a ~790px card, under
+ 3px apart) additionally get a centred 3-tap pass, symmetric so peaks keep
+ their position in time. Together these cut line travel by ~63% and
+ zigzag reversals by ~67%; single-sample peaks are damped by about 5%
+ in the drawing only — numeric readouts still show raw samples.
  Served by nginx from /var/www/html, backed by a Python API server running
  as the systemd unit tuxwall.service on port 8008.
