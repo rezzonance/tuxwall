@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.7.2
+Version: 2.7.3
 Section: admin
 Priority: optional
 Architecture: all
@@ -159,6 +159,15 @@ Description: TuxWall Network Firewall Dashboard
  (LAN <-> WireGuard VPN). setup.sh, the first-boot wizard and postinst now
  install avahi-daemon, set enable-reflector=yes under [reflector], deny the
  WAN interface so mDNS never leaks to the internet, and allow UDP 5353
- inbound on LAN/VPN interfaces only. Also: opencode agent gains bounded
- service-control sudo rights (named restarts/reloads, tc, speedtest and
- tuxwall's own scripts — no blanket admin) with matching permission prompts.
+  inbound on LAN/VPN interfaces only. Also: opencode agent gains bounded
+  service-control sudo rights (named restarts/reloads, tc, speedtest and
+  tuxwall's own scripts — no blanket admin) with matching permission prompts.
+  .
+  v2.7.3 fixes the missing Ban/Unban buttons in the Security page's Top
+  Attackers table: the CrowdSec availability and blocklist checks ran at
+  page load while the login gate was still up, so both API calls failed
+  unauthenticated and left the dashboard with CrowdSec marked unavailable —
+  every later re-render then drew an empty Actions cell, making a manual
+  page refresh (with a valid session cookie) the only way to get the
+  buttons back. The ban state is now re-fetched after login and every time
+  the Security view is shown, so the buttons appear on their own.

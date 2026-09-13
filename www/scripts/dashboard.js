@@ -6096,6 +6096,7 @@
         initSecurityMap();
         refreshSecurity();
         refreshSuricata();
+        updateSecBanAvailability();
         initTrafficMonitor();
         initDiagnose();
         setTimeout(() => { if (secMap) secMap.map.invalidateSize(); }, 60);
@@ -8059,6 +8060,7 @@
     refreshFirewall();
     refreshSecurity();
     refreshSuricata();
+    updateSecBanAvailability();
     refreshCrowdsec();
     refreshCustomBlocklist();
     refreshBandwidth();
