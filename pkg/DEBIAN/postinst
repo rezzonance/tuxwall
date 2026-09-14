@@ -182,6 +182,24 @@ PY
     echo "Watch blocklist progress on the Blocklists page, then verify:"
     echo "    dig adnxs.com @<this-host>   (should return NXDOMAIN)"
     echo
+    echo "Guided SQM speedtest (official Ookla tarball, no snap/apt repo)..."
+    # Ookla's packagecloud repo ends at jammy (404 on noble+); the snap is
+    # an unofficial wrapper. Best-effort tarball install; the dashboard
+    # degrades to manual caps with an install hint when absent.
+    SPEEDTEST_SETUP=""
+    for cand in /var/www/html/scripts/install-speedtest.sh \
+                /usr/local/share/tuxwall/scripts/install-speedtest.sh; do
+      [[ -f "$cand" ]] && SPEEDTEST_SETUP="$cand" && break
+    done
+    if command -v speedtest >/dev/null 2>&1; then
+      echo "  speedtest already present ($(speedtest --version 2>/dev/null | head -n1))"
+    elif [[ -n "$SPEEDTEST_SETUP" ]] && bash "$SPEEDTEST_SETUP" >/dev/null 2>&1; then
+      echo "  speedtest installed ($(speedtest --version 2>/dev/null | head -n1))"
+    else
+      echo "  SKIP: speedtest not installed — System > Traffic Shaping shows a hint."
+      echo "        Re-run later: sudo bash /var/www/html/scripts/install-speedtest.sh"
+    fi
+    echo
     echo "Optional extras:"
     echo "  - Security (attack map):   sudo bash /var/www/html/scripts/geoip-setup.sh"
     echo "  - AI threat summaries:     edit /etc/tuxwall/llm.json"

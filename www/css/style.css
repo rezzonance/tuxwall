@@ -767,9 +767,9 @@ body.locked > .layout { display: none; }
   -webkit-backdrop-filter: blur(20px);
 }
 .login-logo {
-  width: 64px; height: 64px; border-radius: 14px;
-  align-self: center; object-fit: cover;
-  border: 1px solid var(--border);
+  width: 220px; height: auto; max-width: 100%; border-radius: 0;
+  align-self: center; object-fit: contain;
+  border: none;
 }
 .login-card h1 { margin: 2px 0 0; font-size: 20px; text-align: center; }
 .login-sub { margin: -4px 0 8px; font-size: 12.5px; text-align: center; }
@@ -3621,4 +3621,22 @@ body.light-theme .btn-danger:hover {
   /* The shimmer sweep sits at translateX(-100%) until its transition runs;
      with transitions off it must not linger as a stray overlay. */
   .btn::before { display: none !important; }
+}
+
+/* TuxWall banner logo (2026-09-14): wide 3:1 banner replaces square icon.
+   #login-heading is kept in the DOM (dashboard.js writes to it) but hidden
+   since the banner already contains the wordmark. */
+#login-heading { display: none; }
+.brand { flex-direction: column; align-items: stretch; gap: 6px; }
+.brand-mark { width: 100%; height: auto; }
+.brand-mark-img { width: 100%; height: auto; object-fit: contain; }
+.brand-text { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.brand-name { order: 2; font-size: 11px; }
+.brand-name .brand-tux, .brand-name .brand-wall { display: none; }
+.brand-version { margin-left: 0; }
+.brand-sub { order: 1; }
+@media (max-width: 760px) {
+  .brand { flex-direction: row; align-items: center; }
+  .brand-mark { width: 140px; flex: none; }
+  .brand-text { display: flex; align-items: center; }
 }

@@ -6230,12 +6230,13 @@ def delete_system_backup(filename):
 SQM_CONF = "/etc/tuxwall/sqm.conf"
 SQM_SCRIPT = "/usr/local/sbin/tuxwall-sqm.sh"
 SQM_DEFAULTS = {"wan": "enp5s0", "ifb": "ifb4wan", "up_mbit": 285, "down_mbit": 1850}
-# Ookla speedtest is NOT in the Ubuntu archives — typically installed via
-# snap (`sudo snap install speedtest`) or Ookla's own apt repo. The guided
-# test degrades to a clear error when it is absent.
+# Ookla speedtest is NOT in the Ubuntu archives, its packagecloud repo ends
+# at jammy (404 on noble+), and the snap is an unofficial wrapper — so
+# setup.sh / postinst auto-install the official tarball. The guided test
+# degrades to a clear error when it is absent.
 SQM_SPEEDTEST_HINT = ("speedtest binary not found — install it for guided "
-                      "tests: `sudo snap install speedtest` or Ookla's apt "
-                      "repo (https://www.speedtest.net/apps/cli)")
+                      "tests: `sudo bash /var/www/html/scripts/install-speedtest.sh` "
+                      "(official Ookla tarball; snap also works)")
 
 
 def sqm_speedtest_available():

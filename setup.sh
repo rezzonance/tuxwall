@@ -52,6 +52,21 @@ apt-get install -y --no-install-recommends python3-maxminddb python3-netifaces 2
 ok "System packages installed"
 
 # ============================================================================
+# 1A. OOKLA SPEEDTEST (guided SQM line test — official tarball, no snap/apt)
+# ============================================================================
+# Ookla's packagecloud repo has no builds past jammy, so script.deb.sh 404s
+# on noble+; the snap is an unofficial wrapper. Fetch the official static
+# tarball instead. Best-effort: dashboard works with manual caps when absent.
+info "Installing Ookla speedtest (official tarball)..."
+if command -v speedtest >/dev/null 2>&1; then
+    ok "speedtest already present ($(speedtest --version 2>/dev/null | head -n1))"
+elif bash "$REPO_DIR/scripts/install-speedtest.sh" 2>/dev/null; then
+    ok "speedtest installed ($(speedtest --version 2>/dev/null | head -n1))"
+else
+    warn "speedtest not installed — guided SQM test will show an install hint"
+fi
+
+# ============================================================================
 # 1B. TUXWALL APT REPO (update track)
 # ============================================================================
 # setup.sh places files directly (no .deb involved), so register the repo for

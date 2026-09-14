@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.7.3
+Version: 2.7.4
 Section: admin
 Priority: optional
 Architecture: all
@@ -169,5 +169,15 @@ Description: TuxWall Network Firewall Dashboard
   unauthenticated and left the dashboard with CrowdSec marked unavailable —
   every later re-render then drew an empty Actions cell, making a manual
   page refresh (with a valid session cookie) the only way to get the
-  buttons back. The ban state is now re-fetched after login and every time
-  the Security view is shown, so the buttons appear on their own.
+ buttons back. The ban state is now re-fetched after login and every time
+ the Security view is shown, so the buttons appear on their own.
+ .
+ v2.7.4 rebrands the dashboard with the new wide TuxWall banner logo on
+ the login page and in the sidebar (redundant text headings hidden since
+ the banner carries the wordmark; status on the left, version on the
+ right underneath). Also: guided SQM speedtest no longer needs the snap
+ or Ookla's apt repo (whose packagecloud builds end at jammy and 404 on
+ noble+) — setup.sh and the .deb postinst now auto-install the official
+ Ookla static tarball via scripts/install-speedtest.sh (best-effort; the
+ dashboard keeps working with manual caps and an install hint when the
+ binary is absent).
