@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.7.4
+Version: 2.7.5
 Section: admin
 Priority: optional
 Architecture: all
@@ -181,3 +181,21 @@ Description: TuxWall Network Firewall Dashboard
  Ookla static tarball via scripts/install-speedtest.sh (best-effort; the
  dashboard keeps working with manual caps and an install hint when the
  binary is absent).
+ .
+ v2.7.5 adds community ban reporting to tuxwall.org. The dashboard now
+ auto-reports every real ban (CrowdSec captures and manual blocklist
+ entries, each tagged with a category) to the public community ban
+ database at tuxwall.org, and the Security page's Top Attackers table
+ replaces its AbuseIPDB lookup with a green "community hits" badge — the
+ aggregate number of events the community has reported for that address,
+ linking to a per-IP report card (geo, ASN, category breakdown and event
+ timeline) on tuxwall.org. Community lookups run once per address with a
+ five-minute cache that survives table redraws, and the collector ingest
+ is delta-based so re-reporting the same IP never double-counts its hits.
+ Bundled with the collector deployment tooling (deploy-collector.sh,
+ tuxwall-collector systemd unit and nginx vhost). Also: the dashboard
+ nginx site no longer heuristic-caches index.html, so asset-version
+ bumps take effect on the first reload instead of relying on a browser
+ hard-refresh, and the deploy script now syncs the stylesheet into the
+ webroot (a previous release updated the repo CSS but never shipped it
+ to /var/www/html).

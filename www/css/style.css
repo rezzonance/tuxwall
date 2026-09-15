@@ -1499,6 +1499,14 @@ body.light-theme .sec-map .leaflet-container { background: #10151b; }
   padding: 4px 8px; font-size: 13px; min-height: 0 !important;
   text-decoration: none;
 }
+.com-badge {
+  display: inline-block; padding: 2px 9px; border-radius: 20px;
+  background: rgba(63, 185, 80, 0.15); color: var(--green);
+  font-size: 12px; font-weight: 600; min-height: 0 !important;
+  text-decoration: none; vertical-align: middle; margin-left: 3px;
+  border: 1px solid rgba(63, 185, 80, 0.35); line-height: 1.5;
+}
+.com-badge:hover { background: rgba(63, 185, 80, 0.25); box-shadow: 0 0 8px rgba(63, 185, 80, 0.25); }
 
 /* ========== IP HOVER CARD ========== */
 .ip-hover-card {

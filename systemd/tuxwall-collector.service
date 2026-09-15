@@ -1,0 +1,19 @@
+[Unit]
+Description=TuxWall community ban collector (tuxwall.org)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/tuxwall-collector/tuxwall-collector.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+# SQLite DB + the shared DB-IP MMDB databases are read from /var/lib/tuxwall.
+ReadWritePaths=/var/lib/tuxwall-collector
+ReadOnlyPaths=/var/lib/tuxwall
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

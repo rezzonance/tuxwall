@@ -1067,6 +1067,25 @@
         </div>
       </div>
 
+      <div class="card card-mt" id="sec-report-card">
+        <div class="card-head">
+          <h2>Community Ban Reporting</h2>
+          <div class="fw-setting-head" style="gap:10px;">
+            <div id="sec-report-detail" class="muted" style="margin-right:8px;"></div>
+            <label class="fw-switch" title="Report banned IPs to tuxwall.org">
+              <input type="checkbox" id="sec-report-enabled">
+              <span class="fw-switch-slider"></span>
+            </label>
+          </div>
+        </div>
+        <p class="muted bl-note">When enabled, every IP you ban (CrowdSec / custom blocklist) is posted to
+          <a href="https://tuxwall.org/bans" target="_blank" rel="noopener">tuxwall.org</a> behind an anonymous
+          per-install key — never your public IP or identity. Your attackers are aggregated into the public
+          <b>Community Bans</b> list with hit counts, ISP, location and severity, and power
+          <b>tuxwall.org/lists/community-bans.txt</b> for your own blocklists. You can also report any attacker
+          manually with the <b>Report</b> button in the Top Attackers table.</p>
+      </div>
+
       <div class="card">
         <div class="card-head">
           <h2>Attack Map</h2>

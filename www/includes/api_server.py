@@ -1605,6 +1605,7 @@ def ban_crowdsec_ip(ip, duration="24h"):
         return {"ok": False, "error": str(exc)}
     if proc.returncode != 0:
         return {"ok": False, "error": (proc.stderr or proc.stdout or "cscli failed").strip()}
+    _spawn_report(ip, "manual crowdsec ban (%s)" % duration, "crowdsec", "other")
     return {
         "ok": True,
         "ip": ip,
@@ -1775,6 +1776,8 @@ def add_custom_blocklist_entry(value):
     if proc.returncode != 0:
         return {"ok": True, "warning": (proc.stderr or proc.stdout or "").strip(),
                 "message": "Added %s to the list, but the CrowdSec ban failed." % entry}
+    if parsed["type"] == "ip":
+        _spawn_report(entry, "added to custom blocklist", "blocklist", "blocklist")
     return {"ok": True, "message": "Added %s to the blocklist (1y ban)." % entry}
 
 
@@ -1804,6 +1807,7 @@ def remove_custom_blocklist_entry(value):
 
 # --- Security / attack map -----------------------------------------------
 GEO_DB_PATH = os.path.join(BLOCKLIST_DIR, "dbip-city-lite.mmdb")
+GEO_ASN_DB_PATH = os.path.join(BLOCKLIST_DIR, "dbip-asn-lite.mmdb")
 GEO_CACHE_FILE = os.path.join(BLOCKLIST_DIR, "geo_cache.json")
 UFW_LOG = "/var/log/ufw.log"
 SECURITY_POLL_INTERVAL = 1.0
@@ -1830,6 +1834,7 @@ class SecurityMonitor:
         self.running = False
         self.thread = None
         self._reader = None
+        self._asn_reader = None
         self._db_checked = False
         self._cache = {}
         self._cache_dirty = False
@@ -1847,6 +1852,11 @@ class SecurityMonitor:
                     self._reader = maxminddb.open_database(GEO_DB_PATH)
                 except Exception:
                     self._reader = None
+                try:
+                    import maxminddb
+                    self._asn_reader = maxminddb.open_database(GEO_ASN_DB_PATH)
+                except Exception:
+                    self._asn_reader = None
             return self._reader
 
     def _load_cache(self):
@@ -1872,7 +1882,8 @@ class SecurityMonitor:
         cached = self._cache.get(ip)
         if cached is not None:
             return cached
-        info = {"country": "", "iso": "", "city": "", "lat": None, "lon": None}
+        info = {"country": "", "iso": "", "city": "", "lat": None, "lon": None,
+                "asn": "", "isp": ""}
         reader = self._ensure_reader()
         if reader is not None:
             try:
@@ -1886,6 +1897,14 @@ class SecurityMonitor:
                     loc = rec.get("location") or {}
                     info["lat"] = loc.get("latitude")
                     info["lon"] = loc.get("longitude")
+            except Exception:
+                pass
+        if self._asn_reader is not None:
+            try:
+                rec = self._asn_reader.get(ip)
+                if isinstance(rec, dict):
+                    info["asn"] = str(rec.get("autonomous_system_number") or "")
+                    info["isp"] = str(rec.get("autonomous_system_organization") or "")
             except Exception:
                 pass
         if not info["iso"]:
@@ -1943,6 +1962,8 @@ class SecurityMonitor:
                 "city": geo["city"],
                 "lat": geo["lat"],
                 "lon": geo["lon"],
+                "asn": geo.get("asn", ""),
+                "isp": geo.get("isp", ""),
                 "ports": {},
             })
             entry["count"] += 1
@@ -2021,7 +2042,9 @@ class SecurityMonitor:
                     "ip": e["ip"], "count": e["count"],
                     "first": e["first"], "last": e["last"],
                     "country": e["country"], "iso": e["iso"], "city": e["city"],
-                    "lat": e["lat"], "lon": e["lon"], "port": top_port,
+                    "lat": e["lat"], "lon": e["lon"],
+                    "asn": e.get("asn", ""), "isp": e.get("isp", ""),
+                    "port": top_port,
                 })
             by_ip.sort(key=lambda x: -x["count"])
             countries = [
@@ -2181,6 +2204,190 @@ def save_llm_conf(body):
     with open(LLM_CONF_PATH, "w") as f:
         json.dump(data, f, indent=2)
     return {"ok": True, "backup": bak if os.path.exists(bak) else None}
+
+
+# --- Community ban reporting (tuxwall.org) --------------------------------
+# When enabled, the dashboard reports every ban (CrowdSec / custom blocklist)
+# to the tuxwall.org collector, which aggregates them into a public community
+# ban list. The per-install key in /etc/tuxwall/reporting.json is what lets
+# the collector count *distinct* reporting installs for severity; the key is
+# only ever sent over HTTPS and hashed server-side (never stored in plaintext).
+REPORTING_CONF_FILE = "/etc/tuxwall/reporting.json"
+REPORTING_DEFAULT_URL = "https://tuxwall.org/report"
+REPORTING_TIMEOUT = 10
+_report_status_lock = threading.Lock()
+
+
+def load_reporting_conf():
+    conf = {
+        "enabled": False,
+        "url": REPORTING_DEFAULT_URL,
+        "key": "",
+        "last_report": None,
+        "last_error": None,
+    }
+    try:
+        with open(REPORTING_CONF_FILE, "r") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            conf["enabled"] = bool(data.get("enabled"))
+            url = str(data.get("url") or "").strip().rstrip("/")
+            if url:
+                conf["url"] = url
+            conf["key"] = str(data.get("key") or "")
+            conf["last_report"] = data.get("last_report")
+            conf["last_error"] = data.get("last_error")
+    except (OSError, ValueError):
+        pass
+    return conf
+
+
+def _mask_key(key):
+    if len(key) > 8:
+        return key[:4] + "****" + key[-4:]
+    return "****" if key else ""
+
+
+def get_reporting_conf():
+    c = load_reporting_conf()
+    return {
+        "ok": True,
+        "enabled": c["enabled"],
+        "url": c["url"],
+        "key_masked": _mask_key(c["key"]),
+        "key_set": bool(c["key"]),
+        "last_report": c["last_report"],
+        "last_error": c["last_error"],
+    }
+
+
+def save_reporting_conf(body):
+    enabled = bool(body.get("enabled"))
+    data = load_reporting_conf()
+    url = (body.get("url") or "").strip().rstrip("/") or data["url"]
+    if not url:
+        raise ValueError("Reporting URL is required")
+    if not url.startswith("https://"):
+        raise ValueError("Reporting URL must use HTTPS")
+    if not data["key"]:
+        data["key"] = secrets.token_hex(16)
+    data["enabled"] = enabled
+    data["url"] = url
+    bak = REPORTING_CONF_FILE + ".bak-" + time.strftime("%Y%m%d%H%M%S")
+    try:
+        if os.path.exists(REPORTING_CONF_FILE):
+            shutil.copy2(REPORTING_CONF_FILE, bak)
+    except OSError:
+        pass
+    os.makedirs(os.path.dirname(REPORTING_CONF_FILE), exist_ok=True)
+    with open(REPORTING_CONF_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+    return {"ok": True, "backup": bak if os.path.exists(bak) else None}
+
+
+def _write_report_status(ok, error):
+    """Record the outcome of the last report attempt in the conf file."""
+    try:
+        with _report_status_lock:
+            data = load_reporting_conf()
+            if ok:
+                data["last_report"] = time.time()
+                data["last_error"] = None
+            else:
+                data["last_error"] = (error or "")[:200]
+            with open(REPORTING_CONF_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+    except OSError:
+        pass
+
+
+REPORT_CATEGORIES = ["ssh", "rdp", "bruteforce", "scan", "web", "spam", "dos",
+                     "malware", "manual", "blocklist", "other"]
+
+
+def report_category_for(reason, source):
+    """Structured AbuseIPDB-style category sent with each ban report so the
+    tuxwall.org report card can aggregate abuse types, not just free text."""
+    r = (reason or "").lower()
+    s = (source or "").lower()
+    if "rdp" in r:
+        return "rdp"
+    if "ssh" in r or "sshd" in r:
+        return "ssh"
+    if any(k in r for k in ("brute", "credential", "login", "dictionary",
+                            "password", "hydra")):
+        return "bruteforce"
+    if any(k in r for k in ("scan", "probe", "port ", "sniff", "nmap")):
+        return "scan"
+    if any(k in r for k in ("http", "web", "iis", "apache", "nginx", "sql",
+                            "php", "api", "cve", "exploit", "shell", "admin",
+                            "xmlrpc", "wp-", "joomla")):
+        return "web"
+    if any(k in r for k in ("spam", "smtp", "mail", "phish", "spoof", "pxe",
+                            "jabber", "sip")):
+        return "spam"
+    if any(k in r for k in ("dos", "ddos", "flood", "syn")):
+        return "dos"
+    if any(k in r for k in ("malware", "botnet", "c2 ", "c&c", "cnc", "mirai",
+                            "cobalt", "ddg", "xzfl")):
+        return "malware"
+    if "blocklist" in r or s == "blocklist":
+        return "blocklist"
+    if "manual" in r or s == "manual":
+        return "manual"
+    return "other"
+
+
+def report_ban_to_org(ip, hits=0, reason="", source="", category=""):
+    """Send a ban report to tuxwall.org. Never raises; returns a status dict.
+    run a daemon thread when it outlives the request."""
+    try:
+        conf = load_reporting_conf()
+        if not conf["enabled"] or not conf["key"]:
+            return {"ok": False, "reason": "disabled"}
+        ip = (ip or "").strip()
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return {"ok": False, "reason": "invalid ip"}
+        if not addr.is_global:
+            return {"ok": False, "reason": "non-global"}
+        payload = {
+            "key": conf["key"],
+            "ip": str(addr),
+            "hits": max(0, int(hits or 0)),
+            "reason": (reason or "")[:96],
+            "source": (source or "")[:24] or "tuxwall",
+            "category": (category or report_category_for(reason, source)),
+        }
+        req = urllib.request.Request(
+            conf["url"],
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json",
+                     "User-Agent": "tuxwall-report/1.0"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=REPORTING_TIMEOUT) as resp:
+            parsed = json.loads(resp.read().decode("utf-8") or "{}")
+        ok = bool(parsed.get("ok"))
+        _write_report_status(ok, None if ok else str(parsed))
+        return {"ok": ok}
+    except Exception as exc:
+        _write_report_status(False, str(exc))
+        return {"ok": False, "reason": str(exc)}
+
+
+def _spawn_report(ip, reason, source, category=""):
+    """Fire a ban report in a daemon thread so the ban endpoint stays fast."""
+    try:
+        mon = get_security_monitor()
+        hits = int((mon.by_ip.get(ip) or {}).get("count") or 0)
+    except Exception:
+        hits = 0
+    threading.Thread(
+        target=lambda: report_ban_to_org(ip, hits, reason, source, category),
+        daemon=True,
+    ).start()
 
 
 # --- Suricata IDS ----------------------------------------------------------
@@ -7751,6 +7958,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, llm_model_list())
         elif path == "/api/security/ai-config":
             self._send(200, get_llm_conf())
+        elif path == "/api/security/reporting":
+            self._send(200, get_reporting_conf())
         elif path == "/api/security/ai-summary":
             qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             model = (qs.get("model") or [None])[0]
@@ -8488,6 +8697,38 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, remove_custom_blocklist_entry(body.get("entry")))
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/security/reporting":
+            try:
+                self._send(200, save_reporting_conf(body))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/security/report":
+            ip = (body.get("ip") or "").strip()
+            try:
+                addr = ipaddress.ip_address(ip)
+            except ValueError:
+                self._send(400, {"ok": False, "error": "Invalid IP: %r" % ip})
+                return
+            if not addr.is_global:
+                self._send(400, {"ok": False, "error": "Refusing to report non-global IP %s." % ip})
+                return
+            hits = int(body.get("hits") or 0)
+            conf = load_reporting_conf()
+            if not conf["enabled"] or not conf["key"]:
+                self._send(400, {"ok": False,
+                                 "error": "Community ban reporting is not enabled."})
+                return
+            result = report_ban_to_org(ip, max(0, hits), "manual report", "manual", "manual")
+            if result.get("ok"):
+                self._send(200, {"ok": True})
+            else:
+                self._send(502, {"ok": False,
+                                 "error": result.get("reason") or "Report failed"})
+            return
 
         elif path == "/api/domains/add":
             try:
