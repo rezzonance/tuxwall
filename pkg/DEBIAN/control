@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.7.7
+Version: 2.7.8
 Section: admin
 Priority: optional
 Architecture: all
@@ -236,3 +236,19 @@ Description: TuxWall Network Firewall Dashboard
  tooling (not shipped in this package) for loopback-only, key-gated admin
  endpoints to list and purge community bans — the removal path for
  mistakenly reported IPs.
+ .
+ v2.7.8 adds UFW drop evidence to ban reports when Suricata has no
+ signature. Suricata only alerts on what a signature describes — a
+ well-formed SYN to a closed port matches nothing, and that is most of
+ what a home firewall actually receives, so the v2.7.7 signature
+ enrichment stayed silent for nearly every real attacker (observed
+ here: zero alerts for all nine community-banned IPs while the eve log
+ held 229k LAN-noise alerts). When no signature evidence exists, the
+ report now falls back to the UFW drop record — the log that provably
+ sees these attacks: the drop pattern is summarised into the report
+ reason ("port scan: 29 ports probed (top: 5800, 5900, ...)" or
+ "telnet probe: 150 packets to port 23") and the category maps off that
+ text, so the tuxwall.org report card shows the observed abuse type for
+ plain scans and probes too. Suricata keeps priority when it does have
+ evidence; the firewall packet count also fills in for hits when the
+ security monitor's window has no entry for the IP.
