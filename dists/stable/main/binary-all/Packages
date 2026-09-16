@@ -1,17 +1,17 @@
 Package: tuxwall
 Architecture: all
-Version: 2.7.7
+Version: 2.7.8
 Priority: optional
 Section: admin
 Maintainer: jeff <jeff@localhost>
 Depends: python3, nginx, unbound, unbound-anchor, kea-dhcp4-server, kea-common, radvd, avahi-daemon, suricata, suricata-update, wireguard-tools, ufw, iptables, nftables, curl, jq, gzip, ieee-data, iproute2, rsync, fastfetch
 Suggests: crowdsec, crowdsec-firewall-bouncer-iptables, python3-maxminddb, speedtest
-Filename: pool/main/t/tuxwall/tuxwall_2.7.7_all.deb
-Size: 3331748
-MD5sum: 2806d812300979f54a2db3a20297b5ec
-SHA1: e1399cbb39b993a3d2d1873cc67cdd863fb7b70f
-SHA256: ad79f04d2e2cd507715c230185e4d1c6f8ed1b2eae2245028b374e909c995396
-SHA512: 3e431b713ad189ca78f30e47ace325d2c3b0c7cd5f2ce6c1661da69d8d4a3adc7a21d18ae156e4592d6f24e401483f60c4e8a6d81060089e8a9b503fafa960df
+Filename: pool/main/t/tuxwall/tuxwall_2.7.8_all.deb
+Size: 3333328
+MD5sum: 5a6d75f81e9efee3820c1ac082b3f6ed
+SHA1: 65858daebf6b535667faff86514754826586d015
+SHA256: 68979aebdf671a6dfbb50866e4132ae3b53fba4726d1832c74d4af3647c90ef6
+SHA512: 553391bfe6f24c7e140f2a9b47d020905d53fef97383d11def5fb763356917fb5bcd959a5983a10bdaed31a5a1d7722ad38eb28a2ae0ad2fbd4c019cc7571dd4
 Description: TuxWall Network Firewall Dashboard
  Modern web dashboard for a home/edge router featuring DHCP lease management,
  Unbound DNS and blocklist control, UFW firewall rules, WireGuard VPN status,
@@ -242,3 +242,19 @@ Description: TuxWall Network Firewall Dashboard
  tooling (not shipped in this package) for loopback-only, key-gated admin
  endpoints to list and purge community bans — the removal path for
  mistakenly reported IPs.
+ .
+ v2.7.8 adds UFW drop evidence to ban reports when Suricata has no
+ signature. Suricata only alerts on what a signature describes — a
+ well-formed SYN to a closed port matches nothing, and that is most of
+ what a home firewall actually receives, so the v2.7.7 signature
+ enrichment stayed silent for nearly every real attacker (observed
+ here: zero alerts for all nine community-banned IPs while the eve log
+ held 229k LAN-noise alerts). When no signature evidence exists, the
+ report now falls back to the UFW drop record — the log that provably
+ sees these attacks: the drop pattern is summarised into the report
+ reason ("port scan: 29 ports probed (top: 5800, 5900, ...)" or
+ "telnet probe: 150 packets to port 23") and the category maps off that
+ text, so the tuxwall.org report card shows the observed abuse type for
+ plain scans and probes too. Suricata keeps priority when it does have
+ evidence; the firewall packet count also fills in for hits when the
+ security monitor's window has no entry for the IP.
