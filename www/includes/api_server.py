@@ -2403,24 +2403,44 @@ def report_ban_to_org(ip, hits=0, reason="", source="", category="",
 def _spawn_report(ip, reason, source, category=""):
     """Fire a ban report in a daemon thread so the ban endpoint stays fast.
 
-    If Suricata has real (non-informational) alerts for this IP, its verdict
-    replaces the caller's category and the top matching signature is appended
-    to the reason, so the tuxwall.org report card reflects the observed abuse
-    type instead of how the IP happened to be banned locally.
+    Evidence is attached so the tuxwall.org report card reflects the observed
+    abuse type instead of how the IP happened to be banned locally:
+      1. Suricata first — its verdict replaces the category and the top
+         matching signature is appended to the reason.
+      2. Otherwise the UFW drop record — the pattern that actually reached
+         the firewall (port scan, service probe) becomes the category and
+         is appended to the reason.
     """
     try:
         sur_cat, sur_sig = suricata_evidence_for_ip(ip)
     except Exception:
         sur_cat, sur_sig = ("", "")
+    ev_cat, suffix, ufw_ev = "", "", None
+    if sur_cat:
+        if sur_sig:
+            suffix = " — suricata: %s" % sur_sig[:60]
+    else:
+        # No signature evidence (typical: bare SYNs to closed ports match no
+        # rule) — describe the drop pattern the firewall itself recorded.
+        try:
+            ufw_ev = ufw_evidence_for_ip(ip)
+            phrase = ufw_evidence_phrase(ufw_ev)
+            mapped = report_category_for(phrase, "") if phrase else ""
+        except Exception:
+            ufw_ev, phrase, mapped = None, "", ""
+        if phrase:
+            ev_cat = mapped if mapped and mapped != "other" else ""
+            suffix = " — %s" % phrase
+    if suffix:
+        # Keep the evidence inside the collector's 96-char reason cap:
+        # trim the suffix first, then the base reason.
+        if len(reason) + len(suffix) > 96:
+            reason = reason[:max(20, 96 - len(suffix))]
+        reason = (reason + suffix)[:96]
     if sur_cat:
         category = sur_cat
-        if sur_sig:
-            # Keep the Suricata evidence inside the collector's 96-char
-            # reason cap: trim the signature first, then the base reason.
-            suffix = " — suricata: %s" % sur_sig[:60]
-            if len(reason) + len(suffix) > 96:
-                reason = reason[:max(20, 96 - len(suffix))]
-            reason = (reason + suffix)[:96]
+    elif ev_cat:
+        category = ev_cat
     try:
         sur_alerts = suricata_alerts_for_ip(ip)
     except Exception:
@@ -2430,6 +2450,10 @@ def _spawn_report(ip, reason, source, category=""):
         hits = int((mon.by_ip.get(ip) or {}).get("count") or 0)
     except Exception:
         hits = 0
+    if not hits and ufw_ev:
+        # Monitor window missed the IP (e.g. log rotated) — the firewall's
+        # own drop count is a fair stand-in.
+        hits = ufw_ev["packets"]
     threading.Thread(
         target=lambda: report_ban_to_org(ip, hits, reason, source, category,
                                          sur_alerts),
@@ -2640,6 +2664,90 @@ def suricata_alerts_for_ip(ip, window=SURICATA_WINDOW):
             entry["ts"] = ts
     return sorted(agg.values(),
                   key=lambda e: (-e["count"], -e["ts"]))[:5]
+
+
+# --- UFW evidence for ban reports -------------------------------------------
+# Suricata only sees what a signature describes — a well-formed SYN to a closed
+# port matches nothing, which is most of what a home firewall actually gets.
+# The UFW drop log is the record that sees those attackers, so when there is no
+# Suricata evidence the ban report falls back to it: the drop pattern is
+# summarised into the reason ("port scan: 14 ports probed", "telnet probe: 26
+# packets to port 23") and the category maps off that text.
+
+UFW_EVIDENCE_WINDOW = 7 * 86400
+_UFW_SRC_RE = re.compile(r"SRC=(\S+)")
+_UFW_DPT_RE = re.compile(r"DPT=(\d+)")
+_UFW_TS_RE = re.compile(r"^(\S+)")
+
+# Well-known ports worth naming in the evidence phrase.
+_UFW_PORT_NAMES = {
+    21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns",
+    80: "http", 110: "pop3", 143: "imap", 443: "https", 445: "smb",
+    1433: "mssql", 3306: "mysql", 3389: "rdp", 5432: "postgres",
+    5900: "vnc", 6379: "redis", 8080: "http-alt", 8443: "https-alt",
+}
+
+
+def ufw_evidence_for_ip(ip, window=UFW_EVIDENCE_WINDOW):
+    """This IP's firewall-drop record from the live UFW log.
+
+    Returns None when the log is unreadable, else a dict with the packet
+    count, per-port counts (sorted busiest first) and first/last drop
+    timestamps. Reads the current log file only — rotated files fall
+    outside the evidence window anyway.
+    """
+    ports = {}
+    total = 0
+    first = None
+    last = None
+    cutoff = time.time() - window
+    try:
+        with open(UFW_LOG, "r", errors="replace") as f:
+            for line in f:
+                if ("SRC=%s " % ip) not in line:
+                    continue
+                m = _UFW_TS_RE.match(line)
+                if m:
+                    ts = _parse_iso(m.group(1))
+                    if ts and ts >= cutoff:
+                        if first is None or ts < first:
+                            first = ts
+                        if last is None or ts > last:
+                            last = ts
+                total += 1
+                d = _UFW_DPT_RE.search(line)
+                if d:
+                    p = int(d.group(1))
+                    ports[p] = ports.get(p, 0) + 1
+    except OSError:
+        return None
+    if not total:
+        return None
+    return {
+        "packets": total,
+        "ports": sorted(ports.items(), key=lambda kv: (-kv[1], kv[0])),
+        "first": first,
+        "last": last,
+    }
+
+
+def ufw_evidence_phrase(ev):
+    """Human phrase for the drop pattern: scan, service probe, or nothing."""
+    if not ev:
+        return ""
+    ports = ev["ports"]
+    if len(ports) >= 3:
+        top = ", ".join(str(p) for p, _ in ports[:4])
+        return "port scan: %d ports probed (top: %s)" % (len(ports), top)
+    if len(ports) == 1:
+        p, n = ports[0]
+        name = _UFW_PORT_NAMES.get(p)
+        what = "%s probe" % name if name else "probe"
+        return "%s: %d packets to port %d" % (what, n, p)
+    if len(ports) == 2:
+        (p1, n1), (p2, n2) = ports
+        return "probe: %d + %d packets to ports %d, %d" % (n1, n2, p1, p2)
+    return "%d packets dropped (no TCP/UDP ports)" % ev["packets"]
 
 
 def _collect_security_facts():
