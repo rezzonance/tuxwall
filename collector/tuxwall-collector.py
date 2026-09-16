@@ -4,7 +4,8 @@
 Receives ban reports from TuxWall firewall installs, aggregates them in
 SQLite, enriches them with geo/ASN data, and serves:
 
-  POST /report                   - ingest {key, ip, hits, reason, source}
+  POST /report                   - ingest {key, ip, hits, reason, source,
+                                   category?, suricata?: [{sig, count, sid}]}
   GET  /healthz                  - liveness probe
   GET  /api/public/bans          - JSON list of aggregated bans
   GET  /api/admin/bans           - loopback-only admin listing (X-Admin-Key)
@@ -206,6 +207,14 @@ CREATE TABLE IF NOT EXISTS report_events (
     hits INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_report_events_ip_ts ON report_events(ip, ts);
+CREATE TABLE IF NOT EXISTS suricata_evidence (
+    ip TEXT NOT NULL,
+    sig TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 1,
+    last_ts REAL NOT NULL,
+    PRIMARY KEY (ip, sig)
+);
+CREATE INDEX IF NOT EXISTS idx_suricata_evidence_ip ON suricata_evidence(ip);
 """
 
 
@@ -231,8 +240,14 @@ class Store:
             self._conn.executescript(SCHEMA)
             self._conn.commit()
 
-    def ingest(self, reporter, ip, hits, reason, source, category, now):
-        """Record a report. Returns "ok", "duplicate", or "error"."""
+    def ingest(self, reporter, ip, hits, reason, source, category, now,
+               suricata=None):
+        """Record a report. Returns "ok", "duplicate", or "error".
+
+        suricata: optional list of {sig, count, sid} — meaningful Suricata
+        alerts the reporter observed from this IP. Upserted per signature;
+        count keeps the max so re-reports can't inflate it.
+        """
         geo = GEO.enrich(ip)
         with self.lock:
             cur = self._conn.execute(
@@ -294,6 +309,21 @@ class Store:
                 "INSERT INTO report_events (ip, reporter, ts, category, source, hits)"
                 " VALUES (?,?,?,?,?,?)",
                 (ip, reporter, now, category, source, add_hits))
+            for item in (suricata or []):
+                sig = str(item.get("sig") or "").strip()[:120]
+                if not sig:
+                    continue
+                try:
+                    cnt = max(1, min(MAX_HITS, int(item.get("count") or 1)))
+                except (TypeError, ValueError):
+                    cnt = 1
+                self._conn.execute(
+                    "INSERT INTO suricata_evidence (ip, sig, count, last_ts)"
+                    " VALUES (?,?,?,?)"
+                    " ON CONFLICT(ip, sig) DO UPDATE SET"
+                    " count = MAX(count, excluded.count),"
+                    " last_ts = excluded.last_ts",
+                    (ip, sig, cnt, now))
             self._conn.commit()
         return "ok"
 
@@ -303,6 +333,8 @@ class Store:
             self._conn.execute("DELETE FROM reports WHERE last_seen < ?", (cutoff,))
             self._conn.execute(
                 "DELETE FROM report_reports WHERE last_seen < ?", (cutoff,))
+            self._conn.execute(
+                "DELETE FROM suricata_evidence WHERE last_ts < ?", (cutoff,))
             self._conn.commit()
 
     def remove_ip(self, ip):
@@ -310,7 +342,8 @@ class Store:
         counts per table so the caller can tell a hit from a no-op."""
         with self.lock:
             counts = {}
-            for table in ("reports", "report_reports", "report_events"):
+            for table in ("reports", "report_reports", "report_events",
+                          "suricata_evidence"):
                 cur = self._conn.execute(f"DELETE FROM {table} WHERE ip=?", (ip,))
                 counts[table] = cur.rowcount if cur.rowcount >= 0 else 0
             self._conn.commit()
@@ -404,11 +437,17 @@ class Store:
             "city": city,
             "isp": isp,
             "asn": asn,
-            "severity": severity_for(hits, reporters),
             "last_reason": last_reason,
             "last_source": last_source,
+            "severity": severity_for(hits, reporters),
             "categories": {c: {"hits": h, "reports": n} for c, h, n in cats},
             "sources": {s: n for s, n in srcs},
+            "suricata": [
+                {"sig": sg, "count": c, "last_ts": t}
+                for sg, c, t in self._conn.execute(
+                    "SELECT sig, count, last_ts FROM suricata_evidence"
+                    " WHERE ip=? ORDER BY count DESC, last_ts DESC LIMIT 10",
+                    (ip,)).fetchall()],
             "events": [{
                 "reporter": r, "ts": t, "category": c, "source": s, "hits": h,
             } for r, t, c, s, h in events],
@@ -653,13 +692,35 @@ class Handler(BaseHTTPRequestHandler):
         raw_cat = str(body.get("category") or "").strip().lower()
         category = raw_cat if raw_cat in CATEGORIES else category_for(reason, source)
 
+        # Optional Suricata evidence from the reporter's IDS: top signatures
+        # observed from this IP. Bounded — anything malformed is dropped.
+        suricata = []
+        raw_sur = body.get("suricata")
+        if isinstance(raw_sur, list):
+            for item in raw_sur[:5]:
+                if not isinstance(item, dict):
+                    continue
+                sig = str(item.get("sig") or "").strip()[:120]
+                if not sig:
+                    continue
+                try:
+                    cnt = max(1, min(MAX_HITS, int(item.get("count") or 1)))
+                except (TypeError, ValueError):
+                    cnt = 1
+                try:
+                    sid = int(item.get("sid") or 0)
+                except (TypeError, ValueError):
+                    sid = 0
+                suricata.append({"sig": sig, "count": cnt, "sid": sid})
+
         reporter = hashlib.sha256(key.encode("utf-8")).hexdigest()
         now = time.time()
         if not RATE.allow(reporter, now):
             self._json(429, {"ok": False, "error": "Rate limit exceeded"})
             return
 
-        result = _store().ingest(reporter, ip, hits, reason, source, category, now)
+        result = _store().ingest(reporter, ip, hits, reason, source, category,
+                                 now, suricata)
 
         global _ingest_count
         _ingest_count += 1
@@ -825,6 +886,21 @@ def render_ip_page(ip):
         "<div class='kv'><span class='k'>Source</span><span class='v'>%s</span></div>" % (
             _esc(d["last_source"] or "tuxwall"))
 
+    # Suricata signatures reported by participating installs (their IDS
+    # alerts observed from this IP). Absent when no install had evidence.
+    sur_rows = "".join(
+        "<div class='kv'><span class='k mono'>%s</span>"
+        "<span class='v'>%s alert%s</span></div>"
+        % (_esc(s["sig"]), fmt_num(s["count"]), "s" if s["count"] != 1 else "")
+        for s in (d.get("suricata") or []))
+    sur_card = ""
+    if sur_rows:
+        sur_card = ("<div class='detail-card' style='margin-bottom:2rem;'>"
+                    "<h3>Suricata signatures observed</h3>%s"
+                    "<p class='muted' style='font-size:0.72rem;margin:0.6rem 0 0;'>"
+                    "IDS signatures seen by reporting TuxWall installs."
+                    "</p></div>" % sur_rows)
+
     rows = []
     for e in d["events"]:
         when = datetime.fromtimestamp(e["ts"], timezone.utc).strftime("%Y-%m-%d %H:%M")
@@ -858,6 +934,7 @@ def render_ip_page(ip):
         "</div>"
         "<div class='detail-card' style='margin-bottom:2rem;'>"
         "<h3>Reporting sources</h3>__SOURCES__</div>"
+        "__SURICATA__"
         "<div class='table-wrap'><table class='deps-table'>"
         "<thead><tr><th>Time (UTC)</th><th>Install</th><th>Severity</th>"
         "<th>Category</th><th>Hits</th></tr></thead>"
@@ -879,6 +956,7 @@ def render_ip_page(ip):
             .replace("__VERDICT__", verdict)
             .replace("__CATS__", cat_rows)
             .replace("__SOURCES__", srcs)
+            .replace("__SURICATA__", sur_card)
             .replace("__ROWS__", events)
             .replace("__PAGE_CSS__", PAGE_CSS))
 

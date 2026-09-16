@@ -2338,7 +2338,8 @@ def report_category_for(reason, source):
     return "other"
 
 
-def report_ban_to_org(ip, hits=0, reason="", source="", category=""):
+def report_ban_to_org(ip, hits=0, reason="", source="", category="",
+                      suricata=None):
     """Send a ban report to tuxwall.org. Never raises; returns a status dict.
     run a daemon thread when it outlives the request."""
     try:
@@ -2360,6 +2361,28 @@ def report_ban_to_org(ip, hits=0, reason="", source="", category=""):
             "source": (source or "")[:24] or "tuxwall",
             "category": (category or report_category_for(reason, source)),
         }
+        # Suricata signatures observed from this IP (top 5, sanitized) —
+        # rendered on the tuxwall.org report card. Bounded so a hostile or
+        # buggy caller can't inflate the ingest payload.
+        if isinstance(suricata, list):
+            clean = []
+            for item in suricata[:5]:
+                if not isinstance(item, dict):
+                    continue
+                sig = str(item.get("sig") or "").strip()[:120]
+                if not sig:
+                    continue
+                try:
+                    count = max(1, min(1000000, int(item.get("count") or 1)))
+                except (TypeError, ValueError):
+                    count = 1
+                try:
+                    sid = int(item.get("sid") or 0)
+                except (TypeError, ValueError):
+                    sid = 0
+                clean.append({"sig": sig, "count": count, "sid": sid})
+            if clean:
+                payload["suricata"] = clean
         req = urllib.request.Request(
             conf["url"],
             data=json.dumps(payload).encode("utf-8"),
@@ -2399,12 +2422,17 @@ def _spawn_report(ip, reason, source, category=""):
                 reason = reason[:max(20, 96 - len(suffix))]
             reason = (reason + suffix)[:96]
     try:
+        sur_alerts = suricata_alerts_for_ip(ip)
+    except Exception:
+        sur_alerts = []
+    try:
         mon = get_security_monitor()
         hits = int((mon.by_ip.get(ip) or {}).get("count") or 0)
     except Exception:
         hits = 0
     threading.Thread(
-        target=lambda: report_ban_to_org(ip, hits, reason, source, category),
+        target=lambda: report_ban_to_org(ip, hits, reason, source, category,
+                                         sur_alerts),
         daemon=True,
     ).start()
 
@@ -2563,12 +2591,26 @@ def suricata_evidence_for_ip(ip, window=SURICATA_WINDOW):
     (non-informational) alert for the IP in the window — the caller then
     keeps the category it chose itself.
     """
+    alerts = suricata_alerts_for_ip(ip, window)
+    if not alerts:
+        return ("", "")
+    return (alerts[0]["category"], alerts[0]["sig"])
+
+
+def suricata_alerts_for_ip(ip, window=SURICATA_WINDOW):
+    """Meaningful Suricata alerts from this IP, aggregated by signature.
+
+    Returns a list of {"sig", "sid", "count", "category", "ts"} sorted by
+    alert count (ties: most recent), capped at 5 — the payload sent to
+    tuxwall.org stays small and the report card shows the loudest
+    signatures. Informational/noisy signatures are skipped just as in
+    suricata_evidence_for_ip().
+    """
     lines = _suricata_tail_lines()
     if not lines:
-        return ("", "")
+        return []
     now = time.time()
-    tally = {}
-    latest = {}
+    agg = {}
     for raw in lines:
         try:
             ev = json.loads(raw)
@@ -2588,14 +2630,16 @@ def suricata_evidence_for_ip(ip, window=SURICATA_WINDOW):
         cat = _suricata_alert_category(sig, alert.get("category") or "")
         if not cat:
             continue
-        tally[cat] = tally.get(cat, 0) + 1
-        if ts > latest.get(cat, (0, ""))[0]:
-            latest[cat] = (ts, sig)
-    if not tally:
-        return ("", "")
-    # Most-alerted category wins; ties broken by most recent alert.
-    best = max(tally, key=lambda c: (tally[c], latest[c][0]))
-    return (best, latest[best][1])
+        key = (sig, alert.get("signature_id"))
+        entry = agg.setdefault(key, {
+            "sig": sig[:120], "sid": alert.get("signature_id"),
+            "count": 0, "category": cat, "ts": 0.0,
+        })
+        entry["count"] += 1
+        if ts > entry["ts"]:
+            entry["ts"] = ts
+    return sorted(agg.values(),
+                  key=lambda e: (-e["count"], -e["ts"]))[:5]
 
 
 def _collect_security_facts():
