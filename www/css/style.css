@@ -1499,14 +1499,39 @@ body.light-theme .sec-map .leaflet-container { background: #10151b; }
   padding: 4px 8px; font-size: 13px; min-height: 0 !important;
   text-decoration: none;
 }
+/* Community info button — same shape/size as every other .btn .btn-sm in the
+   UI. Its accent colour is the tuxwall.org community-ban severity for that
+   IP: low (green) → medium (amber) → high (red) → critical (purple).
+   No hit count is rendered, just an info glyph. */
 .com-badge {
-  display: inline-block; padding: 2px 9px; border-radius: 20px;
-  background: rgba(63, 185, 80, 0.15); color: var(--green);
-  font-size: 12px; font-weight: 600; min-height: 0 !important;
-  text-decoration: none; vertical-align: middle; margin-left: 3px;
-  border: 1px solid rgba(63, 185, 80, 0.35); line-height: 1.5;
+  --sev: var(--muted);
+  display: inline-flex; align-items: center; justify-content: center;
+  text-decoration: none; vertical-align: middle; line-height: 1.5;
+  min-height: 0 !important;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--sev) 22%, transparent) 0%, color-mix(in srgb, var(--sev) 10%, transparent) 100%);
+  color: color-mix(in srgb, var(--sev) 35%, #fff);
+  border-color: color-mix(in srgb, var(--sev) 45%, transparent);
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--sev) 20%, transparent),
+              inset 0 1px 0 color-mix(in srgb, var(--sev) 14%, transparent);
 }
-.com-badge:hover { background: rgba(63, 185, 80, 0.25); box-shadow: 0 0 8px rgba(63, 185, 80, 0.25); }
+/* Severity scale — matches severity_for() in tuxwall-collector.py */
+.com-sev-low      { --sev: var(--green); }
+.com-sev-medium   { --sev: var(--amber); }
+.com-sev-high     { --sev: var(--red); }
+.com-sev-critical { --sev: #a371f7; }
+/* Not reported / still loading / API unreachable — neutral, never alarming */
+.com-sev-none,
+.com-sev-pending,
+.com-sev-unknown  { --sev: var(--muted); }
+.com-sev-pending  { opacity: 0.65; }
+.com-badge:hover {
+  color: color-mix(in srgb, var(--sev) 20%, #fff);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--sev) 34%, transparent) 0%, color-mix(in srgb, var(--sev) 17%, transparent) 100%);
+  border-color: color-mix(in srgb, var(--sev) 65%, transparent);
+  box-shadow: 0 2px 16px color-mix(in srgb, var(--sev) 38%, transparent),
+              inset 0 1px 0 color-mix(in srgb, var(--sev) 20%, transparent);
+}
+.com-badge .com-badge-icon { font-size: 13px; line-height: 1; font-style: normal; }
 
 /* ========== IP HOVER CARD ========== */
 .ip-hover-card {

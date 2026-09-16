@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.7.5
+Version: 2.7.6
 Section: admin
 Priority: optional
 Architecture: all
@@ -199,3 +199,21 @@ Description: TuxWall Network Firewall Dashboard
  hard-refresh, and the deploy script now syncs the stylesheet into the
  webroot (a previous release updated the repo CSS but never shipped it
  to /var/www/html).
+ .
+ v2.7.6 reworks the Top Attackers community button on the Security page.
+ It was a bespoke green pill showing a shield glyph and the community hit
+ count, matching nothing else in the UI and spending most of its life on a
+ placeholder while the lookup was in flight. It now uses the standard
+ button chrome, shows an info glyph instead of a number, and takes its
+ accent colour from that IP's community severity — low green, medium
+ amber, high red, critical purple — with unreported, loading and
+ API-unreachable states rendering neutral grey so "no data" never reads
+ as "safe". The tuxwall.org lookup is retained (same five-minute cache and
+ in-flight dedupe) but drives colour only, and the severity string is
+ whitelist-checked before it reaches the DOM; tiers come from the
+ collector's own severity_for(), so the dashboard and tuxwall.org cannot
+ disagree. Also bumps the index.html asset-version stamps, which the .deb
+ had never done: postinst ships index.html verbatim, so package upgrades
+ carrying dashboard JS or CSS changes left browsers running the cached
+ previous assets until a manual hard-refresh (setup.sh already stamped
+ them, the package path did not).

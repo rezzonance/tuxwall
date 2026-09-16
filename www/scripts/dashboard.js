@@ -451,7 +451,7 @@
 
   // tuxwall.org community ban lookup state. Lives at module scope so it
   // survives the per-refresh render calls — otherwise every redraw would
-  // clear the cache, re-show "…", and refetch every top-attacker IP.
+  // clear the cache and refetch every top-attacker IP.
   const COMMUNITY_TTL = 5 * 60 * 1000;
   const communityCache = new Map();
   const communityInFlight = new Set();
@@ -2496,23 +2496,34 @@
       </span>`;
     }
 
-    // tuxwall.org community ban lookup — a per-IP badge in place of the old
-    // AbuseIPDB button. Values render instantly from the module-level cache
-    // (5 min TTL); uncached IPs are fetched once and deduped in-flight.
+    // tuxwall.org community info button — links to the per-IP report card.
+    // The API result is used for COLOUR ONLY (no hit count is rendered):
+    // low=green, medium=yellow, high=red, critical=purple. Values come from
+    // the module-level cache (5 min TTL); uncached IPs are fetched once and
+    // deduped in-flight.
+    const COMMUNITY_SEV = ["low", "medium", "high", "critical"];
+
+    function communityTitle(sev) {
+      if (sev === "none")    return "No community reports yet — open tuxwall.org report card";
+      if (sev === "unknown") return "tuxwall.org unreachable — open report card";
+      if (!sev)              return "Checking tuxwall.org community severity…";
+      return `Community severity: ${sev.toUpperCase()} — open tuxwall.org report card`;
+    }
+
     function communityBadge(ip) {
       const safe = esc(ip);
       const cached = communityCache.get(ip);
-      let html = "…";
-      let title = "Checking tuxwall.org…";
-      if (cached && Date.now() - cached.ts < COMMUNITY_TTL) {
-        html = cached.hits ? `⛨ ${formatNumber(cached.hits)}` : "⛨ 0";
-        title = cached.hits
-          ? `${formatNumber(cached.hits)} community hits · ${cached.reporters} install(s) — open tuxwall.org report card`
-          : "No community reports yet — open tuxwall.org report card";
-      } else {
-        communityLookup(ip);
-      }
-      return `<a class="btn btn-sm btn-ghost com-badge" href="https://tuxwall.org/ip/${safe}" target="_blank" rel="noopener" data-cip="${safe}" title="${title}">${html}</a>`;
+      const fresh = cached && Date.now() - cached.ts < COMMUNITY_TTL;
+      const sev = fresh ? cached.sev : "";
+      if (!fresh) communityLookup(ip);
+      return `<a class="btn btn-sm com-badge com-sev-${esc(sev || "pending")}" href="https://tuxwall.org/ip/${safe}" target="_blank" rel="noopener" data-cip="${safe}" title="${esc(communityTitle(sev))}" aria-label="Community info for ${safe}"><i class="com-badge-icon" aria-hidden="true">ℹ</i></a>`;
+    }
+
+    function applyCommunitySev(ip, sev) {
+      document.querySelectorAll(`.com-badge[data-cip="${CSS.escape(ip)}"]`).forEach(el => {
+        el.className = `btn btn-sm com-badge com-sev-${sev}`;
+        el.title = communityTitle(sev);
+      });
     }
 
     function communityLookup(ip) {
@@ -2522,22 +2533,12 @@
             { headers: { "Accept": "application/json" } })
         .then(r => r.ok ? r.json() : { reported: false })
         .then(d => {
-          const hits = d.report ? Math.max(0, parseInt(d.report.hits || 0, 10)) : 0;
-          const reporters = d.report ? Math.max(0, parseInt(d.report.reporters || 0, 10)) : 0;
-          communityCache.set(ip, { ts: Date.now(), hits, reporters });
-          document.querySelectorAll(`.com-badge[data-cip="${CSS.escape(ip)}"]`).forEach(el => {
-            el.textContent = hits ? `⛨ ${formatNumber(hits)}` : "⛨ 0";
-            el.title = hits
-              ? `${formatNumber(hits)} community hits · ${reporters} install(s) — open tuxwall.org report card`
-              : "No community reports yet — open tuxwall.org report card";
-          });
+          const raw = d && d.report ? String(d.report.severity || "").toLowerCase() : "";
+          const sev = COMMUNITY_SEV.includes(raw) ? raw : "none";
+          communityCache.set(ip, { ts: Date.now(), sev });
+          applyCommunitySev(ip, sev);
         })
-        .catch(() => {
-          document.querySelectorAll(`.com-badge[data-cip="${CSS.escape(ip)}"]`).forEach(el => {
-            el.textContent = "⛨ ?";
-            el.title = "tuxwall.org unreachable";
-          });
-        })
+        .catch(() => applyCommunitySev(ip, "unknown"))
         .finally(() => communityInFlight.delete(ip));
     }
 
