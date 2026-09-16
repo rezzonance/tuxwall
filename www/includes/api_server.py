@@ -2378,7 +2378,26 @@ def report_ban_to_org(ip, hits=0, reason="", source="", category=""):
 
 
 def _spawn_report(ip, reason, source, category=""):
-    """Fire a ban report in a daemon thread so the ban endpoint stays fast."""
+    """Fire a ban report in a daemon thread so the ban endpoint stays fast.
+
+    If Suricata has real (non-informational) alerts for this IP, its verdict
+    replaces the caller's category and the top matching signature is appended
+    to the reason, so the tuxwall.org report card reflects the observed abuse
+    type instead of how the IP happened to be banned locally.
+    """
+    try:
+        sur_cat, sur_sig = suricata_evidence_for_ip(ip)
+    except Exception:
+        sur_cat, sur_sig = ("", "")
+    if sur_cat:
+        category = sur_cat
+        if sur_sig:
+            # Keep the Suricata evidence inside the collector's 96-char
+            # reason cap: trim the signature first, then the base reason.
+            suffix = " — suricata: %s" % sur_sig[:60]
+            if len(reason) + len(suffix) > 96:
+                reason = reason[:max(20, 96 - len(suffix))]
+            reason = (reason + suffix)[:96]
     try:
         mon = get_security_monitor()
         hits = int((mon.by_ip.get(ip) or {}).get("count") or 0)
@@ -2488,6 +2507,95 @@ def build_suricata():
         "alerts": alerts[:30],
         "top": top_list[:10],
     }
+
+
+# --- Suricata evidence for ban reports -------------------------------------
+# When a ban is reported to tuxwall.org, enrich the report with what Suricata
+# actually saw from that IP so the community report card carries a real abuse
+# type (bruteforce, scan, ssh, ...) instead of the generic "how it was banned
+# locally" category. Informational/noisy signatures are ignored: they say
+# nothing about the IP's intent and would mislabel benign traffic.
+
+# Signature/category fragments that carry no abuse signal.
+_SURICATA_NOISE = (
+    "et info", "et policy", "suricata ethertype", "excessive header repetition",
+    "misc activity", "generic protocol command decode", "unknown protocol",
+    "applayer", "detect protocol", "tcp window", "reassembly",
+    "microsoft connection test", "github cdn", "dns over https",
+)
+
+# Ordered rules: first keyword hit wins for a given alert. Specific abuse
+# categories come first; "scan" precedes "ssh" so "ET SCAN Potential SSH
+# Scan" is a scan, not an ssh attack, while "SSH Bruteforce" is caught by
+# the earlier bruteforce rule.
+_SURICATA_CAT_RULES = (
+    ("malware", ("malware", "botnet", "trojan", "c&c", "cnc", "backdoor",
+                 "ransomware", "mirai")),
+    ("dos", ("ddos", "dos", "flood")),
+    ("bruteforce", ("brute", "dictionary", "credential", "hydra",
+                    "password guess", "multiple failed login", "bad-auth")),
+    ("rdp", ("rdp", "vnc", "remote desktop")),
+    ("scan", ("scan", "probe", "sweep", "nmap")),
+    ("ssh", ("ssh",)),
+    ("web", ("sql injection", "xss", "lfi", "rfi", "command injection",
+             "web attack", "web-server", "web_server", "file upload",
+             "cve-", "exploit", "shellcode")),
+    ("spam", ("spam", "smtp", "phishing")),
+)
+
+
+def _suricata_alert_category(sig, cat):
+    text = ("%s %s" % (sig, cat)).lower()
+    for frag in _SURICATA_NOISE:
+        if frag in text:
+            return ""
+    for cat_name, keys in _SURICATA_CAT_RULES:
+        for k in keys:
+            if k in text:
+                return cat_name
+    return ""
+
+
+def suricata_evidence_for_ip(ip, window=SURICATA_WINDOW):
+    """Best abuse category and top signature Suricata saw from this IP.
+
+    Returns (category, signature). ("", "") when Suricata has no meaningful
+    (non-informational) alert for the IP in the window — the caller then
+    keeps the category it chose itself.
+    """
+    lines = _suricata_tail_lines()
+    if not lines:
+        return ("", "")
+    now = time.time()
+    tally = {}
+    latest = {}
+    for raw in lines:
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict) or ev.get("event_type") != "alert":
+            continue
+        if (ev.get("src_ip") or "") != ip:
+            continue
+        alert = ev.get("alert") or {}
+        sig = (alert.get("signature") or "").strip()
+        if not sig:
+            continue
+        ts = _parse_iso(ev.get("timestamp")) or now
+        if now - ts > window:
+            continue
+        cat = _suricata_alert_category(sig, alert.get("category") or "")
+        if not cat:
+            continue
+        tally[cat] = tally.get(cat, 0) + 1
+        if ts > latest.get(cat, (0, ""))[0]:
+            latest[cat] = (ts, sig)
+    if not tally:
+        return ("", "")
+    # Most-alerted category wins; ties broken by most recent alert.
+    best = max(tally, key=lambda c: (tally[c], latest[c][0]))
+    return (best, latest[best][1])
 
 
 def _collect_security_facts():
