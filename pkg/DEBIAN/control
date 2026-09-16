@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.7.6
+Version: 2.7.7
 Section: admin
 Priority: optional
 Architecture: all
@@ -217,3 +217,22 @@ Description: TuxWall Network Firewall Dashboard
  carrying dashboard JS or CSS changes left browsers running the cached
  previous assets until a manual hard-refresh (setup.sh already stamped
  them, the package path did not).
+ .
+ v2.7.7 enriches community ban reports with Suricata evidence. Reports to
+ tuxwall.org previously carried only how an IP was banned locally (manual
+ crowdsec ban -> "other", blocklist add -> "blocklist"), so the community
+ report cards' category breakdown never reflected the observed abuse type.
+ Bans reported now consult the dashboard's Suricata alert tail: the most-
+ alerted abuse category (bruteforce, scan, ssh, web, rdp, dos, malware,
+ spam) replaces the generic one, the top matching signature is appended to
+ the report reason inside the collector's 96-char cap, and the top five
+ signatures with alert counts are attached to the report payload.
+ Informational signatures (ET INFO, ET POLICY, ethertype and protocol-
+ decode noise) are excluded so benign traffic is never mislabelled.
+ The tuxwall.org report cards render a "Suricata signatures observed"
+ card from this evidence, and the per-IP JSON API exposes it; the
+ collector keeps per-signature counts as a max across re-reports so they
+ can never be inflated. Also bundles tuxwall.org collector deployment
+ tooling (not shipped in this package) for loopback-only, key-gated admin
+ endpoints to list and purge community bans — the removal path for
+ mistakenly reported IPs.
