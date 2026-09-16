@@ -1,17 +1,17 @@
 Package: tuxwall
 Architecture: all
-Version: 2.7.5
+Version: 2.7.6
 Priority: optional
 Section: admin
 Maintainer: jeff <jeff@localhost>
 Depends: python3, nginx, unbound, unbound-anchor, kea-dhcp4-server, kea-common, radvd, avahi-daemon, suricata, suricata-update, wireguard-tools, ufw, iptables, nftables, curl, jq, gzip, ieee-data, iproute2, rsync, fastfetch
 Suggests: crowdsec, crowdsec-firewall-bouncer-iptables, python3-maxminddb, speedtest
-Filename: pool/main/t/tuxwall/tuxwall_2.7.5_all.deb
-Size: 3329120
-MD5sum: 4c814187f4fa3ca58810a5852372d75b
-SHA1: f6a1e319cdc75d3d93298e327aefdc8c911fdf5a
-SHA256: 8fb78078132bceec560cac460e780d0a923c75849ea46416c74c6c0c1686b2f1
-SHA512: f56ece17a5b380fbd413244c18322c1488224a8a64b7056803d92e02bf6a2afbc2d40707074636d43fac66140647d7a6140dee7d0b68d420577ad22483026d44
+Filename: pool/main/t/tuxwall/tuxwall_2.7.6_all.deb
+Size: 3329688
+MD5sum: a2d512ded3bcd90647d270ae5c866367
+SHA1: 7183db8fc56e48549f9696a2d2f4b03d4e87bc10
+SHA256: 4945c7a123e98f18bc89d7a496504ea58c54195019f9f387f4ced06c3cb24f7f
+SHA512: 91fe5472817689d701d3bda9e5d334bcbd1545eaf9caac1f97263ee9f63d826eed108ffa087cc2c124b337503dfc324c80bdbd0125554533ab4aa5260f30a6ac
 Description: TuxWall Network Firewall Dashboard
  Modern web dashboard for a home/edge router featuring DHCP lease management,
  Unbound DNS and blocklist control, UFW firewall rules, WireGuard VPN status,
@@ -205,4 +205,21 @@ Description: TuxWall Network Firewall Dashboard
  hard-refresh, and the deploy script now syncs the stylesheet into the
  webroot (a previous release updated the repo CSS but never shipped it
  to /var/www/html).
-
+ .
+ v2.7.6 reworks the Top Attackers community button on the Security page.
+ It was a bespoke green pill showing a shield glyph and the community hit
+ count, matching nothing else in the UI and spending most of its life on a
+ placeholder while the lookup was in flight. It now uses the standard
+ button chrome, shows an info glyph instead of a number, and takes its
+ accent colour from that IP's community severity — low green, medium
+ amber, high red, critical purple — with unreported, loading and
+ API-unreachable states rendering neutral grey so "no data" never reads
+ as "safe". The tuxwall.org lookup is retained (same five-minute cache and
+ in-flight dedupe) but drives colour only, and the severity string is
+ whitelist-checked before it reaches the DOM; tiers come from the
+ collector's own severity_for(), so the dashboard and tuxwall.org cannot
+ disagree. Also bumps the index.html asset-version stamps, which the .deb
+ had never done: postinst ships index.html verbatim, so package upgrades
+ carrying dashboard JS or CSS changes left browsers running the cached
+ previous assets until a manual hard-refresh (setup.sh already stamped
+ them, the package path did not).

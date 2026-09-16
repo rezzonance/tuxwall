@@ -1,32 +1,28 @@
 Architectures: all amd64
 Codename: stable
 Components: main
-Date: Tue, 15 Sep 2026 04:40:33 +0000
+Date: Wed, 16 Sep 2026 03:19:00 GMT
 Description: TuxWall network firewall dashboard
 Label: TuxWall APT Repository
 Origin: TuxWall
 Suite: stable
 MD5Sum:
- a014be944930b2c7c1e735beae4cecf2              205 Release
- 4cc9810c920d43928a0e6f581bfd6283            12788 main/binary-all/Packages
- 0880d6138452b1588e2127bed00234ee             6098 main/binary-all/Packages.gz
- 4cc9810c920d43928a0e6f581bfd6283            12788 main/binary-amd64/Packages
- 0880d6138452b1588e2127bed00234ee             6098 main/binary-amd64/Packages.gz
+ 225a6f96be6c1a21610870e36ea678da      13970 main/binary-all/Packages
+ 6ee8fbf13bda13b8e299536c70ad073e       6556 main/binary-all/Packages.gz
+ 225a6f96be6c1a21610870e36ea678da      13970 main/binary-amd64/Packages
+ 6ee8fbf13bda13b8e299536c70ad073e       6556 main/binary-amd64/Packages.gz
 SHA1:
- af9806b59c88fa7f50b08c4e90e6df49db89bdb5              205 Release
- 0a5365733809becca34fd7fb7b270424f2baf171            12788 main/binary-all/Packages
- c208b00be16943f065a8834559c7496e37509636             6098 main/binary-all/Packages.gz
- 0a5365733809becca34fd7fb7b270424f2baf171            12788 main/binary-amd64/Packages
- c208b00be16943f065a8834559c7496e37509636             6098 main/binary-amd64/Packages.gz
+ b6c86f95d4aa1d8d02bf1aee2467e375bf1bcaaf      13970 main/binary-all/Packages
+ 1ba5ddc74fab84874689d3c0971a06c2c7b46ebe       6556 main/binary-all/Packages.gz
+ b6c86f95d4aa1d8d02bf1aee2467e375bf1bcaaf      13970 main/binary-amd64/Packages
+ 1ba5ddc74fab84874689d3c0971a06c2c7b46ebe       6556 main/binary-amd64/Packages.gz
 SHA256:
- e9c5dc533e8f1514f211e74f87a2b35a0512e2eeb353e132edcd53925e875953              205 Release
- 2dbcd4c538bc19fc6e60101a3d52f62b569df034dd6945c1a509dbc4f544b0d7            12788 main/binary-all/Packages
- 4ec54e903035fb3e09480549f625789034b369ac6858d8fa7a3935395b2ac9e9             6098 main/binary-all/Packages.gz
- 2dbcd4c538bc19fc6e60101a3d52f62b569df034dd6945c1a509dbc4f544b0d7            12788 main/binary-amd64/Packages
- 4ec54e903035fb3e09480549f625789034b369ac6858d8fa7a3935395b2ac9e9             6098 main/binary-amd64/Packages.gz
+ bf7561c042bd03c20f2389d729f651dd1deaac51b5503f5c0b06d0b08f733889      13970 main/binary-all/Packages
+ 15133e38b508d11bd8d997921694d54a62c68fc1f1cfce9d368e274c6432a102       6556 main/binary-all/Packages.gz
+ bf7561c042bd03c20f2389d729f651dd1deaac51b5503f5c0b06d0b08f733889      13970 main/binary-amd64/Packages
+ 15133e38b508d11bd8d997921694d54a62c68fc1f1cfce9d368e274c6432a102       6556 main/binary-amd64/Packages.gz
 SHA512:
- dc152336897fb94c82856a73891f1364f2bc3ea57355e0e058f2bfe6f78e71424f489b494a7809881e4485743b8cd8506b35deaa2417aff1b80f50b02d9dc8cc              205 Release
- d04e690000c7361318c96b92491321f353b7f4cafdccd55a93374d4a05705e2546249d16782a903665578b758b825bbcf7240f89fa58691ba683c23a55043247            12788 main/binary-all/Packages
- f466ee5c162a69a99359bc038eca5333491cc216bfa5f26a3a93daccec3a59c897d299d38eb07d210ec9fe8936573c790317da9d680c701b278184b22a245c4b             6098 main/binary-all/Packages.gz
- d04e690000c7361318c96b92491321f353b7f4cafdccd55a93374d4a05705e2546249d16782a903665578b758b825bbcf7240f89fa58691ba683c23a55043247            12788 main/binary-amd64/Packages
- f466ee5c162a69a99359bc038eca5333491cc216bfa5f26a3a93daccec3a59c897d299d38eb07d210ec9fe8936573c790317da9d680c701b278184b22a245c4b             6098 main/binary-amd64/Packages.gz
+ 2e61763562e3695280548b20692f28c87a39ff488dc913eff904edbddaf1df3dabce6fa19fcbe914b0158dcec962091535c41432f2c4080f0b674226068ccdeb      13970 main/binary-all/Packages
+ 46d0448f3d5e5604cafe305983fb9953fded7fbc6af620ceca8008c13d7c614e898095a7c6c916297352456fd06f5d919b4ac12c6d368305e6bad952d36aa0d0       6556 main/binary-all/Packages.gz
+ 2e61763562e3695280548b20692f28c87a39ff488dc913eff904edbddaf1df3dabce6fa19fcbe914b0158dcec962091535c41432f2c4080f0b674226068ccdeb      13970 main/binary-amd64/Packages
+ 46d0448f3d5e5604cafe305983fb9953fded7fbc6af620ceca8008c13d7c614e898095a7c6c916297352456fd06f5d919b4ac12c6d368305e6bad952d36aa0d0       6556 main/binary-amd64/Packages.gz
