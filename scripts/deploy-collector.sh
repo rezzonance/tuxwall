@@ -21,6 +21,20 @@ SITE="${SITE:-/etc/nginx/sites-available/tuxwall-org}"
 echo "[1/6] Installing collector service..."
 install -d -m 0755 /opt/tuxwall-collector /var/lib/tuxwall-collector
 install -m 0755 "$REPO_DIR/collector/tuxwall-collector.py" /opt/tuxwall-collector/tuxwall-collector.py
+
+# Admin key for the loopback-only /api/admin endpoints (ban removal).
+# Never proxied by nginx. Created once, never overwritten. Group "adm" can
+# read it so the local admin shell can drive deletions without sudo.
+install -d -m 0750 -g adm /etc/tuxwall-collector
+if [[ ! -s /etc/tuxwall-collector/admin.key ]]; then
+  ( umask 027; openssl rand -hex 32 > /etc/tuxwall-collector/admin.key )
+  chown root:adm /etc/tuxwall-collector/admin.key
+  chmod 0640 /etc/tuxwall-collector/admin.key
+  echo "   admin key created: /etc/tuxwall-collector/admin.key"
+else
+  echo "   admin key present: /etc/tuxwall-collector/admin.key"
+fi
+
 install -m 0644 "$REPO_DIR/systemd/tuxwall-collector.service" /etc/systemd/system/tuxwall-collector.service
 systemctl daemon-reload
 systemctl enable --now tuxwall-collector

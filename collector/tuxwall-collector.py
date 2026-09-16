@@ -7,6 +7,8 @@ SQLite, enriches them with geo/ASN data, and serves:
   POST /report                   - ingest {key, ip, hits, reason, source}
   GET  /healthz                  - liveness probe
   GET  /api/public/bans          - JSON list of aggregated bans
+  GET  /api/admin/bans           - loopback-only admin listing (X-Admin-Key)
+  DELETE /api/admin/bans/<ip>    - loopback-only admin removal (X-Admin-Key)
   GET  /bans                     - public HTML page
   GET  /ip/<addr>                - AbuseIPDB-style per-IP report card
   GET  /lists/community-bans.txt - plain-text IPs (severity-filterable)
@@ -18,6 +20,7 @@ without leaking who reported what.
 Data (c) DB-IP.com, licensed under CC BY 4.0 (https://db-ip.com/db/lite.php)
 """
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
@@ -45,6 +48,13 @@ PRUNE_EVERY = 200          # run retention cleanup every N ingests
 SOURCE_MAX = 24
 REASON_MAX = 96
 MAX_HITS = 1000000
+
+# Admin endpoints (/api/admin/**) are NEVER proxied by nginx — they answer on
+# the loopback listener only. The key gates them against local misuse and is
+# compared in constant time. Key file is created by deploy-collector.sh
+# (0600/0640 root:adm); absent key = admin endpoints disabled outright.
+ADMIN_KEY_PATH = os.environ.get(
+    "TUXWALL_COLLECTOR_ADMIN_KEY") or "/etc/tuxwall-collector/admin.key"
 
 SEVERITY_LOW = "low"
 SEVERITY_MEDIUM = "medium"
@@ -295,6 +305,17 @@ class Store:
                 "DELETE FROM report_reports WHERE last_seen < ?", (cutoff,))
             self._conn.commit()
 
+    def remove_ip(self, ip):
+        """Admin removal: purge an IP from every table. Returns deleted row
+        counts per table so the caller can tell a hit from a no-op."""
+        with self.lock:
+            counts = {}
+            for table in ("reports", "report_reports", "report_events"):
+                cur = self._conn.execute(f"DELETE FROM {table} WHERE ip=?", (ip,))
+                counts[table] = cur.rowcount if cur.rowcount >= 0 else 0
+            self._conn.commit()
+        return counts
+
     def top_bans(self, min_severity=0, tier=None, limit=500):
         """Aggregate ban rows ordered by hit count.
 
@@ -465,6 +486,18 @@ class Handler(BaseHTTPRequestHandler):
     def _ok_json(self, **kw):
         self._json(200, {"ok": True, **kw})
 
+    # --- Admin auth (loopback-only endpoints, never proxied by nginx) ------
+    def _admin_key(self):
+        try:
+            with open(ADMIN_KEY_PATH, "rb") as f:
+                return f.read().strip()
+        except OSError:
+            return b""
+
+    def _admin_authorized(self):
+        supplied = (self.headers.get("X-Admin-Key") or "").strip().encode("utf-8")
+        return bool(supplied) and hmac.compare_digest(supplied, self._admin_key())
+
     def do_GET(self):
         path = self.path.split("?")[0]
         import urllib.parse
@@ -533,6 +566,34 @@ class Handler(BaseHTTPRequestHandler):
             bans = _store().top_bans(min_severity=rank, limit=20000)
             lines = [b["ip"] for b in bans]
             self._text(200, "\n".join(lines) + ("\n" if lines else ""))
+            return
+        if path == "/api/admin/bans":
+            if not self._admin_authorized():
+                self._json(401, {"ok": False, "error": "Admin key required"})
+                return
+            bans = _store().top_bans(min_severity=0, limit=20000)
+            self._json(200, {
+                "ok": True,
+                "generated": datetime.now(timezone.utc).isoformat(),
+                "total": len(bans),
+                "bans": bans,
+            })
+            return
+        if path.startswith("/api/admin/bans/"):
+            if not self._admin_authorized():
+                self._json(401, {"ok": False, "error": "Admin key required"})
+                return
+            try:
+                addr = ipaddress.ip_address(path[len("/api/admin/bans/"):])
+            except ValueError:
+                self._json(400, {"ok": False, "error": "Invalid IP"})
+                return
+            self._json(405, {
+                "ok": False,
+                "error": "Admin ban lookups use DELETE",
+                "usage": "curl -X DELETE -H \"X-Admin-Key: <key>\""
+                         " http://127.0.0.1:8009/api/admin/bans/<ip>",
+            })
             return
         if path == "/report":
             # /report only accepts POST — return a hint instead of a bare 404
@@ -609,6 +670,35 @@ class Handler(BaseHTTPRequestHandler):
             self._json(500, {"ok": False, "error": "Storage failure"})
             return
         self._ok_json(accepted=(result == "ok"), duplicate=(result == "duplicate"))
+
+    def do_DELETE(self):
+        path = self.path.split("?")[0]
+        if not path.startswith("/api/admin/bans/"):
+            self._json(404, {"ok": False, "error": "Not found"})
+            return
+        if not self._admin_authorized():
+            self._json(401, {"ok": False, "error": "Admin key required"})
+            return
+        try:
+            addr = ipaddress.ip_address(path[len("/api/admin/bans/"):])
+        except ValueError:
+            self._json(400, {"ok": False, "error": "Invalid IP"})
+            return
+        ip = str(addr)
+        counts = _store().remove_ip(ip)
+        if counts.get("reports", 0) == 0:
+            self._json(404, {"ok": False, "error": "IP not found", "ip": ip})
+            return
+        _log().put(json.dumps({
+            "ts": time.time(),
+            "client": self.client_address[0] if self.client_address else "",
+            "path": path,
+            "msg": "admin delete: removed %s (reports=%d report_reports=%d"
+                   " report_events=%d)" % (ip, counts.get("reports", 0),
+                                           counts.get("report_reports", 0),
+                                           counts.get("report_events", 0)),
+        }))
+        self._json(200, {"ok": True, "ip": ip, "removed": counts})
 
 
 def _store():
