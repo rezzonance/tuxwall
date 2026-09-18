@@ -1,17 +1,17 @@
 Package: tuxwall
 Architecture: all
-Version: 2.7.8
+Version: 2.7.9
 Priority: optional
 Section: admin
 Maintainer: jeff <jeff@localhost>
 Depends: python3, nginx, unbound, unbound-anchor, kea-dhcp4-server, kea-common, radvd, avahi-daemon, suricata, suricata-update, wireguard-tools, ufw, iptables, nftables, curl, jq, gzip, ieee-data, iproute2, rsync, fastfetch
 Suggests: crowdsec, crowdsec-firewall-bouncer-iptables, python3-maxminddb, speedtest
-Filename: pool/main/t/tuxwall/tuxwall_2.7.8_all.deb
-Size: 3333328
-MD5sum: 5a6d75f81e9efee3820c1ac082b3f6ed
-SHA1: 65858daebf6b535667faff86514754826586d015
-SHA256: 68979aebdf671a6dfbb50866e4132ae3b53fba4726d1832c74d4af3647c90ef6
-SHA512: 553391bfe6f24c7e140f2a9b47d020905d53fef97383d11def5fb763356917fb5bcd959a5983a10bdaed31a5a1d7722ad38eb28a2ae0ad2fbd4c019cc7571dd4
+Filename: pool/main/t/tuxwall/tuxwall_2.7.9_all.deb
+Size: 3337006
+MD5sum: 6101ae43f9022ead3da9805e04d4c736
+SHA1: 878bd3645d07f4d4c25cccda38fdba7846162101
+SHA256: 6ec47ce10ecc65739233e44b7b2b5fac7b6be8109c9a0fb0a1c2b4bd28f05568
+SHA512: 27fc2d23d97246003a958aa157c68b2e027970f22e5bba66baf212efb88d523317a5f89c040a4f58cd5c007ce37ffe5552bb1aad811f5f279441137996962f26
 Description: TuxWall Network Firewall Dashboard
  Modern web dashboard for a home/edge router featuring DHCP lease management,
  Unbound DNS and blocklist control, UFW firewall rules, WireGuard VPN status,
@@ -258,3 +258,23 @@ Description: TuxWall Network Firewall Dashboard
  plain scans and probes too. Suricata keeps priority when it does have
  evidence; the firewall packet count also fills in for hits when the
  security monitor's window has no entry for the IP.
+ .
+ v2.7.9 fixes the Bandwidth page's per-client stats and gives the
+ dashboard a polish pass. Dead clients no longer linger: the nftables
+ per-IP sets were only ever added to, never pruned, so every address
+ the router had ever leased stayed in the Top lists forever (including
+ the router itself); the sets are now synced to clients that both hold
+ a DHCP lease and answer on the LAN (ARP-checked, 30s cache), and the
+ per-client rates treat counter resets as a fresh baseline instead of
+ freezing at a stale value. The Bandwidth page also gains a Top
+ Downloaders card — a glowing SVG donut with per-client radial
+ gradients, tooltip slices and a ten-row legend that always shows ten
+ entries (active clients ranked by current download rate, padded with
+ placeholders), refreshed once a minute. The Clients table gains pulsing
+ green online dots and animated up/down traffic arrows, and the Traffic
+ Shaping card shows a green/red pulsing status dot with teal download
+ and purple upload cap values. The Security page's Top Attackers info
+ card now opens only when hovering the IP cell instead of the whole
+ row, and the Community Ban Reporting / Suricata Alerts cards lose
+ their double spacing and cramped note padding. Asset-version stamp
+ bumped so browsers pick up the new dashboard JS on first reload.
