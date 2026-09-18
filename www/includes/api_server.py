@@ -4491,12 +4491,25 @@ def build_bandwidth():
         except Exception:
             leases = []
         lease_map = {l["ip"]: l for l in leases if l.get("ip")}
+        # Only list clients that hold a lease AND answer on the LAN right now,
+        # so dead/offline clients drop out of the sets and the page.
+        active_map = {}
+        for ip, lease in lease_map.items():
+            try:
+                online = arp_online(ip)
+            except Exception:
+                online = True
+            if online:
+                active_map[ip] = lease
         try:
-            sync_client_traffic_clients(list(lease_map))
+            sync_client_traffic_clients(list(active_map))
         except Exception as exc:
             clients_error = str(exc)
+        own_ips = _host_ipv4_addrs()
         for ip, snap in traffic.snapshot().items():
-            lease = lease_map.get(ip, {})
+            lease = active_map.get(ip)
+            if lease is None or ip in own_ips:
+                continue
             clients.append({
                 "ip": ip,
                 "hostname": lease.get("hostname", ""),
@@ -4563,15 +4576,66 @@ def ensure_client_traffic_table():
     return (proc.stderr or "nft create table failed").strip()
 
 
-def sync_client_traffic_clients(ips):
-    if not ips:
-        return
-    for set_name in (NFT_TX_SET, NFT_RX_SET):
-        subprocess.run(
-            [NFT_BIN, "add", "element", "inet", NFT_TABLE, set_name,
-             "{%s}" % ", ".join(ips)],
-            capture_output=True, text=True, timeout=10,
+def _host_ipv4_addrs():
+    """IPv4 addresses assigned to this router (excluded from client lists)."""
+    try:
+        proc = subprocess.run(
+            ["ip", "-o", "-4", "addr"],
+            capture_output=True, text=True, timeout=5,
         )
+    except Exception:
+        return set()
+    addrs = set()
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 4:
+            addrs.add(parts[3].split("/")[0])
+    return addrs
+
+
+def sync_client_traffic_clients(ips):
+    """Keep the nft per-IP sets in sync with the given client IPs.
+
+    Adds elements for new clients and removes elements for clients that
+    no longer have an active lease, so dead IPs stop being counted and
+    listed. Removing an element resets its counter, which the monitor
+    treats as a fresh baseline.
+    """
+    wanted = set(ips)
+    for set_name in (NFT_TX_SET, NFT_RX_SET):
+        try:
+            proc = subprocess.run(
+                [NFT_BIN, "list", "set", "inet", NFT_TABLE, set_name],
+                capture_output=True, text=True, timeout=10,
+            )
+        except Exception:
+            continue
+        if proc.returncode != 0:
+            continue
+        current = set()
+        for match in re.finditer(
+            r"(\d{1,3}(?:\.\d{1,3}){3})\s+counter", proc.stdout,
+        ):
+            current.add(match.group(1))
+        for ip in current - wanted:
+            try:
+                subprocess.run(
+                    [NFT_BIN, "delete", "element", "inet", NFT_TABLE,
+                     set_name, "{%s}" % ip],
+                    capture_output=True, text=True, timeout=10,
+                )
+            except Exception:
+                continue
+        missing = wanted - current
+        if missing:
+            try:
+                subprocess.run(
+                    [NFT_BIN, "add", "element", "inet", NFT_TABLE,
+                     set_name, "{%s}" % ", ".join(sorted(missing))],
+                    capture_output=True, text=True, timeout=10,
+                )
+            except Exception:
+                continue
 
 
 class ClientTrafficMonitor:
@@ -4611,10 +4675,12 @@ class ClientTrafficMonitor:
             for ip, counts in current.items():
                 prev = self.last.get(ip)
                 rx, tx = counts.get("rx", 0), counts.get("tx", 0)
-                if (prev is not None and now > prev["t"]
-                        and rx >= prev["rx"] and tx >= prev["tx"]):
+                if prev is not None and now > prev["t"]:
                     dt = now - prev["t"]
-                    if dt > 0:
+                    if rx < prev["rx"] or tx < prev["tx"]:
+                        # Counter was reset (element recreated) - new baseline.
+                        self.rates[ip] = {"rx_rate": 0.0, "tx_rate": 0.0}
+                    elif dt > 0:
                         self.rates[ip] = {
                             "rx_rate": (rx - prev["rx"]) / dt,
                             "tx_rate": (tx - prev["tx"]) / dt,
@@ -4623,6 +4689,10 @@ class ClientTrafficMonitor:
                         tot["rx"] += rx - prev["rx"]
                         tot["tx"] += tx - prev["tx"]
                 self.last[ip] = {"t": now, "rx": rx, "tx": tx}
+            for gone in set(self.rates) - set(current):
+                self.rates.pop(gone, None)
+                self.totals.pop(gone, None)
+                self.last.pop(gone, None)
 
     def start(self):
         if self.running:

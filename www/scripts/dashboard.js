@@ -2,7 +2,7 @@
   "use strict";
 
   const REFRESH_MS = 30000;
-  const BANDWIDTH_POLL_MS = 5000;
+  const BANDWIDTH_POLL_MS = 60000;
   const SECURITY_POLL_MS = 15000;
   const WG_POLL_MS = 5000;
   const OV_POLL_MS = 5000;
@@ -2676,7 +2676,10 @@
     // Attach hover card to a single row (called once per row, on insert)
     function attachIpRowHover(row) {
       const hoverCard = document.getElementById("ip-hover-card");
-      row.addEventListener("mouseenter", (e) => {
+      const ipCell = row.querySelector("td:first-child");
+      if (!ipCell) return;
+      
+      ipCell.addEventListener("mouseenter", (e) => {
         const ispEl = document.getElementById("isp-" + row.dataset.ip.replace(/\./g, "-"));
         const isp   = ispEl ? ispEl.textContent.replace(/^·\s*/, "").trim() : "";
         hoverCard.innerHTML = `
@@ -2694,8 +2697,8 @@
         hoverCard.hidden = false;
         positionHoverCard(e);
       });
-      row.addEventListener("mousemove", positionHoverCard);
-      row.addEventListener("mouseleave", () => { hoverCard.hidden = true; });
+      ipCell.addEventListener("mousemove", positionHoverCard);
+      ipCell.addEventListener("mouseleave", () => { hoverCard.hidden = true; });
     }
 
     // Run the diff update
@@ -3802,13 +3805,15 @@
     try {
       const d = await fetchJSON("/api/sqm");
       if (!d.ok) throw new Error(d.error || "SQM unavailable");
-      els.sqmStatus.textContent = d.active ? "Active" : "Inactive";
+      const isActive = d.active;
+      els.sqmStatus.innerHTML = `<span class="sqm-status-dot sqm-status-${isActive ? 'active' : 'inactive'}"></span>${isActive ? "Active" : "Inactive"}`;
+      els.sqmStatus.className = isActive ? "sqm-status-active" : "sqm-status-inactive";
       els.sqmStatusNote.textContent = d.active
         ? `CAKE on ${d.wan} + ${d.ifb}`
         : "shaping not applied — run Apply to enable";
       els.sqmWan.textContent = d.wan || "—";
-      els.sqmDown.textContent = d.down_mbit != null ? `${d.down_mbit} Mbps` : "—";
-      els.sqmUp.textContent = d.up_mbit != null ? `${d.up_mbit} Mbps` : "—";
+      els.sqmDown.innerHTML = d.down_mbit != null ? `<span class="sqm-down-value">${d.down_mbit} Mbps</span>` : "—";
+      els.sqmUp.innerHTML = d.up_mbit != null ? `<span class="sqm-up-value">${d.up_mbit} Mbps</span>` : "—";
       els.sqmDrops.textContent = d.down_drops != null
         ? `${formatNumber(d.down_drops)} drops${d.down_overlimits != null ? ` / ${formatNumber(d.down_overlimits)} overlimits` : ""}`
         : "—";
@@ -4826,13 +4831,135 @@
     }
     els.bwClientsBody.innerHTML = clients.map((c) => `
       <tr>
-        <td><span class="mono">${esc(c.ip)}</span>${c.hostname ? `<span class="muted"> · ${esc(c.hostname)}</span>` : ""}</td>
+        <td>
+          <span class="bw-client-status"></span>
+          <span class="mono">${esc(c.ip)}</span>${c.hostname ? `<span class="muted"> · ${esc(c.hostname)}</span>` : ""}
+        </td>
         <td class="mono">${esc(c.mac || "—")}</td>
-        <td>${formatMBs(c.rx_bytes_per_s)}</td>
-        <td>${formatMBs(c.tx_bytes_per_s)}</td>
+        <td>
+          <span class="bw-arrow bw-arrow-down ${(c.rx_bytes_per_s || 0) > 1024 ? 'bw-arrow-active' : ''}">↓</span>
+          <span class="mono">${formatMBs(c.rx_bytes_per_s)}</span>
+        </td>
+        <td>
+          <span class="bw-arrow bw-arrow-up ${(c.tx_bytes_per_s || 0) > 1024 ? 'bw-arrow-active' : ''}">↑</span>
+          <span class="mono">${formatMBs(c.tx_bytes_per_s)}</span>
+        </td>
         <td>${formatBytes(c.rx_bytes)}</td>
         <td>${formatBytes(c.tx_bytes)}</td>
       </tr>`).join("");
+
+    renderTopDownloaders(clients);
+  }
+
+  // Top 10 downloaders: legend on the left (always 10 rows), pie on the right.
+  function renderTopDownloaders(clients) {
+    const legend = document.getElementById("bw-top-legend");
+    const pie = document.getElementById("bw-top-pie");
+    if (!legend || !pie) return;
+    const hint = document.getElementById("bw-top-hint");
+    const top = (clients || [])
+      .sort((a, b) => (b.rx_bytes_per_s || 0) - (a.rx_bytes_per_s || 0))
+      .slice(0, 10);
+    if (hint) {
+      hint.textContent = top.length
+        ? `Top ${top.length} by current download rate`
+        : "No clients online";
+    }
+    if (!top.length) {
+      legend.innerHTML = "";
+      pie.innerHTML = `<p class="muted">No clients online.</p>`;
+      return;
+    }
+    const total = top.reduce((s, c) => s + (c.rx_bytes_per_s || 0), 0);
+    const rows = top.map((c, i) => {
+      const pct = total > 0 ? ((c.rx_bytes_per_s || 0) / total) * 100 : 0;
+      return `
+        <div class="bw-top-row">
+          <span class="bw-top-swatch" style="background:${CHART_COLORS[i % CHART_COLORS.length]}"></span>
+          <span class="mono">${esc(c.hostname || c.ip)}</span>
+          <span class="muted mono">${esc(c.ip)}</span>
+          <span class="mono" style="margin-left:auto">${formatMBs(c.rx_bytes_per_s)}</span>
+          <span class="muted mono" style="width:48px;text-align:right">${pct.toFixed(1)}%</span>
+        </div>`;
+    });
+    // Always show 10 legend rows, padding with placeholders.
+    for (let i = rows.length; i < 10; i++) {
+      rows.push(`
+        <div class="bw-top-row bw-top-empty-row">
+          <span class="bw-top-swatch" style="background:#21262d"></span>
+          <span class="muted mono">—</span>
+          <span class="muted mono">—</span>
+          <span class="muted mono" style="margin-left:auto">—</span>
+          <span class="muted mono" style="width:48px;text-align:right">—</span>
+        </div>`);
+    }
+    legend.innerHTML = rows.join("");
+    pie.innerHTML = topPieSVG(top, total);
+  }
+
+  function topPieSVG(top, total) {
+    const size = 240;
+    const cx = size / 2, cy = size / 2;
+    const outerR = 100, innerR = 62;
+    const svg = [];
+    const defs = [`<defs>`];
+    
+    // Radial gradients for each slice with glow
+    for (let i = 0; i < CHART_COLORS.length; i++) {
+      const color = CHART_COLORS[i];
+      defs.push(`
+        <radialGradient id="bw-grad-${i}">
+          <stop offset="0%" style="stop-color:${color};stop-opacity:1" />
+          <stop offset="100%" style="stop-color:${color};stop-opacity:0.85" />
+        </radialGradient>
+        <filter id="bw-glow-${i}" x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+          <feMerge>
+            <feMergeNode in="coloredBlur"/>
+            <feMergeNode in="SourceGraphic"/>
+          </feMerge>
+        </filter>`);
+    }
+    defs.push(`</defs>`);
+    svg.push(defs.join(""));
+
+    let angle = -Math.PI / 2;
+    if (total <= 0) {
+      // Empty donut
+      svg.push(donutPath(cx, cy, outerR, innerR, 0, Math.PI * 2, "#21262d", null, 0));
+    } else if (top.length === 1) {
+      // Full donut ring
+      svg.push(donutPath(cx, cy, outerR, innerR, 0, Math.PI * 2, `url(#bw-grad-0)`, 0, 0));
+    } else {
+      for (let i = 0; i < top.length; i++) {
+        const frac = (top[i].rx_bytes_per_s || 0) / total;
+        if (frac <= 0) continue;
+        const sweep = frac * Math.PI * 2;
+        const a0 = angle, a1 = angle + sweep;
+        angle = a1;
+        const label = esc(top[i].hostname || top[i].ip);
+        svg.push(donutPath(cx, cy, outerR, innerR, a0, a1, `url(#bw-grad-${i % CHART_COLORS.length})`, i, label + " · " + formatMBs(top[i].rx_bytes_per_s)));
+      }
+    }
+    
+    // Center hole with subtle inner shadow
+    svg.push(`<circle cx="${cx}" cy="${cy}" r="${innerR}" fill="#0d1117" opacity="0.6"/>`);
+    
+    svg.push(`<text x="${cx}" y="${cy - 6}" text-anchor="middle" class="bw-top-total">${formatMBs(total)}</text>`);
+    svg.push(`<text x="${cx}" y="${cy + 10}" text-anchor="middle" class="bw-top-total-label">total down</text>`);
+    return `<svg viewBox="0 0 ${size} ${size}" style="width:100%;max-width:${size}px;height:auto" role="img">` + svg.join("") + "</svg>";
+  }
+
+  function donutPath(cx, cy, outerR, innerR, a0, a1, fill, filterIdx, title) {
+    const x0Out = cx + outerR * Math.cos(a0), y0Out = cy + outerR * Math.sin(a0);
+    const x1Out = cx + outerR * Math.cos(a1), y1Out = cy + outerR * Math.sin(a1);
+    const x0In = cx + innerR * Math.cos(a0), y0In = cy + innerR * Math.sin(a0);
+    const x1In = cx + innerR * Math.cos(a1), y1In = cy + innerR * Math.sin(a1);
+    const large = (a1 - a0) > Math.PI ? 1 : 0;
+    const d = `M ${x0Out.toFixed(2)} ${y0Out.toFixed(2)} A ${outerR} ${outerR} 0 ${large} 1 ${x1Out.toFixed(2)} ${y1Out.toFixed(2)} L ${x1In.toFixed(2)} ${y1In.toFixed(2)} A ${innerR} ${innerR} 0 ${large} 0 ${x0In.toFixed(2)} ${y0In.toFixed(2)} Z`;
+    const filter = filterIdx !== null ? ` filter="url(#bw-glow-${filterIdx % CHART_COLORS.length})"` : "";
+    const titleTag = title ? `<title>${title}</title>` : "";
+    return `<path class="bw-pie-slice" d="${d}" fill="${fill}"${filter}>${titleTag}</path>`;
   }
 
   async function refreshBandwidth() {
