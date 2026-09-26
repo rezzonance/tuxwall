@@ -246,6 +246,8 @@
     sysDisk: document.getElementById("sys-disk"),
     sysSwap: document.getElementById("sys-swap"),
     sysOs: document.getElementById("sys-os"),
+    sysRebootUptime: document.getElementById("sys-reboot-uptime"),
+    sysRebootBoot: document.getElementById("sys-reboot-boot"),
     sqmStatus: document.getElementById("sqm-status"),
     sqmStatusNote: document.getElementById("sqm-status-note"),
     sqmWan: document.getElementById("sqm-wan"),
@@ -268,6 +270,7 @@
     sysPoolsNote: document.getElementById("sys-pools-note"),
     sysPoolAdd: document.getElementById("sys-pool-add"),
     sysFfInfo: document.getElementById("sys-ff-info"),
+    sysDetail: document.getElementById("sys-detail"),
     ovCpu: document.getElementById("ov-cpu"),
     ovMem: document.getElementById("ov-mem"),
     ovDisk: document.getElementById("ov-disk"),
@@ -289,7 +292,14 @@
     ovJitChart: document.getElementById("ov-jit-chart"),
     ovResChart: document.getElementById("ov-res-chart"),
     ovBwChart: document.getElementById("ov-bw-chart"),
+    ovResCpu: document.getElementById("ov-res-cpu"),
+    ovResMem: document.getElementById("ov-res-mem"),
+    ovBwDown: document.getElementById("ov-bw-down"),
+    ovBwUp: document.getElementById("ov-bw-up"),
     ovLatChart: document.getElementById("ov-lat-chart"),
+    ovLatAvg: document.getElementById("ov-lat-avg"),
+    ovLatMax: document.getElementById("ov-lat-max"),
+    ovJitMdev: document.getElementById("ov-jit-mdev"),
     ovPieSinkhole: document.getElementById("ov-pie-sinkhole"),
     ovPieQtypes: document.getElementById("ov-pie-qtypes"),
     ovPieIpv: document.getElementById("ov-pie-ipv"),
@@ -2462,15 +2472,10 @@
       </tr>`;
     };
 
-    els.secCountriesBody.innerHTML = countries.slice(0, 25).map(buildCountryRow).join("");
-    const cMoreWrap = document.getElementById("sec-countries-more-wrap");
-    cMoreWrap.hidden = countries.length <= 25;
-    if (!cMoreWrap.hidden) {
-      document.getElementById("sec-countries-more").onclick = () => {
-        document.getElementById("sec-countries-full-body").innerHTML = countries.map(buildCountryRow).join("");
-        document.getElementById("sec-countries-modal").hidden = false;
-      };
-    }
+    els.secCountriesBody.innerHTML = countries.map(buildCountryRow).join("");
+    // Full list lives inline now (the row-cap toggle shows 25 / expands);
+    // the countries modal popup is retired.
+    document.getElementById("sec-countries-more-wrap").hidden = true;
 
     const byIp = d.by_ip || [];
     const ipMax = byIp[0] ? byIp[0].count : 1;
@@ -2704,11 +2709,11 @@
     // Run the diff update
     const newIps = byIp.map(i => i.ip);
     const prevIps = Array.from(els.secIpsBody.querySelectorAll("tr[data-ip]")).map(r => r.dataset.ip);
-    diffIpTable(els.secIpsBody, byIp, 25);
+    diffIpTable(els.secIpsBody, byIp, byIp.length);
 
     // Server-side ISP (DB-IP ASN) is available directly in the snapshot —
     // fill the spans immediately instead of waiting on ip-api.com.
-    byIp.slice(0, 25).forEach((i) => {
+    byIp.forEach((i) => {
       if (i.isp) {
         const el = document.getElementById("isp-" + i.ip.replace(/\./g, "-"));
         if (el && !el.textContent) el.textContent = "· " + i.isp;
@@ -2716,18 +2721,12 @@
     });
 
     // Only fetch ISP info for IPs that are new to the table
-    const brandNewIps = byIp.slice(0, 25).filter(i => !prevIps.includes(i.ip));
+    const brandNewIps = byIp.filter(i => !prevIps.includes(i.ip));
     if (brandNewIps.length) fetchIspInfo(brandNewIps, "sec-ips");
 
-    const ipMoreWrap = document.getElementById("sec-ips-more-wrap");
-    ipMoreWrap.hidden = byIp.length <= 25;
-    if (!ipMoreWrap.hidden) {
-      document.getElementById("sec-ips-more").onclick = () => {
-        document.getElementById("sec-ips-full-body").innerHTML = byIp.map(buildIpRow).join("");
-        document.getElementById("sec-ips-modal").hidden = false;
-        fetchIspInfo(byIp, "sec-ips-full");
-      };
-    }
+    // Full list lives inline now (the row-cap toggle shows 25 / expands);
+    // the attackers modal popup is retired.
+    document.getElementById("sec-ips-more-wrap").hidden = true;
 
     // (Recent Hits table replaced by Traffic Monitor)
 
@@ -2951,6 +2950,10 @@
   // ---- ISP batch lookup via ip-api.com (free, no key) ----
   async function fetchIspInfo(ipList, tablePrefix) {
     if (!ipList || !ipList.length) return;
+    // ip-api.com free tier is HTTP-only; browsers block it as mixed content
+    // on HTTPS pages. Skip silently there -- snapshot ISP data from the
+    // server-side DB-IP database already covers most rows.
+    if (window.location.protocol === "https:") return;
     const ips = ipList.slice(0, 50).map(i => ({ query: i.ip, fields: "query,org,hosting" }));
     try {
       const resp = await fetch("http://ip-api.com/batch?fields=query,org,hosting", {
@@ -3762,6 +3765,11 @@
     els.sysDisk.textContent = disk.total ? `${formatBytes(disk.used)} / ${formatBytes(disk.total)}${pct(disk.used, disk.total)}` : "—";
     els.sysSwap.textContent = swap.total ? `${formatBytes(swap.used)} / ${formatBytes(swap.total)}` : "—";
     els.sysOs.textContent = d.os ? `${d.os}` : "—";
+    if (els.sysRebootUptime) els.sysRebootUptime.textContent = d.uptime != null ? formatUptime(d.uptime) : "—";
+    if (els.sysRebootBoot) els.sysRebootBoot.textContent = d.uptime != null
+      ? new Date(Date.now() - d.uptime * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
+      : "—";
+    renderSysDetail(d);
 
     els.sysInterfacesBody.innerHTML = (d.interfaces || []).map((i) => `
       <tr>
@@ -3788,6 +3796,55 @@
     }
   }
 
+  function renderSysDetail(d) {
+    if (!els.sysDetail) return;
+    if (!d || !d.ok) {
+      els.sysDetail.innerHTML = `<p class="muted">Error: ${esc((d && d.error) || "system info unavailable")}</p>`;
+      return;
+    }
+    const cpu = d.cpu || {};
+    const mem = d.mem || {};
+    const swap = d.swap || {};
+    const disk = d.disk || {};
+    const wan = d.wan || {};
+    const dash = "\u2014";
+    const val = (v) => (v === "" || v == null ? dash : esc(String(v)));
+    const model = (cpu.model || "").replace(/\(R\)|\(TM\)/g, "").replace(/\s+CPU.*$/i, "").replace(/\s+/g, " ").trim();
+    const upIfaces = (d.interfaces || []).filter((i) => i && i.state === "UP");
+    const row = (k, v) => `<div class="sys-drow"><span>${k}</span><b>${v}</b></div>`;
+    const grp = (title, rows) => `<div class="sys-dgroup"><h4>${title}</h4>${rows}</div>`;
+    const lanRows = upIfaces
+      .filter((i) => i.name !== wan.ifname)
+      .map((i) => {
+        const v4 = (i.addrs || []).find((a) => a.family === "inet");
+        return row("LAN " + esc(i.name), esc(v4 ? v4.addr + "/" + v4.mask : "no IPv4"));
+      }).join("");
+    els.sysDetail.innerHTML =
+      grp("Platform",
+        row("Hostname", val(d.hostname)) +
+        row("OS", val(d.os)) +
+        row("Kernel", val(d.kernel)) +
+        row("Arch", val(d.arch)) +
+        row("TuxWall", val(d.tuxwall_version ? "v" + d.tuxwall_version : "")) +
+        row("Uptime", val(formatUptime(d.uptime)))) +
+      grp("Processor",
+        row("Model", val(model)) +
+        row("Cores", val(cpu.cores || "")) +
+        row("Temp", val(cpu.temp != null ? cpu.temp + "\u00B0C" : "")) +
+        row("Load", val((d.load || []).map((x) => Number(x).toFixed(2)).join(" / ")))) +
+      grp("Memory",
+        row("RAM", mem.total ? `${esc(formatBytes(mem.used))} / ${esc(formatBytes(mem.total))}${pct(mem.used, mem.total)}` : dash) +
+        row("Swap", swap.total ? `${esc(formatBytes(swap.used))} / ${esc(formatBytes(swap.total))}` : dash)) +
+      grp("Storage",
+        row("Device", val(disk.fs)) +
+        row("Used", disk.total ? `${esc(formatBytes(disk.used))} / ${esc(formatBytes(disk.total))}${pct(disk.used, disk.total)}` : dash) +
+        row("Mount", val(disk.mount))) +
+      grp("Network",
+        row("WAN", val(wan.ifname ? `${wan.ifname}${wan.ipv4 ? " · " + wan.ipv4 : ""}` : "")) +
+        row("Gateway", val(wan.gateway4)) +
+        (lanRows || row("LAN", upIfaces.length ? `${upIfaces.length} up` : dash)));
+  }
+
   async function refreshSystem() {
     try {
       const data = await fetchJSON("/api/system");
@@ -3797,7 +3854,6 @@
     }
     refreshSqm();
     refreshPools();
-    refreshFastfetch();
   }
 
   async function refreshSqm() {
@@ -4697,6 +4753,196 @@
     }
   }
 
+  // Animated chart transitions (Overview CPU & Bandwidth).
+  // Each refresh tweens plotted values from the previous snapshot to the
+  // new one (~0.8s, ease-out) so the graphs glide instead of jump-cutting.
+  // Length changes (new samples) are handled by resampling the old series
+  // onto the new sample count. Skipped under prefers-reduced-motion.
+  const chartTween = new WeakMap();
+  const TWEEN_MS = 800;
+  function tweenChartDraw(canvas, history, extra, drawFn, valIdx) {
+    const target = (history || []).map((s) => s.slice());
+    const to = target.map((s) => valIdx.map((k) => s[k]));
+    const prev = chartTween.get(canvas);
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduceMotion || !prev || !prev.values.length || !to.length) {
+      chartTween.set(canvas, { values: to, raf: 0 });
+      drawFn(canvas, target, extra);
+      return;
+    }
+    if (prev.raf) cancelAnimationFrame(prev.raf);
+    const from = prev.values;
+    const sample = (arr, j, outLen) => {
+      if (!arr.length || !outLen) return 0;
+      if (arr.length === 1 || outLen === 1) return arr[0];
+      const p = (j * (arr.length - 1)) / (outLen - 1);
+      const i0 = Math.floor(p), i1 = Math.min(arr.length - 1, i0 + 1);
+      return arr[i0] + (arr[i1] - arr[i0]) * (p - i0);
+    };
+    const t0 = performance.now();
+    const state = { values: to, raf: 0 };
+    chartTween.set(canvas, state);
+    const step = (t) => {
+      const e = 1 - Math.pow(1 - Math.min(1, (t - t0) / TWEEN_MS), 3);
+      const blended = target.map((row, j) => {
+        const out = row.slice();
+        valIdx.forEach((k, m) => {
+          out[k] = sample(from[m] || [], j, to.length) * (1 - e) + to[j][m] * e;
+        });
+        return out;
+      });
+      drawFn(canvas, blended, extra);
+      state.raf = e < 1 ? requestAnimationFrame(step) : 0;
+    };
+    state.raf = requestAnimationFrame(step);
+  }
+
+  // Live graph lane: every 2s (matching the fastest backend sampler)
+  // the two Overview graphs repaint from fresh snapshots with current
+  // values in their HTML legends. Gated on login + auto-refresh + the
+  // Overview being visible; the 15s cycle remains the error reporter.
+  let liveGraphsTimer = 0;
+  function paintLiveGraphs(sys, bw, latSeries) {
+    const fmtLiveMs = (v) => (v == null ? "—" : v >= 100 ? Math.round(v) + " ms" : v.toFixed(1) + " ms");
+    if (Array.isArray(latSeries)) liveLatSnap = latSeries;
+    const lastLat = liveLatSnap.length ? liveLatSnap[liveLatSnap.length - 1] : null;
+    if (els.ovLatAvg) els.ovLatAvg.textContent = lastLat ? fmtLiveMs(lastLat[1]) : "—";
+    if (els.ovLatMax) els.ovLatMax.textContent = lastLat ? fmtLiveMs(lastLat[2]) : "—";
+    if (els.ovJitMdev) els.ovJitMdev.textContent = lastLat ? fmtLiveMs(lastLat[3]) : "—";
+    if (!sys || !sys.ok || !bw || !bw.ok) return;
+    const usage = sys.usage || {};
+    if (els.ovResCpu) els.ovResCpu.textContent = usage.cpu_pct != null ? Math.round(usage.cpu_pct) + "%" : "—";
+    if (els.ovResMem) els.ovResMem.textContent = usage.mem_pct != null ? usage.mem_pct.toFixed(1) + "%" : "—";
+    liveSysSnap = sys;
+    const ifaces = bw.interfaces || [];
+    const totDown = ifaces.reduce((n, i) => n + (i.rx_bps || 0), 0);
+    const totUp = ifaces.reduce((n, i) => n + (i.tx_bps || 0), 0);
+    if (els.ovBwDown) els.ovBwDown.textContent = formatBits(totDown);
+    if (els.ovBwUp) els.ovBwUp.textContent = formatBits(totUp);
+    liveBwSnap = bw;
+  }
+  function startLiveGraphs() {
+    if (liveGraphsTimer) return;
+    requestAnimationFrame(sweepFrame);
+    liveGraphsTimer = setInterval(async () => {
+      if (!state.authed || !els.auto.checked || state.activeView !== "overview" || document.hidden) return;
+      try {
+        const [sys, bw, latH] = await Promise.all([fetchJSON("/api/system"), fetchJSON("/api/bandwidth"), fetchJSON("/api/latency/history?hours=1").catch(() => ({ series: [] }))]);
+        paintLiveGraphs(sys, bw, latH.series || []);
+      } catch (_) { /* silent: the 15s cycle surfaces errors */ }
+    }, 2000);
+  }
+
+  // Heart-monitor sweep (Overview CPU & Bandwidth).
+  // Instead of redrawing on each poll, every animation frame resamples the
+  // stored histories onto a moving 2-minute time grid, so the traces drift
+  // left continuously like a live monitor. The existing draw functions do
+  // the actual painting (axes, smoothing, glow, head dot), fed with
+  // synthetic timestamped rows. New samples ease in via hold-last
+  // interpolation at the leading edge -- no jumps, no tween fighting.
+  let liveSysSnap = null, liveBwSnap = null, liveLatSnap = [];
+  // Eased leading-edge values for the latency/jitter sweep (see below).
+  let liveHead = { latAvg: null, latMax: null, jit: null, t: 0 };
+  let liveScale = { lat: 0, jit: 0, t: 0 };
+  const SWEEP_FAST_SEC = 300, SWEEP_FAST_PTS = 150;   // CPU, Bandwidth: live 5 min
+  const SWEEP_SLOW_SEC = 3600, SWEEP_SLOW_PTS = 180; // Latency, Jitter: past hour
+  // Resample value series onto a moving window ending now.
+  function sweepRows(now, windowSec, pts, cols) {
+    const t0 = now - windowSec;
+    const rows = [];
+    for (let i = 0; i < pts; i++) {
+      const t = t0 + (windowSec * i) / (pts - 1);
+      rows.push([t].concat(cols.map((c) => sweepValueAt(c, t))));
+    }
+    return rows;
+  }
+  function sweepValueAt(pairs, t) {
+    // pairs: [[ts, v], ...] ascending. Hold edges, lerp between.
+    const n = pairs.length;
+    if (!n) return 0;
+    if (t <= pairs[0][0]) return pairs[0][1];
+    if (t >= pairs[n - 1][0]) return pairs[n - 1][1];
+    let lo = 0, hi = n - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (pairs[mid][0] <= t) lo = mid; else hi = mid;
+    }
+    const a = pairs[lo], b = pairs[hi];
+    const f = (t - a[0]) / Math.max(1e-6, b[0] - a[0]);
+    return a[1] + (b[1] - a[1]) * f;
+  }
+  function paintLiveSweep() {
+    const now = Date.now() / 1000;
+    // CPU & Memory: fast 5-minute sweep.
+    const hist = (liveSysSnap && liveSysSnap.history) || [];
+    if (!hist.length) {
+      drawResourceChart(els.ovResChart, []);
+    } else {
+      drawResourceChart(els.ovResChart, sweepRows(now, SWEEP_FAST_SEC, SWEEP_FAST_PTS,
+        [hist.map((r) => [r[0], r[1]]), hist.map((r) => [r[0], r[2]])]));
+    }
+    // Bandwidth.
+    const ifaces = (liveBwSnap && liveBwSnap.interfaces) || [];
+    const merged = mergeInterfaceHistory(ifaces);
+    if (!merged.length) {
+      drawBandwidth(els.ovBwChart, [], 1);
+    } else {
+      let maxBps = 1;
+      for (const m of merged) {
+        if (m[1] > maxBps) maxBps = m[1];
+        if (m[2] > maxBps) maxBps = m[2];
+      }
+      drawBandwidth(els.ovBwChart, sweepRows(now, SWEEP_FAST_SEC, SWEEP_FAST_PTS,
+        [merged.map((r) => [r[0], r[1]]), merged.map((r) => [r[0], r[2]])]), maxBps);
+    }
+    // WAN latency (avg + max) and jitter (mdev) share one history.
+    const latBase = (liveSysSnap && liveSysSnap.latency && liveSysSnap.latency.baseline_ms) || 0;
+    if (!liveLatSnap.length) {
+      drawLatencyChart(els.ovLatChart, [], 0);
+      drawJitterChart(els.ovJitChart, []);
+    } else {
+      const lRows = sweepRows(now, SWEEP_SLOW_SEC, SWEEP_SLOW_PTS,
+        [liveLatSnap.map((r) => [r[0], r[1]]), liveLatSnap.map((r) => [r[0], r[2]])]);
+      const jRows = sweepRows(now, SWEEP_SLOW_SEC, SWEEP_SLOW_PTS,
+        [liveLatSnap.map((r) => [r[0], 0]), liveLatSnap.map((r) => [r[0], 0]), liveLatSnap.map((r) => [r[0], r[3]])]);
+      // Ease the leading edge toward each new ping sample instead of
+      // snapping: samples land roughly every 12s, and hold-last made the
+      // head jump vertically on every one. tau ~0.7s glides to the truth.
+      const lastRow = lRows.length - 1;
+      const nowMs = now * 1000;
+      const dtHead = liveHead.t ? Math.min(2, (nowMs - liveHead.t) / 1000) : 0;
+      liveHead.t = nowMs;
+      const kHead = dtHead > 0 ? 1 - Math.exp(-dtHead / 1.2) : 1;
+      const easeHead = (key, target) => {
+        if (liveHead[key] == null) liveHead[key] = target;
+        liveHead[key] += (target - liveHead[key]) * kHead;
+        return liveHead[key];
+      };
+      lRows[lastRow][1] = easeHead("latAvg", lRows[lastRow][1]);
+      lRows[lastRow][2] = easeHead("latMax", lRows[lastRow][2]);
+      jRows[lastRow][3] = easeHead("jit", jRows[lastRow][3]);
+      // Stabilize the Y scales: jump to a new spike immediately (truthful),
+      // then relax slowly when it ages out (no downward snap).
+      let latMaxT = 1, jitMaxT = 0.5;
+      for (const r of lRows) if (r[2] > latMaxT) latMaxT = r[2];
+      for (const r of jRows) if (r[3] > jitMaxT) jitMaxT = r[3];
+      latMaxT *= 1.15; jitMaxT *= 1.15;
+      const kScale = dtHead > 0 ? 1 - Math.exp(-dtHead / 4) : 1;
+      liveScale.lat = (!liveScale.lat || latMaxT > liveScale.lat)
+        ? latMaxT : liveScale.lat + (latMaxT - liveScale.lat) * kScale;
+      liveScale.jit = (!liveScale.jit || jitMaxT > liveScale.jit)
+        ? jitMaxT : liveScale.jit + (jitMaxT - liveScale.jit) * kScale;
+      drawLatencyChart(els.ovLatChart, lRows, latBase, liveScale.lat);
+      drawJitterChart(els.ovJitChart, jRows, liveScale.jit);
+    }
+  }
+  function sweepFrame() {
+    if (state.authed && els.auto.checked && state.activeView === "overview" && !document.hidden) {
+      paintLiveSweep();
+    }
+    requestAnimationFrame(sweepFrame);
+  }
+
   function drawBandwidth(canvas, history, maxBps) {
     const dpr = window.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
@@ -4757,7 +5003,7 @@
       }
       // Gradient fill
       const grad = ctx.createLinearGradient(0, padT, 0, padT + ph);
-      grad.addColorStop(0, hexToRgba(color, 0.28));
+      grad.addColorStop(0, hexToRgba(color, 0.34));
       grad.addColorStop(1, hexToRgba(color, 0.02));
       ctx.beginPath();
       smoothCurvePath(ctx, pts);
@@ -4767,13 +5013,29 @@
       ctx.fillStyle = grad;
       ctx.fill();
       // Smooth line
+      ctx.save();
       ctx.beginPath();
       smoothCurvePath(ctx, pts);
       ctx.strokeStyle = color;
       ctx.lineWidth = 2;
       ctx.lineJoin = "round";
       ctx.lineCap = "round";
+      ctx.shadowColor = hexToRgba(color, 0.45);
+      ctx.shadowBlur = 6;
       ctx.stroke();
+      ctx.restore();
+      // Glowing head dot riding the latest sample.
+      const lp = pts[pts.length - 1];
+      if (lp) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(lp[0], lp[1], 3, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 8;
+        ctx.fill();
+        ctx.restore();
+      }
     }
 
     drawSeries(history.map((s) => s[2]), cssVar("--amber", BW_TX_FALLBACK));
@@ -5035,7 +5297,7 @@
         pts.push([x, y]);
       }
       const grad = ctx.createLinearGradient(0, padT, 0, padT + ph);
-      grad.addColorStop(0, hexToRgba(color, 0.28));
+      grad.addColorStop(0, hexToRgba(color, 0.34));
       grad.addColorStop(1, hexToRgba(color, 0.02));
       ctx.beginPath();
       smoothCurvePath(ctx, pts);
@@ -5044,13 +5306,29 @@
       ctx.closePath();
       ctx.fillStyle = grad;
       ctx.fill();
+      ctx.save();
       ctx.beginPath();
       smoothCurvePath(ctx, pts);
       ctx.strokeStyle = color;
       ctx.lineWidth = 2;
       ctx.lineJoin = "round";
       ctx.lineCap = "round";
+      ctx.shadowColor = hexToRgba(color, 0.45);
+      ctx.shadowBlur = 6;
       ctx.stroke();
+      ctx.restore();
+      // Glowing head dot riding the latest sample.
+      const lp2 = pts[pts.length - 1];
+      if (lp2) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(lp2[0], lp2[1], 3, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 8;
+        ctx.fill();
+        ctx.restore();
+      }
     }
 
     const resCpu = cssVar("--amber", "#d29922");
@@ -5058,18 +5336,9 @@
     drawSeries(history.map((s) => s[1]), resCpu);
     drawSeries(history.map((s) => s[2]), resMem);
 
-    ctx.fillStyle = resCpu;
-    ctx.fillRect(padL + 2, padT - 2, 9, 9);
-    ctx.fillStyle = resMem;
-    ctx.fillRect(padL + 60, padT - 2, 9, 9);
-    ctx.fillStyle = cssVar("--text", "#e6edf3");
-    ctx.font = "10px sans-serif";
-    ctx.textAlign = "left";
-    ctx.fillText("CPU", padL + 14, padT + 5);
-    ctx.fillText("Mem", padL + 72, padT + 5);
   }
 
-  function drawLatencyChart(canvas, history, baselineMs) {
+  function drawLatencyChart(canvas, history, baselineMs, maxOverride) {
     const dpr = window.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
     if (rect.width < 10 || rect.height < 10) return;
@@ -5092,11 +5361,13 @@
       return;
     }
 
-    let maxMs = 1;
-    for (const s of history) {
-      if (s[2] > maxMs) maxMs = s[2];
+    let maxMs = (typeof maxOverride === "number" && maxOverride > 0) ? maxOverride : 1;
+    if (!(typeof maxOverride === "number" && maxOverride > 0)) {
+      for (const s of history) {
+        if (s[2] > maxMs) maxMs = s[2];
+      }
+      maxMs *= 1.15;
     }
-    maxMs *= 1.15;
     ctx.font = "10px sans-serif";
     ctx.textAlign = "left";
     for (let i = 0; i <= 3; i++) {
@@ -5136,7 +5407,7 @@
       }
       if (filled) {
         const grad = ctx.createLinearGradient(0, padT, 0, padT + ph);
-        grad.addColorStop(0, hexToRgba(color, 0.2));
+        grad.addColorStop(0, hexToRgba(color, 0.26));
         grad.addColorStop(1, hexToRgba(color, 0.01));
         ctx.beginPath();
         smoothCurvePath(ctx, pts);
@@ -5146,13 +5417,31 @@
         ctx.fillStyle = grad;
         ctx.fill();
       }
+      ctx.save();
       ctx.beginPath();
       smoothCurvePath(ctx, pts);
       ctx.strokeStyle = color;
       ctx.lineWidth = 2;
       ctx.lineJoin = "round";
       ctx.lineCap = "round";
+      ctx.shadowColor = hexToRgba(color, 0.45);
+      ctx.shadowBlur = 6;
       ctx.stroke();
+      ctx.restore();
+      // Head dot on the filled (avg) series.
+      if (filled) {
+        const lp = pts[pts.length - 1];
+        if (lp) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(lp[0], lp[1], 3, 0, Math.PI * 2);
+          ctx.fillStyle = color;
+          ctx.shadowColor = color;
+          ctx.shadowBlur = 8;
+          ctx.fill();
+          ctx.restore();
+        }
+      }
     }
 
     const latMax = cssVar("--red", "#f85149");
@@ -5173,18 +5462,9 @@
       ctx.restore();
     }
 
-    ctx.fillStyle = latAvg;
-    ctx.fillRect(padL + 2, padT - 2, 9, 9);
-    ctx.fillStyle = hexToRgba(latMax, 0.75);
-    ctx.fillRect(padL + 60, padT - 2, 9, 9);
-    ctx.fillStyle = cssVar("--text", "#e6edf3");
-    ctx.font = "10px sans-serif";
-    ctx.textAlign = "left";
-    ctx.fillText("avg", padL + 14, padT + 5);
-    ctx.fillText("max", padL + 72, padT + 5);
   }
 
-  function drawJitterChart(canvas, history) {
+  function drawJitterChart(canvas, history, maxOverride) {
     const dpr = window.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
     if (rect.width < 10 || rect.height < 10) return;
@@ -5208,11 +5488,13 @@
       return;
     }
 
-    let maxMs = 0.5;
-    for (const s of pts) {
-      if (s[3] > maxMs) maxMs = s[3];
+    let maxMs = (typeof maxOverride === "number" && maxOverride > 0) ? maxOverride : 0.5;
+    if (!(typeof maxOverride === "number" && maxOverride > 0)) {
+      for (const s of pts) {
+        if (s[3] > maxMs) maxMs = s[3];
+      }
+      maxMs *= 1.15;
     }
-    maxMs *= 1.15;
 
     ctx.font = "10px sans-serif";
     ctx.textAlign = "left";
@@ -5247,7 +5529,7 @@
       padT + ph * Math.max(0, Math.min(1, 1 - s[3] / maxMs)),
     ]);
     const grad = ctx.createLinearGradient(0, padT, 0, padT + ph);
-    grad.addColorStop(0, hexToRgba(jitColor, 0.28));
+    grad.addColorStop(0, hexToRgba(jitColor, 0.34));
     grad.addColorStop(1, hexToRgba(jitColor, 0.02));
     ctx.beginPath();
     smoothCurvePath(ctx, curvePts);
@@ -5256,23 +5538,32 @@
     ctx.closePath();
     ctx.fillStyle = grad;
     ctx.fill();
+    ctx.save();
     ctx.beginPath();
     smoothCurvePath(ctx, curvePts);
     ctx.strokeStyle = jitColor;
     ctx.lineWidth = 2;
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
+    ctx.shadowColor = hexToRgba(jitColor, 0.45);
+    ctx.shadowBlur = 6;
     ctx.stroke();
-
-    ctx.fillStyle = jitColor;
-    ctx.fillRect(padL + 2, padT - 2, 9, 9);
-    ctx.fillStyle = cssVar("--text", "#e6edf3");
-    ctx.font = "10px sans-serif";
-    ctx.textAlign = "left";
-    ctx.fillText("mdev", padL + 14, padT + 5);
+    ctx.restore();
+    // Head dot on the latest sample.
+    const jp = curvePts[curvePts.length - 1];
+    if (jp) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(jp[0], jp[1], 3, 0, Math.PI * 2);
+      ctx.fillStyle = jitColor;
+      ctx.shadowColor = jitColor;
+      ctx.shadowBlur = 8;
+      ctx.fill();
+      ctx.restore();
+    }
   }
 
-  const PIE_SPACING = 0.035;
+  const PIE_SPACING = 0.06;
   const PIE_EASE = 7;
   const PIE_SPIN_RATE = 8;
   const donutStates = new WeakMap();
@@ -5308,13 +5599,100 @@
     return `rgb(${r},${g},${b})`;
   }
 
+  /* ── Donut colour model ────────────────────────────────────────────────
+     The categorical donuts (Query Types, Attacks by Country) used to pull
+     from CHART_COLORS, a 12-entry rainbow — six unrelated hues in one 200px
+     donut read as noise. They now use an analogous ramp generated from the
+     active theme's --accent: a ±60° hue sweep at a fixed saturation and
+     lightness, so slices stay distinguishable while sharing one colour
+     family, and the ramp re-derives itself for every theme.
+     CHART_COLORS is deliberately left untouched for the line/area charts. */
+  function hexToHsl(hex) {
+    const h = hex.replace("#", "");
+    const r = parseInt(h.slice(0, 2), 16) / 255;
+    const g = parseInt(h.slice(2, 4), 16) / 255;
+    const b = parseInt(h.slice(4, 6), 16) / 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const l = (max + min) / 2;
+    let s = 0, hue = 0;
+    if (max !== min) {
+      const d = max - min;
+      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+      if (max === r) hue = ((g - b) / d + (g < b ? 6 : 0));
+      else if (max === g) hue = (b - r) / d + 2;
+      else hue = (r - g) / d + 4;
+      hue *= 60;
+    }
+    return { h: hue, s: s * 100, l: l * 100 };
+  }
+
+  function hslToHex(h, s, l) {
+    h = ((h % 360) + 360) % 360;
+    s = Math.min(100, Math.max(0, s)) / 100;
+    l = Math.min(100, Math.max(0, l)) / 100;
+    const c = (1 - Math.abs(2 * l - 1)) * s;
+    const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+    const m = l - c / 2;
+    let rgb;
+    if (h < 60) rgb = [c, x, 0];
+    else if (h < 120) rgb = [x, c, 0];
+    else if (h < 180) rgb = [0, c, x];
+    else if (h < 240) rgb = [0, x, c];
+    else if (h < 300) rgb = [x, 0, c];
+    else rgb = [c, 0, x];
+    const to = (v) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
+    return `#${to(rgb[0])}${to(rgb[1])}${to(rgb[2])}`;
+  }
+
+  // Full-strength resting colour; hovering adds glow + thickness instead,
+  // which is what makes the focused slice read as "lit up".
+  function softenHex(hex, factor) {
+    const c = hexToHsl(hex);
+    return hslToHex(c.h, c.s * (factor == null ? 1.0 : factor), c.l);
+  }
+
+  /* Two-slice donuts whose categories carry no ok/bad meaning (IPv4 vs IPv6,
+     Down vs Up) previously paired the theme --accent with a hardcoded colour
+     (#39c5cf / --amber). That collided badly: the IPv4/IPv6 pair was within
+     40° of hue in 10 of the 12 built-in themes — 2° apart on Cyberpunk and 9°
+     on Nord, i.e. visually identical. Deriving both ends from the accent with
+     an explicit separation guarantees they can never converge. */
+  function donutDuo(sep) {
+    const base = hexToHsl(cssVar("--accent", "#4f8cff"));
+    const isLight = document.body.classList.contains("light-theme");
+    const sat = Math.min(78, Math.max(50, base.s));
+    const lit = isLight ? 46 : 60;
+    return [
+      hslToHex(base.h, sat, lit),
+      hslToHex(base.h + (sep || 150), sat - 4, lit + (isLight ? 10 : 9)),
+    ];
+  }
+
+  const DONUT_HUE_SPAN = 120;
+  function donutRamp(n) {
+    const base = hexToHsl(cssVar("--accent", "#4f8cff"));
+    const isLight = document.body.classList.contains("light-theme");
+    const sat = Math.min(78, Math.max(50, base.s));
+    const lit = isLight ? 46 : 60;
+    const step = n > 1 ? DONUT_HUE_SPAN / (n - 1) : 0;
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const hue = base.h - DONUT_HUE_SPAN / 2 + step * i;
+      // Alternate lightness a touch so neighbouring slices separate even
+      // where the hue delta is small.
+      out.push(hslToHex(hue, sat - (i % 2) * 6, lit + (i % 2 ? (isLight ? 10 : 9) : 0)));
+    }
+    return out;
+  }
+
   function donutGeometry(rect, shownCount) {
     const w = rect.width, h = rect.height;
     const legendBlock = shownCount * 12;
     const cx = w / 2;
     const cy = (h - legendBlock) / 2;
     const donutR = Math.max(16, Math.min(w / 2 - 10, cy - 8, 62));
-    const innerR = Math.max(8, donutR * 0.6);
+    // Thinner ring (0.60 → 0.67) reads as a chart rather than a pie wedge.
+    const innerR = Math.max(8, donutR * 0.67);
     const thickness = donutR - innerR;
     return { cx, cy, donutR, innerR, thickness, midR: innerR + thickness / 2 };
   }
@@ -5387,19 +5765,44 @@
     ctx.stroke();
 
     // --- Main segment arcs ---
+    // Each segment is drawn as: soft outer glow → gradient body → inner
+    // highlight. When any slice is hovered the others drop to 34% alpha and
+    // lose their glow, so the focused slice is the only lit element.
     ctx.lineCap = "round";
+    const hovering = st.hover !== -1;
     arcs.forEach((arc, i) => {
       const hot = st.hover === i;
+      const dim = hovering && !hot;
       if (arc.to <= arc.from) return;
+
+      const baseColor = hot ? arc.s.color : softenHex(arc.s.color);
+      const mid = start + (arc.from + arc.to) / 2;
+
+      ctx.save();
+      ctx.globalAlpha = dim ? 0.34 : 1;
+
+      // Depth: bright toward the inner edge, deeper at the outer edge.
+      const grad = ctx.createLinearGradient(
+        g.cx + Math.cos(mid) * g.innerR, g.cy + Math.sin(mid) * g.innerR,
+        g.cx + Math.cos(mid) * g.donutR, g.cy + Math.sin(mid) * g.donutR
+      );
+      grad.addColorStop(0, shadeColor(baseColor, hot ? 36 : 26));
+      grad.addColorStop(1, shadeColor(baseColor, hot ? -12 : -30));
+
+      if (!dim) {
+        ctx.shadowColor = hexToRgba(arc.s.color, hot ? 0.7 : 0.32);
+        ctx.shadowBlur = hot ? 14 : 5;
+      }
       ctx.beginPath();
       ctx.arc(g.cx, g.cy, g.midR, start + arc.from, start + arc.to);
-      ctx.strokeStyle = hot ? shadeColor(arc.s.color, 30) : arc.s.color;
-      ctx.lineWidth = hot ? g.thickness + 6 : g.thickness;
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = hot ? g.thickness + 5 : g.thickness;
       ctx.stroke();
+      ctx.restore();
 
       // Inner highlight — bright thin arc near inner edge
       ctx.save();
-      ctx.globalAlpha = hot ? 0.55 : 0.22;
+      ctx.globalAlpha = dim ? 0.1 : (hot ? 0.5 : 0.2);
       ctx.beginPath();
       ctx.arc(g.cx, g.cy, g.innerR + 2, start + arc.from + 0.04, start + arc.to - 0.04);
       ctx.strokeStyle = shadeColor(arc.s.color, 60);
@@ -5419,36 +5822,17 @@
     ctx.fillStyle = cGrad;
     ctx.fill();
 
-    // --- Center text ---
-    const numSize  = Math.round(g.innerR * 0.52);
-    const lblSize  = Math.round(g.innerR * 0.27);
-    const numY     = g.cy - lblSize * 0.6;
-    const lblY     = g.cy + numSize * 0.55;
+    /* --- Center is intentionally left empty ---
+       The big summary number used to sit here in the colour of the first (or
+       hovered) slice, which made it blend straight into the ring, and it was
+       sized from the hole radius with no fitting, so longer strings such as
+       "45% blocked" spilled outside the donut. The legend beneath already
+       carries every label and percentage, and the tooltip carries the exact
+       value, so the number was redundant.
 
-    // Big number — bold, coloured
-    ctx.fillStyle = topColor;
-    ctx.font = `800 ${numSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(st.center, g.cx, numY);
-
-    // Divider line
-    ctx.save();
-    ctx.globalAlpha = 0.18;
-    ctx.beginPath();
-    ctx.moveTo(g.cx - g.innerR * 0.45, g.cy + 1);
-    ctx.lineTo(g.cx + g.innerR * 0.45, g.cy + 1);
-    ctx.strokeStyle = cssVar("--muted", "#8b949e");
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.restore();
-
-    // Sub-label — small caps feel, muted
-    ctx.fillStyle = hexToRgba(cssVar("--muted", "#8b949e"), 0.75);
-    ctx.font = `600 ${lblSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText((st.totalLabel || formatNumber(st.total)).toUpperCase(), g.cx, lblY);
+       st.center / st.totalLabel are still maintained on the state object —
+       showPieTip() uses !!st.totalLabel to decide between byte and plain
+       number formatting — they are simply no longer drawn. */
 
     // --- Legend ---
     const ly0 = rect.height - st.shown.length * 13 + 9;
@@ -5460,7 +5844,7 @@
       const dotAlpha = dim ? 0.3 : 1;
       // Rounded dot
       ctx.save();
-      ctx.shadowBlur = dim ? 0 : 8;
+      ctx.shadowBlur = dim ? 0 : (st.hover === i ? 12 : 7);
       ctx.shadowColor = s.color;
       ctx.beginPath();
       ctx.arc(rect.width / 2 - 99, ly - 3, 4, 0, Math.PI * 2);
@@ -5473,7 +5857,7 @@
       const label = s.label.length > 16 ? s.label.slice(0, 14) + "…" : s.label;
       ctx.fillText(label, rect.width / 2 - 90, ly);
       // Percentage
-      ctx.fillStyle = dim ? hexToRgba(cssVar("--muted", "#8b949e"), 0.35) : hexToRgba(s.color, 0.9);
+      ctx.fillStyle = dim ? hexToRgba(cssVar("--muted", "#8b949e"), 0.35) : hexToRgba(s.color, 0.78);
       ctx.textAlign = "right";
       ctx.font = "bold 11px sans-serif";
       ctx.fillText(Math.round((s.value / st.total) * 100) + "%", rect.width / 2 + 100, ly);
@@ -5686,28 +6070,34 @@
       { label: "Allowed", value: allowed, color: pieGreen },
       { label: "Blocked", value: blocked, color: pieRed },
     ];
+    const ipvDuo = donutDuo(150);
     const ipvSlices = [
-      { label: "IPv4", value: Math.max(0, (dnsT.queries || 0) - (dnsT.ipv6 || 0)), color: pieBlue },
-      { label: "IPv6", value: dnsT.ipv6 || 0, color: "#39c5cf" },
+      { label: "IPv4", value: Math.max(0, (dnsT.queries || 0) - (dnsT.ipv6 || 0)), color: ipvDuo[0] },
+      { label: "IPv6", value: dnsT.ipv6 || 0, color: ipvDuo[1] },
     ];
     const cacheSlices = [
       { label: "Cache hit", value: dnsT.cachehits || 0, color: pieGreen },
       { label: "Cache miss", value: dnsT.cachemiss || 0, color: pieAmber },
     ];
 
+    // Categorical donuts share one analogous ramp instead of the 12-hue
+    // rainbow. Only the first 6 entries can ever be visible — drawDonut folds
+    // everything past the 5th slice into a muted "Other".
+    const donutColors = donutRamp(6);
     const qtypeSlices = (dns.qtypes || []).map((q, i) => ({
-      label: q.label, value: q.count, color: CHART_COLORS[i % CHART_COLORS.length],
+      label: q.label, value: q.count, color: donutColors[i % donutColors.length],
     }));
     const countrySlices = (sec.countries || []).map((c, i) => ({
-      label: c.name, value: c.count, color: CHART_COLORS[i % CHART_COLORS.length],
+      label: c.name, value: c.count, color: donutColors[i % donutColors.length],
     }));
 
     const ifaces = bw.interfaces || [];
     const totDown = ifaces.reduce((n, i) => n + (i.rx_total || 0), 0);
     const totUp = ifaces.reduce((n, i) => n + (i.tx_total || 0), 0);
+    const bwDuo = donutDuo(210);
     const bwSlices = [
-      { label: "Down", value: totDown, color: pieBlue },
-      { label: "Up", value: totUp, color: pieAmber },
+      { label: "Down", value: totDown, color: bwDuo[0] },
+      { label: "Up", value: totUp, color: bwDuo[1] },
     ];
 
     ovPie(els.ovPieSinkhole, sinkholeSlices, blocked && allowed ? Math.round(blocked / (blocked + allowed) * 100) + "% blocked" : "");
@@ -5719,38 +6109,21 @@
     ovPie(els.ovPieBw, bwSlices, "", formatBytes(totDown + totUp));
     ovPie(els.ovPieCache, cacheSlices, dnsT.hitrate != null ? Math.round(dnsT.hitrate * 100) + "% hit" : "");
 
-    els.ovResHint.textContent = sys.uptime != null
-      ? `Last ${Math.round(SYSTEM_WINDOW / 60)} minutes · 5s samples` : "";
-    requestAnimationFrame(() => {
-      drawResourceChart(els.ovResChart, (sys.history || []).map((s) => s));
-    });
+    els.ovResHint.textContent = sys.uptime != null ? "Live · 5 min" : "";
+    liveSysSnap = sys;
 
     els.ovBwHint.textContent = ifaces.length
-      ? `${ifaces.map((i) => i.name).join(", ")} · ${Math.round(bw.max_samples * bw.interval / 60)} min window`
+      ? `${ifaces.map((i) => i.name).join(", ")} · live 5 min`
       : "Collecting samples…";
-    const merged = mergeInterfaceHistory(ifaces);
-    let maxBps = 1;
-    for (const s of merged) {
-      if (s[1] > maxBps) maxBps = s[1];
-      if (s[2] > maxBps) maxBps = s[2];
-    }
-    requestAnimationFrame(() => {
-      drawBandwidth(els.ovBwChart, merged, maxBps);
-    });
+    liveBwSnap = bw;
 
     els.ovLatHint.textContent = (d.latHistory || []).length
-      ? `ping ${((sys.latency || {}).target || "")} · 24h window`
+      ? `ping ${((sys.latency || {}).target || "")} · past hour`
       : "Collecting samples…";
-    requestAnimationFrame(() => {
-      drawLatencyChart(els.ovLatChart, d.latHistory || [], base);
-    });
-
     els.ovJitHint.textContent = (d.latHistory || []).length
-      ? `ping ${((sys.latency || {}).target || "")} · 24h window`
+      ? `ping ${((sys.latency || {}).target || "")} · past hour`
       : "Collecting samples…";
-    requestAnimationFrame(() => {
-      drawJitterChart(els.ovJitChart, d.latHistory || []);
-    });
+    if (!liveLatSnap.length) liveLatSnap = d.latHistory || [];
 
     renderAttackMap(ovMap, sec.by_ip || []);
     els.ovGeoHint.textContent = (sec.geo_db && sec.geo_db.hint) || `${formatNumber((sec.stats || {}).unique_ips || 0)} attack sources`;
@@ -5785,13 +6158,16 @@
     const hint = document.getElementById("ov-wan-hint");
     const wan = sys.wan || {};
     if (!body) return;
+    const card = body.closest(".card");
     if (!wan.ifname) {
       hint.textContent = "no default route";
       body.innerHTML = `<p class="muted">No WAN interface detected.</p>`;
+      if (card) card.classList.remove("is-up"), card.classList.add("is-down");
       return;
     }
     const up = (wan.state || "").toUpperCase() === "UP";
     hint.textContent = wan.ifname;
+    if (card) card.classList.toggle("is-up", up), card.classList.toggle("is-down", !up);
     const rows = [];
     const row = (label, value, cls) => `
       <div class="ov-kv-row">
@@ -5811,9 +6187,11 @@
     const body = document.getElementById("ov-wg-body");
     const hint = document.getElementById("ov-wg-hint");
     if (!body) return;
+    const wgCard = body.closest(".card");
     if (!wg || !wg.configured) {
       hint.textContent = "not configured";
       body.innerHTML = `<p class="muted">WireGuard is not configured.</p>`;
+      if (wgCard) wgCard.classList.remove("is-up", "is-down");
       return;
     }
     const iface = wg.interface || {};
@@ -5824,6 +6202,7 @@
     hint.textContent = iface.up
       ? `up · ${online.length}/${peers.length} peers online`
       : "interface down";
+    if (wgCard) wgCard.classList.toggle("is-up", !!iface.up), wgCard.classList.toggle("is-down", !iface.up);
     const rows = [];
     const row = (label, value, cls) => `
       <div class="ov-kv-row">
@@ -8301,7 +8680,7 @@
     }
     applyDefaultPasswordWarning(d.default_password);
     applyRoleUI();
-    if (state.isOwner && state.activeView === "settings") loadUsers();
+    if (state.canManageUsers && state.activeView === "settings") loadUsers();
     startDashboard();
   }
 
@@ -8323,6 +8702,7 @@
     refreshOverview();
     loadThemes();
     setInterval(refreshSystem, 60000);
+    startLiveGraphs();
     // On a fresh login (no persisted session bootstrap) the router location is
     // not yet on state; fetch it so the attack map centers on the saved location.
     if (state.routerLat == null) {
@@ -8341,4 +8721,177 @@
   }
 
   document.addEventListener("DOMContentLoaded", init);
+})();
+
+/* =========================================================================
+   Table row caps (appended 2026-09-24)
+   -------------------------------------------------------------------------
+   Long list cards (CrowdSec alerts, custom blocklist, DHCP leases, firewall
+   events…) used to render every row, so a single card could stretch a page
+   to several screens. Each registered table now shows the first N rows and
+   offers an inline "Show all / Show less" control.
+
+   Implemented as a self-contained observer rather than by editing each
+   renderer: every table here is re-rendered by writing tbody.innerHTML (and
+   the search/chip filters re-render too), so a MutationObserver re-applies
+   the cap automatically after any refresh, filter or poll — no render
+   function needs to know this exists.
+
+   Expanded state is keyed by table id and survives re-renders, so a table a
+   user expanded stays expanded across the 30s auto-refresh.
+   ========================================================================= */
+(() => {
+  "use strict";
+
+  const DEFAULT_CAP = 25;
+
+  // Tables that own a long, homogeneous list. Deliberately excluded:
+  //   sec-countries-table / sec-ips-table → already capped at 25 by the
+  //   renderer with their own "Show more" modal, and
+  //   tm-table → lives in a fixed-height scroller (.tm-scroll).
+  const CAPPED = [
+    "cs-decisions-table",
+    "cs-alerts-table",
+    "cbl-table",
+    "leases-table",
+    "res-table",
+    "bl-table",
+    "wl-table",
+    "dm-table",
+    "vlan-table",
+    "pol-table",
+    "fw-rules-table",
+    "fw-events",
+    "pf-table",
+    "dmz-table",
+    "wg-peers-table",
+    "bw-clients-table",
+    "sys-services",
+    "sec-countries-table",
+    "sec-ips-table",
+    "tm-table",
+    "cs-bouncers-table",
+  ];
+
+  const expanded = new Map();   // tableId -> bool
+  const scheduled = new WeakSet();
+
+  function rowsOf(tbody) {
+    return Array.from(tbody.rows);
+  }
+
+  function apply(table, cap) {
+    const tbody = table.tBodies[0];
+    if (!tbody) return;
+
+    const id = table.id;
+    const rows = rowsOf(tbody);
+    const isOpen = expanded.get(id) === true;
+    const bar = ensureBar(table);
+    if (!bar) return;
+
+    if (rows.length <= cap) {
+      rows.forEach((r) => r.classList.remove("tw-row-capped"));
+      bar.hidden = true;
+      return;
+    }
+
+    bar.hidden = false;
+    rows.forEach((r, i) => {
+      r.classList.toggle("tw-row-capped", !isOpen && i >= cap);
+    });
+
+    const btn = bar.querySelector(".tw-more-btn");
+    btn.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    btn.querySelector(".tw-more-label").textContent = isOpen ? "Show less" : "Show all";
+    btn.querySelector(".tw-more-count").textContent = isOpen
+      ? `${rows.length} shown`
+      : `${cap} of ${rows.length}`;
+  }
+
+  function ensureBar(table) {
+    const wrap = table.closest(".table-wrap");
+    if (!wrap || !wrap.parentNode) return null;
+
+    let bar = wrap.parentNode.querySelector(`:scope > .show-more-bar[data-tw-for="${table.id}"]`);
+    if (bar) return bar;
+
+    bar = document.createElement("div");
+    bar.className = "show-more-bar";
+    bar.dataset.twFor = table.id;
+    bar.hidden = true;
+    bar.innerHTML =
+      '<button type="button" class="btn btn-ghost btn-sm tw-more-btn" aria-expanded="false">' +
+      '<span class="tw-more-label">Show all</span>' +
+      '<span class="tw-more-count"></span>' +
+      '<span class="tw-more-chevron" aria-hidden="true"></span>' +
+      "</button>";
+
+    bar.querySelector(".tw-more-btn").addEventListener("click", () => {
+      const open = expanded.get(table.id) === true;
+      expanded.set(table.id, !open);
+      if (!open) markReveal(table);
+      apply(table, capFor(table));
+    });
+
+    wrap.insertAdjacentElement("afterend", bar);
+    return bar;
+  }
+
+  // Stagger the rows that are about to appear (cap the delay so expanding a
+  // 2000-row table doesn't animate for a minute).
+  function markReveal(table) {
+    const tbody = table.tBodies[0];
+    if (!tbody) return;
+    const cap = capFor(table);
+    rowsOf(tbody).slice(cap).forEach((r, i) => {
+      if (i > 24) return;
+      r.style.setProperty("--tw-delay", `${Math.min(i * 18, 420)}ms`);
+      r.classList.add("tw-row-reveal");
+      r.addEventListener("animationend", () => {
+        r.classList.remove("tw-row-reveal");
+        r.style.removeProperty("--tw-delay");
+      }, { once: true });
+    });
+  }
+
+  function capFor(table) {
+    const attr = parseInt(table.dataset.twCap || "", 10);
+    return Number.isFinite(attr) && attr > 0 ? attr : DEFAULT_CAP;
+  }
+
+  function schedule(table) {
+    if (scheduled.has(table)) return;
+    scheduled.add(table);
+    requestAnimationFrame(() => {
+      scheduled.delete(table);
+      apply(table, capFor(table));
+    });
+  }
+
+  function attach(table) {
+    if (!table.tBodies[0] || table.dataset.twCapped === "1") return;
+    table.dataset.twCapped = "1";
+
+    // Observed on the table with subtree:true rather than on the tbody, so the
+    // cap survives a renderer that swaps the whole <tbody> out. Only childList
+    // is watched — apply() changes classes/styles (attributes) and writes the
+    // bar outside the table, so this can never re-trigger itself.
+    new MutationObserver(() => schedule(table))
+      .observe(table, { childList: true, subtree: true });
+    schedule(table);
+  }
+
+  function init() {
+    CAPPED.forEach((id) => {
+      const el = document.getElementById(id);
+      if (el && el.tagName === "TABLE") attach(el);
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
 })();

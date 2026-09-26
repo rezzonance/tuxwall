@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.7.9
+Version: 2.8.0
 Section: admin
 Priority: optional
 Architecture: all
@@ -272,3 +272,31 @@ Description: TuxWall Network Firewall Dashboard
  row, and the Community Ban Reporting / Suricata Alerts cards lose
  their double spacing and cramped note padding. Asset-version stamp
  bumped so browsers pick up the new dashboard JS on first reload.
+ .
+ v2.8.0 is the layout and live-graphs release. Every page now sizes its
+ boxes to content — no scrollbars inside cards, the page scrolls
+ naturally, wide tables keep their own horizontal safety net — with
+ composed full-width rows on CrowdSec/Bandwidth/DHCP/Blocklists and
+ equal-height pairs for the Settings location/theme and Blocklists
+ whitelist/update-log cards. The Security page's Top Countries and Top
+ Attackers popups are retired: full lists render inline behind the
+ 25-row Show-all expand toggle now shared by Traffic Monitor and the
+ CrowdSec tables. The Overview graphs become live monitors: CPU/Bandwidth
+ sweep the trailing 5 minutes and Latency/Jitter the past hour with
+ eased leading edges and stabilized Y axes (an eased head killed the
+ 12-second sample snap; separate eased scales killed the whole-trace
+ jump when a spike aged out; feeding both lanes from one raw-sample
+ source killed the 15s two-dataset flicker), with HTML legends showing
+ live values, line glow and head dots, and a 2s polling lane behind the
+ 15s cycle. Donut contrast reworked: full-strength resting colours
+ (was desaturated to 82% and washed together), wider slice gaps, deeper
+ edge gradients, tighter glow. System Info replaces the fastfetch
+ terminal dump with a structured detail grid (Platform / Processor /
+ Memory / Storage / Network) fed by /api/system. WAN Status and
+ WireGuard cards gain state-driven glow bars and pulsing status dots;
+ the Reboot card shows uptime and last boot; the DHCP ban notice
+ becomes a green message window. Fixes: User Manager list stayed empty
+ on page refresh (the bootstrap path gated on isOwner where every other
+ path uses canManageUsers), ip-api ISP lookups were blocked as mixed
+ content on HTTPS (now skipped there), Suricata severity badges wrapped
+ mid-word in the narrow Overview card, and Asset-version stamps bumped.

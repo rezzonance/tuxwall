@@ -523,7 +523,7 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.03); }
   font-size: 14px; border-top: 1px solid var(--border); padding-top: 14px;
 }
 #view-backups .card > h3:first-of-type { border-top: none; margin-top: 10px; }
-#view-backups .card > p { margin: 0; padding: 12px 14px 0; }
+#view-backups .card > p { margin: 0; padding: 12px 14px 10px; }
 #view-backups .card > p.muted:last-child { padding-bottom: 14px; }
 #view-backups .card > .table-wrap { margin-top: 8px; }
 #view-backups .card > #bk-sys-contents { padding: 0 14px; }
@@ -1228,7 +1228,12 @@ body.light-theme .sec-map .leaflet-container { background: #10151b; }
   display: block; width: 100%; height: 230px;
   transition: filter var(--transition);
 }
-.pie-canvas:hover { cursor: crosshair; filter: drop-shadow(0 0 12px rgba(79,140,255,0.15)); }
+.pie-canvas:hover {
+  cursor: crosshair;
+  /* Theme-aware halo — was hardcoded to the dark theme's blue, so it clashed
+     on Gruvbox / Rosé Pine / Emerald. */
+  filter: drop-shadow(0 0 14px color-mix(in srgb, var(--accent) 22%, transparent));
+}
 .pie-tip {
   position: fixed; z-index: 1200; pointer-events: none;
   display: none; max-width: 300px;
@@ -3672,4 +3677,825 @@ body.light-theme .btn-danger:hover {
   .brand { flex-direction: row; align-items: center; }
   .brand-mark { width: 140px; flex: none; }
   .brand-text { display: flex; align-items: center; }
+}
+
+/* =========================================================================
+   LAYOUT DEPTH & CARD CAPPING (appended 2026-09-24)
+   -------------------------------------------------------------------------
+   Purpose: give each page a composed, multi-column layout instead of a stack
+   of full-width boxes, and stop long list cards from growing without bound.
+
+   This layer is PURELY structural — it deliberately does not touch the glow,
+   gradient titles, pulses or button flair defined earlier in this file.
+
+   Technique: each composed view becomes a 12-column grid whose children are
+   full-width by default, then individual cards opt into a span via :has().
+   Browsers without :has() simply keep the previous stacked layout, so this
+   degrades gracefully rather than collapsing.
+   ========================================================================= */
+
+/* ---------- 1. The composed views ---------- */
+#view-crowdsec,
+#view-blocklists,
+#view-bandwidth,
+#view-settings,
+#view-security,
+#view-clients,
+#view-vlans {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 18px;
+  /* `start`, not `stretch`: stretching forced short cards (the bandwidth
+     donut, small forms) to match the height of a 25-row table beside them,
+     leaving a large dead area under their content. Row caps already keep
+     neighbouring card heights close. */
+  align-items: start;
+}
+
+/* Default: every direct child occupies the full row. */
+#view-crowdsec > *,
+#view-blocklists > *,
+#view-bandwidth > *,
+#view-settings > *,
+#view-security > *,
+#view-clients > *,
+#view-vlans > * {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+/* Grid gap replaces the stacked margins. */
+#view-crowdsec > .card,
+#view-blocklists > .card,
+#view-bandwidth > .card,
+#view-settings > .card,
+#view-security > .card,
+#view-clients > .card,
+#view-vlans > .card,
+#view-crowdsec > .card-mt,
+#view-blocklists > .card-mt,
+#view-bandwidth > .card-mt,
+#view-settings > .card-mt,
+#view-security > .card-mt,
+#view-clients > .card-mt,
+#view-vlans > .card-mt { margin-top: 0; }
+
+#view-crowdsec > .card,
+#view-blocklists > .card,
+#view-bandwidth > .card,
+#view-settings > .card,
+#view-security > .card,
+#view-clients > .card,
+#view-vlans > .card {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Shrink + scroll safety net.
+   A card in a narrow column whose table is wider than the column must scroll
+   INSIDE its .table-wrap. Without an explicit min-width:0 the wrap can refuse
+   to shrink below its content, and because .card is overflow:hidden the
+   overflow was being clipped with no scrollbar — content simply vanished.
+   These two rules are what make every narrow card scroll instead of cut off. */
+#view-crowdsec .card,
+#view-blocklists .card,
+#view-bandwidth .card,
+#view-settings .card,
+#view-security .card,
+#view-clients .card,
+#view-vlans .card { min-width: 0; }
+
+#view-crowdsec .table-wrap,
+#view-blocklists .table-wrap,
+#view-bandwidth .table-wrap,
+#view-settings .table-wrap,
+#view-security .table-wrap,
+#view-clients .table-wrap,
+#view-vlans .table-wrap {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* ---------- 2. Per-page composition ---------- */
+
+/* CrowdSec: decisions lead, bouncers ride alongside, then an even pair. */
+#view-crowdsec > .card:has(#cs-decisions-table) { grid-column: span 7; }
+#view-crowdsec > .card:has(#cs-bouncers-table)  { grid-column: span 5; }
+#view-crowdsec > .card:has(#cs-alerts-table)    { grid-column: span 6; }
+#view-crowdsec > .card:has(#cbl-table)          { grid-column: span 6; }
+
+/* Blocklists: sources full width, then whitelist beside the update log. */
+#view-blocklists > .card:has(#wl-table) { grid-column: span 5; }
+#view-blocklists > .card:has(#bl-log)   { grid-column: span 7; }
+
+/* Bandwidth: the donut card is narrower than the per-client table. */
+#view-bandwidth > .card:has(#bw-top-pie)      { grid-column: span 5; }
+#view-bandwidth > .card:has(#bw-clients-body) { grid-column: span 7; }
+
+/* The card's own <style> lays the legend and donut out as a flex ROW whose
+   legend is `flex: 1 1 300px; min-width: 260px`. In a half-width card that
+   leaves too little room for the donut, so it was being pushed to the right
+   edge / wrapped. Stack them instead and centre the donut under the legend. */
+#view-bandwidth .bw-top-wrap {
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+#view-bandwidth .bw-top-legend {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+}
+#view-bandwidth .bw-top-pie { flex: 0 0 auto; margin: 0 auto; }
+
+/* Settings: small forms pair up instead of each claiming a full row. */
+#view-settings > .card:has(#router-lat)  { grid-column: span 5; }
+#view-settings > .card:has(#theme-file)  { grid-column: span 7; }
+#view-settings > .card:has(#users-tbody) { grid-column: span 7; }
+#view-settings > #totp-card              { grid-column: span 5; }
+
+/* Security: the ban-reporting panel fills the gutter beside the map, and
+   Suricata keeps the full row — it carries a signature plus two IP columns,
+   which is simply too much content for a narrow card. */
+#view-security > #sec-report-card              { grid-column: span 4; }
+#view-security > .card:has(#sec-map)           { grid-column: span 8; }
+#view-security > .card:has(#sec-suricata-body) { grid-column: 1 / -1; }
+
+/* Security's stacked sub-wrapper becomes a 2-up row of its own. */
+#view-security > .sec-full-cards {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 18px;
+  align-items: stretch;
+}
+#view-security > .sec-full-cards > .card { margin-top: 0; display: flex; flex-direction: column; min-width: 0; }
+#view-security > .sec-full-cards > .card:has(#sec-countries-body) { grid-column: span 5; }
+#view-security > .sec-full-cards > .card:has(#sec-ips-body)       { grid-column: span 7; }
+
+/* DHCP + VLAN tables are wide (7-8 columns), so they keep the full row —
+   their height problem is solved by the row cap below, not by narrowing. */
+
+/* ---------- 3. Overview: asymmetric content rows ---------- */
+#view-overview .chart-grid:not(#ov-wan-grid):not(.chart-grid-map),
+#view-overview #ov-wan-grid {
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+}
+#view-overview .chart-grid:not(#ov-wan-grid):not(.chart-grid-map) > .card:nth-child(1) { grid-column: span 6; }
+#view-overview .chart-grid:not(#ov-wan-grid):not(.chart-grid-map) > .card:nth-child(2) { grid-column: span 6; }
+#view-overview .chart-grid:not(#ov-wan-grid):not(.chart-grid-map) > .card:nth-child(3) { grid-column: span 7; }
+#view-overview .chart-grid:not(#ov-wan-grid):not(.chart-grid-map) > .card:nth-child(4) { grid-column: span 5; }
+#ov-wan-grid > .card:nth-child(1) { grid-column: span 7; }
+#ov-wan-grid > .card:nth-child(2) { grid-column: span 5; }
+
+#view-overview .chart-grid-map {
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  grid-template-rows: auto;
+  flex: 0 0 auto;
+  min-height: 0;
+}
+#view-overview .chart-grid-map > .card:nth-child(1) { grid-column: span 12; }
+#view-overview .chart-grid-map > .card:nth-child(2) { grid-column: span 6; }
+#view-overview .chart-grid-map > .card:nth-child(3) { grid-column: span 6; }
+
+/* Same shrink/scroll guarantee for the overview's half-width cards. */
+#view-overview .chart-grid .card,
+#view-overview .pie-grid .card { min-width: 0; }
+#view-overview .chart-grid .table-wrap,
+#view-overview .pie-grid .table-wrap {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* ---------- 4. Row cap + expand affordance ---------- */
+
+/* Rows past the cap are removed from flow entirely. */
+tr.tw-row-capped { display: none; }
+
+/* The expand bar keeps the sidebar's glass + glow language. */
+.show-more-bar {
+  position: relative;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--accent) 4%, transparent) 0%,
+    transparent 100%);
+  margin-top: auto;
+}
+.show-more-bar::before {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; top: -1px;
+  height: 1px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--accent) 55%, transparent) 50%,
+    transparent 100%);
+}
+.tw-more-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.tw-more-count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+  font-weight: 500;
+}
+.tw-more-chevron {
+  display: inline-block;
+  width: 9px; height: 9px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg) translate(-1px, -1px);
+  transition: transform var(--transition);
+}
+.tw-more-btn[aria-expanded="true"] .tw-more-chevron {
+  transform: rotate(-135deg) translate(-1px, -1px);
+}
+
+/* Newly revealed rows cascade in instead of appearing all at once. */
+tr.tw-row-reveal {
+  animation: tw-row-reveal-in 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: var(--tw-delay, 0s);
+}
+@keyframes tw-row-reveal-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Cards enter with a short stagger when a page is opened. */
+.view:not([hidden]) > .card,
+.view:not([hidden]) > .sec-full-cards > .card,
+.view:not([hidden]) > .card-grid > .card {
+  animation: card-rise 0.34s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.view:not([hidden]) > .card:nth-of-type(2) { animation-delay: 0.04s; }
+.view:not([hidden]) > .card:nth-of-type(3) { animation-delay: 0.08s; }
+.view:not([hidden]) > .card:nth-of-type(4) { animation-delay: 0.12s; }
+.view:not([hidden]) > .card:nth-of-type(5) { animation-delay: 0.16s; }
+.view:not([hidden]) > .card:nth-of-type(n+6) { animation-delay: 0.2s; }
+
+/* ---------- 5. Responsive collapse ---------- */
+@media (max-width: 1250px) {
+  #view-crowdsec > .card,
+  #view-blocklists > .card,
+  #view-bandwidth > .card,
+  #view-settings > .card,
+  #view-security > .card,
+  #view-security > .sec-full-cards > .card,
+  #view-overview .chart-grid > .card,
+  #view-overview .chart-grid-map > .card,
+  #ov-wan-grid > .card { grid-column: 1 / -1 !important; }
+}
+@media (max-width: 760px) {
+  #view-crowdsec,
+  #view-blocklists,
+  #view-bandwidth,
+  #view-settings,
+  #view-security,
+  #view-clients,
+  #view-vlans { gap: 10px; }
+}
+
+/* =========================================================================
+   SECURITY NATURAL-HEIGHT PILOT (applied 2026-09-26)
+   -------------------------------------------------------------------------
+   Spec (corrected): each box sizes to its own content. NO scrollbars
+   inside boxes -- a box never clips or inner-scrolls. The PAGE scrolls
+   vertically as needed. The page NEVER scrolls horizontally: every grid
+   child is full-width with min-width:0, and wide tables keep
+   overflow-x:auto only as a safety net (no scrollbar appears unless a
+   table is genuinely wider than the card).
+
+   What this changes vs the 2026-09-24 composition layer:
+   - map / report / suricata / countries+attackers / chart / traffic
+     monitor / diagnose all take full-width rows (no narrow side-by-side
+     cards that squeeze tables into inner horizontal scrolls);
+   - .sec-full-cards returns to a vertical stack;
+   - Traffic Monitor's fixed 420px inner scroller is removed, so all
+     100 rows render in the natural page flow;
+   - countries / attackers keep their existing top-25 + modal pattern
+     (user-triggered expansion, never an inner scrollbar).
+
+   LAYOUT ONLY: no colors, fonts, glows, gradients or menu rules touched.
+   Small screens are untouched (already stacked full-width there).
+   Revert: restore style.css.bak.20260926-natural.
+   ========================================================================= */
+
+/* Traffic Monitor: natural height at every viewport (was a 420px scroller,
+   320px on small screens). */
+#view-security #traffic-monitor-card .tm-scroll {
+  max-height: none;
+  overflow-x: auto; /* safety net only -- appears solely on real overflow */
+  overflow-y: visible;
+}
+
+@media (min-width: 1251px) {
+  /* Full-width rows: wide tables never squeeze, so no inner scrolling. */
+  #view-security > #sec-report-card,
+  #view-security > .card:has(#sec-map),
+  #view-security > .card:has(#sec-suricata-body),
+  #view-security > .sec-full-cards,
+  #view-security > #sec-chart-card,
+  #view-security > #traffic-monitor-card,
+  #view-security > .card:has(#diag-target) {
+    grid-column: 1 / -1;
+  }
+
+  /* Back to a vertical stack (overrides the 2-up grid). */
+  #view-security > .sec-full-cards {
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Boxes size to content; nothing clips. */
+  #view-security > .card,
+  #view-security > .sec-full-cards > .card {
+    min-height: auto;
+  }
+
+  /* Map keeps its full showcase height. */
+  #view-security #sec-map {
+    height: 480px;
+  }
+}
+
+/* =========================================================================
+   CROWDSEC NATURAL-HEIGHT LAYER (applied 2026-09-26)
+   -------------------------------------------------------------------------
+   Same setup as the Security page: each box takes a full-width row and
+   sizes to its content. NO scrollbars inside boxes; the PAGE scrolls
+   vertically; the page NEVER scrolls horizontally. The row-cap toggle
+   (25 / Show all) governs the decisions, bouncers, alerts and custom
+   blocklist tables -- including cs-bouncers-table, newly added to the
+   CAPPED list in dashboard.js.
+
+   LAYOUT ONLY: no colors, fonts, glows, gradients or menu rules touched.
+   Small screens are untouched (already stacked full-width there).
+   Revert: restore style.css.bak.20260926-cs.
+   ========================================================================= */
+
+@media (min-width: 1251px) {
+  /* Full-width rows so 5-column tables never squeeze into inner scrolls. */
+  #view-crowdsec > .card:has(#cs-decisions-table),
+  #view-crowdsec > .card:has(#cs-bouncers-table),
+  #view-crowdsec > .card:has(#cs-alerts-table),
+  #view-crowdsec > .card:has(#cbl-table) {
+    grid-column: 1 / -1;
+  }
+
+  /* Boxes size to content; nothing clips. */
+  #view-crowdsec > .card {
+    min-height: auto;
+  }
+}
+
+/* =========================================================================
+   BANDWIDTH NATURAL-HEIGHT LAYER (applied 2026-09-26)
+   -------------------------------------------------------------------------
+   Same setup as Security/CrowdSec: each box takes a full-width row and
+   sizes to its content. NO scrollbars inside boxes; the PAGE scrolls
+   vertically; the page NEVER scrolls horizontally. The Clients table
+   already renders its full list with the row-cap toggle (25 / Show all),
+   the Top Downloaders donut shows its top 10, and per-interface chart
+   cards keep their fixed canvas heights -- no JavaScript changes needed.
+
+   With the full row width available, the donut card's own side-by-side
+   arrangement (legend left, donut right) is restored.
+
+   LAYOUT ONLY: no colors, fonts, glows, gradients or menu rules touched.
+   Small screens are untouched (already stacked full-width there).
+   Revert: restore style.css.bak.20260926-bw.
+   ========================================================================= */
+
+@media (min-width: 1251px) {
+  /* Full-width rows so the 6-column Clients table never inner-scrolls. */
+  #view-bandwidth > .card:has(#bw-top-pie),
+  #view-bandwidth > .card:has(#bw-clients-body) {
+    grid-column: 1 / -1;
+  }
+
+  /* Boxes size to content; nothing clips. */
+  #view-bandwidth > .card {
+    min-height: auto;
+  }
+
+  /* Restore the card's native side-by-side donut arrangement. */
+  #view-bandwidth .bw-top-wrap {
+    flex-direction: row;
+    align-items: center;
+  }
+  #view-bandwidth .bw-top-legend {
+    flex: 1 1 300px;
+    min-width: 260px;
+    width: auto;
+  }
+  #view-bandwidth .bw-top-pie {
+    flex: 0 0 240px;
+    margin-left: auto;
+  }
+}
+
+/* =========================================================================
+   TOTP CARD SPACING FIX (applied 2026-09-26)
+   -------------------------------------------------------------------------
+   The Two-Factor card's children disagreed about the body inset: the text
+   sat at 16px while the Enable button was flush with the card edge, the
+   enroll/disable rows used uneven 6px/16px padding plus a first-child
+   margin hack, inline <label>s ran into their inputs on one line, and
+   auto-width inputs floated in a wide card. This gives the card one even
+   16px body gutter, stacked labels over full-width capped inputs, a
+   block-level QR code, and consistent button rhythm.
+
+   LAYOUT ONLY: no colors, fonts, glows or menu rules touched.
+   Revert: restore style.css.bak.20260926-totp.
+   ========================================================================= */
+
+/* Align the Enable button with the 16px body inset (was flush left). */
+#totp-card > button#totp-start-btn {
+  margin: 12px 16px 16px;
+}
+
+/* One even body gutter for the enroll / disable rows. */
+#totp-card > div {
+  padding: 12px 16px 16px;
+}
+#totp-card > div > *:first-child {
+  margin-top: 0;
+}
+
+/* Stacked labels above their fields. */
+#totp-card .login-label {
+  display: block;
+  margin: 12px 0 6px;
+}
+
+/* Full-width (capped) fields instead of skinny auto-width inputs. */
+#totp-card .login-input {
+  display: block;
+  width: 100%;
+  max-width: 340px;
+  box-sizing: border-box;
+}
+
+/* QR code and manual secret as proper blocks. */
+#totp-qr {
+  display: block;
+  margin: 4px 0 12px;
+}
+#totp-secret {
+  display: block;
+  margin: 0 0 4px;
+}
+
+/* Button rhythm inside the enroll / disable rows. */
+#totp-card > div > button {
+  margin-top: 12px;
+}
+#totp-card #totp-confirm-btn {
+  margin-right: 8px;
+}
+
+/* =========================================================================
+   SETTINGS EQUAL-HEIGHT PAIR (applied 2026-09-26)
+   -------------------------------------------------------------------------
+   The Router Location and Install-a-custom-theme cards share a row but the
+   composed grid uses align-items:start, so they end at different heights.
+   These two cards (and only these) stretch to the row height instead.
+   Content stays top-aligned in both; the shorter card simply gains even
+   bottom whitespace rather than a ragged edge.
+
+   LAYOUT ONLY: no colors, fonts, glows or menu rules touched.
+   Revert: restore style.css.bak.20260926-eqht.
+   ========================================================================= */
+
+@media (min-width: 1251px) {
+  #view-settings > .card:has(#router-lat),
+  #view-settings > .card:has(#theme-file) {
+    align-self: stretch;
+  }
+}
+
+/* =========================================================================
+   SYSTEM INFO DETAIL GRID (applied 2026-09-26)
+   -------------------------------------------------------------------------
+   The fastfetch <pre> left half the full-width card empty. It is replaced
+   by a structured detail grid fed by the existing /api/system payload
+   (no backend changes): five labeled groups that fill the row beside the
+   Ubuntu mark. Natural height, page scrolls, no inner scrollbars.
+
+   LAYOUT ONLY: no colors, fonts, glows or menu rules touched.
+   Revert: restore style.css.bak.20260926-sysinfo (plus index.html and
+   dashboard.js backups of the same date in /home/jeff/backups/).
+   ========================================================================= */
+
+.sys-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(225px, 1fr));
+  gap: 20px 32px;
+  padding: 14px 18px 16px;
+  align-content: start;
+}
+.sys-dgroup {
+  min-width: 0;
+}
+.sys-dgroup h4 {
+  margin: 0 0 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+}
+.sys-drow {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 14px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+}
+.sys-drow:last-child {
+  border-bottom: none;
+}
+.sys-drow > span {
+  flex: none;
+  color: var(--muted);
+}
+.sys-drow > b {
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  text-align: right;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+/* Reboot box detail rows: breathing room above the button, readable width. */
+.reboot-detail {
+  margin: 2px 0 14px;
+  max-width: 440px;
+}
+
+/* =========================================================================
+   DHCP BAN NOTE MESSAGE WINDOW (applied 2026-09-26)
+   -------------------------------------------------------------------------
+   The "Banning a client..." note becomes a message window: green
+   semi-transparent fill with a matching border, theme-aware via
+   var(--green) so it adapts to every theme. Scoped to the DHCP page only.
+   Revert: restore style.css.bak.20260926-dhcpnote.
+   ========================================================================= */
+
+#view-clients > p.bl-note {
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--green) 38%, transparent);
+  border-radius: 10px;
+  padding: 12px 16px;
+}
+
+/* =========================================================================
+   BLOCKLISTS EQUAL-HEIGHT PAIR (applied 2026-09-26)
+   -------------------------------------------------------------------------
+   The Whitelist and Update Log cards share a row but end at different
+   heights. These two cards (and only these) stretch to the row height
+   instead. Content stays top-aligned in both.
+   LAYOUT ONLY: no colors, fonts, glows or menu rules touched.
+   Revert: restore style.css.bak.20260926-blht.
+   ========================================================================= */
+
+@media (min-width: 1251px) {
+  #view-blocklists > .card:has(#wl-table),
+  #view-blocklists > .card:has(#bl-log) {
+    align-self: stretch;
+  }
+}
+
+/* =========================================================================
+   OVERVIEW SURICATA SEVERITY COLUMN (applied 2026-09-26)
+   -------------------------------------------------------------------------
+   The wrap-friendly rule for long signatures also hit the Sev badge cell,
+   and word-break split HIGH/MED/LOW across two lines ("LO"/"W"). Signatures
+   keep wrapping; the severity badge column is forced onto one line.
+   LAYOUT ONLY: no colors, fonts, glows or menu rules touched.
+   Revert: restore style.css.bak.20260926-ovsev.
+   ========================================================================= */
+
+#ov-suricata-body td:nth-child(2) {
+  white-space: nowrap;
+  word-break: normal;
+}
+
+/* =========================================================================
+   WAN + WIREGUARD CARD WOW (applied 2026-09-26)
+   -------------------------------------------------------------------------
+   Both cards were flat key-value lists. They now get state-driven accents
+   (JS toggles .is-up / .is-down on the card): a glowing top bar and a
+   pulsing status dot in the header -- green when up, red when down --
+   plus a soft hover sweep on the rows. All theme-aware; motion disabled
+   under prefers-reduced-motion.
+   Revert: restore style.css.bak.20260926-ovwow (and the JS backup of the
+   same date in /home/jeff/backups/).
+   ========================================================================= */
+
+/* State-driven top-glow bars. */
+.card:has(#ov-wan-body).is-up::before,
+.card:has(#ov-wg-body).is-up::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--green) 70%, transparent) 50%,
+    transparent 100%);
+  pointer-events: none;
+}
+.card:has(#ov-wan-body).is-down::before,
+.card:has(#ov-wg-body).is-down::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--red) 70%, transparent) 50%,
+    transparent 100%);
+  pointer-events: none;
+}
+.card:has(#ov-wan-body).is-up,
+.card:has(#ov-wg-body).is-up {
+  position: relative;
+}
+.card:has(#ov-wan-body).is-down,
+.card:has(#ov-wg-body).is-down {
+  position: relative;
+  border-color: color-mix(in srgb, var(--red) 35%, var(--border));
+}
+
+/* Pulsing status dot in the headers. */
+.card:has(#ov-wan-body).is-up .card-head h2::before,
+.card:has(#ov-wg-body).is-up .card-head h2::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 8px;
+  vertical-align: 1px;
+  background: var(--green);
+  box-shadow: 0 0 8px var(--green);
+  animation: ov-dot-pulse 2.2s ease-in-out infinite;
+}
+.card:has(#ov-wan-body).is-down .card-head h2::before,
+.card:has(#ov-wg-body).is-down .card-head h2::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 8px;
+  vertical-align: 1px;
+  background: var(--red);
+  box-shadow: 0 0 8px var(--red);
+}
+@keyframes ov-dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.85); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .card:has(#ov-wan-body).is-up .card-head h2::before,
+  .card:has(#ov-wg-body).is-up .card-head h2::before {
+    animation: none;
+  }
+}
+
+/* Soft hover sweep on the key-value and peer rows. */
+.ov-kv-row {
+  padding: 3px 8px;
+  margin: 0 -8px;
+  border-radius: 6px;
+  transition: background 0.15s ease;
+}
+.ov-kv-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.ov-wg-peer {
+  padding: 3px 8px;
+  margin: 0 -8px;
+  border-radius: 6px;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+.ov-wg-peer:hover {
+  background: rgba(255, 255, 255, 0.04);
+  transform: translateX(3px);
+}
+
+/* =========================================================================
+   CHART LEGENDS (applied 2026-09-26)
+   -------------------------------------------------------------------------
+   HTML legends for the Overview CPU/Memory and Bandwidth graphs: color key
+   dot plus live value, replacing the old canvas-drawn squares. Theme-aware
+   via --lg / --text / --muted.
+   Revert: restore style.css.bak.20260926-live.
+   ========================================================================= */
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  padding: 10px 14px 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.lg-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+.lg-item i {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: var(--lg);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--lg) 55%, transparent);
+  font-style: normal;
+  flex: none;
+}
+.lg-item b {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* =========================================================================
+   BACKUPS PAGE STYLING (applied 2026-09-26)
+   -------------------------------------------------------------------------
+   A little extra styling for the single big card: the secrets warning
+   becomes an amber message window (mirrors the DHCP notice pattern),
+   the three sections get numbered accent badges via CSS counters, and
+   section headings pick up a touch more presence. Theme-aware throughout.
+   Revert: restore style.css.bak.20260926-bkstyle (plus the index backup
+   of the same date in /home/jeff/backups/).
+   ========================================================================= */
+
+/* Amber warning callout for the secrets notice. */
+#view-backups .card > p.bk-warn {
+  position: relative;
+  background: color-mix(in srgb, var(--amber, #d29922) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber, #d29922) 38%, transparent);
+  border-radius: 10px;
+  padding: 12px 14px 10px 42px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+#view-backups .bk-warn::before {
+  content: "\26A0";
+  position: absolute;
+  left: 20px;
+  top: 8px;
+  font-size: 16px;
+  line-height: 1.55;
+  color: var(--amber, #d29922);
+}
+
+/* Numbered section badges on the direct-child section headings. */
+#view-backups > .card {
+  counter-reset: bk-section;
+}
+#view-backups > .card > h3 {
+  counter-increment: bk-section;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+#view-backups > .card > h3::before {
+  content: counter(bk-section);
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 30%, transparent), color-mix(in srgb, var(--accent) 12%, transparent));
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  color: color-mix(in srgb, var(--accent) 55%, #fff);
+  font-size: 12px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }

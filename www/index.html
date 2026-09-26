@@ -6,7 +6,7 @@
   <title>TuxWall - Network Dashboard</title>
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
-  <link rel="stylesheet" href="/css/style.css?v=202609181200">
+  <link rel="stylesheet" href="/css/style.css?v=20260926-bkstyle8">
 </head>
 <body>
 <div id="login-gate" class="login-gate" hidden>
@@ -190,18 +190,33 @@
       <div class="chart-grid">
         <div class="card">
           <div class="card-head"><h2>CPU &amp; Memory</h2><span class="muted" id="ov-res-hint"></span></div>
+          <div class="chart-legend">
+            <span class="lg-item"><i style="--lg:var(--amber)"></i>CPU<b id="ov-res-cpu">—</b></span>
+            <span class="lg-item"><i style="--lg:var(--accent)"></i>Mem<b id="ov-res-mem">—</b></span>
+          </div>
           <div class="bw-canvas-wrap"><canvas id="ov-res-chart" class="bw-canvas"></canvas></div>
         </div>
         <div class="card">
           <div class="card-head"><h2>Bandwidth</h2><span class="muted" id="ov-bw-hint"></span></div>
+          <div class="chart-legend">
+            <span class="lg-item"><i style="--lg:var(--accent)"></i>Down<b id="ov-bw-down">—</b></span>
+            <span class="lg-item"><i style="--lg:var(--amber)"></i>Up<b id="ov-bw-up">—</b></span>
+          </div>
           <div class="bw-canvas-wrap"><canvas id="ov-bw-chart" class="bw-canvas"></canvas></div>
         </div>
         <div class="card">
-          <div class="card-head"><h2>WAN Latency</h2><span class="muted" id="ov-lat-hint"></span></div>
+          <div class="card-head"><h2>WAN Latency (1h)</h2><span class="muted" id="ov-lat-hint"></span></div>
+          <div class="chart-legend">
+            <span class="lg-item"><i style="--lg:var(--accent)"></i>Avg<b id="ov-lat-avg">—</b></span>
+            <span class="lg-item"><i style="--lg:var(--red)"></i>Max<b id="ov-lat-max">—</b></span>
+          </div>
           <div class="bw-canvas-wrap"><canvas id="ov-lat-chart" class="bw-canvas"></canvas></div>
         </div>
         <div class="card">
-          <div class="card-head"><h2>Jitter (24h)</h2><span class="muted" id="ov-jit-hint"></span></div>
+          <div class="card-head"><h2>Jitter (1h)</h2><span class="muted" id="ov-jit-hint"></span></div>
+          <div class="chart-legend">
+            <span class="lg-item"><i style="--lg:var(--amber)"></i>Mdev<b id="ov-jit-mdev">—</b></span>
+          </div>
           <div class="bw-canvas-wrap"><canvas id="ov-jit-chart" class="bw-canvas"></canvas></div>
         </div>
       </div>
@@ -1558,7 +1573,7 @@
           }
         </style>
         <div class="table-wrap">
-          <table>
+          <table id="bw-clients-table">
             <thead>
               <tr>
                 <th>Client</th>
@@ -1848,7 +1863,7 @@
         <div class="card card-wide sys-info-card">
           <div class="card-head">
             <h2>System Info</h2>
-            <span class="card-head-note muted">fastfetch</span>
+            <span class="card-head-note muted">live</span>
           </div>
           <div class="ff-wrap">
             <div class="ff-logo-svg" title="Ubuntu">
@@ -1880,7 +1895,7 @@
                 </g>
               </svg>
             </div>
-            <pre id="sys-ff-info" class="ff-pre ff-info">Loading…</pre>
+            <div id="sys-detail" class="sys-detail"><p class="muted">Loading…</p></div>
           </div>
         </div>
 
@@ -1929,6 +1944,10 @@
         <div class="card">
           <div class="card-head"><h2>Reboot</h2></div>
           <div class="upd-body">
+            <div class="reboot-detail">
+              <div class="sys-drow"><span>Uptime</span><b id="sys-reboot-uptime">—</b></div>
+              <div class="sys-drow"><span>Last boot</span><b id="sys-reboot-boot">—</b></div>
+            </div>
             <button class="btn btn-danger" id="sys-reboot" type="button">Reboot system</button>
             <p class="muted upd-hint">Restarts the router. The dashboard and network go offline for about a minute.</p>
           </div>
@@ -2010,10 +2029,11 @@
         <div class="card-head">
           <h2>System Configuration Backup</h2>
           <div class="card-toolbar">
-            <button class="btn btn-sm" id="bk-sys-create" type="button">Create system backup</button>
+            <button class="btn btn-sm btn-primary" id="bk-sys-create" type="button">Create system backup</button>
           </div>
         </div>
-        <p class="muted">Snapshot of the configs selected below into a single archive, saved to <code>/var/lib/tuxwall/backups/system</code> on this server. Includes live firewall rules, installed-package state, and the dashboard files. Download and store a copy on another computer. <b>Warning:</b> archives contain secrets (WireGuard keys, CrowdSec keys) — never share them as-is; use <b>Export sanitized</b> instead.</p>
+        <p class="muted">Snapshot of the configs selected below into a single archive, saved to <code>/var/lib/tuxwall/backups/system</code> on this server. Includes live firewall rules, installed-package state, and the dashboard files. Download and store a copy on another computer.</p>
+        <p class="bk-warn"><b>Warning:</b> archives contain secrets (WireGuard keys, CrowdSec keys) — never share them as-is; use <b>Export sanitized</b> instead.</p>
         <div class="upd-progress" id="bk-sys-progress" hidden>
           <div class="bar upd-bar"><div class="bar-fill" id="bk-sys-bar" style="width:0%"></div></div>
           <p class="muted upd-status" id="bk-sys-status"></p>
@@ -2316,7 +2336,7 @@
 
 <script src="/scripts/leaflet.js"></script>
 <script src="/scripts/qrcode.js"></script>
-<script src="/scripts/dashboard.js?v=202609181200"></script>
+<script src="/scripts/dashboard.js?v=20260926-latsrc1"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>
