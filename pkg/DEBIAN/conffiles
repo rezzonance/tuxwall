@@ -6,3 +6,5 @@
 /etc/systemd/system/tuxwall-agent.service
 /etc/systemd/system/tuxwall-blocklist-update.service
 /etc/systemd/system/tuxwall-blocklist-update.timer
+/etc/systemd/system/suricata-update.service
+/etc/systemd/system/suricata-update.timer

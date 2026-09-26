@@ -425,12 +425,13 @@ config_suricata() {
     if [[ -f "$SURICATA" ]]; then
         log "Tuning Suricata HOME_NET + af-packet interface (WAN=$WAN_NIC)"
         if [[ $DRY_RUN -eq 0 ]]; then
-            python3 - "$SURICATA" "$LAN_SUBNET" "$WAN_NIC" <<'PY'
+            python3 - "$SURICATA" "$LAN_SUBNET" "$WAN_NIC" "${LAN:-}" <<'PY'
 import re, sys
 path, home_net, wan = sys.argv[1], sys.argv[2], sys.argv[3]
+lan = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else wan
 with open(path) as f:
     lines = f.readlines()
-out, in_af = [], False
+out, in_af, bind_k = [], False, 0
 for ln in lines:
     # track whether we are inside the top-level af-packet: block
     top = re.match(r'^(\S.*):', ln)
@@ -439,7 +440,12 @@ for ln in lines:
     elif top and in_af:
         in_af = False
     if in_af and re.match(r'^\s{2}- interface:', ln):
-        ln = re.sub(r'^(\s{2}- interface:\s*).*', r'\g<1>%s' % wan, ln)
+        # Bind the first af-packet entry to WAN and the second to LAN, so
+        # the wizard monitors BOTH directions (before, every entry was
+        # rewritten to WAN and the LAN was never inspected).
+        bind = wan if bind_k == 0 else (lan or wan)
+        ln = re.sub(r'^(\s{2}- interface:\s*).*', r'\g<1>%s' % bind, ln)
+        bind_k += 1
     out.append(ln)
 text = ''.join(out)
 text = re.sub(r'HOME_NET:\s*"\[.*?\]"', 'HOME_NET: "[%s]"' % home_net, text)

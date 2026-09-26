@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ============================================================================
 # TuxWall Automated Installer
-# Tested on: Ubuntu 24.04 / 25.04
+# Tested on: Ubuntu 24.04 / 25.04 / 26.04 LTS / 26.04 LTS
 # Run as root: sudo bash setup.sh
 # ============================================================================
 
@@ -163,7 +163,7 @@ chmod 755 /var/www/html/includes/api_server.py
 # Cache-bust dashboard assets: browsers cache ?v= URLs hard, so stamp a
 # fresh version every deploy (otherwise stale JS/CSS survives upgrades).
 ASSET_V="$(date +%Y%m%d%H%M)"
-sed -i -E "s/\.(js|css)\?v=[A-Za-z0-9]+/.\1?v=${ASSET_V}/g" /var/www/html/index.html
+sed -i -E "s/\.(js|css)\?v=[-A-Za-z0-9._]+/.\1?v=${ASSET_V}/g" /var/www/html/index.html
 
 ok "Web files installed"
 
@@ -195,9 +195,12 @@ cp "$REPO_DIR/scripts/tuxwall-sqm.sh" /usr/local/sbin/tuxwall-sqm.sh
 chmod 755 /usr/local/sbin/tuxwall-sqm.sh
 # Seed SQM rates file (dashboard System > Traffic Shaping manages it afterwards).
 # Never overwrite an existing conf — it holds the site's tuned rates.
+# Seed WAN with the detected default-route interface (eth0 only as fallback).
+SQM_WAN_IF="$(ip route show default 2>/dev/null | awk '{print $5}' | head -n1)"
+[[ -n "$SQM_WAN_IF" ]] || SQM_WAN_IF="eth0"
 [[ -f /etc/tuxwall/sqm.conf ]] || printf '%s\n' \
     '# TuxWall SQM rates (Mbit). Managed by dashboard System > Traffic Shaping.' \
-    'WAN=eth0' \
+    "WAN=$SQM_WAN_IF" \
     'UP_RATE=95mbit' \
     'DOWN_RATE=920mbit' > /etc/tuxwall/sqm.conf
 
@@ -243,6 +246,8 @@ info "Installing systemd units..."
 cp "$REPO_DIR/systemd/tuxwall.service"                    /etc/systemd/system/tuxwall.service
 cp "$REPO_DIR/systemd/tuxwall-blocklist-update.service"   /etc/systemd/system/tuxwall-blocklist-update.service
 cp "$REPO_DIR/systemd/tuxwall-blocklist-update.timer"     /etc/systemd/system/tuxwall-blocklist-update.timer
+cp "$REPO_DIR/systemd/suricata-update.service"            /etc/systemd/system/suricata-update.service
+cp "$REPO_DIR/systemd/suricata-update.timer"              /etc/systemd/system/suricata-update.timer
 
 # SQM service (optional — installed but not enabled by default)
 cp "$REPO_DIR/systemd/tuxwall-sqm.service"               /etc/systemd/system/tuxwall-sqm.service
@@ -265,6 +270,36 @@ else
     warn "re-run later: sudo bash $REPO_DIR/scripts/setup-opencode-agent.sh"
 fi
 
+
+# ============================================================================
+# 9C. SURICATA — af-packet provisioning + scheduled rule updates
+# ============================================================================
+info "Provisioning Suricata (af-packet interfaces + rule updates)..."
+
+# Stock suricata.yaml ships placeholder NICs that fail to bind on a fresh
+# box (suricata.service then exits immediately). Guarded tuner: rewrites
+# only when no configured interface exists. Hand-tuned boxes untouched.
+if [[ -f /etc/suricata/suricata.yaml ]]; then
+    if python3 "$REPO_DIR/scripts/tune-suricata.py" /etc/suricata/suricata.yaml >/dev/null 2>&1; then
+        ok "Suricata af-packet rebound to detected WAN/LAN interfaces"
+        systemctl enable suricata 2>/dev/null || true
+        systemctl restart suricata 2>/dev/null || warn "suricata restart failed - check /etc/suricata/suricata.yaml"
+    else
+        ok "Suricata config already valid - untouched"
+    fi
+else
+    warn "suricata.yaml not found - skipping Suricata provisioning"
+fi
+
+# Ubuntu ships no timer for suricata-update; without one the ruleset is
+# fetched never or once and goes stale. Fetch once now + enable daily timer.
+if command -v suricata-update >/dev/null 2>&1; then
+    suricata-update >/dev/null 2>&1 && ok "Suricata rules fetched" || warn "suricata-update failed (offline?)"
+    systemctl daemon-reload
+    systemctl enable --now suricata-update.timer 2>/dev/null \
+        && ok "Daily Suricata rule updates enabled (suricata-update.timer)" \
+        || warn "Could not enable suricata-update.timer"
+fi
 
 # ============================================================================
 # 10. UNBOUND — ensure includes directory exists
@@ -423,7 +458,9 @@ echo -e "${GREEN}  TuxWall installation complete!${NC}"
 echo "=========================================="
 echo
 echo "  Dashboard : http://localhost (or gateway LAN IP)"
-echo "  Default   : admin / tuxwall"
+echo "  First-run : open the dashboard and create the first admin account"
+echo "              (no default credentials - the login page shows the"
+echo "               enrollment form; this is the fail-closed setup gate)"
 echo
 echo "  Services  :"
 echo "    systemctl status tuxwall"

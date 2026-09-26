@@ -58,6 +58,12 @@ EOF
     unbound-checkconf || true
     systemctl restart unbound || true
 
+    # Cache-bust dashboard assets on every package upgrade: browsers cache
+    # ?v= URLs hard, so a fresh stamp guarantees the shipped JS/CSS is
+    # actually fetched (setup.sh always did this; the .deb path did not).
+    ASSET_V="$(date +%Y%m%d%H%M)"
+    sed -i -E "s/\.(js|css)\?v=[-A-Za-z0-9._]+/.\1?v=${ASSET_V}/g" /var/www/html/index.html 2>/dev/null || true
+
     echo "[5/9] Configuring nginx reverse proxy..."
     # Only manage the bundled vhost on fresh installs. If an enabled site
     # already serves the web root (custom router setup with SSL/vhosts),
@@ -145,6 +151,32 @@ with open(path, "w") as f: f.write(text)
 PY
       systemctl enable --now avahi-daemon >/dev/null 2>&1 || true
       systemctl restart avahi-daemon >/dev/null 2>&1 || true
+    fi
+
+    echo "[6c/9] Provisioning Suricata (guarded af-packet/HOME_NET tune)..."
+    # Stock suricata.yaml ships placeholder NIC names that fail to bind on a
+    # fresh install, so suricata.service can exit immediately. The guarded
+    # tuner rewrites af-packet to the detected WAN/LAN interfaces and HOME_NET
+    # to the LAN subnet ONLY when no configured interface exists; hand-tuned
+    # installs are never touched. Best-effort: never fail the install.
+    if [[ -f /etc/suricata/suricata.yaml && -f /usr/local/share/tuxwall/scripts/tune-suricata.py ]]; then
+      if python3 /usr/local/share/tuxwall/scripts/tune-suricata.py /etc/suricata/suricata.yaml >/dev/null 2>&1; then
+        echo "   Suricata af-packet rebound to detected WAN/LAN interfaces."
+        systemctl enable suricata >/dev/null 2>&1 || true
+        systemctl restart suricata >/dev/null 2>&1 || true
+      else
+        echo "   Suricata config already valid (af-packet interfaces exist) - untouched."
+      fi
+    fi
+
+    echo "[6d/9] Enabling daily Suricata rule updates (suricata-update)..."
+    # Ubuntu's suricata-update package ships no systemd timer, so rule sets
+    # are fetched never or once and go stale. Enable our daily timer and pull
+    # a first ruleset now (best-effort; Suricata live-reloads via its socket).
+    if [[ -f /etc/systemd/system/suricata-update.timer ]]; then
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      systemctl enable --now suricata-update.timer >/dev/null 2>&1 || true
+      command -v suricata-update >/dev/null 2>&1 && suricata-update >/dev/null 2>&1 || true
     fi
 
     echo "[7/9] Enabling dashboard service and daily blocklist updates..."
