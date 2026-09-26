@@ -1,0 +1,330 @@
+Package: tuxwall
+Architecture: all
+Version: 2.8.1
+Priority: optional
+Section: admin
+Maintainer: jeff <jeff@localhost>
+Depends: python3, nginx, unbound, unbound-anchor, kea-dhcp4-server, kea-common, radvd, avahi-daemon, suricata, suricata-update, wireguard-tools, ufw, iptables, nftables, curl, jq, gzip, ieee-data, iproute2, rsync
+Suggests: crowdsec, crowdsec-firewall-bouncer-iptables, python3-maxminddb, speedtest, fastfetch
+Filename: pool/main/t/tuxwall/tuxwall_2.8.1_all.deb
+Size: 3353518
+MD5sum: 346ef0bf304dc96943b0131321f7f648
+SHA1: a5b717cd49c571cf826d040f92af867f5c2208ff
+SHA256: a72010f7918438ad60445621d00efd79496f7fe18bdeb7e81c61b60955c3f0ca
+SHA512: 0f5983f762c20b07eecff86530d83c1534fcd79b553278a305cb03c8bc5a8a4f346897b794de00b0e1abd5528127a636e782cc264197b7bf5e79f64607b0104d
+Description: TuxWall Network Firewall Dashboard
+ Modern web dashboard for a home/edge router featuring DHCP lease management,
+ Unbound DNS and blocklist control, UFW firewall rules, WireGuard VPN status,
+ CrowdSec integration, live attack map with animated arcs, bandwidth charts,
+ AI Assistant (Claude/Ollama/OpenAI) with live system context and one-click
+ rule changes, themed UI with glassmorphism effects, and dark/light themes.
+ .
+ v2.2.0 adds: DHCP static IP reservation management (add/edit/delete via
+ kea-dhcp4.conf with live Kea reload, click-to-fill from leases table),
+ fetchJSON options fix (POST body was silently dropped causing 404 on all
+ VLAN/PF/DMZ actions), CrowdSec main window overflow fix, scrollbar theming,
+ mobile layout fix for full-width main panel.
+ .
+ v2.3.0 adds: embedded opencode AI agent with interactive permission
+ prompts, OPNsense-style User Manager (add/edit/disable users, per-user
+ admin rights), and TOTP two-factor authentication (QR-code enrollment
+ with Google Authenticator/Aegis/1Password, per-step replay protection).
+ .
+ v2.4.0 adds: firewall restore baseline (save/restore live rulesets, atomic
+ iptables-restore with verification) replacing the destructive flush-all reset;
+ system backup overhaul — include/exclude config checklist, browse archive
+ contents, per-file download and single-file restore with .bak snapshots and
+ service-restart hints, sanitized exports for safe sharing (WireGuard/CrowdSec/
+ cloudflared/tuxwall secrets dropped or redacted), upload-and-examine restore
+ flow, auto-prune retention, root-only archive permissions, and dashboard files
+  now captured in the system backup.
+  .
+  v2.5.0 adds: unified glassmorphism button system matching the sidebar nav —
+  accent-tinted translucent gradients with backdrop blur, glowing borders and
+  hover glow on all buttons (primary, ghost, danger, segmented tabs, service
+  tabs, login, icon buttons and file-selector buttons), light-theme contrast
+  overrides, and cache-bust bump.
+  .
+  v2.5.1 adds: attack map tile fix — CARTO now watermarks keyless raster
+  basemaps; tiles now carry a registered CARTO key (?key= param, the
+  documented parameter name), plus cache-bust bump.
+  .
+  v2.5.2 adds: hostname endpoint fix (moved from GET, where it crashed on
+  an undefined body, to admin-gated POST matching the dashboard); postinst
+  no longer truncates the blocklist on upgrade and tolerates a missing
+  agent-setup script; system-backup defaults to /var/lib/tuxwall/backups;
+  packaging refresh (full Depends, complete conffiles, tuxwall-sqm unit
+  shipped, stale web-root junk removed); first-boot networking fixes
+  (no bogus LAN default route, ULA-based AAAA, random ULA /48, correct
+  CrowdSec bouncer, non-clobbering config install); AI context now reads
+ real backend keys; sidebar-style glass buttons with neon glow.
+ .
+ v2.5.3 adds: security hardening — default admin/tuxwall credentials no
+ longer auto-create (fail-closed setup gate with working first-admin
+ enrollment), UFW raw-rule verb whitelist, CSRF Origin check, login
+ rate-limit identity spoof fix, blocklist SSRF guard, 30-minute session
+ idle timeout, two-step backup restore with code-replace confirmation
+ (web + single-file paths, backend snapshotted first), login rate limit
+ and security headers in nginx (dual-mode Secure cookie ready for TLS);
+ System page gains structured DHCP (Kea) and DNS (Unbound) config forms
+ with validation and automatic rollback, themed form-field styling, an
+ updates-available indicator, and cache-bust bump.
+ .
+ v2.5.4 adds: postinst retires any WAN-wide OpenSSH allow on upgrade when
+ scoped SSH access (LAN/VPN interface rules) already exists, and only
+ adds SSH/HTTP allows when missing — upgrades no longer reopen or keep
+ internet-facing SSH.
+ .
+ v2.5.5 adds: System page gains a Traffic Shaping (CAKE SQM) card — live
+ caps/status/drop counters, rate editing via /etc/tuxwall/sqm.conf, and a
+ guided Ookla speedtest (shaping lifted for a clean reading, then
+ restored) with ~93% suggested rates and provisioning-mismatch warnings;
+ per-interface DHCP pools with multi-subnet Kea APIs, interface binding
+ and validation (replacing the single-subnet DHCP Pool card); agent
+ sudoers rewritten without wildcards for sudo-rs; setup.sh stamps asset
+ versions so browsers never run stale dashboard JS after upgrades.
+ .
+ v2.5.6 adds: speedtest dependency handling for the guided SQM test —
+ backend availability detection with a clear install hint, disabled
+ Run button when absent, and README install notes (Ookla speedtest is
+ not in the Ubuntu archives: snap or Ookla's apt repo).
+ .
+ v2.5.7 adds: setup.sh UFW step only adds SSH/HTTP/WireGuard rules when no
+ matching rule exists — re-runs no longer re-open a deliberately removed
+ WAN-wide rule (e.g. global port 80).
+ .
+ v2.5.8 adds: System page replaces the DNS (Unbound) and CPU/Memory cards
+ with a single System Info card — fastfetch logo plus specs via a new
+ /api/system/fastfetch endpoint (ANSI-to-HTML color conversion, logo left
+ and specs right side-by-side); fastfetch added to Depends and install
+ package lists.
+ .
+ v2.5.9 adds: Ookla speedtest to Suggests — it powers the guided SQM line-
+ speed test but ships neither in the Ubuntu archives nor the TuxWall repo
+ (snap or Ookla's apt repo), so it must stay out of Depends; the dashboard
+ keeps its availability detection with install hint.
+ .
+ v2.6.0 fixes the blank attack map and charts after login: the login gate
+ hides the whole layout, so the map and every canvas were measured at 0x0
+ and never re-measured — Leaflet cached the zero size and each chart's
+ small-size guard dropped its frame with no retry, leaving a manual page
+ refresh as the only cure. Login now re-measures on the next frame, and a
+ ResizeObserver re-draws anything returning from zero size, covering view
+ switches too. Also: accessibility and theming pass — prefers-reduced-motion
+ support that stops decorative animation while keeping progress spinners
+ alive (and without hiding attack-map markers, whose keyframes end at
+ opacity 0), light-theme contrast fixes bringing all 8 stat colours and all
+ 15 nav colours to WCAG AA 4.5:1 (several were as low as 1.9:1), an
+ undefined --fg variable that silently broke three rules, a duplicate
+ .icon-btn block, and a redrawn Ubuntu mark that no longer vanishes on
+ light themes.
+ .
+ v2.6.1 smooths the CPU, memory and bandwidth graphs. The Catmull-Rom
+ control-point coefficient was 0.4 where the maths calls for 1/6, so the
+ curve overshot every sample and invented up to ~24px of vertical wobble
+ that was never in the data; control points are now also clamped to each
+ segment's y-range, which makes overshoot impossible rather than merely
+ small. Dense series (300 bandwidth samples across a ~790px card, under
+ 3px apart) additionally get a centred 3-tap pass, symmetric so peaks keep
+ their position in time. Together these cut line travel by ~63% and
+ zigzag reversals by ~67%; single-sample peaks are damped by about 5%
+ in the drawing only — numeric readouts still show raw samples.
+ .
+ v2.7.0 is a security release fixing broken access control. The read-only
+ "viewer" role was enforced only by hiding controls in the browser: of 101
+ POST endpoints just 9 could check role at all, so any signed-in viewer
+ could reboot the router, rewrite firewall rules, read WireGuard peer
+ configs, restore backups, or drive the AI agent — which runs shell
+ commands and holds sudo — while also being able to approve the agent's
+ own permission prompts. Role gating is now default-deny: admin is
+ required unless an endpoint is explicitly listed, viewers keep only
+ self-service password and TOTP actions, and /api/backups/** and
+ /api/agent/** are admin-only on GET too (raw backups contain auth.json
+ and WireGuard private keys). Also fixes /api/system/self-restart, whose
+ loopback check read client_address — always 127.0.0.1 behind nginx
+ proxy_pass, leaving it reachable unauthenticated from the LAN or VPN;
+ it now resolves the real peer via nginx's X-Real-IP. The AI Assistant
+ is hidden from non-admins in the UI to match the server-side rule.
+ .
+ v2.7.1 fixes the dashboard returning a blank page over IPv6. The nginx
+ site listens on [fd00:1::1]:80 but its access lists allowed only
+ 127.0.0.1, ::1 and the RFC1918 IPv4 ranges, so any client arriving over
+ IPv6 hit "deny all" and, via error_page 403 =200, received an empty
+ 200 rather than an error. It stayed hidden because bare-IP access is
+ IPv4-only; it appears as soon as the dashboard is reached by a hostname
+ carrying an AAAA record, when browsers prefer IPv6. All four access
+ lists now also allow fd00::/8, covering the fd00:1::/64 LAN and the
+ fd00:2::/64 WireGuard range. fd00::/8 is used deliberately rather than
+ a delegated global prefix, which changes whenever the ISP rotates it.
+ Served by nginx from /var/www/html, backed by a Python API server running
+ as the systemd unit tuxwall.service on port 8008.
+ .
+ v2.7.2 adds an Avahi mDNS reflector for Music Assistant / AirPlay /
+ Chromecast discovery across segments. mDNS is link-local, so without a
+ reflector Home Assistant on one segment cannot discover players on another
+ (LAN <-> WireGuard VPN). setup.sh, the first-boot wizard and postinst now
+ install avahi-daemon, set enable-reflector=yes under [reflector], deny the
+ WAN interface so mDNS never leaks to the internet, and allow UDP 5353
+  inbound on LAN/VPN interfaces only. Also: opencode agent gains bounded
+  service-control sudo rights (named restarts/reloads, tc, speedtest and
+  tuxwall's own scripts — no blanket admin) with matching permission prompts.
+  .
+  v2.7.3 fixes the missing Ban/Unban buttons in the Security page's Top
+  Attackers table: the CrowdSec availability and blocklist checks ran at
+  page load while the login gate was still up, so both API calls failed
+  unauthenticated and left the dashboard with CrowdSec marked unavailable —
+  every later re-render then drew an empty Actions cell, making a manual
+  page refresh (with a valid session cookie) the only way to get the
+ buttons back. The ban state is now re-fetched after login and every time
+ the Security view is shown, so the buttons appear on their own.
+ .
+ v2.7.4 rebrands the dashboard with the new wide TuxWall banner logo on
+ the login page and in the sidebar (redundant text headings hidden since
+ the banner carries the wordmark; status on the left, version on the
+ right underneath). Also: guided SQM speedtest no longer needs the snap
+ or Ookla's apt repo (whose packagecloud builds end at jammy and 404 on
+ noble+) — setup.sh and the .deb postinst now auto-install the official
+ Ookla static tarball via scripts/install-speedtest.sh (best-effort; the
+ dashboard keeps working with manual caps and an install hint when the
+ binary is absent).
+ .
+ v2.7.5 adds community ban reporting to tuxwall.org. The dashboard now
+ auto-reports every real ban (CrowdSec captures and manual blocklist
+ entries, each tagged with a category) to the public community ban
+ database at tuxwall.org, and the Security page's Top Attackers table
+ replaces its AbuseIPDB lookup with a green "community hits" badge — the
+ aggregate number of events the community has reported for that address,
+ linking to a per-IP report card (geo, ASN, category breakdown and event
+ timeline) on tuxwall.org. Community lookups run once per address with a
+ five-minute cache that survives table redraws, and the collector ingest
+ is delta-based so re-reporting the same IP never double-counts its hits.
+ Bundled with the collector deployment tooling (deploy-collector.sh,
+ tuxwall-collector systemd unit and nginx vhost). Also: the dashboard
+ nginx site no longer heuristic-caches index.html, so asset-version
+ bumps take effect on the first reload instead of relying on a browser
+ hard-refresh, and the deploy script now syncs the stylesheet into the
+ webroot (a previous release updated the repo CSS but never shipped it
+ to /var/www/html).
+ .
+ v2.7.6 reworks the Top Attackers community button on the Security page.
+ It was a bespoke green pill showing a shield glyph and the community hit
+ count, matching nothing else in the UI and spending most of its life on a
+ placeholder while the lookup was in flight. It now uses the standard
+ button chrome, shows an info glyph instead of a number, and takes its
+ accent colour from that IP's community severity — low green, medium
+ amber, high red, critical purple — with unreported, loading and
+ API-unreachable states rendering neutral grey so "no data" never reads
+ as "safe". The tuxwall.org lookup is retained (same five-minute cache and
+ in-flight dedupe) but drives colour only, and the severity string is
+ whitelist-checked before it reaches the DOM; tiers come from the
+ collector's own severity_for(), so the dashboard and tuxwall.org cannot
+ disagree. Also bumps the index.html asset-version stamps, which the .deb
+ had never done: postinst ships index.html verbatim, so package upgrades
+ carrying dashboard JS or CSS changes left browsers running the cached
+ previous assets until a manual hard-refresh (setup.sh already stamped
+ them, the package path did not).
+ .
+ v2.7.7 enriches community ban reports with Suricata evidence. Reports to
+ tuxwall.org previously carried only how an IP was banned locally (manual
+ crowdsec ban -> "other", blocklist add -> "blocklist"), so the community
+ report cards' category breakdown never reflected the observed abuse type.
+ Bans reported now consult the dashboard's Suricata alert tail: the most-
+ alerted abuse category (bruteforce, scan, ssh, web, rdp, dos, malware,
+ spam) replaces the generic one, the top matching signature is appended to
+ the report reason inside the collector's 96-char cap, and the top five
+ signatures with alert counts are attached to the report payload.
+ Informational signatures (ET INFO, ET POLICY, ethertype and protocol-
+ decode noise) are excluded so benign traffic is never mislabelled.
+ The tuxwall.org report cards render a "Suricata signatures observed"
+ card from this evidence, and the per-IP JSON API exposes it; the
+ collector keeps per-signature counts as a max across re-reports so they
+ can never be inflated. Also bundles tuxwall.org collector deployment
+ tooling (not shipped in this package) for loopback-only, key-gated admin
+ endpoints to list and purge community bans — the removal path for
+ mistakenly reported IPs.
+ .
+ v2.7.8 adds UFW drop evidence to ban reports when Suricata has no
+ signature. Suricata only alerts on what a signature describes — a
+ well-formed SYN to a closed port matches nothing, and that is most of
+ what a home firewall actually receives, so the v2.7.7 signature
+ enrichment stayed silent for nearly every real attacker (observed
+ here: zero alerts for all nine community-banned IPs while the eve log
+ held 229k LAN-noise alerts). When no signature evidence exists, the
+ report now falls back to the UFW drop record — the log that provably
+ sees these attacks: the drop pattern is summarised into the report
+ reason ("port scan: 29 ports probed (top: 5800, 5900, ...)" or
+ "telnet probe: 150 packets to port 23") and the category maps off that
+ text, so the tuxwall.org report card shows the observed abuse type for
+ plain scans and probes too. Suricata keeps priority when it does have
+ evidence; the firewall packet count also fills in for hits when the
+ security monitor's window has no entry for the IP.
+ .
+ v2.7.9 fixes the Bandwidth page's per-client stats and gives the
+ dashboard a polish pass. Dead clients no longer linger: the nftables
+ per-IP sets were only ever added to, never pruned, so every address
+ the router had ever leased stayed in the Top lists forever (including
+ the router itself); the sets are now synced to clients that both hold
+ a DHCP lease and answer on the LAN (ARP-checked, 30s cache), and the
+ per-client rates treat counter resets as a fresh baseline instead of
+ freezing at a stale value. The Bandwidth page also gains a Top
+ Downloaders card — a glowing SVG donut with per-client radial
+ gradients, tooltip slices and a ten-row legend that always shows ten
+ entries (active clients ranked by current download rate, padded with
+ placeholders), refreshed once a minute. The Clients table gains pulsing
+ green online dots and animated up/down traffic arrows, and the Traffic
+ Shaping card shows a green/red pulsing status dot with teal download
+ and purple upload cap values. The Security page's Top Attackers info
+ card now opens only when hovering the IP cell instead of the whole
+ row, and the Community Ban Reporting / Suricata Alerts cards lose
+ their double spacing and cramped note padding. Asset-version stamp
+ bumped so browsers pick up the new dashboard JS on first reload.
+ .
+ v2.8.0 is the layout and live-graphs release. Every page now sizes its
+ boxes to content — no scrollbars inside cards, the page scrolls
+ naturally, wide tables keep their own horizontal safety net — with
+ composed full-width rows on CrowdSec/Bandwidth/DHCP/Blocklists and
+ equal-height pairs for the Settings location/theme and Blocklists
+ whitelist/update-log cards. The Security page's Top Countries and Top
+ Attackers popups are retired: full lists render inline behind the
+ 25-row Show-all expand toggle now shared by Traffic Monitor and the
+ CrowdSec tables. The Overview graphs become live monitors: CPU/Bandwidth
+ sweep the trailing 5 minutes and Latency/Jitter the past hour with
+ eased leading edges and stabilized Y axes (an eased head killed the
+ 12-second sample snap; separate eased scales killed the whole-trace
+ jump when a spike aged out; feeding both lanes from one raw-sample
+ source killed the 15s two-dataset flicker), with HTML legends showing
+ live values, line glow and head dots, and a 2s polling lane behind the
+ 15s cycle. Donut contrast reworked: full-strength resting colours
+ (was desaturated to 82% and washed together), wider slice gaps, deeper
+ edge gradients, tighter glow. System Info replaces the fastfetch
+ terminal dump with a structured detail grid (Platform / Processor /
+ Memory / Storage / Network) fed by /api/system. WAN Status and
+ WireGuard cards gain state-driven glow bars and pulsing status dots;
+ the Reboot card shows uptime and last boot; the DHCP ban notice
+ becomes a green message window. Fixes: User Manager list stayed empty
+ on page refresh (the bootstrap path gated on isOwner where every other
+ path uses canManageUsers), ip-api ISP lookups were blocked as mixed
+ content on HTTPS (now skipped there), Suricata severity badges wrapped
+ mid-word in the narrow Overview card, and Asset-version stamps bumped.
+ .
+ v2.8.1 fixes the installer paths found in a release audit. Suricata rule
+ updates were never fetched or scheduled anywhere: the .deb postinst and
+ setup.sh now run suricata-update once and enable a daily systemd timer
+ (Ubuntu ships none), so fresh installs get a real ruleset instead of a
+ dead or stale one. Suricata af-packet/HOME_NET provisioning existed only
+ in the first-boot wizard — postinst and setup.sh now call a guarded tuner
+ (scripts/tune-suricata.py) that rebinds placeholder interfaces to the
+ detected WAN/LAN NICs only when no configured interface exists, leaving
+ hand-tuned installs untouched; the wizard itself now binds the first
+ af-packet entry to WAN and the second to LAN (it previously rewrote every
+ entry to WAN, so the LAN was never inspected). The setup.sh completion
+ banner no longer advertises default admin/tuxwall credentials that the
+ v2.5.3 fail-closed enrollment retired. The .deb postinst now stamps the
+ index.html asset versions on every upgrade (previously only setup.sh
+ stamped, so deb upgrades relied on a manual release-time bump), and the
+ stamp regex accepts dashed version strings. Cosmetic: setup.sh header
+ notes 26.04, the SQM seed uses the detected WAN interface instead of eth0,
+ and fastfetch moves from Depends to Suggests (the v2.8.0 System Info grid
+ reads /api/system directly; the /api/system/fastfetch endpoint degrades
+ gracefully when absent).
+
