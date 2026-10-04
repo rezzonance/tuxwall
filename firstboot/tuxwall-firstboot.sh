@@ -650,7 +650,7 @@ install_tuxwall_stack() {
         crowdsec crowdsec-firewall-bouncer-iptables
         aide
         nginx
-        python3 curl jq gzip ca-certificates ieee-data python3-maxminddb fastfetch
+        python3 curl jq gzip ca-certificates ieee-data python3-maxminddb
     )
 
     if [[ $DRY_RUN -eq 1 ]]; then

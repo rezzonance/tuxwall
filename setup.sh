@@ -44,7 +44,7 @@ apt-get install -y --no-install-recommends \
     crowdsec crowdsec-firewall-bouncer-iptables \
     aide \
     nginx \
-    python3 curl jq gzip ieee-data gnupg fastfetch \
+    python3 curl jq gzip ieee-data gnupg \
     || fail "apt install failed"
 
 # Optional but nice to have

@@ -1,10 +1,10 @@
 Package: tuxwall
-Version: 2.9.0
+Version: 2.9.1
 Section: admin
 Priority: optional
 Architecture: all
 Depends: python3, nginx, unbound, unbound-anchor, kea-dhcp4-server, kea-common, radvd, avahi-daemon, suricata, suricata-update, wireguard-tools, ufw, iptables, nftables, curl, jq, gzip, ieee-data, iproute2, rsync, aide
-Suggests: crowdsec, crowdsec-firewall-bouncer-iptables, python3-maxminddb, speedtest, fastfetch, zeek
+Suggests: crowdsec, crowdsec-firewall-bouncer-iptables, python3-maxminddb, speedtest, zeek
 Maintainer: jeff <jeff@localhost>
 Description: TuxWall Network Firewall Dashboard
  Modern web dashboard for a home/edge router featuring DHCP lease management,
@@ -363,3 +363,9 @@ Description: TuxWall Network Firewall Dashboard
  Show-all cap. Dependencies: aide moves to Depends (core feature);
  zeek joins Suggests (Security page reads /opt/zeek logs, degrades
  gracefully when absent).
+ .
+ v2.9.1 retires fastfetch entirely: it drops out of Suggests and both
+ installer package lists (setup.sh and the first-boot wizard) — since
+ v2.8.0 the System Info card reads /api/system directly and the
+ /api/system/fastfetch endpoint degrades gracefully when the binary
+ is absent, so nothing requires it. No dashboard changes.
