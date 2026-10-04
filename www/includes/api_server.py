@@ -2461,6 +2461,105 @@ def _spawn_report(ip, reason, source, category=""):
     ).start()
 
 
+# --- Community reporting bridge for non-dashboard bans -----------------------
+# Reporting previously fired only from dashboard actions (manual bans,
+# blocklist adds, honeypot auto-bans, the Report button). Bans created
+# outside the dashboard — the CrowdSec engine's own scenario captures and
+# CLI-made cscli decisions — never touched those paths and were silently
+# never reported to tuxwall.org. This watcher polls the live decision list
+# and reports every new non-dashboard decision once (deduped by decision id).
+BAN_REPORT_STATE = os.path.join(BLOCKLIST_DIR, "reported-decisions.json")
+BAN_REPORT_LOCK = threading.Lock()
+BAN_REPORT_INTERVAL = 60
+BAN_REPORT_SKIP_REASONS = ("honeypot/",          # reported at ban time
+                           "custom/custom-blocklist",  # ditto (blocklist add)
+                           "manual ban")         # ditto (dashboard manual ban)
+BAN_REPORT_SOURCES = ("crowdsec", "cscli")  # cscli covers CLI-made bans;
+                                           # "capi" excluded: those IPs came
+                                           # FROM community lists (circular)
+
+
+def _load_reported_ban_ids():
+    try:
+        with open(BAN_REPORT_STATE, "r") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            ids = [int(i) for i in data if str(i).isdigit()]
+            return set(ids[-20000:])
+    except (OSError, ValueError):
+        pass
+    return set()
+
+
+def _save_reported_ban_ids(ids):
+    os.makedirs(os.path.dirname(BAN_REPORT_STATE), exist_ok=True)
+    tmp = BAN_REPORT_STATE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(sorted(ids)[-20000:], f)
+    os.replace(tmp, BAN_REPORT_STATE)
+
+
+def ban_report_watcher():
+    """Report non-dashboard CrowdSec decisions to tuxwall.org, once each."""
+    while True:
+        time.sleep(BAN_REPORT_INTERVAL)
+        try:
+            proc = subprocess.run(
+                [CROWDSEC_BIN, "decisions", "list", "-o", "raw"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if proc.returncode != 0:
+                continue
+            with BAN_REPORT_LOCK:
+                reported = _load_reported_ban_ids()
+                fresh = []
+                for line in proc.stdout.splitlines()[1:]:
+                    parts = line.strip().split(",")
+                    if len(parts) < 11:
+                        continue
+                    try:
+                        dec_id = int(parts[0])
+                    except ValueError:
+                        continue
+                    source = parts[1].strip().lower()
+                    value = parts[2].strip()
+                    reason = parts[3].strip()
+                    simulated = parts[9].strip().lower() == "true"
+                    if not value.startswith("Ip:"):
+                        continue        # ranges/scopes: skip (dashboard path
+                                        # reports those correctly at add time)
+                    ip = value[3:]
+                    if simulated or source not in BAN_REPORT_SOURCES:
+                        reported.add(dec_id)
+                        continue
+                    if any(reason.startswith(p) for p in BAN_REPORT_SKIP_REASONS):
+                        reported.add(dec_id)   # honeypot reports at ban time
+                        continue
+                    if dec_id in reported:
+                        continue
+                    try:
+                        if not ipaddress.ip_address(ip).is_global:
+                            reported.add(dec_id)
+                            continue
+                    except ValueError:
+                        continue
+                    _spawn_report(ip, "crowdsec decision: %s" % reason[:60],
+                                 "crowdsec", report_category_for(reason, "crowdsec"))
+                    reported.add(dec_id)
+                    fresh.append((dec_id, ip))
+                if fresh:
+                    _save_reported_ban_ids(reported)
+        except Exception:
+            pass
+
+
+def start_ban_report_watcher():
+    conf = load_reporting_conf()
+    if not conf.get("enabled"):
+        return
+    threading.Thread(target=ban_report_watcher, daemon=True).start()
+
+
 # --- Suricata IDS ----------------------------------------------------------
 SURICATA_EVE_LOG = "/var/log/suricata/eve.json"
 SURICATA_WINDOW = 86400
@@ -12266,6 +12365,7 @@ def main():
     _ensure_unbound_local_actions()
     _restore_nat_on_boot()
     start_honeypot_at_boot()
+    start_ban_report_watcher()
     get_security_monitor()
     get_system_monitor()
     get_latency_monitor()
