@@ -855,10 +855,16 @@ def render_bans_page(sev="all"):
             severity_rank(sev)
         except ValueError:
             sev = "all"
-    if sev == "all":
-        bans = all_bans[:100]
-    else:
-        bans = [b for b in all_bans if b["severity"] == sev][:100]
+    # Table rows: newest reports first so freshly reported bans are
+    # immediately visible (the client-side sort re-orders on demand).
+    # Capped at 500 rows for page weight; the aggregates above still use
+    # the full set. Was: top 100 by hits, which hid new single-hit bans
+    # below the cut even though the txt list and JSON API carried them.
+    rows = sorted(all_bans,
+                  key=lambda b: (b.get("last_seen") or 0), reverse=True)
+    if sev != "all":
+        rows = [b for b in rows if b["severity"] == sev]
+    bans = rows[:500]
     stats = _store().stats()
     now = time.time()
 
