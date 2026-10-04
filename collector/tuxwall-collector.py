@@ -8,6 +8,7 @@ SQLite, enriches them with geo/ASN data, and serves:
                                    category?, suricata?: [{sig, count, sid}]}
   GET  /healthz                  - liveness probe
   GET  /api/public/bans          - JSON list of aggregated bans
+  GET  /api/public/stats         - uncapped totals (ips, hits, countries, ...)
   GET  /api/admin/bans           - loopback-only admin listing (X-Admin-Key)
   DELETE /api/admin/bans/<ip>    - loopback-only admin removal (X-Admin-Key)
   GET  /bans                     - public HTML page
@@ -463,6 +464,24 @@ class Store:
             reporters = cur.fetchone()[0]
         return {"ips": ips, "hits": hits, "reporters": reporters}
 
+    def public_stats(self):
+        """Uncapped aggregate counts over the active (in-retention) ban set,
+        for /api/public/stats. Reporter identities are never exposed, only
+        the distinct count."""
+        cutoff = time.time() - RETENTION_DAYS * 86400
+        with self.lock:
+            ips, hits, countries, last_seen = self._conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(hits),0),"
+                " COUNT(DISTINCT NULLIF(iso,'')), MAX(last_seen)"
+                " FROM reports WHERE last_seen > ?", (cutoff,)).fetchone()
+            reporters = self._conn.execute(
+                "SELECT COUNT(DISTINCT rr.reporter) FROM report_reports rr"
+                " JOIN reports r ON r.ip = rr.ip WHERE r.last_seen > ?",
+                (cutoff,)).fetchone()[0]
+        return {"ips": ips, "hits": hits, "countries": countries,
+                "reporters": reporters, "last_seen": last_seen,
+                "retention_days": RETENTION_DAYS}
+
 
 # --- Per-key rate limiting (in-memory, resets on restart) ------------------
 class RateLimiter:
@@ -564,6 +583,10 @@ class Handler(BaseHTTPRequestHandler):
                 "total": len(bans),
                 "bans": bans,
             })
+            return
+        if path == "/api/public/stats":
+            self._json(200, dict(_store().public_stats(), ok=True,
+                                 generated=datetime.now(timezone.utc).isoformat()))
             return
         if path.startswith("/api/public/bans/"):
             # Per-IP lookup used by dashboard browsers and third-party tools.
@@ -781,47 +804,140 @@ def _filter_badge(value, label, active):
     return '<a class="%s" href="%s">%s</a>' % (cls, href, label)
 
 
+def fmt_ago(ts, now=None):
+    """Compact relative time ("4m ago", "3h ago", "2d ago")."""
+    try:
+        delta = max(0, int((now or time.time()) - float(ts)))
+    except (TypeError, ValueError):
+        return "—"
+    if delta < 60:
+        return "just now"
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if delta >= size:
+            return "%d%s ago" % (delta // size, unit)
+    return "just now"
+
+
+def _fmt_utc(ts):
+    try:
+        return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        return ""
+
+
+def _top_counts(items, n):
+    counts = defaultdict(int)
+    for k in items:
+        if k:
+            counts[k] += 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:n]
+
+
+def _bar_list(pairs, label_fn):
+    if not pairs:
+        return "<p class='muted empty-sm'>Not enough data yet.</p>"
+    top = pairs[0][1] or 1
+    return "".join(
+        "<div class='rank-row'><span class='rank-k'>%s</span>"
+        "<span class='rank-bar'><i style='width:%.0f%%'></i></span>"
+        "<span class='rank-n'>%s</span></div>"
+        % (label_fn(k), v * 100.0 / top, fmt_num(v))
+        for k, v in pairs)
+
+
 def render_bans_page(sev="all"):
-    if sev == "all":
-        bans = _store().top_bans(min_severity=0, limit=100)
-    else:
+    # Every active ban, used for the page-wide aggregates (distribution,
+    # countries, networks). The table itself shows the top 100 for the
+    # selected tier.
+    all_bans = _store().top_bans(min_severity=0, limit=5000)
+    if sev != "all":
         try:
             severity_rank(sev)
         except ValueError:
             sev = "all"
-            bans = _store().top_bans(min_severity=0, limit=100)
-        else:
-            bans = _store().top_bans(tier=sev, limit=100)
+    if sev == "all":
+        bans = all_bans[:100]
+    else:
+        bans = [b for b in all_bans if b["severity"] == sev][:100]
     stats = _store().stats()
+    now = time.time()
+
+    # Severity distribution bar
+    dist = {k: 0 for k in SEVERITY_ORDER}
+    for b in all_bans:
+        dist[b["severity"] if b["severity"] in dist else SEVERITY_LOW] += 1
+    total_active = len(all_bans) or 1
+    dist_bar = "".join(
+        "<a class='dist-seg dist-%s' href='/bans?severity=%s' style='flex-grow:%d'"
+        " title='%s: %s IPs'></a>" % (k, k, dist[k], k.title(), fmt_num(dist[k]))
+        for k in reversed(SEVERITY_ORDER) if dist[k])
+    dist_legend = "".join(
+        "<span class='dist-key'><i class='dist-%s'></i>%s <b>%s</b> <em>%.0f%%</em></span>"
+        % (k, k.title(), fmt_num(dist[k]), dist[k] * 100.0 / total_active)
+        for k in reversed(SEVERITY_ORDER))
+
+    iso_name = {}
+    for b in all_bans:
+        if b["iso"] and b["country"]:
+            iso_name.setdefault(b["iso"], b["country"])
+    countries = _top_counts((b["iso"] for b in all_bans), 6)
+    networks = _top_counts((b["isp"] for b in all_bans), 6)
+    n_countries = len({b["iso"] for b in all_bans if b["iso"]})
+    last_ts = max((b["last_seen"] or 0 for b in all_bans), default=0)
+
     rows = []
+    max_hits = max((b["hits"] for b in bans), default=1) or 1
     for b in bans:
-        flag = b["iso"]
-        if len(flag) == 2:
-            flag = "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in flag)
-        else:
-            flag = "\u2753"
         loc = " • ".join(x for x in (b["city"], b["country"]) if x) or "Unknown"
+        isp = _esc(b["isp"] or "")
+        search = " ".join(x for x in (b["ip"], b["city"], b["country"], b["iso"],
+                                      b["isp"], b["asn"], b["severity"]) if x).lower()
+        try:
+            a = ipaddress.ip_address(b["ip"])
+            ip_key = "%d-%s" % (a.version, a.packed.hex().zfill(32))
+        except ValueError:
+            ip_key = b["ip"]
+        try:
+            sev_key = severity_rank(b["severity"])
+        except ValueError:
+            sev_key = 0
         rows.append(
-            "<tr>"
-            f"<td class='mono'><a class='ip-link' href='/ip/{_esc(b['ip'])}'>{_esc(b['ip'])}</a></td>"
-            f"<td>{render_severity_badge(b['severity'])}</td>"
-            f"<td>{fmt_num(b['hits'])}</td>"
-            f"<td>{fmt_num(b['reporters'])}</td>"
-            f"<td>{flag} {_esc(loc)}</td>"
-            f"<td class='muted'>{_esc(b['isp']) or '—'}</td>"
-            f"<td class='mono muted'>{fmt_date(b['last_seen'])}</td>"
+            f"<tr data-search='{_esc(search)}'>"
+            f"<td class='mono' data-v='{ip_key}'><a class='ip-link' href='/ip/{_esc(b['ip'])}'>{_esc(b['ip'])}</a></td>"
+            f"<td data-v='{sev_key}'>{render_severity_badge(b['severity'])}</td>"
+            f"<td class='hits-cell' data-v='{int(b['hits'] or 0)}'><span class='hits-n'>{fmt_num(b['hits'])}</span>"
+            f"<span class='hits-bar'><i style='width:{b['hits'] * 100.0 / max_hits:.0f}%'></i></span></td>"
+            f"<td class='num-cell' data-v='{int(b['reporters'] or 0)}'>{fmt_num(b['reporters'])}</td>"
+            f"<td data-v='{_esc(loc.lower())}'><span class='flag'>{_flag_emoji(b['iso'])}</span> {_esc(loc)}</td>"
+            f"<td class='muted isp-cell' title='{isp}' data-v='{isp.lower()}'>{isp or '—'}"
+            + (f" <span class='asn'>AS{_esc(b['asn'])}</span>" if b.get('asn') else "")
+            + "</td>"
+            f"<td class='mono muted' title='{_fmt_utc(b['last_seen'])}' data-v='{float(b['last_seen'] or 0):.0f}'>{fmt_ago(b['last_seen'], now)}</td>"
             "</tr>"
         )
     body = "".join(rows) or (
-        "<tr><td colspan='7' class='empty'>No community bans yet — "
-        "installations that opt in to ban reporting will appear here.</td></tr>")
+        "<tr><td colspan='7' class='empty'>No community bans yet. "
+        "Installations that opt in to ban reporting will appear here.</td></tr>")
     filters = "".join(
-        _filter_badge(s, s.title() if s != "all" else "All", s == sev)
+        _filter_badge(s, (s.title() if s != "all" else "All")
+                      + " <span class='cnt'>%s</span>" % fmt_num(
+                          len(all_bans) if s == "all" else dist[s]),
+                      s == sev)
         for s in ["all"] + SEVERITY_ORDER)
+    showing = "Top %d of %s" % (len(bans), fmt_num(
+        len(all_bans) if sev == "all" else dist.get(sev, 0)))
     return (HTML_TEMPLATE
-            .replace("__TOTAL__", fmt_num(stats["ips"]))
-            .replace("__HITS__", fmt_num(stats["hits"]))
-            .replace("__REPORTERS__", fmt_num(stats["reporters"]))
+            .replace("__TOTAL__", str(int(stats["ips"] or 0)))
+            .replace("__HITS__", str(int(stats["hits"] or 0)))
+            .replace("__REPORTERS__", str(int(stats["reporters"] or 0)))
+            .replace("__COUNTRIES__", str(n_countries))
+            .replace("__LAST_ACTIVITY__", fmt_ago(last_ts, now) if last_ts else "—")
+            .replace("__DIST_BAR__", dist_bar)
+            .replace("__DIST_LEGEND__", dist_legend)
+            .replace("__TOP_COUNTRIES__", _bar_list(
+                countries, lambda k: "%s %s" % (_flag_emoji(k), _esc(iso_name.get(k, k)))))
+            .replace("__TOP_NETWORKS__", _bar_list(networks, _esc))
+            .replace("__SHOWING__", showing)
             .replace("__FILTERS__", filters)
             .replace("__ROWS__", body)
             .replace("__GENERATED__",
@@ -917,12 +1033,19 @@ def render_ip_page(ip):
 
     body = (
         "<div class='stats'>"
-        "<div class='stat-card'><div class='num'>__TOTAL__</div><div class='lbl'>Total hits</div></div>"
+        "<div class='stat-card'><div class='num' data-count='__TOTAL_RAW__'>__TOTAL__</div><div class='lbl'>Total hits</div></div>"
         "<div class='stat-card'><div class='num'>__REPORTERS__</div><div class='lbl'>Reporting installs</div></div>"
         "<div class='stat-card'><div class='num'>__FIRST_SEEN__</div><div class='lbl'>First seen</div></div>"
-        "<div class='stat-card'><div class='num'>__LAST_SEEN__</div><div class='lbl'>Last seen</div></div>"
+        "<div class='stat-card'><div class='num' title='__LAST_SEEN_UTC__'>__LAST_SEEN__</div><div class='lbl'>Last seen</div></div>"
         "</div>"
-        "<p class='verdict'>__VERDICT__</p>"
+        "<p class='verdict__VERDICT_CLS__'>__VERDICT__</p>"
+        "<div class='lookups'><span>Look up elsewhere:</span>"
+        "<a href='https://www.abuseipdb.com/check/__IP__' target='_blank' rel='noopener nofollow'>AbuseIPDB</a>"
+        "<a href='https://www.shodan.io/host/__IP__' target='_blank' rel='noopener nofollow'>Shodan</a>"
+        "<a href='https://bgp.he.net/ip/__IP__' target='_blank' rel='noopener nofollow'>bgp.he.net</a>"
+        "<a href='https://ipinfo.io/__IP__' target='_blank' rel='noopener nofollow'>ipinfo</a>"
+        "<a href='/api/public/bans/__IP__'>JSON</a>"
+        "</div>"
         "<div class='detail-grid'>"
         "<div class='detail-card'><h3>Source / Network</h3>"
         "<div class='kv'><span class='k'>Location</span><span class='v'>__IP_LOCATION__</span></div>"
@@ -941,10 +1064,10 @@ def render_ip_page(ip):
         "<tbody>__ROWS__</tbody></table></div>")
 
     return (IP_DETAIL_TEMPLATE
+            .replace("__BODY__", body)
             .replace("__IP__", _esc(d["ip"]))
             .replace("__BADGE__", render_severity_badge(sev))
             .replace("__FLAG__", flag)
-            .replace("__BODY__", body)
             .replace("__IP_LOCATION__", _esc(loc))
             .replace("__ISP__", _esc(d["isp"]) or "—")
             .replace("__ASN__", _esc(d["asn"]) or "—")
@@ -952,7 +1075,10 @@ def render_ip_page(ip):
             .replace("__TOTAL__", fmt_num(d["hits"]))
             .replace("__REPORTERS__", fmt_num(d["reporters"]))
             .replace("__FIRST_SEEN__", fmt_date(d["first_seen"]))
-            .replace("__LAST_SEEN__", fmt_date(d["last_seen"]))
+            .replace("__LAST_SEEN_UTC__", _fmt_utc(d["last_seen"]))
+            .replace("__LAST_SEEN__", fmt_ago(d["last_seen"]))
+            .replace("__TOTAL_RAW__", str(int(d["hits"] or 0)))
+            .replace("__VERDICT_CLS__", "" if d["reporters"] > 1 else " solo")
             .replace("__VERDICT__", verdict)
             .replace("__CATS__", cat_rows)
             .replace("__SOURCES__", srcs)
@@ -979,136 +1105,213 @@ def fmt_date(ts):
 
 PAGE_CSS = """\
 .page-main { max-width: 1100px; margin: 0 auto; padding: 6rem 2rem 0; }
-    .filters { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center;
-               margin: 0 0 1.5rem; }
+    .page-main .section { padding-left: 0; padding-right: 0; }
+    .nav-links a.active { color: var(--green); }
+
+    /* header */
+    .live-pill { display: inline-flex; align-items: center; gap: 0.5rem;
+                 font-family: var(--mono, monospace); font-size: 0.7rem;
+                 letter-spacing: 0.15em; text-transform: uppercase; color: #ff7b72;
+                 border: 1px solid rgba(255,95,87,0.35); background: rgba(255,60,60,0.06);
+                 border-radius: 999px; padding: 0.25rem 0.8rem; margin-bottom: 1rem; }
+    .live-dot { width: 8px; height: 8px; border-radius: 50%; background: #ff5f57;
+                animation: live-ping 1.8s ease-out infinite; }
+    @keyframes live-ping { 0% { box-shadow: 0 0 0 0 rgba(255,95,87,0.6); }
+                           100% { box-shadow: 0 0 0 10px rgba(255,95,87,0); } }
+    .page-title { font-size: clamp(2rem, 5vw, 3rem); line-height: 1.1; margin-bottom: 0.75rem; }
+    .page-title span { color: var(--green); }
+
+    /* stat cards */
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+             gap: 1rem; margin: 2rem 0; }
+    .stat-card { background: var(--card); border: 1px solid var(--border);
+                 border-radius: 6px; padding: 1.1rem 1.3rem; position: relative; overflow: hidden; }
+    .stat-card::before { content: ''; position: absolute; left: 0; top: 0; right: 0; height: 2px;
+                         background: linear-gradient(90deg, var(--green), transparent); }
+    .stat-card.red::before { background: linear-gradient(90deg, #ff5f57, transparent); }
+    .stat-card .num { font-family: var(--mono, monospace); font-size: 1.7rem; color: var(--green);
+                      font-weight: bold; font-variant-numeric: tabular-nums; line-height: 1.2; }
+    .stat-card.red .num { color: #ff7b72; }
+    .stat-card .lbl { font-size: 0.72rem; letter-spacing: 0.1em; text-transform: uppercase;
+                      color: var(--muted); margin-top: 4px; }
+
+    /* severity distribution */
+    .dist { margin: 0 0 2rem; }
+    .dist-bar { display: flex; height: 12px; border-radius: 6px; overflow: hidden;
+                background: #0a0a0a; border: 1px solid var(--border); gap: 2px; }
+    .dist-seg { display: block; min-width: 6px; transition: filter 0.2s; }
+    .dist-seg:hover { filter: brightness(1.3); }
+    .dist-legend { display: flex; flex-wrap: wrap; gap: 0.4rem 1.4rem; margin-top: 0.7rem;
+                   font-size: 0.85rem; color: var(--muted); }
+    .dist-key { display: inline-flex; align-items: center; gap: 0.4rem; }
+    .dist-key i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+    .dist-key b { color: var(--text); font-weight: 600; }
+    .dist-key em { font-style: normal; opacity: 0.7; }
+    .dist-low { background: #39ff14; } .dist-medium { background: #f0a500; }
+    .dist-high { background: #f97316; } .dist-critical { background: #ef4444; }
+
+    /* insight panels */
+    .insights { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
+                gap: 1rem; margin: 0 0 2.5rem; }
+    .panel { background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+             padding: 1.2rem 1.4rem; }
+    .panel h3 { font-family: var(--mono, monospace); color: var(--white); font-size: 0.8rem;
+                letter-spacing: 0.12em; text-transform: uppercase; margin: 0 0 0.9rem; }
+    .rank-row { display: grid; grid-template-columns: minmax(0, 11rem) 1fr 3rem; gap: 0.7rem;
+                align-items: center; padding: 0.28rem 0; font-size: 0.88rem; }
+    .rank-k { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+    .rank-bar { height: 6px; background: #0a0a0a; border-radius: 3px; overflow: hidden; }
+    .rank-bar i { display: block; height: 100%; border-radius: 3px;
+                  background: linear-gradient(90deg, var(--dimgreen), var(--green)); }
+    .rank-n { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .empty-sm { font-size: 0.85rem; }
+
+    /* use-this-list callout */
+    .use-list { display: grid; grid-template-columns: 1fr auto; gap: 1rem 2rem; align-items: center;
+                border: 1px solid var(--dimgreen); border-radius: 6px; padding: 1.3rem 1.5rem;
+                margin: 0 0 2.5rem;
+                background: linear-gradient(135deg, rgba(57,255,20,0.07), rgba(57,255,20,0.01)); }
+    .use-list h3 { color: var(--white); font-size: 1.05rem; margin-bottom: 0.3rem; }
+    .use-list p { color: var(--muted); font-size: 0.92rem; margin: 0; }
+    .use-list .cmd { grid-column: 1 / -1; display: flex; align-items: center; gap: 0.75rem;
+                     background: rgba(0,0,0,0.5); border: 1px solid var(--border); border-radius: 4px;
+                     padding: 0.5rem 0.5rem 0.5rem 0.9rem; font-family: var(--mono, monospace);
+                     font-size: 0.82rem; }
+    .use-list .cmd code { flex: 1; overflow-x: auto; white-space: nowrap; background: none;
+                          padding: 0; color: var(--text); }
+    .use-list .actions { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+    @media (max-width: 700px) { .use-list { grid-template-columns: 1fr; } }
+    .copy-btn { flex-shrink: 0; font-family: var(--mono, monospace); font-size: 0.72rem;
+                letter-spacing: 0.08em; text-transform: uppercase; color: var(--green);
+                background: rgba(57,255,20,0.08); border: 1px solid var(--dimgreen);
+                border-radius: 4px; padding: 0.35rem 0.7rem; cursor: pointer; }
+    .copy-btn:hover, .copy-btn.copied { background: var(--green); color: #000; }
+
+    /* table toolbar */
+    .toolbar { display: flex; flex-wrap: wrap; gap: 0.8rem 1.2rem; align-items: center;
+               justify-content: space-between; margin: 0 0 1rem; }
+    .filters { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
     .filters .fl { font-size: 0.7rem; letter-spacing: 0.2em; text-transform: uppercase;
                    color: var(--muted); margin-right: 0.25rem; }
     .filters .badge { text-decoration: none; cursor: pointer; }
+    .filters .badge .cnt { opacity: 0.65; margin-left: 0.2rem; }
     .filters .badge.cur { background: var(--green); color: #000;
                           border-color: var(--green); font-weight: bold; }
-    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-             gap: 1.2rem; margin: 0 0 2rem; }
-    .stat-card { background: var(--card); border: 1px solid var(--border);
-                 border-radius: 4px; padding: 1.2rem 1.4rem; }
-    .stat-card .num { font-size: 1.6rem; color: var(--green); font-weight: bold; }
-    .stat-card .lbl { font-size: 0.72rem; letter-spacing: 0.1em; text-transform: uppercase;
-                      color: var(--muted); margin-top: 2px; }
+    .search { flex: 0 1 300px; display: flex; align-items: center; gap: 0.5rem;
+              background: var(--card); border: 1px solid var(--border); border-radius: 4px;
+              padding: 0 0.75rem; }
+    .search:focus-within { border-color: var(--dimgreen); }
+    .search svg { flex-shrink: 0; opacity: 0.6; }
+    .search input { flex: 1; min-width: 0; background: none; border: none; outline: none;
+                    color: var(--text); font: inherit; font-size: 0.9rem; padding: 0.5rem 0; }
+    .table-meta { font-size: 0.8rem; color: var(--muted); margin: 0 0 0.6rem; }
+
+    /* table */
     .table-wrap { overflow-x: auto; background: var(--card); border: 1px solid var(--border);
-                  border-radius: 4px; }
+                  border-radius: 6px; }
     .table-wrap .deps-table { margin-top: 0; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-            font-size: 0.75rem; }
+    .deps-table thead th { position: sticky; top: 0; background: #121212; }
+    .deps-table td { vertical-align: middle; }
+    .deps-table th[data-sort] button { all: unset; cursor: pointer; display: inline-flex;
+                                       align-items: center; gap: 0.35rem; color: inherit;
+                                       font: inherit; letter-spacing: inherit; text-transform: inherit; }
+    .deps-table th[data-sort] button::after { content: '↕'; opacity: 0.35; font-size: 0.85em; }
+    .deps-table th[aria-sort="ascending"] button::after { content: '↑'; opacity: 1; }
+    .deps-table th[aria-sort="descending"] button::after { content: '↓'; opacity: 1; }
+    .deps-table th[data-sort] button:hover { color: var(--white); }
+    .deps-table th[data-sort] button:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+    .deps-table tbody tr { transition: background 0.15s; }
+    .deps-table tbody tr:hover td { background: rgba(57,255,20,0.04); }
+    .hits-cell { min-width: 110px; }
+    .hits-n { font-variant-numeric: tabular-nums; }
+    .hits-bar { display: block; height: 3px; margin-top: 4px; background: #0a0a0a;
+                border-radius: 2px; overflow: hidden; }
+    .hits-bar i { display: block; height: 100%; background: var(--dimgreen); }
+    .num-cell { font-variant-numeric: tabular-nums; text-align: center; }
+    .isp-cell { max-width: 240px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .asn { font-family: var(--mono, monospace); font-size: 0.7rem; opacity: 0.7; }
+    .flag { font-size: 1.05rem; }
+    .no-match { display: none; }
+    .no-match.show { display: table-row; }
+
+    .mono { font-family: var(--mono, ui-monospace, monospace); font-size: 0.8rem; }
     .muted { color: var(--muted); }
-    .sev { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 2px;
-           font-size: 0.65rem; letter-spacing: 0.1em; text-transform: uppercase;
-           border: 1px solid transparent; }
-    .sev-low      { color: #39ff14; border-color: #1a7a00; }
-    .sev-medium   { color: #f0a500; border-color: #b8860b; }
-    .sev-high     { color: #f97316; border-color: #ea580c; }
-    .sev-critical { color: #ef4444; border-color: #b91c1c; }
+    .sev { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 3px;
+           font-family: var(--mono, monospace); font-size: 0.66rem; letter-spacing: 0.1em;
+           text-transform: uppercase; border: 1px solid transparent; font-weight: 600; }
+    .sev-low      { color: #39ff14; border-color: #1a7a00; background: rgba(57,255,20,0.06); }
+    .sev-medium   { color: #f0a500; border-color: #b8860b; background: rgba(240,165,0,0.07); }
+    .sev-high     { color: #fb923c; border-color: #ea580c; background: rgba(249,115,22,0.08); }
+    .sev-critical { color: #f87171; border-color: #b91c1c; background: rgba(239,68,68,0.1); }
     .empty { text-align: center; color: var(--muted); padding: 2rem 1rem; }
-    .nav-links a.active { color: var(--green); }
     .ip-link { color: var(--green); text-decoration: none; }
     .ip-link:hover { text-decoration: underline; }
+
+    /* ip report page */
     .ip-head { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
-    .ip-head .section-title { margin-bottom: 0; }
-    .ip-flag { font-size: 1.4rem; line-height: 1; }
-    .verdict { color: var(--muted); font-size: 0.9rem; }
-    .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem;
-                   margin: 0 0 2rem; }
+    .ip-head .section-title { margin-bottom: 0; font-size: clamp(1.6rem, 4vw, 2.4rem); }
+    .ip-flag { font-size: 1.6rem; line-height: 1; }
+    .verdict { color: var(--text); font-size: 1rem; border-left: 3px solid var(--green);
+               padding: 0.6rem 1rem; background: rgba(57,255,20,0.04); margin: 0 0 1.5rem; }
+    .verdict.solo { border-left-color: #f0a500; background: rgba(240,165,0,0.05); }
+    .lookups { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;
+               margin: 0 0 2rem; font-size: 0.85rem; color: var(--muted); }
+    .lookups a { color: var(--text); text-decoration: none; border: 1px solid var(--border);
+                 border-radius: 4px; padding: 0.25rem 0.7rem; transition: border-color 0.2s; }
+    .lookups a:hover { border-color: var(--green); color: var(--green); }
+    .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 0 0 2rem; }
     @media (max-width: 700px) { .detail-grid { grid-template-columns: 1fr; } }
     .detail-card { background: var(--card); border: 1px solid var(--border);
-                   border-radius: 4px; padding: 1.2rem 1.4rem; }
-    .detail-card h3 { color: var(--white); font-size: 0.85rem; margin: 0 0 0.9rem;
-                      letter-spacing: 0.05em; }
-    .kv { display: flex; justify-content: space-between; gap: 1rem; padding: 0.3rem 0;
-          border-bottom: 1px solid var(--border); }
+                   border-radius: 6px; padding: 1.2rem 1.4rem; }
+    .detail-card h3 { font-family: var(--mono, monospace); color: var(--white); font-size: 0.8rem;
+                      letter-spacing: 0.12em; text-transform: uppercase; margin: 0 0 0.9rem; }
+    .kv { display: flex; justify-content: space-between; gap: 1rem; padding: 0.4rem 0;
+          border-bottom: 1px solid var(--border); font-size: 0.92rem; }
     .kv:last-child { border-bottom: none; }
-    .kv .k { color: var(--muted); text-transform: uppercase; font-size: 0.65rem;
-             letter-spacing: 0.1em; }
-    .kv .v { color: var(--text); text-align: right; }
+    .kv .k { color: var(--muted); text-transform: uppercase; font-size: 0.7rem;
+             letter-spacing: 0.1em; padding-top: 0.15rem; }
+    .kv .v { color: var(--text); text-align: right; word-break: break-word; }
     .cat-row { display: grid; grid-template-columns: 130px 1fr 110px; align-items: center;
                gap: 0.6rem; padding: 0.3rem 0; }
-    .cat-row .k { color: var(--muted); font-size: 0.72rem; }
-    .cat-row .bar { height: 8px; background: #0a0a0a; border: 1px solid var(--border);
-                    border-radius: 2px; overflow: hidden; }
-    .cat-row .bar i { display: block; height: 100%; background: var(--dimgreen); }
-    .cat-row .n { text-align: right; color: var(--muted); font-size: 0.7rem; }"""
+    .cat-row .k { color: var(--text); font-size: 0.85rem; }
+    .cat-row .bar { height: 6px; background: #0a0a0a; border-radius: 3px; overflow: hidden; }
+    .cat-row .bar i { display: block; height: 100%; border-radius: 3px;
+                      background: linear-gradient(90deg, var(--dimgreen), var(--green)); }
+    .cat-row .n { text-align: right; color: var(--muted); font-size: 0.78rem; }
+
+    @media (max-width: 600px) {
+      .page-main { padding: 5rem 1.25rem 0; }
+      .search { flex: 1 1 100%; }
+    }
+    @media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }"""
 
 
-HTML_TEMPLATE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Community Bans — TuxWall</title>
-  <meta name="description" content="IPs reported as banned by participating TuxWall firewall installs, with hit counts, severity, and geolocation. Powered by the TuxWall community ban network." />
-  <meta name="robots" content="index, follow" />
-  <link rel="canonical" href="https://tuxwall.org/bans" />
-  <meta name="theme-color" content="#0d0d0d" />
-  <link rel="icon" href="/favicon.ico?v=2" sizes="16x16 32x32 48x48 64x64" />
-  <link rel="icon" type="image/png" sizes="60x60" href="/images/tux-logo60.png?v=2" />
-  <link rel="stylesheet" href="/css/style.css?v=20260830b" />
-  <style>
-    __PAGE_CSS__
-  </style>
-</head>
-<body>
-
-  <nav>
+NAV_HTML = """<nav>
     <a class="nav-brand" href="https://tuxwall.org/">
-      <img src="/images/tuxwall-small-white.png" alt="Tux" />
+      <img src="/images/tuxwall-nav.png" alt="TuxWall" width="114" height="38"
+           onerror="this.onerror=null;this.src='/images/tuxwall-small-white.png'" />
     </a>
     <ul class="nav-links" id="navLinks">
       <li><a href="https://tuxwall.org/">Home</a></li>
-      <li><a class="active" href="/bans">Bans</a></li>
-      <li><a href="/api/public/bans">JSON API</a></li>
-      <li><a href="/lists/community-bans.txt">Ban List</a></li>
-      <li><a class="nav-forum" href="https://github.com/rezzonance/tuxwall" target="_blank" rel="noopener">GitHub</a></li>
+      <li><a href="https://tuxwall.org/#features">Features</a></li>
+      <li><a href="https://tuxwall.org/#install">Install</a></li>
+      <li><a href="https://tuxwall.org/configs.html">Configs</a></li>
+      <li class="has-dropdown">
+        <a class="dropdown-toggle active" href="/bans" aria-haspopup="true">Community Bans ▾</a>
+        <ul class="dropdown">
+          <li><a href="/api/public/bans">JSON</a></li>
+          <li><a href="/lists/community-bans.txt">Ban List</a></li>
+        </ul>
+      </li>
+      <li><a class="nav-forum" href="https://forum.tuxwall.org">Forum</a></li>
     </ul>
     <button class="nav-toggle" id="navToggle" aria-label="Toggle menu" aria-expanded="false" aria-controls="navLinks">
       <span></span><span></span><span></span>
     </button>
-  </nav>
+  </nav>"""
 
-  <div class="page-main">
-    <section class="section" style="padding-top:0;">
-      <p class="section-label">// community ban list</p>
-      <h2 class="section-title">Banned by TuxWall.</h2>
-      <p class="section-desc">IPs reported as banned by participating TuxWall firewall installs.
-         Severity reflects cumulative hit counts and how many independent installs reported the source.</p>
 
-      <div class="filters">
-        <span class="fl">Severity:</span>
-        __FILTERS__
-      </div>
-
-      <div class="stats">
-        <div class="stat-card"><div class="num">__TOTAL__</div><div class="lbl">Unique IPs</div></div>
-        <div class="stat-card"><div class="num">__HITS__</div><div class="lbl">Reported hits</div></div>
-        <div class="stat-card"><div class="num">__REPORTERS__</div><div class="lbl">Reporting installs</div></div>
-      </div>
-
-      <div class="table-wrap">
-        <table class="deps-table">
-          <thead><tr><th>IP</th><th>Severity</th><th>Hits</th><th>Reporters</th>
-            <th>Location</th><th>ISP / AS</th><th>Last seen</th></tr></thead>
-          <tbody>__ROWS__</tbody>
-        </table>
-      </div>
-    </section>
-  </div>
-
-  <footer>
-    Data generated __GENERATED__ · Geo data (c) DB-IP.com, CC BY 4.0.
-    <a href="/api/public/bans">JSON API</a> ·
-    <a href="/lists/community-bans.txt">Plain-text IP list</a>
-    (<a href="/lists/community-bans.txt?severity=high">high severity only</a>) —
-    add it to your firewall via the TuxWall custom blocklist.
-    Built for dedicated Linux gateways.
-  </footer>
-
-  <script>
+NAV_JS = """
     const navToggle = document.getElementById('navToggle');
     const navLinks = document.getElementById('navLinks');
     function closeNav() {
@@ -1125,6 +1328,208 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     window.matchMedia('(min-width: 821px)').addEventListener('change', e => {
       if (e.matches) closeNav();
     });
+
+    // Copy buttons: <button class="copy-btn" data-copy="text">
+    document.querySelectorAll('.copy-btn[data-copy]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const text = btn.dataset.copy;
+        const done = msg => { const o = btn.textContent; btn.textContent = msg;
+          btn.classList.add('copied');
+          setTimeout(() => { btn.textContent = o; btn.classList.remove('copied'); }, 1500); };
+        if (navigator.clipboard && window.isSecureContext) {
+          navigator.clipboard.writeText(text).then(() => done('Copied!'), () => done('Failed'));
+        } else {
+          const ta = document.createElement('textarea'); ta.value = text;
+          document.body.appendChild(ta); ta.select();
+          try { document.execCommand('copy'); done('Copied!'); } catch (e) { done('Failed'); }
+          ta.remove();
+        }
+      });
+    });
+
+    // Count-up for stat numbers: <div class="num" data-count="1234">
+    (function () {
+      const els = document.querySelectorAll('[data-count]');
+      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      els.forEach(el => {
+        const target = parseInt(el.dataset.count, 10) || 0;
+        if (reduce || target < 10) { el.textContent = target.toLocaleString(); return; }
+        const start = performance.now(), dur = 1200;
+        (function tick(now) {
+          const t = Math.min((now - start) / dur, 1);
+          el.textContent = Math.round(target * (1 - Math.pow(1 - t, 3))).toLocaleString();
+          if (t < 1) requestAnimationFrame(tick);
+        })(start);
+      });
+    })();
+"""
+
+
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Community Bans — TuxWall</title>
+  <meta name="description" content="IPs reported as banned by participating TuxWall firewall installs, with hit counts, severity, and geolocation. Powered by the TuxWall community ban network." />
+  <meta name="robots" content="index, follow" />
+  <link rel="canonical" href="https://tuxwall.org/bans" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="TuxWall Community Bans" />
+  <meta property="og:description" content="A live, free blocklist of attacker IPs reported by TuxWall firewalls around the world." />
+  <meta property="og:url" content="https://tuxwall.org/bans" />
+  <meta property="og:image" content="https://tuxwall.org/images/og-image.jpg" />
+  <meta name="theme-color" content="#0d0d0d" />
+  <link rel="icon" href="/favicon.ico?v=2" sizes="16x16 32x32 48x48 64x64" />
+  <link rel="icon" type="image/png" sizes="60x60" href="/images/tux-logo60.png?v=2" />
+  <link rel="stylesheet" href="/css/style.css?v=20261004-2" />
+  <style>
+    __PAGE_CSS__
+  </style>
+</head>
+<body>
+
+  __NAV__
+
+  <main class="page-main">
+    <section class="section" style="padding-top:0;">
+      <span class="live-pill"><span class="live-dot"></span> Live · last report __LAST_ACTIVITY__</span>
+      <h1 class="page-title section-title">Community <span>Bans</span></h1>
+      <p class="section-desc">Attackers caught by TuxWall firewalls around the world, aggregated into one free blocklist.
+         Severity grows with the number of hits and how many independent installs reported the same source.</p>
+
+      <div class="stats">
+        <div class="stat-card red"><div class="num" data-count="__TOTAL__">__TOTAL__</div><div class="lbl">Unique attacker IPs</div></div>
+        <div class="stat-card red"><div class="num" data-count="__HITS__">__HITS__</div><div class="lbl">Reported hits</div></div>
+        <div class="stat-card"><div class="num" data-count="__COUNTRIES__">__COUNTRIES__</div><div class="lbl">Countries of origin</div></div>
+        <div class="stat-card"><div class="num" data-count="__REPORTERS__">__REPORTERS__</div><div class="lbl">Reporting installs</div></div>
+      </div>
+
+      <div class="dist">
+        <div class="dist-bar">__DIST_BAR__</div>
+        <div class="dist-legend">__DIST_LEGEND__</div>
+      </div>
+
+      <div class="insights">
+        <div class="panel"><h3>Top countries</h3>__TOP_COUNTRIES__</div>
+        <div class="panel"><h3>Top networks</h3>__TOP_NETWORKS__</div>
+      </div>
+
+      <div class="use-list">
+        <div>
+          <h3>Block them on your own firewall</h3>
+          <p>Add the plain-text list to the TuxWall custom blocklist, or to any firewall that accepts an IP list URL. It updates continuously.</p>
+        </div>
+        <div class="actions">
+          <a class="btn btn-outline" href="/lists/community-bans.txt">All IPs</a>
+          <a class="btn btn-outline" href="/lists/community-bans.txt?severity=high">High+ only</a>
+          <a class="btn btn-outline" href="/api/public/bans">JSON</a>
+        </div>
+        <div class="cmd">
+          <code>https://tuxwall.org/lists/community-bans.txt</code>
+          <button class="copy-btn" data-copy="https://tuxwall.org/lists/community-bans.txt">Copy URL</button>
+        </div>
+      </div>
+
+      <div class="toolbar">
+        <div class="filters">
+          <span class="fl">Severity:</span>
+          __FILTERS__
+        </div>
+        <label class="search">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <input id="banSearch" type="search" placeholder="Filter by IP, country, ISP…" aria-label="Filter bans" autocomplete="off" />
+        </label>
+      </div>
+      <p class="table-meta"><span id="tableCount">__SHOWING__</span> · <span id="sortLabel">sorted by hits ↓</span> · click a column to sort · hover a time for the exact UTC timestamp</p>
+
+      <div class="table-wrap">
+        <table class="deps-table" id="banTable">
+          <thead><tr>
+            <th data-sort="ip" aria-sort="none"><button type="button">IP</button></th>
+            <th data-sort="num" data-first="desc" aria-sort="none"><button type="button">Severity</button></th>
+            <th data-sort="num" data-first="desc" aria-sort="descending"><button type="button">Hits</button></th>
+            <th data-sort="num" data-first="desc" aria-sort="none"><button type="button">Reporters</button></th>
+            <th data-sort="text" aria-sort="none"><button type="button">Location</button></th>
+            <th data-sort="text" aria-sort="none"><button type="button">ISP / AS</button></th>
+            <th data-sort="num" data-first="desc" aria-sort="none"><button type="button">Last seen</button></th>
+          </tr></thead>
+          <tbody>__ROWS__
+            <tr class="no-match"><td colspan="7" class="empty">No bans match that filter.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    Data generated __GENERATED__ · Geo data © DB-IP.com, CC BY 4.0 ·
+    <a href="/api/public/bans">JSON API</a> ·
+    <a href="/lists/community-bans.txt">Plain-text IP list</a>
+    (<a href="/lists/community-bans.txt?severity=high">high severity only</a>)
+    <br /><br />
+    <span style="color:#777;">Built for dedicated Linux gateways.</span>
+  </footer>
+
+  <script>
+    __NAV_JS__
+
+    // Instant client-side table filter
+    (function () {
+      const input = document.getElementById('banSearch');
+      const rows = Array.from(document.querySelectorAll('#banTable tbody tr[data-search]'));
+      const none = document.querySelector('#banTable .no-match');
+      const count = document.getElementById('tableCount');
+      const initial = count.textContent;
+      if (!input || !rows.length) return;
+      input.addEventListener('input', () => {
+        const q = input.value.trim().toLowerCase();
+        let shown = 0;
+        rows.forEach(r => {
+          const hit = !q || r.dataset.search.includes(q);
+          r.style.display = hit ? '' : 'none';
+          if (hit) shown++;
+        });
+        none.classList.toggle('show', shown === 0);
+        count.textContent = q ? shown + ' matching' : initial;
+      });
+      document.addEventListener('keydown', e => {
+        if (e.key === '/' && document.activeElement !== input) { e.preventDefault(); input.focus(); }
+      });
+    })();
+
+    // Column sorting (client-side over the rendered rows)
+    (function () {
+      const table = document.getElementById('banTable');
+      const tbody = table.tBodies[0];
+      const heads = Array.from(table.tHead.rows[0].cells);
+      const label = document.getElementById('sortLabel');
+      const noMatch = tbody.querySelector('.no-match');
+      heads.forEach((th, col) => {
+        th.querySelector('button').addEventListener('click', () => {
+          const cur = th.getAttribute('aria-sort');
+          const dir = cur === 'none'
+            ? (th.dataset.first === 'desc' ? 'descending' : 'ascending')
+            : (cur === 'ascending' ? 'descending' : 'ascending');
+          heads.forEach(h => h.setAttribute('aria-sort', 'none'));
+          th.setAttribute('aria-sort', dir);
+          const sign = dir === 'ascending' ? 1 : -1;
+          const type = th.dataset.sort;
+          const rows = Array.from(tbody.querySelectorAll('tr[data-search]'));
+          const key = r => r.cells[col].dataset.v || '';
+          rows.sort((a, b) => {
+            const x = key(a), y = key(b);
+            let d = (type === 'num' ? (parseFloat(x) || 0) - (parseFloat(y) || 0)
+                                    : x.localeCompare(y)) * sign;
+            if (d === 0) d = (parseFloat(b.cells[2].dataset.v) || 0) - (parseFloat(a.cells[2].dataset.v) || 0);
+            return d;
+          });
+          rows.forEach(r => tbody.insertBefore(r, noMatch));
+          label.textContent = 'sorted by ' + th.textContent.trim().toLowerCase() +
+                              (dir === 'ascending' ? ' ↑' : ' ↓');
+        });
+      });
+    })();
   </script>
 
 </body>
@@ -1144,72 +1549,49 @@ IP_DETAIL_TEMPLATE = """<!DOCTYPE html>
   <meta name="theme-color" content="#0d0d0d" />
   <link rel="icon" href="/favicon.ico?v=2" sizes="16x16 32x32 48x48 64x64" />
   <link rel="icon" type="image/png" sizes="60x60" href="/images/tux-logo60.png?v=2" />
-  <link rel="stylesheet" href="/css/style.css?v=20260830b" />
+  <link rel="stylesheet" href="/css/style.css?v=20261004-2" />
   <style>
     __PAGE_CSS__
   </style>
 </head>
 <body>
 
-  <nav>
-    <a class="nav-brand" href="https://tuxwall.org/">
-      <img src="/images/tuxwall-small-white.png" alt="Tux" />
-    </a>
-    <ul class="nav-links" id="navLinks">
-      <li><a href="https://tuxwall.org/">Home</a></li>
-      <li><a class="active" href="/bans">Bans</a></li>
-      <li><a href="/api/public/bans">JSON API</a></li>
-      <li><a href="/lists/community-bans.txt">Ban List</a></li>
-      <li><a class="nav-forum" href="https://github.com/rezzonance/tuxwall" target="_blank" rel="noopener">GitHub</a></li>
-    </ul>
-    <button class="nav-toggle" id="navToggle" aria-label="Toggle menu" aria-expanded="false" aria-controls="navLinks">
-      <span></span><span></span><span></span>
-    </button>
-  </nav>
+  __NAV__
 
-  <div class="page-main">
+  <main class="page-main">
     <section class="section" style="padding-top:0;">
+      <p class="section-desc" style="margin-bottom:1rem;"><a class="ip-link" href="/bans">← Back to Community Bans</a></p>
       <p class="section-label">// ip report</p>
       <div class="ip-head">
-        <h2 class="section-title">__IP__</h2>
+        <h1 class="section-title mono-ip">__IP__</h1>
+        <button class="copy-btn" data-copy="__IP__">Copy</button>
         __BADGE__
         <span class="ip-flag">__FLAG__</span>
       </div>
-      <p class="section-desc"><a class="ip-link" href="/bans">« back to ban list</a><br>
-         Community abuse report compiled from reports sent by participating TuxWall firewall installs.</p>
+      <p class="section-desc" style="margin-top:0.75rem;">Community abuse report compiled from reports sent by participating TuxWall firewall installs.</p>
       __BODY__
     </section>
-  </div>
+  </main>
 
   <footer>
     Verdicts and categories are self-reported by participating TuxWall installs and are not a guarantee.
-    Geo data (c) DB-IP.com, CC BY 4.0.
-    <a href="/api/public/bans">JSON API</a> · <a href="/bans">Ban list</a>.
-    Built for dedicated Linux gateways.
+    Geo data © DB-IP.com, CC BY 4.0 ·
+    <a href="/api/public/bans">JSON API</a> · <a href="/bans">Ban list</a>
+    <br /><br />
+    <span style="color:#777;">Built for dedicated Linux gateways.</span>
   </footer>
 
   <script>
-    const navToggle = document.getElementById('navToggle');
-    const navLinks = document.getElementById('navLinks');
-    function closeNav() {
-      document.body.classList.remove('nav-open');
-      navToggle.setAttribute('aria-expanded', 'false');
-    }
-    navToggle.addEventListener('click', () => {
-      const open = document.body.classList.toggle('nav-open');
-      navToggle.setAttribute('aria-expanded', open);
-    });
-    navLinks.addEventListener('click', e => {
-      if (e.target.tagName === 'A') closeNav();
-    });
-    window.matchMedia('(min-width: 821px)').addEventListener('change', e => {
-      if (e.matches) closeNav();
-    });
+    __NAV_JS__
   </script>
 
 </body>
 </html>
 """
+
+HTML_TEMPLATE = HTML_TEMPLATE.replace("__NAV__", NAV_HTML).replace("__NAV_JS__", NAV_JS)
+IP_DETAIL_TEMPLATE = (IP_DETAIL_TEMPLATE.replace("__NAV__", NAV_HTML)
+                      .replace("__NAV_JS__", NAV_JS))
 
 
 def main():
