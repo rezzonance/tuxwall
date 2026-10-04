@@ -2561,6 +2561,833 @@ def build_suricata():
     }
 
 
+# --- Zeek (passive network analysis) ----------------------------------------
+# Zeek runs as a passive sensor on the LAN interface (enp6s0): it sniffs a
+# copy of every packet but never sits in the forwarding path, so router
+# throughput is unaffected. Two feeds back the Security tab panels:
+#   notice.log — Zeek's Notice framework events (scan detection, SSL
+#                certificate anomalies, DNS weirdness, protocol violations)
+#   conn.log   — per-connection records used to build an outbound activity
+#                profile per LAN device for malware/C2 hunting.
+
+ZEEK_LOG_DIR = "/opt/zeek/logs/current"
+ZEEK_NOTICE_LOG = os.path.join(ZEEK_LOG_DIR, "notice.log")
+ZEEK_CONN_LOG = os.path.join(ZEEK_LOG_DIR, "conn.log")
+ZEEK_WINDOW = 86400
+ZEEK_TAIL_BYTES = 4 * 1024 * 1024
+ZEEK_DEVICE_WINDOW = 3600
+
+
+def _zeek_tail_lines(path):
+    """Read complete JSON lines from the tail of a Zeek log (bounded memory)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if st.st_size == 0:
+        return []
+    start = max(0, st.st_size - ZEEK_TAIL_BYTES)
+    try:
+        with open(path, "r", errors="replace") as f:
+            f.seek(start)
+            if start:
+                f.readline()
+            data = f.read()
+    except OSError:
+        return None
+    return [raw.strip() for raw in data.splitlines() if raw.strip()]
+
+
+def _zeek_endpoint(ev, vec_key, addr_key):
+    """Extract ("addr", "port") from a Zeek JSON record, tolerating both the
+    flattened layout ("id.orig_h" / "id.orig_p") and the structured one
+    ("src": [{"addr": ..., "port": ...}]) used by different Zeek writers."""
+    val = ev.get(vec_key)
+    if isinstance(val, dict):
+        return str(val.get("addr") or ""), val.get("port")
+    if isinstance(val, list) and val and isinstance(val[0], dict):
+        return str(val[0].get("addr") or ""), val[0].get("port")
+    return str(ev.get(addr_key) or ""), ev.get("id.orig_p" if addr_key == "id.orig_h" else "id.resp_p")
+
+
+def _zeek_is_lan(ip):
+    """True for addresses on this router's LAN/VPN side (private ranges)."""
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return False
+
+
+# --- AIDE file integrity ------------------------------------------------------
+AIDE_BINARY = "/usr/bin/aide"
+AIDE_CONF = "/etc/aide/aide.conf"
+AIDE_DB = "/var/lib/aide/aide.db"
+AIDE_DB_NEW = "/var/lib/aide/aide.db.new"
+AIDE_LOG = "/var/log/aide/aide.log"
+AIDE_NIGHTLY = "/etc/cron.daily/dailyaidecheck"
+AIDE_TIMEOUT = 3600  # init took ~26 min on this host; allow an hour
+
+AIDE_STATE = {
+    "running": False,
+    "op": None,          # "check" | "update"
+    "started_at": None,
+    "finished_at": None,
+    "summary": None,
+    "changes": [],
+    "raw_tail": [],
+    "error": None,
+}
+AIDE_LOCK = threading.Lock()
+
+AIDE_SUMMARY_RES = {
+    "total": re.compile(r"number of entries:\s*(\d+)", re.IGNORECASE),
+    "added": re.compile(r"Added entries:\s*(\d+)"),
+    "removed": re.compile(r"Removed entries:\s*(\d+)"),
+    "changed": re.compile(r"Changed entries:\s*(\d+)"),
+}
+# Real AIDE 0.19 output: section headers ("Added entries:") followed by
+# entry lines like "f++++++++++++++++++: /path" (type char + attr deltas).
+AIDE_SECTION_RE = re.compile(r"^(Added|Removed|Changed) entries:\s*$")
+AIDE_ENTRY_RE = re.compile(r"^[a-zA-Z][\w.+-]*:\s+(/[^\s]+)")
+
+
+def _aide_parse_report(text):
+    """Extract summary counts and changed paths from an AIDE report."""
+    summary = {}
+    for key, rex in AIDE_SUMMARY_RES.items():
+        m = rex.search(text)
+        summary[key] = int(m.group(1)) if m else None
+    changes = []
+    section = None
+    for line in text.splitlines():
+        line = line.rstrip()
+        if not line or set(line) == {"-"}:
+            continue
+        m = AIDE_SECTION_RE.match(line)
+        if m:
+            section = m.group(1).lower()
+            continue
+        if not section:
+            continue
+        m = AIDE_ENTRY_RE.match(line)
+        if m:
+            changes.append({"type": section, "path": m.group(1)[:160]})
+            if len(changes) >= 100:
+                break
+    return summary, changes[:100]
+
+
+def _aide_last_nightly():
+    """Best-effort parse of the most recent run in /var/log/aide/aide.log."""
+    try:
+        with open(AIDE_LOG, "r") as f:
+            text = f.read()
+    except OSError:
+        return None
+    chunks = text.split("Start timestamp:")
+    if not text.strip():
+        return None
+    last = chunks[-1]
+    try:
+        mtime = os.path.getmtime(AIDE_LOG)
+    except OSError:
+        mtime = None
+    summary, changes = _aide_parse_report(last)
+    m = re.search(r"Start timestamp:\s*([^\n]+)", last)
+    return {
+        "started": (m.group(1).strip() if m else None),
+        "mtime": mtime,
+        "summary": summary,
+        "changes": changes[:50],
+    }
+
+
+def _aide_run(op):
+    """Run aide --check/--update in the background and update AIDE_STATE."""
+    cmd = [AIDE_BINARY, "--config=" + AIDE_CONF, "--" + op]
+    started = time.time()
+    AIDE_STATE.update({
+        "running": True, "op": op, "started_at": started,
+        "finished_at": None, "summary": None, "changes": [],
+        "raw_tail": [], "error": None,
+    })
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=AIDE_TIMEOUT,
+        )
+        text = (proc.stdout or "") + (proc.stderr or "")
+        summary, changes = _aide_parse_report(text)
+        tail = [l for l in text.splitlines() if l.strip()][-40:]
+        AIDE_STATE.update({
+            "summary": summary,
+            "changes": changes,
+            "raw_tail": tail,
+            # AIDE exit codes are a bitmask: 1=added 2=removed 4=changed.
+            # Anything below 8 is a valid result (changes present), not an error.
+            "error": None if 0 <= proc.returncode < 8 else
+                     "aide --{} exited {}: {}".format(op, proc.returncode, (proc.stderr or "").strip()[:300]),
+        })
+        if op == "update" and 0 <= proc.returncode < 8:
+            # promote aide.db.new to the baseline (preserve ownership/mode)
+            try:
+                st = os.stat(AIDE_DB)
+                os.replace(AIDE_DB_NEW, AIDE_DB)
+                os.chown(AIDE_DB, st.st_uid, st.st_gid)
+                os.chmod(AIDE_DB, st.st_mode & 0o7777)
+            except OSError as exc:
+                AIDE_STATE["error"] = "baseline promotion failed: {}".format(exc)
+    except subprocess.TimeoutExpired:
+        AIDE_STATE["error"] = "aide --{} timed out after {}s".format(op, AIDE_TIMEOUT)
+    except Exception as exc:
+        AIDE_STATE["error"] = str(exc)
+    finally:
+        AIDE_STATE["running"] = False
+        AIDE_STATE["finished_at"] = time.time()
+
+
+def start_aide_run(op):
+    if op not in ("check", "update"):
+        return {"ok": False, "error": "Invalid operation"}
+    if not os.path.exists(AIDE_BINARY):
+        return {"ok": False, "error": "AIDE is not installed"}
+    with AIDE_LOCK:
+        if AIDE_STATE["running"]:
+            return {"ok": True, "running": True, "message": "AIDE is already running"}
+        threading.Thread(target=_aide_run, args=(op,), daemon=True).start()
+    return {"ok": True, "running": True, "message": "AIDE {} started".format(op)}
+
+
+def build_aide():
+    """AIDE status: baseline db info, nightly cron, last run, live job state."""
+    enabled = os.path.exists(AIDE_BINARY)
+    db = None
+    try:
+        st = os.stat(AIDE_DB)
+        db = {"mtime": st.st_mtime, "size": st.st_size}
+    except OSError:
+        pass
+    version = None
+    try:
+        proc = subprocess.run([AIDE_BINARY, "--version"], capture_output=True,
+                              text=True, timeout=10)
+        m = re.search(r"AIDE\s+([\d.]+)", proc.stdout or proc.stderr or "")
+        version = m.group(1) if m else None
+    except Exception:
+        pass
+    state = {k: AIDE_STATE.get(k) for k in
+             ("running", "op", "started_at", "finished_at", "summary",
+              "changes", "error")}
+    return {
+        "ok": True,
+        "enabled": enabled,
+        "version": version,
+        "db": db,
+        "nightly": {
+            "enabled": os.path.exists(AIDE_NIGHTLY),
+            "last": _aide_last_nightly(),
+        },
+        "state": state,
+        "hint": None if enabled else
+                "AIDE is not installed (apt install aide && aideinit)",
+    }
+
+
+# --- Honeypot (WAN port-garden tarpit) -----------------------------------------
+# Trap WAN port scanners: bind classic scan ports on the WAN address only,
+# hold each connection open with a clamped TCP window (tarpit), and auto-ban
+# the source via CrowdSec. Any connection to these ports is hostile by
+# definition, so no reputation cross-checking is needed before a ban.
+HONEY_CONF_FILE = os.path.join(BLOCKLIST_DIR, "honeypot.json")
+HONEY_WAN_IFACE = "enp5s0"
+HONEY_DEFAULT_PORTS = [23, 2323, 3389, 445, 5555]
+HONEY_MAX_TOTAL = 256        # concurrent trapped sockets across all ports
+HONEY_MAX_PER_IP = 8         # concurrent trapped sockets per source IP
+HONEY_MAX_HOLD = 4 * 3600    # hold a single connection at most 4 hours
+HONEY_TICK = 10              # poll interval / dribble period (seconds)
+HONEY_REASON = "honeypot/tuxwall"
+
+HONEY_STATE = {
+    "listening": False,
+    "wan_ip": None,
+    "ports": [],
+    "threads": [],
+    "active": {},            # (ip, port) -> {"ip","port","connected_at"}
+    "traps": [],              # closed connection history (bounded)
+    "hits": {},               # ip -> total connection count
+    "stats": {"total": 0, "unique": 0, "wasted": 0, "banned": 0, "lan_guard": 0},
+    "log": [],
+    "started_at": None,
+    "error": None,
+    "sockets": {},      # port -> live bound trap socket
+    "watchdog": None,
+}
+HONEY_STOP = threading.Event()
+HONEY_APPLY_LOCK = threading.RLock()
+HONEY_LAN_NETS = [ipaddress.ip_network(n) for n in
+                 ("192.168.1.0/24", "10.0.0.0/24", "127.0.0.0/8")]
+
+
+def _honey_is_lan(ip):
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return True
+    return any(a in net for net in HONEY_LAN_NETS)
+
+
+def _honey_load_conf():
+    conf = {
+        "enabled": False,
+        "ports": list(HONEY_DEFAULT_PORTS),
+        "auto_ban": True,
+        "ban_threshold": 1,
+        "max_hold": HONEY_MAX_HOLD,
+    }
+    try:
+        with open(HONEY_CONF_FILE, "r") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            conf.update({k: data[k] for k in conf if k in data})
+    except (OSError, ValueError):
+        pass
+    conf["ports"] = _honey_valid_ports(conf["ports"])
+    return conf
+
+
+def _honey_valid_ports(ports):
+    try:
+        vals = sorted({int(p) for p in (ports or [])})
+    except (TypeError, ValueError):
+        return []
+    return [p for p in vals if 1 <= p <= 65535][:16]
+
+
+def _honey_save_conf(conf):
+    os.makedirs(os.path.dirname(HONEY_CONF_FILE), exist_ok=True)
+    tmp = HONEY_CONF_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(conf, f, indent=2)
+    os.replace(tmp, HONEY_CONF_FILE)
+
+
+def _honey_log(line):
+    with HONEY_APPLY_LOCK:
+        HONEY_STATE["log"].append("[{}] {}".format(time.strftime("%H:%M:%S"), line))
+        del HONEY_STATE["log"][:-60]
+
+
+def _honey_is_self(ip):
+    """True for the router's own current WAN address (self-originated)."""
+    with HONEY_APPLY_LOCK:
+        return bool(ip) and ip == HONEY_STATE.get("wan_ip")
+
+
+def _honey_wan_ip():
+    """Resolve the current WAN IPv4 without sending a packet (UDP connect)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("192.0.2.1", 53))
+            ip = s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        return None
+    if _honey_is_lan(ip):
+        return None
+    return ip
+
+
+def _honey_ban(ip):
+    """CrowdSec decision + community report for a trapped scanner."""
+    try:
+        subprocess.run(
+            [CROWDSEC_BIN, "decisions", "add", "--ip", ip,
+             "--duration", CUSTOM_BLOCKLIST_DURATION, "--reason", HONEY_REASON],
+            capture_output=True, text=True, timeout=CROWDSEC_TIMEOUT,
+        )
+    except Exception:
+        return
+    with HONEY_APPLY_LOCK:
+        HONEY_STATE["stats"]["banned"] += 1
+    _honey_log("auto-banned {} (CrowdSec 1y)".format(ip))
+    _spawn_report(ip, "trapped by honeypot", "honeypot", "honeypot")
+
+
+def _honey_tarpit(conn, ip, port):
+    """Hold one scanner connection open, dribbling one byte per tick."""
+    start = time.time()
+    sent = 0
+    try:
+        conn.settimeout(HONEY_TICK)
+        try:
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_WINDOW_CLAMP, 1)
+        except (AttributeError, OSError):
+            pass
+        while (not HONEY_STOP.is_set()
+               and time.time() - start < HONEY_MAX_HOLD):
+            try:
+                if not conn.recv(1024):
+                    break  # remote closed
+            except socket.timeout:
+                pass
+            except OSError:
+                break
+            try:
+                conn.send(b"\x00")
+                sent += 1
+            except OSError:
+                break
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+        duration = time.time() - start
+        with HONEY_APPLY_LOCK:
+            HONEY_STATE["active"].pop((ip, port), None)
+            HONEY_STATE["stats"]["wasted"] += duration
+            HONEY_STATE["traps"].append({
+                "ip": ip, "port": port, "connected_at": start,
+                "duration": duration, "sent": sent,
+            })
+            HONEY_STATE["traps"] = HONEY_STATE["traps"][-400:]
+
+
+def _honey_bind(port, wan_ip):
+    """Bind one honeypot port synchronously. Returns the socket or None.
+
+    Binding BEFORE opening the firewall rule guarantees a failed bind
+    (port in use by a real service) can never expose that service to WAN.
+    """
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((wan_ip, port))
+        sock.listen(16)
+        sock.settimeout(2)
+        return sock
+    except OSError as exc:
+        with HONEY_APPLY_LOCK:
+            HONEY_STATE["error"] = (
+                "port {} not bound ({}) - no firewall rule added"
+                .format(port, getattr(exc, "strerror", exc)))
+        _honey_log(HONEY_STATE["error"])
+        return None
+
+
+def _honey_listener(sock, port):
+    """Accept loop for one bound honeypot socket."""
+    try:
+        while not HONEY_STOP.is_set():
+            try:
+                conn, addr = sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            ip = addr[0]
+            if _honey_is_lan(ip) or _honey_is_self(ip):
+                with HONEY_APPLY_LOCK:
+                    HONEY_STATE["stats"]["lan_guard"] += 1
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                continue
+            with HONEY_APPLY_LOCK:
+                st = HONEY_STATE
+                active_total = len(st["active"])
+                active_ip = sum(1 for k in st["active"] if k[0] == ip)
+                hits = st["hits"].get(ip, 0) + 1
+                st["hits"][ip] = hits
+                st["stats"]["total"] += 1
+                if hits == 1:
+                    st["stats"]["unique"] += 1
+                conf_auto = None  # decide outside lock below
+            conf = _honey_load_conf()
+            should_ban = (conf.get("auto_ban")
+                          and hits == int(conf.get("ban_threshold") or 1))
+            if active_total >= HONEY_MAX_TOTAL or active_ip >= HONEY_MAX_PER_IP:
+                # over capacity: drop instead of trap so memory stays bounded
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                continue
+            with HONEY_APPLY_LOCK:
+                HONEY_STATE["active"][(ip, port)] = {
+                    "ip": ip, "port": port, "connected_at": time.time(),
+                }
+            if should_ban:
+                threading.Thread(target=_honey_ban, args=(ip,), daemon=True).start()
+            threading.Thread(
+                target=_honey_tarpit, args=(conn, ip, port), daemon=True,
+            ).start()
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def _honey_watchdog():
+    """Keep firewall rules no wider than the live trap sockets.
+
+    Every 60s: any port whose trap socket has died immediately loses its
+    UFW allow rule, so a service that later grabs that port can never
+    inherit WAN exposure from a dead tarpit. Exits when the honeypot is
+    no longer listening.
+    """
+    while True:
+        time.sleep(60)
+        with HONEY_APPLY_LOCK:
+            if not HONEY_STATE["listening"]:
+                return
+            socks = dict(HONEY_STATE.get("sockets") or {})
+        dead = [p for p, s in socks.items() if s.fileno() == -1]
+        for port in dead:
+            _honey_ufw_deny(port)
+            with HONEY_APPLY_LOCK:
+                HONEY_STATE["sockets"].pop(port, None)
+                if port in HONEY_STATE["ports"]:
+                    HONEY_STATE["ports"].remove(port)
+            _honey_log("watchdog: trap on port {} died - firewall rule removed".format(port))
+        if dead:
+            with HONEY_APPLY_LOCK:
+                if not HONEY_STATE["sockets"] and HONEY_STATE["listening"]:
+                    HONEY_STATE["listening"] = False
+                    HONEY_STATE["error"] = "all traps died - firewall rules removed"
+                    _honey_log("all traps dead - honeypot stopped")
+
+def _honey_ufw_allow(port):
+    try:
+        _ufw(["allow", "in", "on", HONEY_WAN_IFACE,
+              "to", "any", "port", str(port), "proto", "tcp"])
+    except Exception as exc:
+        _honey_log("ufw allow port {}: {}".format(port, exc))
+        return False
+    return True
+
+
+def _honey_ufw_deny(port):
+    try:
+        _ufw(["delete", "allow", "in", "on", HONEY_WAN_IFACE,
+              "to", "any", "port", str(port), "proto", "tcp"])
+    except Exception:
+        pass  # rule not present - fine
+
+
+def _honey_stop_listeners():
+    HONEY_STOP.set()
+    for t in HONEY_STATE["threads"]:
+        t.join(timeout=3)
+    HONEY_STATE["threads"] = []
+    HONEY_STOP.clear()
+    with HONEY_APPLY_LOCK:
+        HONEY_STATE["listening"] = False
+        HONEY_STATE["ports"] = []
+        HONEY_STATE["sockets"] = {}
+        # close any tarpit threads' bookkeeping; sockets close on their own
+        HONEY_STATE["active"] = {}
+
+
+def apply_honeypot(conf, touch_ufw=False):
+    """(Re)start or stop the honeypot listeners per conf.
+
+    touch_ufw=True adds/removes the WAN allow rules (used by the API
+    endpoint; skipped at boot since UFW rules persist).
+    """
+    with HONEY_APPLY_LOCK:
+        if HONEY_STATE["threads"]:
+            busy = True
+        else:
+            busy = False
+    if busy:
+        _honey_stop_listeners()
+    if not conf.get("enabled"):
+        if touch_ufw:
+            for p in _honey_valid_ports(conf.get("ports")):
+                _honey_ufw_deny(p)
+        _honey_log("honeypot disabled")
+        return {"ok": True, "enabled": False}
+    wan_ip = _honey_wan_ip()
+    if not wan_ip:
+        HONEY_STATE["error"] = "could not resolve a non-LAN WAN IPv4 address"
+        _honey_log(HONEY_STATE["error"])
+        return {"ok": False, "error": HONEY_STATE["error"]}
+    ports = _honey_valid_ports(conf.get("ports"))
+    if not ports:
+        return {"ok": False, "error": "no valid ports configured"}
+    # bind every port FIRST; only bound ports get a firewall allow rule
+    bound = {}
+    for p in ports:
+        sock = _honey_bind(p, wan_ip)
+        if sock is not None:
+            bound[p] = sock
+    if not bound:
+        return {"ok": False, "error": "no ports could be bound on {}".format(wan_ip)}
+    if touch_ufw:
+        for p in bound:
+            _honey_ufw_allow(p)
+    for p, sock in bound.items():
+        t = threading.Thread(
+            target=_honey_listener, args=(sock, p), daemon=True)
+        t.start()
+        with HONEY_APPLY_LOCK:
+            HONEY_STATE["threads"].append(t)
+    with HONEY_APPLY_LOCK:
+        HONEY_STATE["sockets"] = dict(bound)
+        HONEY_STATE["listening"] = True
+        HONEY_STATE["wan_ip"] = wan_ip
+        HONEY_STATE["ports"] = list(bound)
+        HONEY_STATE["started_at"] = time.time()
+        if HONEY_STATE["error"] and HONEY_STATE["error"].startswith("port "):
+            HONEY_STATE["error"] = None  # bind errors from this cycle are stale
+    wd = HONEY_STATE.get("watchdog")
+    if not wd or not wd.is_alive():
+        wd = threading.Thread(target=_honey_watchdog, daemon=True)
+        wd.start()
+        with HONEY_APPLY_LOCK:
+            HONEY_STATE["watchdog"] = wd
+    _honey_log("honeypot active on {} ports {}{}".format(
+        wan_ip, list(bound),
+        "" if len(bound) == len(ports)
+        else " (skipped {})".format(sorted(set(ports) - set(bound)))))
+    return {"ok": True, "enabled": True, "wan_ip": wan_ip, "ports": list(bound)}
+
+
+def start_honeypot_at_boot():
+    conf = _honey_load_conf()
+    if conf.get("enabled"):
+        try:
+            apply_honeypot(conf, touch_ufw=False)
+        except Exception as exc:
+            _honey_log("boot start failed: {}".format(exc))
+
+
+def build_honeypot():
+    with HONEY_APPLY_LOCK:
+        active = sorted(
+            HONEY_STATE["active"].values(),
+            key=lambda a: a["connected_at"], reverse=True,
+        )[:50]
+        traps = list(reversed(HONEY_STATE["traps"][-30:]))
+        top = sorted(
+            HONEY_STATE["hits"].items(), key=lambda kv: -kv[1])[:15]
+        state = {
+            "listening": HONEY_STATE["listening"],
+            "wan_ip": HONEY_STATE["wan_ip"],
+            "ports": HONEY_STATE["ports"],
+            "started_at": HONEY_STATE["started_at"],
+            "error": HONEY_STATE["error"],
+            "stats": dict(HONEY_STATE["stats"]),
+            "active_count": len(HONEY_STATE["active"]),
+            "active": active,
+            "traps": traps,
+            "top": [{"ip": ip, "hits": n} for ip, n in top],
+            "log": list(HONEY_STATE["log"][-20:]),
+        }
+    return {
+        "ok": True,
+        "conf": _honey_load_conf(),
+        "state": state,
+        "hint": ("Listening sockets bind the WAN address only; LAN/WG "
+                 "sources are closed immediately and never counted."),
+    }
+
+
+def set_honeypot_conf(body):
+    conf = _honey_load_conf()
+    if "enabled" in body:
+        conf["enabled"] = bool(body.get("enabled"))
+    if body.get("ports") is not None:
+        ports = _honey_valid_ports(body.get("ports"))
+        if not ports:
+            return {"ok": False, "error": "No valid ports (1-65535, max 16)"}
+        old_ports = conf["ports"]
+        conf["ports"] = ports
+    else:
+        old_ports = conf["ports"]
+    if "auto_ban" in body:
+        conf["auto_ban"] = bool(body.get("auto_ban"))
+    if body.get("ban_threshold") is not None:
+        try:
+            conf["ban_threshold"] = max(1, min(10, int(body.get("ban_threshold"))))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "Invalid ban threshold"}
+    _honey_save_conf(conf)
+    # remove ufw rules for ports we dropped
+    for p in old_ports:
+        if p not in conf["ports"] or not conf["enabled"]:
+            _honey_ufw_deny(p)
+    result = apply_honeypot(conf, touch_ufw=True)
+    if not result.get("ok"):
+        # roll back to disabled so we never leave half-bound state
+        conf["enabled"] = False
+        _honey_save_conf(conf)
+        apply_honeypot(conf, touch_ufw=True)
+        return {"ok": False, "error": result.get("error")}
+    return {"ok": True, "conf": conf, "message": (
+        "Honeypot enabled on {}".format(result.get("ports")) if conf["enabled"]
+        else "Honeypot disabled")}
+
+
+def build_zeek():
+    """Recent Zeek notices plus per-LAN-device outbound activity, read live
+    from /opt/zeek/logs/current. Refreshed by the Security tab poll."""
+    if not os.path.exists(ZEEK_NOTICE_LOG) and not os.path.exists(ZEEK_CONN_LOG):
+        return {
+            "ok": True, "enabled": False, "count_24h": 0, "notices": [],
+            "devices": [],
+            "hint": ("Zeek is not installed or not writing logs to "
+                     "/opt/zeek/logs/current. Install Zeek (zeek.org), load "
+                     "the JSON log scripts, and 'zeekctl deploy' on the LAN "
+                     "interface to populate this panel."),
+        }
+    now = time.time()
+
+    # --- Notices (24h) ---
+    notices = []
+    for raw in _zeek_tail_lines(ZEEK_NOTICE_LOG) or []:
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict) or not ev.get("note"):
+            continue
+        try:
+            ts = float(ev.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not ts or now - ts > ZEEK_WINDOW:
+            continue
+        src, sport = _zeek_endpoint(ev, "src", "id.orig_h")
+        dst, dport = _zeek_endpoint(ev, "dst", "id.resp_h")
+        notices.append({
+            "ts": ts,
+            "note": str(ev.get("note"))[:60],
+            "msg": str(ev.get("msg") or "")[:160],
+            "src": src, "sport": sport or "",
+            "dst": dst, "dport": dport or "",
+        })
+    notices.sort(key=lambda n: n["ts"], reverse=True)
+
+    # --- Per-device outbound profile (1h window) ---
+    # A device talking to many unknown external hosts, or regularly beeping
+    # at the same one, is the classic malware check-in pattern.
+    devices = {}
+    for raw in _zeek_tail_lines(ZEEK_CONN_LOG) or []:
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        try:
+            ts = float(ev.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not ts or now - ts > ZEEK_DEVICE_WINDOW:
+            continue
+        orig = str(ev.get("id.orig_h") or "")
+        resp = str(ev.get("id.resp_h") or "")
+        if _zeek_is_lan(orig):
+            dev, peer = orig, resp
+        elif _zeek_is_lan(resp):
+            dev, peer = resp, orig
+        else:
+            continue
+        if not dev or not peer or _zeek_is_lan(peer):
+            continue
+        d = devices.setdefault(dev, {"device": dev, "conns": 0, "peers": {},
+                                     "last_ts": ts})
+        d["conns"] += 1
+        d["peers"][peer] = d["peers"].get(peer, 0) + 1
+        if ts > d["last_ts"]:
+            d["last_ts"] = ts
+    device_list = []
+    for d in devices.values():
+        top_peer, top_hits = max(d["peers"].items(), key=lambda kv: kv[1])
+        device_list.append({
+            "device": d["device"],
+            "conns": d["conns"],
+            "peer_count": len(d["peers"]),
+            "top_peer": top_peer,
+            "top_peer_hits": top_hits,
+            "last_ts": d["last_ts"],
+        })
+    device_list.sort(key=lambda v: (-v["conns"], v["device"]))
+    device_list = device_list[:50]
+
+    return {
+        "ok": True,
+        "enabled": True,
+        "count_24h": len(notices),
+        "notices": notices[:100],
+        "devices": device_list,
+    }
+
+
+# --- Zeek QUIC connections ----------------------------------------------------
+# Every UDP/TLS (QUIC) flow from a LAN device to an external peer, read live
+# from quic.log. Ordinary HTTP/3 carries a real SNI on port 443; an
+# anonymous QUIC tunnel (proxy/VPN tooling) shows odd ports and no SNI.
+
+ZEEK_QUIC_LOG = os.path.join(ZEEK_LOG_DIR, "quic.log")
+ZEEK_QUIC_WINDOW = 3600
+
+
+def build_zeek_quic():
+    """Recent QUIC flows per LAN device (last hour), read from quic.log."""
+    if not os.path.exists(ZEEK_QUIC_LOG):
+        return {
+            "ok": True, "enabled": False, "count_1h": 0, "flows": [],
+            "hint": ("Zeek is not writing quic.log — no QUIC traffic seen yet "
+                     "or the QUIC analyzer is disabled."),
+        }
+    now = time.time()
+    flows = []
+    for raw in _zeek_tail_lines(ZEEK_QUIC_LOG) or []:
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        try:
+            ts = float(ev.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not ts or now - ts > ZEEK_QUIC_WINDOW:
+            continue
+        orig = str(ev.get("id.orig_h") or "")
+        resp = str(ev.get("id.resp_h") or "")
+        if _zeek_is_lan(orig):
+            dev, peer = orig, resp
+        elif _zeek_is_lan(resp):
+            dev, peer = resp, orig
+        else:
+            continue
+        if not peer or _zeek_is_lan(peer):
+            continue
+        flows.append({
+            "ts": ts,
+            "device": dev,
+            "peer": peer,
+            "port": ev.get("id.resp_p") or "",
+            "version": str(ev.get("version") or "")[:40],
+            "sni": str(ev.get("server_name") or ""),
+        })
+    flows.sort(key=lambda f: f["ts"], reverse=True)
+    return {
+        "ok": True,
+        "enabled": True,
+        "count_1h": len(flows),
+        "flows": flows[:100],
+    }
+
+
 # --- Suricata evidence for ban reports -------------------------------------
 # When a ban is reported to tuxwall.org, enrich the report with what Suricata
 # actually saw from that IP so the community report card carries a real abuse
@@ -4038,6 +4865,580 @@ def reload_unbound():
     )
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or "unbound-control reload failed").strip())
+
+
+# --- RPZ (response policy zones) -------------------------------------------
+RPZ_ENTRIES_FILE = os.path.join(BLOCKLIST_DIR, "rpz.json")
+RPZ_ZONEFILE = "/var/lib/unbound/rpz-block.rpz"
+RPZ_BACKUP = RPZ_ZONEFILE + ".bak"
+RPZ_INCLUDE = "/etc/unbound/unbound.conf.d/98-rpz.conf"
+RPZ_ZONE_NAME = "rpz.local"
+RPZ_ACTIONS = ("block", "drop", "redirect", "passthru")
+RPZ_MATCHES = ("domain", "ip")
+
+RPZ_INCLUDE_BODY = (
+    "# Managed by the tuxwall Blocklists page (RPZ) - DO NOT EDIT\n"
+    "server:\n"
+    "    # respip module required for RPZ (default is \"validator iterator\")\n"
+    "    module-config: \"respip validator iterator\"\n"
+    "\n"
+    "rpz:\n"
+    "    name: \"" + RPZ_ZONE_NAME + "\"\n"
+    "    zonefile: \"" + RPZ_ZONEFILE + "\"\n"
+    "    # zonefile mtime is checked and reloaded automatically, no restart needed\n"
+    "    # log which RPZ trigger fired (visible in journal / unbound-control)\n"
+    "    rpz-log: yes\n"
+    "    rpz-log-name: \"" + RPZ_ZONE_NAME + "\"\n"
+)
+
+
+def load_rpz_entries():
+    try:
+        with open(RPZ_ENTRIES_FILE, "r") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return [
+                    e for e in data
+                    if isinstance(e, dict) and e.get("domain")
+                    and e.get("action") in RPZ_ACTIONS
+                ]
+    except (OSError, ValueError):
+        pass
+    return []
+
+
+def save_rpz_entries(entries):
+    os.makedirs(os.path.dirname(RPZ_ENTRIES_FILE), exist_ok=True)
+    tmp = RPZ_ENTRIES_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(entries, f, indent=2)
+    os.replace(tmp, RPZ_ENTRIES_FILE)
+
+
+def valid_rpz_domain(token):
+    dom = normalize_domain(token)
+    if not dom or _looks_like_ip(dom) or not DOMAIN_RE.match(dom):
+        return None
+    return dom
+
+
+def valid_rpz_cidr(token):
+    """Normalize a CIDR (or bare IP) for answer-IP policies; None if invalid."""
+    token = (token or "").strip()
+    if not token or not IPV4_RE.match(token.split("/")[0]):
+        return None
+    try:
+        net = ipaddress.ip_network(token, strict=False)
+    except ValueError:
+        return None
+    if net.version != 4:
+        return None
+    return str(net)
+
+
+def valid_rpz_value(token):
+    """Accept a domain or CIDR; returns (value, mode) or (None, None)."""
+    if "/" in token or _looks_like_ip((token or "").strip()):
+        cidr = valid_rpz_cidr(token)
+        return (cidr, "ip") if cidr else (None, None)
+    dom = valid_rpz_domain(token)
+    return (dom, "domain") if dom else (None, None)
+
+
+def _rpz_ip_owner(cidr):
+    """Encode a CIDR as an RPZ response-IP owner label.
+
+    Format (per RPZ spec): prefixlen.<network octets, reversed, truncated
+    to the octets that carry network bits>.rpz-ip
+    e.g. 192.0.2.0/24 -> 24.2.0.192.rpz-ip
+    """
+    net = ipaddress.ip_network(cidr)
+    used = net.network_address.packed[: (net.prefixlen + 7) // 8]
+    rev = ".".join(str(b) for b in used[::-1])
+    return "{}.{}.rpz-ip".format(net.prefixlen, rev)
+
+
+def _rpz_rdata(entry):
+    action = entry.get("action")
+    if action == "block":
+        return "."
+    if action == "drop":
+        return "rpz-drop."
+    if action == "passthru":
+        return "rpz-passthru."
+    if action == "redirect":
+        target = (entry.get("target") or "").strip()
+        if not IPV4_RE.match(target):
+            raise ValueError("redirect requires a valid IPv4 target")
+        return target + "."
+    raise ValueError("invalid action (expected block/drop/redirect/passthru)")
+
+
+def write_rpz_zone(entries):
+    serial = time.strftime("%Y%m%d%H")
+    lines = [
+        "$TTL 300",
+        "@ IN SOA {}. hostmaster.housenetwork.site. (".format(RPZ_ZONE_NAME),
+        "        {} ; serial".format(serial),
+        "        3600       ; refresh",
+        "        600        ; retry",
+        "        86400      ; expire",
+        "        30 )       ; minimum",
+        "@ IN NS localhost.",
+        "",
+        "; Generated by the tuxwall Blocklists page (RPZ) - DO NOT EDIT",
+        "; owner names encode the target domain as <domain>.{}".format(RPZ_ZONE_NAME),
+    ]
+    for e in sorted(entries, key=lambda x: x["domain"]):
+        rdata = _rpz_rdata(e)
+        if e.get("match", "domain") == "ip":
+            lines.append("{}.{}. CNAME {}".format(
+                _rpz_ip_owner(e["domain"]), RPZ_ZONE_NAME, rdata))
+            continue
+        dom = e["domain"]
+        lines.append("{}.{}. CNAME {}".format(dom, RPZ_ZONE_NAME, rdata))
+        lines.append("*.{0}.{1}. CNAME {2}".format(dom, RPZ_ZONE_NAME, rdata))
+    os.makedirs(os.path.dirname(RPZ_ZONEFILE), exist_ok=True)
+    tmp = RPZ_ZONEFILE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp, RPZ_ZONEFILE)
+
+
+def ensure_rpz_include():
+    """Install the 98-rpz.conf include (server + rpz stanzas) if missing."""
+    if os.path.exists(RPZ_INCLUDE):
+        return False
+    os.makedirs(os.path.dirname(RPZ_INCLUDE), exist_ok=True)
+    tmp = RPZ_INCLUDE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(RPZ_INCLUDE_BODY)
+    os.replace(tmp, RPZ_INCLUDE)
+    return True
+
+
+def apply_rpz():
+    """Regenerate the RPZ zonefile from rpz.json and hot-reload unbound.
+
+    Uses unbound-control reload (no downtime). On checkconf/reload failure
+    the previous zonefile is restored and an error raised.
+    """
+    entries = load_rpz_entries()
+    ensure_rpz_include()
+    if os.path.exists(RPZ_ZONEFILE):
+        shutil.copy2(RPZ_ZONEFILE, RPZ_BACKUP)
+    write_rpz_zone(entries)
+    try:
+        reload_unbound()
+    except Exception:
+        if os.path.exists(RPZ_BACKUP):
+            shutil.copy2(RPZ_BACKUP, RPZ_ZONEFILE)
+        raise
+
+
+def add_rpz_entry(value, action, target="", note="", match=None):
+    val, mode = valid_rpz_value(value)
+    if val is None:
+        return {"ok": False, "error": "Invalid domain or CIDR"}
+    if mode == "ip" and match == "domain":
+        return {"ok": False, "error": "Value looks like an IP/CIDR; pick 'Answer IP' match"}
+    if mode == "domain" and match == "ip":
+        return {"ok": False, "error": "Value looks like a domain; pick 'Domain' match"}
+    if action not in RPZ_ACTIONS:
+        return {"ok": False, "error": "Invalid action (expected block/drop/redirect/passthru)"}
+    entry = {
+        "domain": val,
+        "match": mode,
+        "action": action,
+        "target": (target or "").strip() if action == "redirect" else "",
+        "note": (note or "").strip()[:200],
+        "added_at": time.time(),
+    }
+    try:
+        _rpz_rdata(entry)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    entries = load_rpz_entries()
+    if any(e["domain"] == val for e in entries):
+        return {"ok": False, "error": "{} already has an RPZ policy".format(val)}
+    entries.append(entry)
+    try:
+        save_rpz_entries(entries)
+        apply_rpz()
+    except Exception as exc:
+        save_rpz_entries([e for e in entries if e["domain"] != val])
+        try:
+            apply_rpz()
+        except Exception:
+            pass
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "message": "RPZ policy for {} applied".format(val)}
+
+
+def remove_rpz_entry(value):
+    val, _ = valid_rpz_value(value)
+    if val is None:
+        return {"ok": False, "error": "Invalid domain or CIDR"}
+    entries = load_rpz_entries()
+    if not any(e["domain"] == val for e in entries):
+        return {"ok": False, "error": "{} has no RPZ policy".format(val)}
+    entries = [e for e in entries if e["domain"] != val]
+    try:
+        save_rpz_entries(entries)
+        apply_rpz()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "message": "RPZ policy for {} removed".format(val)}
+
+
+def build_rpz():
+    entries = load_rpz_entries()
+    try:
+        zone_mtime = os.path.getmtime(RPZ_ZONEFILE)
+    except OSError:
+        zone_mtime = None
+    return {
+        "ok": True,
+        "entries": entries,
+        "zone_name": RPZ_ZONE_NAME,
+        "zonefile": RPZ_ZONEFILE,
+        "include_installed": os.path.exists(RPZ_INCLUDE),
+        "last_update": zone_mtime,
+        "feeds": _rpz_feeds_status(load_rpz_feeds()),
+        "stats": _rpz_stats(),
+        "hits": _rpz_hits(100),
+    }
+
+
+# --- RPZ feeds (auto-updating threat feeds consumed by unbound directly) ---
+RPZ_FEEDS_FILE = os.path.join(BLOCKLIST_DIR, "rpz-feeds.json")
+RPZ_FEEDS_CONF = "/etc/unbound/unbound.conf.d/98-rpz-feeds.conf"
+RPZ_FEEDS_BACKUP = RPZ_FEEDS_CONF + ".bak"
+
+
+def _rpz_feed_zone_name(url):
+    return "feed-{}.rpz.local".format(hashlib.sha256(url.encode()).hexdigest()[:8])
+
+
+def _rpz_feed_zonefile(url):
+    return os.path.join(
+        os.path.dirname(RPZ_ZONEFILE),
+        "rpz-feed-{}.rpz".format(hashlib.sha256(url.encode()).hexdigest()[:8]),
+    )
+
+
+def load_rpz_feeds():
+    try:
+        with open(RPZ_FEEDS_FILE, "r") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return [
+                    f for f in data
+                    if isinstance(f, dict) and f.get("url")
+                ]
+    except (OSError, ValueError):
+        pass
+    return []
+
+
+def save_rpz_feeds(feeds):
+    os.makedirs(os.path.dirname(RPZ_FEEDS_FILE), exist_ok=True)
+    tmp = RPZ_FEEDS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(feeds, f, indent=2)
+    os.replace(tmp, RPZ_FEEDS_FILE)
+
+
+def write_rpz_feeds_conf(feeds):
+    enabled = [f for f in feeds if f.get("enabled", True)]
+    lines = ["# Generated by the tuxwall Blocklists page (RPZ feeds) - DO NOT EDIT"]
+    for f in enabled:
+        url = f["url"]
+        name = _rpz_feed_zone_name(url)
+        zonefile = _rpz_feed_zonefile(url)
+        lines.append("")
+        lines.append("# {}".format(f.get("name") or url))
+        lines.append("rpz:")
+        lines.append('    name: "{}"'.format(name))
+        lines.append('    url: "{}"'.format(url))
+        lines.append('    zonefile: "{}"'.format(zonefile))
+        lines.append("    # unbound re-checks the feed automatically and hot-reloads it")
+        lines.append("    rpz-log: yes")
+        lines.append('    rpz-log-name: "{}"'.format(name))
+    lines.append("")
+    os.makedirs(os.path.dirname(RPZ_FEEDS_CONF), exist_ok=True)
+    tmp = RPZ_FEEDS_CONF + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(lines))
+    os.replace(tmp, RPZ_FEEDS_CONF)
+
+
+def _rpz_feed_entries(url):
+    """Count CNAME policy entries in a feed's cached zonefile."""
+    try:
+        with open(_rpz_feed_zonefile(url), "r") as f:
+            return sum(
+                1 for line in f
+                if " CNAME " in line and not line.startswith(("$", "@", ";"))
+            )
+    except OSError:
+        return 0
+
+
+def apply_rpz_feeds():
+    """Regenerate the RPZ feeds include and hot-reload unbound."""
+    feeds = load_rpz_feeds()
+    if os.path.exists(RPZ_FEEDS_CONF):
+        shutil.copy2(RPZ_FEEDS_CONF, RPZ_FEEDS_BACKUP)
+    write_rpz_feeds_conf(feeds)
+    try:
+        reload_unbound()
+    except Exception:
+        if os.path.exists(RPZ_FEEDS_BACKUP):
+            shutil.copy2(RPZ_FEEDS_BACKUP, RPZ_FEEDS_CONF)
+        raise
+
+
+def add_rpz_feed(url, name=""):
+    url = (url or "").strip()
+    if not valid_blocklist_url(url):
+        return {"ok": False, "error": "Invalid feed URL (https and public host required)"}
+    feeds = load_rpz_feeds()
+    if any(f["url"] == url for f in feeds):
+        return {"ok": False, "error": "Feed already added"}
+    feeds.append({
+        "url": url,
+        "name": (name or "").strip()[:200],
+        "enabled": True,
+        "added_at": time.time(),
+    })
+    try:
+        save_rpz_feeds(feeds)
+        apply_rpz_feeds()
+    except Exception as exc:
+        save_rpz_feeds([f for f in feeds if f["url"] != url])
+        apply_rpz_feeds()
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "message": "RPZ feed added and Unbound reloaded"}
+
+
+def remove_rpz_feed(url):
+    url = (url or "").strip()
+    feeds = load_rpz_feeds()
+    if not any(f["url"] == url for f in feeds):
+        return {"ok": False, "error": "Feed not found"}
+    removed = [f for f in feeds if f["url"] == url]
+    feeds = [f for f in feeds if f["url"] != url]
+    try:
+        save_rpz_feeds(feeds)
+        apply_rpz_feeds()
+    except Exception as exc:
+        save_rpz_feeds(feeds + removed)
+        apply_rpz_feeds()
+        return {"ok": False, "error": str(exc)}
+    try:
+        os.remove(_rpz_feed_zonefile(url))
+    except OSError:
+        pass
+    return {"ok": True, "message": "RPZ feed removed and Unbound reloaded"}
+
+
+def toggle_rpz_feed(url):
+    url = (url or "").strip()
+    feeds = load_rpz_feeds()
+    for f in feeds:
+        if f["url"] == url:
+            f["enabled"] = not f.get("enabled", True)
+    save_rpz_feeds(feeds)
+    try:
+        apply_rpz_feeds()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "message": "RPZ feed toggled and Unbound reloaded"}
+
+
+def _rpz_feeds_status(feeds):
+    """Annotate feeds with entry counts / zonefile mtimes (best effort)."""
+    out = []
+    for f in feeds:
+        zonefile = _rpz_feed_zonefile(f["url"])
+        try:
+            mtime = os.path.getmtime(zonefile)
+        except OSError:
+            mtime = None
+        g = dict(f)
+        g["entries"] = _rpz_feed_entries(f["url"]) if mtime else 0
+        g["last_updated"] = mtime
+        g["last_status"] = "ok" if mtime else "pending"
+        out.append(g)
+    return out
+
+
+# --- RPZ activity: hit log + action counters -------------------------------
+RPZ_HIT_LINE_RE = re.compile(r"rpz:\s+applied\s+\[(?P<zone>[^\]]+)\]\s+(?P<qname>\S+)\s+"
+                             r"(?P<action>rpz-[a-z-]+)\s+(?P<client>[\d.]+)@(?P<port>\d+)\s+"
+                             r"(?P<query>\S+)")
+RPZ_ACTIVITY_CACHE = {"at": 0.0, "hits": [], "lock": threading.Lock()}
+RPZ_ACTIVITY_TTL = 10
+
+
+def _rpz_journal_hits(limit):
+    """Read recent RPZ 'applied' lines from the unbound journal."""
+    try:
+        proc = subprocess.run(
+            ["journalctl", "-u", "unbound", "--since", "-24h", "--no-pager",
+             "-o", "short-iso", "-n", "2000"],
+            capture_output=True, text=True, timeout=20,
+        )
+        if proc.returncode != 0:
+            return []
+    except Exception:
+        return []
+    hits = []
+    for line in proc.stdout.splitlines():
+        if "rpz: applied" not in line:
+            continue
+        m = RPZ_HIT_LINE_RE.search(line)
+        if not m:
+            continue
+        hits.append({
+            "time": line.split(" ", 1)[0],
+            "zone": m.group("zone"),
+            "qname": m.group("qname"),
+            "action": m.group("action"),
+            "client": m.group("client"),
+            "query": m.group("query"),
+        })
+    hits.reverse()
+    return hits[:limit]
+
+
+def _rpz_hits(limit=100):
+    with RPZ_ACTIVITY_CACHE["lock"]:
+        now = time.time()
+        if now - RPZ_ACTIVITY_CACHE["at"] > RPZ_ACTIVITY_TTL:
+            RPZ_ACTIVITY_CACHE["hits"] = _rpz_journal_hits(500)
+            RPZ_ACTIVITY_CACHE["at"] = now
+        return RPZ_ACTIVITY_CACHE["hits"][:limit]
+
+
+def _rpz_stats():
+    """Pull RPZ action counters from unbound-control stats (since restart)."""
+    stats = {}
+    try:
+        proc = subprocess.run(
+            ["unbound-control", "stats"], capture_output=True, text=True, timeout=15
+        )
+        for line in proc.stdout.splitlines():
+            if not line.startswith("num.rpz."):
+                continue
+            key, _, val = line.partition("=")
+            try:
+                stats[key] = int(val)
+            except ValueError:
+                pass
+    except Exception:
+        pass
+    return stats
+
+
+# --- RPZ bulk import --------------------------------------------------------
+def rpz_import(text):
+    """Import policies, one per line: <value> [action] [target].
+
+    CIDR values are auto-detected (anything with a '/' or an IP) and become
+    answer-IP policies. Returns a summary; invalid lines are reported.
+    """
+    added, skipped, errors = 0, 0, []
+    pending = []
+    for raw in (text or "").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        value = parts[0]
+        action = parts[1] if len(parts) > 1 else "block"
+        target = parts[2] if len(parts) > 2 else ""
+        val, mode = valid_rpz_value(value)
+        if val is None:
+            errors.append("invalid value: {}".format(value))
+            continue
+        if action not in RPZ_ACTIONS:
+            errors.append("invalid action for {}: {}".format(value, action))
+            continue
+        entry = {
+            "domain": val,
+            "match": mode,
+            "action": action,
+            "target": target.strip() if action == "redirect" else "",
+            "note": "bulk import",
+            "added_at": time.time(),
+        }
+        try:
+            _rpz_rdata(entry)
+        except ValueError as exc:
+            errors.append("{}: {}".format(value, exc))
+            continue
+        pending.append(entry)
+
+    entries = load_rpz_entries()
+    known = {e["domain"] for e in entries}
+    for entry in pending:
+        if entry["domain"] in known:
+            skipped += 1
+            continue
+        entries.append(entry)
+        known.add(entry["domain"])
+        added += 1
+
+    if not added:
+        return {"ok": True, "added": 0, "skipped": skipped, "errors": errors,
+                "message": "Nothing imported (duplicates or invalid lines)"}
+    try:
+        save_rpz_entries(entries)
+        apply_rpz()
+    except Exception as exc:
+        # revert to the pre-import state and re-apply
+        save_rpz_entries(entries[:-added])
+        try:
+            apply_rpz()
+        except Exception:
+            pass
+        return {"ok": False, "added": 0, "skipped": skipped,
+                "errors": errors + [str(exc)], "message": "Import failed: " + str(exc)}
+    return {"ok": True, "added": added, "skipped": skipped, "errors": errors,
+            "message": "Imported {} policies{}".format(
+                added, " ({} skipped as duplicates)".format(skipped) if skipped else "")}
+
+
+def refresh_rpz_feeds():
+    """Force Unbound to re-download feed zones.
+
+    Unbound re-fetches a url: RPZ zone when its cached zonefile is absent,
+    so remove the cache and hot-reload. If a feed is unreachable, Unbound
+    logs an error and keeps serving DNS without that zone until its next
+    successful check.
+    """
+    feeds = [f for f in load_rpz_feeds() if f.get("enabled", True)]
+    removed = []
+    for f in feeds:
+        zonefile = _rpz_feed_zonefile(f["url"])
+        try:
+            os.remove(zonefile)
+            removed.append(zonefile)
+        except OSError:
+            pass
+    try:
+        reload_unbound()
+    except Exception:
+        # restore caches so we don't leave feeds cold on a failed reload
+        for zonefile in removed:
+            open(zonefile, "a").close()
+        try:
+            reload_unbound()
+        except Exception as exc:
+            raise RuntimeError("Feed refresh failed: {}".format(exc))
+    return {"ok": True, "message": "Forced re-download of {} feed(s)".format(len(removed))}
 
 
 def _ufw(args):
@@ -8296,6 +9697,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, ai_security_summary(model))
         elif path == "/api/security/suricata":
             self._send(200, build_suricata())
+        elif path == "/api/security/zeek":
+            self._send(200, build_zeek())
+        elif path == "/api/security/zeek/quic":
+            self._send(200, build_zeek_quic())
+        elif path == "/api/security/aide":
+            self._send(200, build_aide())
+        elif path == "/api/security/honeypot":
+            self._send(200, build_honeypot())
         elif path == "/api/agent/models":
             try:
                 data = self._agent_call("GET", "/config/providers", timeout=10)
@@ -8400,6 +9809,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_bandwidth())
         elif path == "/api/blocklists":
             self._send(200, build_blocklists())
+        elif path == "/api/rpz":
+            self._send(200, build_rpz())
         elif path == "/api/system":
             self._send(200, build_system())
         elif path == "/api/system/fastfetch":
@@ -8883,6 +10294,51 @@ class Handler(BaseHTTPRequestHandler):
             save_whitelist(whitelist)
             self._send(200, build_blocklists())
 
+        elif path == "/api/rpz/add":
+            result = add_rpz_entry(
+                body.get("domain") or "",
+                (body.get("action") or "").strip(),
+                body.get("target") or "",
+                body.get("note") or "",
+                (body.get("match") or "").strip() or None,
+            )
+            self._send(200 if result.get("ok") else 400, result)
+
+        elif path == "/api/rpz/import":
+            self._send(200, rpz_import(body.get("text") or ""))
+
+        elif path == "/api/rpz/remove":
+            result = remove_rpz_entry(body.get("domain") or "")
+            self._send(200 if result.get("ok") else 400, result)
+
+        elif path == "/api/rpz/apply":
+            try:
+                apply_rpz()
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+                return
+            self._send(200, {"ok": True, "message": "RPZ zone applied and Unbound reloaded"})
+
+        elif path == "/api/rpz/feed/add":
+            result = add_rpz_feed(body.get("url") or "", body.get("name") or "")
+            self._send(200 if result.get("ok") else 400, result)
+
+        elif path == "/api/rpz/feed/refresh":
+            try:
+                result = refresh_rpz_feeds()
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+                return
+            self._send(200, result)
+
+        elif path == "/api/rpz/feed/remove":
+            result = remove_rpz_feed(body.get("url") or "")
+            self._send(200 if result.get("ok") else 400, result)
+
+        elif path == "/api/rpz/feed/toggle":
+            result = toggle_rpz_feed(body.get("url") or "")
+            self._send(200 if result.get("ok") else 400, result)
+
         elif path == "/api/diagnose":
             self._send(200, build_diagnose(body.get("target", "")))
 
@@ -9027,6 +10483,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, remove_custom_blocklist_entry(body.get("entry")))
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/security/honeypot/config":
+            self._send(200, set_honeypot_conf(body))
+
+        elif path == "/api/security/aide/check":
+            self._send(200, start_aide_run("check"))
+
+        elif path == "/api/security/aide/update":
+            self._send(200, start_aide_run("update"))
 
         elif path == "/api/security/reporting":
             try:
@@ -10800,6 +12265,7 @@ def main():
     _ensure_service_reload()
     _ensure_unbound_local_actions()
     _restore_nat_on_boot()
+    start_honeypot_at_boot()
     get_security_monitor()
     get_system_monitor()
     get_latency_monitor()

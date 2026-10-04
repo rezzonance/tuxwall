@@ -928,7 +928,92 @@ table .btn { margin-left: 8px; }
   color: var(--muted); white-space: pre-wrap; word-break: break-all;
   max-height: 220px; overflow-y: auto;
 }
-.bl-note { padding: 12px 2px; font-size: 12px; }
+/* ---------- Info notes (bl-note / sec-note) ----------
+   Unified note styling across the dashboard: soft blue tint, rounded
+   corners, and a glowing accent line down the left edge. */
+.bl-note,
+.sec-note {
+  position: relative;
+  margin: 12px 14px 14px;
+  padding: 14px 18px 14px 22px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: color-mix(in srgb, var(--text) 80%, var(--muted));
+  background: linear-gradient(180deg, rgba(56,139,253,0.09) 0%, rgba(56,139,253,0.04) 100%);
+  border: 1px solid rgba(56,139,253,0.16);
+  border-radius: 10px;
+  box-shadow: 0 0 20px rgba(56,139,253,0.06), inset 0 1px 0 rgba(255,255,255,0.03);
+  transition: border-color 0.2s;
+  overflow: hidden;
+}
+.bl-note::before,
+.sec-note::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 8px; bottom: 8px; width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: linear-gradient(180deg, var(--accent) 0%, color-mix(in srgb, var(--accent) 30%, transparent) 100%);
+  box-shadow: 0 0 8px rgba(79,140,255,0.35);
+  pointer-events: none;
+  transition: box-shadow 0.2s, top 0.2s, bottom 0.2s;
+}
+.bl-note:hover,
+.sec-note:hover { border-color: rgba(79,140,255,0.35); }
+.bl-note:hover::before,
+.sec-note:hover::before {
+  top: 5px; bottom: 5px;
+  box-shadow: 0 0 14px rgba(79,140,255,0.55);
+}
+.bl-note b, .sec-note b { color: var(--text); font-weight: 600; }
+.bl-note a, .sec-note a { color: var(--accent); }
+.bl-note code, .sec-note code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: rgba(56,139,253,0.12);
+  border: 1px solid rgba(56,139,253,0.18);
+  border-radius: 5px;
+  padding: 1px 5px;
+  color: var(--text);
+}
+.sec-note { padding: 8px 18px 12px 22px; }
+
+/* Status indicator dot */
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  background: var(--green); box-shadow: 0 0 8px var(--green);
+  animation: status-dot-pulse 2s ease-in-out infinite;
+}
+.status-dot[data-status="inactive"] {
+  background: var(--red); box-shadow: 0 0 8px var(--red); animation: none;
+}
+@keyframes status-dot-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 8px var(--green); }
+  50% { opacity: 0.5; box-shadow: 0 0 4px var(--green); }
+}
+
+/* Honeypot stat cards - matching tuxwall stat-card style */
+.honey-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; padding: 12px 16px 16px; }
+.honey-stat {
+  position: relative; overflow: hidden;
+  background: linear-gradient(135deg, var(--card) 0%, color-mix(in srgb, var(--card) 90%, var(--bg-elev)) 100%);
+  border: 1px solid var(--border); border-radius: var(--radius); padding: 14px;
+  transition: border-color var(--transition), box-shadow var(--transition), transform var(--transition);
+}
+.honey-stat:hover {
+  border-color: color-mix(in srgb, var(--border) 60%, var(--honey-c, var(--accent)));
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25); transform: translateY(-1px);
+}
+.honey-stat::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  background: var(--honey-c, var(--accent));
+}
+.honey-stat-value { font-size: 22px; font-weight: 700; color: var(--honey-c); }
+.honey-stat-label { color: var(--muted); font-size: 12px; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.03em; }
+.honey-stat.trapped { --honey-c: #3fb950; }
+.honey-stat.unique { --honey-c: #bc8cff; }
+.honey-stat.held { --honey-c: #ffa657; }
+.honey-stat.wasted { --honey-c: #d29922; }
+.honey-stat.banned { --honey-c: #f85149; }
 
 /* ---------- Security / Attack Map ---------- */
 .sec-map {
@@ -945,7 +1030,7 @@ table .btn { margin-left: 8px; }
   border-color: rgba(255,255,255,0.1);
 }
 .sec-map .leaflet-control-zoom a:hover { background: rgba(79,140,255,0.2); color: var(--accent); }
-.sec-note { padding: 8px 14px 12px; font-size: 12px; margin: 0; }
+/* sec-note: merged into the unified note block above */
 
 /* SVG arc layer */
 .sec-arcs {
@@ -4254,12 +4339,8 @@ tr.tw-row-reveal {
    Revert: restore style.css.bak.20260926-dhcpnote.
    ========================================================================= */
 
-#view-clients > p.bl-note {
-  background: color-mix(in srgb, var(--green) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--green) 38%, transparent);
-  border-radius: 10px;
-  padding: 12px 16px;
-}
+/* 2026-10-03: override removed - this note now uses the unified bl-note
+   styling (blue tint + left accent line) like every other note. */
 
 /* =========================================================================
    BLOCKLISTS EQUAL-HEIGHT PAIR (applied 2026-09-26)
@@ -4498,4 +4579,69 @@ tr.tw-row-reveal {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+/* ========== RPZ POLICIES (Blocklists) ========== */
+.rpz-form { flex-wrap: wrap; gap: 6px; }
+
+.rpz-form input[type="text"],
+.rpz-form input[type="number"],
+.rpz-form select {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.rpz-form input[type="text"]:focus,
+.rpz-form input[type="number"]:focus,
+.rpz-form select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.rpz-form select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+                    linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
+  background-position: calc(100% - 16px) calc(50% - 2px), calc(100% - 11px) calc(50% - 2px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 30px;
+  cursor: pointer;
+}
+
+.rpz-form select option {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+
+/* Clean number inputs like the Port Forwarding form (no spinners) */
+.rpz-form input[type="number"]::-webkit-inner-spin-button,
+.rpz-form input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
+.rpz-form input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+
+.rpz-form textarea {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: var(--mono, monospace);
+  outline: none;
+  transition: border-color 0.15s;
+  resize: vertical;
+  min-height: 60px;
+}
+
+.rpz-form textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
 }

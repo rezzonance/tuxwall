@@ -6,7 +6,7 @@
   <title>TuxWall - Network Dashboard</title>
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
-  <link rel="stylesheet" href="/css/style.css?v=20260926-bkstyle8">
+  <link rel="stylesheet" href="/css/style.css?v=202610032214">
 </head>
 <body>
 <div id="login-gate" class="login-gate" hidden>
@@ -578,6 +578,96 @@
       </div>
 
       <div class="card card-mt">
+        <div class="card-head"><h2>RPZ Policies</h2></div>
+        <div class="card-toolbar bl-toolbar rpz-form">
+          <input type="text" id="rpz-domain" placeholder="Domain, e.g. tracker.example.com (wildcard: covers subdomains too)" autocomplete="off" spellcheck="false" style="flex:1.6">
+          <select id="rpz-match" title="Match the query name, or any answer resolving into a bad IP range" style="flex:1">
+            <option value="domain">Match: Domain</option>
+            <option value="ip">Match: Answer IP</option>
+          </select>
+          <select id="rpz-action" style="flex:1">
+            <option value="block">Block (NXDOMAIN)</option>
+            <option value="drop">Drop (no answer)</option>
+            <option value="redirect">Redirect</option>
+            <option value="passthru">Passthru (exempt)</option>
+          </select>
+          <input type="text" id="rpz-target" placeholder="Redirect to IP, e.g. 192.168.1.1" autocomplete="off" spellcheck="false" hidden>
+          <button id="rpz-add" class="btn" type="button">Add policy</button>
+          <span class="toolbar-spacer"></span>
+          <span class="muted" id="rpz-hint"></span>
+          <button id="rpz-bulk" class="btn" type="button">Bulk import</button>
+          <button id="rpz-apply" class="btn" type="button">Re-apply</button>
+        </div>
+        <div class="card-toolbar bl-toolbar rpz-form" id="rpz-bulk-row" hidden>
+          <textarea id="rpz-bulk-text" rows="4" placeholder="One policy per line:&#10;tracker.example.com            (defaults to block)&#10;noisy.example.net drop&#10;walled.example.org redirect 192.168.1.1&#10;192.0.2.0/24                   (answer-IP block, auto-detected)" spellcheck="false" style="flex:2"></textarea>
+          <button id="rpz-bulk-go" class="btn btn-primary" type="button" style="align-self:flex-end">Import</button>
+        </div>
+        <div class="table-wrap">
+          <table id="rpz-table">
+            <thead>
+              <tr>
+                <th>Domain</th>
+                <th style="width:180px">Action</th>
+                <th>Target</th>
+                <th>Added</th>
+                <th style="width:80px"></th>
+              </tr>
+            </thead>
+            <tbody id="rpz-body"></tbody>
+          </table>
+        </div>
+        <div id="rpz-empty" class="empty" hidden>No RPZ policies. Add one above.</div>
+      </div>
+
+      <div class="card card-mt">
+        <div class="card-head"><h2>RPZ Feeds</h2></div>
+        <div class="card-toolbar bl-toolbar rpz-form">
+          <input type="text" id="rpzf-url" placeholder="Feed URL in RPZ format, e.g. https://raw.githubusercontent.com/hagezi/dns-blocklists/main/rpz/tif.mini.txt" autocomplete="off" spellcheck="false" style="flex:2">
+          <input type="text" id="rpzf-name" placeholder="Label (optional)" autocomplete="off" spellcheck="false" style="flex:1">
+          <button id="rpzf-add" class="btn" type="button">Add feed</button>
+          <span class="toolbar-spacer"></span>
+          <button id="rpzf-refresh" class="btn" type="button">Force re-download</button>
+        </div>
+        <div class="table-wrap">
+          <table id="rpzf-table">
+            <thead>
+              <tr>
+                <th style="width:70px">Enabled</th>
+                <th>Feed URL</th>
+                <th>Entries</th>
+                <th>Downloaded</th>
+                <th style="width:80px"></th>
+              </tr>
+            </thead>
+            <tbody id="rpzf-body"></tbody>
+          </table>
+        </div>
+        <div id="rpzf-empty" class="empty" hidden>No RPZ feeds configured. Add one above — Unbound fetches and refreshes RPZ-format feeds automatically, no cron needed.</div>
+      </div>
+
+      <div class="card card-mt">
+        <div class="card-head">
+          <h2>RPZ Activity</h2>
+          <span class="card-head-note muted" id="rpza-stats"></span>
+        </div>
+        <div class="table-wrap">
+          <table id="rpza-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th style="width:220px">Zone</th>
+                <th>Query</th>
+                <th style="width:140px">Action</th>
+                <th>Client</th>
+              </tr>
+            </thead>
+            <tbody id="rpza-body"></tbody>
+          </table>
+        </div>
+        <div id="rpza-empty" class="empty" hidden>No RPZ hits in the last 24 hours.</div>
+      </div>
+
+      <div class="card card-mt">
         <div class="card-head"><h2>Whitelist</h2></div>
         <div class="card-toolbar bl-toolbar">
           <input type="text" id="wl-domain" placeholder="Allow a blocked domain, e.g. example.com" autocomplete="off" spellcheck="false">
@@ -602,7 +692,7 @@
         <pre id="bl-log" class="bl-log"></pre>
       </div>
 
-      <p class="muted bl-note">Enabled sources are fetched and merged into Unbound as <b>always_nxdomain</b> zones (blocked domains resolve to nothing, so ads never load). Whitelisted domains (and their subdomains) are exempted. Source and whitelist changes take effect on the next <b>Update Now</b>.</p>
+      <p class="muted bl-note">Enabled sources are fetched and merged into Unbound as <b>always_nxdomain</b> zones (blocked domains resolve to nothing, so ads never load). Whitelisted domains (and their subdomains) are exempted. Source and whitelist changes take effect on the next <b>Update Now</b>. RPZ policies are applied immediately via a hot Unbound reload — no restart, no downtime.</p>
     </section>
     <section id="view-firewall" class="view" hidden>
 
@@ -1066,7 +1156,7 @@
       <style>
         #view-security .bl-note,
         #view-security .sec-note {
-          padding: 12px 16px;
+          padding: 12px 18px 12px 22px;
           margin: 0;
         }
       </style>
@@ -1134,6 +1224,96 @@
           </table>
         </div>
         <p class="muted bl-note">Signature detections are read live from <b>/var/log/suricata/eve.json</b> and also feed the AI Threat Summary above. Suricata runs as a <b>passive IDS</b>: it inspects a copy of each packet via af-packet and never sits in the forwarding path, so internet throughput is unaffected. Install and enable <a href="https://suricata.io" target="_blank" rel="noopener">Suricata</a> on the LAN/WAN interfaces to populate this table.</p>
+      </div>
+
+      <div class="card card-mt">
+        <div class="card-head">
+          <h2>File Integrity (AIDE)</h2>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            <span class="muted" id="sec-aide-hint"></span>
+            <button id="sec-aide-run" class="btn btn-sm" type="button">Run check</button>
+            <button id="sec-aide-update" class="btn btn-sm" type="button">Update baseline</button>
+          </div>
+        </div>
+        <div id="sec-aide-summary" class="muted" style="padding:0 16px 8px;"></div>
+        <div class="table-wrap">
+          <table id="sec-aide-table">
+            <thead><tr><th style="width:110px">Change</th><th>Path</th></tr></thead>
+            <tbody id="sec-aide-body"></tbody>
+          </table>
+        </div>
+        <p class="muted bl-note">File-integrity monitoring with <b>AIDE</b> — the layer your network sensors can't cover: it verifies every system file against a cryptographic baseline, catching trojaned binaries, modified firewall/DNS configs and anything else that changed on the router itself. A nightly check runs via <b>/etc/cron.daily</b>; the buttons above run a full check on demand or re-baseline after intentional changes (expect ~25 min for 255k entries — the result appears here when done, no page babysitting needed).</p>
+      </div>
+
+      <div class="card card-mt">
+        <div class="card-head">
+          <h2 style="display:flex;align-items:center;gap:8px;">Honeypot <span class="status-dot" id="honey-status-dot" data-status="inactive"></span></h2>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            <span class="muted" id="sec-honey-hint"></span>
+            <button id="sec-honey-toggle" class="btn btn-sm" type="button">Enable</button>
+          </div>
+        </div>
+        <div class="card-toolbar bl-toolbar rpz-form">
+          <input type="text" id="sec-honey-ports" placeholder="Ports, e.g. 23, 2323, 3389, 445, 8080, 5555" autocomplete="off" spellcheck="false" style="flex:2">
+          <label class="fw-switch" title="Auto-ban trapped IPs via CrowdSec (1y)">
+            <input type="checkbox" id="sec-honey-autoban">
+            <span class="fw-switch-slider"></span>
+          </label>
+          <span class="muted">auto-ban</span>
+          <input type="number" id="sec-honey-threshold" min="1" max="10" title="Ban after this many connections" style="width:70px">
+          <span class="muted">hits → ban</span>
+          <button id="sec-honey-apply" class="btn" type="button">Save &amp; Apply</button>
+        </div>
+        <div id="sec-honey-summary" class="honey-stats"></div>
+        <div class="table-wrap">
+          <table id="sec-honey-table">
+            <thead><tr><th style="width:100px">Status</th><th>IP</th><th style="width:90px">Port</th><th>Held</th><th style="width:110px">First seen</th></tr></thead>
+            <tbody id="sec-honey-body"></tbody>
+          </table>
+        </div>
+        <p class="muted bl-note">A <b>port-garden tarpit</b>: classic scan ports (telnet, RDP, SMB, adb…) are bound on the <b>WAN address only</b> — every connection is held open with a clamped TCP window while the scanner waits forever for data that never comes. Any connection here is hostile by definition, so sources are <b>auto-banned via CrowdSec (1 year)</b> and reported like any other attacker — no manual banning, no AbuseIPDB cross-checking needed. LAN/WireGuard sources are closed immediately and never counted. Overflow connections beyond the safety caps (256 total / 8 per IP) are dropped, not trapped, so a botnet flood can't exhaust the router. <b>Keep the threshold at 1</b>: nothing legitimate ever connects to these ports, so a single completed handshake is hostile by definition — only raise it (to 3–5) if you add a port that could plausibly see innocent traffic (e.g. 80/443).</p>
+      </div>
+
+      <div class="card card-mt">
+        <div class="card-head">
+          <h2>Zeek Notices</h2>
+          <span class="muted" id="sec-zeek-hint">Reading /opt/zeek/logs/current/notice.log…</span>
+        </div>
+        <div class="table-wrap">
+          <table id="sec-zeek-table">
+            <thead><tr><th>Time</th><th>Notice</th><th>Detail</th><th>Source</th><th>Destination</th></tr></thead>
+            <tbody id="sec-zeek-body"></tbody>
+          </table>
+        </div>
+        <p class="muted bl-note">Behavioral alerts from Zeek's <b>Notice framework</b> — scan detection, SSL certificate anomalies, DNS weirdness, protocol violations — read live from <b>/opt/zeek/logs/current/notice.log</b>. Zeek runs as a <b>passive sensor</b> on the LAN interface and never sits in the forwarding path, so throughput is unaffected.</p>
+      </div>
+
+      <div class="card card-mt">
+        <div class="card-head">
+          <h2>LAN Device Activity</h2>
+          <span class="muted" id="sec-zeek-dev-hint">outbound external peers · last hour</span>
+        </div>
+        <div class="table-wrap">
+          <table id="sec-zeek-dev-table">
+            <thead><tr><th>LAN Device</th><th>External Conns</th><th>Distinct Peers</th><th>Top Peer</th><th>Last Seen</th></tr></thead>
+            <tbody id="sec-zeek-dev-body"></tbody>
+          </table>
+        </div>
+        <p class="muted bl-note">Outbound connection profile per LAN device (from Zeek <b>conn.log</b>). A device suddenly talking to many unknown external hosts — or beeping at the same one on a fixed interval — is the classic malware check-in pattern. Cross-reference device IPs with the <a href="#clients">Clients</a> tab.</p>
+      </div>
+
+      <div class="card card-mt">
+        <div class="card-head">
+          <h2>QUIC Connections</h2>
+          <span class="muted" id="sec-quic-hint">last hour · all LAN devices</span>
+        </div>
+        <div class="table-wrap">
+          <table id="sec-quic-table">
+            <thead><tr><th>Time</th><th>LAN Device</th><th>Destination</th><th>Version</th><th>SNI</th></tr></thead>
+            <tbody id="sec-quic-body"></tbody>
+          </table>
+        </div>
+        <p class="muted bl-note">Every QUIC (UDP-based TLS) flow from the LAN, read live from Zeek <b>quic.log</b>. Ordinary HTTP/3 browsing shows a real SNI on port 443. Anonymous QUIC tunnels (proxy/VPN tooling) show odd ports and <b>no SNI</b> — those rows are worth checking.</p>
       </div>
 
       <div class="sec-full-cards">
@@ -2336,7 +2516,7 @@
 
 <script src="/scripts/leaflet.js"></script>
 <script src="/scripts/qrcode.js"></script>
-<script src="/scripts/dashboard.js?v=20260926-latsrc1"></script>
+<script src="/scripts/dashboard.js?v=202610032206"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>

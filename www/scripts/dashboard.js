@@ -2,7 +2,7 @@
   "use strict";
 
   const REFRESH_MS = 30000;
-  const BANDWIDTH_POLL_MS = 60000;
+  const BANDWIDTH_POLL_MS = 3000; // 60s made the page look frozen; backend samples every 2s
   const SECURITY_POLL_MS = 15000;
   const WG_POLL_MS = 5000;
   const OV_POLL_MS = 5000;
@@ -138,6 +138,25 @@
     secSuricataBody: document.querySelector("#sec-suricata-body"),
     secSuricataHint: document.getElementById("sec-suricata-hint"),
     secSuricataTabs: document.getElementById("sec-suricata-tabs"),
+    secZeekBody: document.querySelector("#sec-zeek-body"),
+    secZeekHint: document.getElementById("sec-zeek-hint"),
+    secAideHint: document.getElementById("sec-aide-hint"),
+    secAideSummary: document.getElementById("sec-aide-summary"),
+    secAideRun: document.getElementById("sec-aide-run"),
+    secAideUpdate: document.getElementById("sec-aide-update"),
+    secAideBody: document.getElementById("sec-aide-body"),
+    secHoneyHint: document.getElementById("sec-honey-hint"),
+    secHoneySummary: document.getElementById("sec-honey-summary"),
+    secHoneyToggle: document.getElementById("sec-honey-toggle"),
+    secHoneyPorts: document.getElementById("sec-honey-ports"),
+    secHoneyAutoban: document.getElementById("sec-honey-autoban"),
+    secHoneyThreshold: document.getElementById("sec-honey-threshold"),
+    secHoneyApply: document.getElementById("sec-honey-apply"),
+    secHoneyBody: document.getElementById("sec-honey-body"),
+    secZeekDevBody: document.querySelector("#sec-zeek-dev-body"),
+    secZeekDevHint: document.getElementById("sec-zeek-dev-hint"),
+    secQuicBody: document.querySelector("#sec-quic-body"),
+    secQuicHint: document.getElementById("sec-quic-hint"),
     secChart: document.getElementById("sec-chart"),
     dmDomain: document.getElementById("dm-domain"),
     dmIp: document.getElementById("dm-ip"),
@@ -195,6 +214,28 @@
     wlAdd: document.getElementById("wl-add"),
     wlBody: document.getElementById("wl-body"),
     wlEmpty: document.getElementById("wl-empty"),
+    rpzDomain: document.getElementById("rpz-domain"),
+    rpzMatch: document.getElementById("rpz-match"),
+    rpzAction: document.getElementById("rpz-action"),
+    rpzTarget: document.getElementById("rpz-target"),
+    rpzAdd: document.getElementById("rpz-add"),
+    rpzApply: document.getElementById("rpz-apply"),
+    rpzBody: document.getElementById("rpz-body"),
+    rpzEmpty: document.getElementById("rpz-empty"),
+    rpzHint: document.getElementById("rpz-hint"),
+    rpzBulk: document.getElementById("rpz-bulk"),
+    rpzBulkRow: document.getElementById("rpz-bulk-row"),
+    rpzBulkText: document.getElementById("rpz-bulk-text"),
+    rpzBulkGo: document.getElementById("rpz-bulk-go"),
+    rpzfUrl: document.getElementById("rpzf-url"),
+    rpzfName: document.getElementById("rpzf-name"),
+    rpzfAdd: document.getElementById("rpzf-add"),
+    rpzfRefresh: document.getElementById("rpzf-refresh"),
+    rpzfBody: document.getElementById("rpzf-body"),
+    rpzfEmpty: document.getElementById("rpzf-empty"),
+    rpzaStats: document.getElementById("rpza-stats"),
+    rpzaBody: document.getElementById("rpza-body"),
+    rpzaEmpty: document.getElementById("rpza-empty"),
     sysHost: document.getElementById("sys-host"),
     sysHostEdit: document.getElementById("sys-host-edit"),
     sysEditKea: document.getElementById("sys-edit-kea"),
@@ -2788,6 +2829,274 @@
     }
   }
 
+  function renderZeek(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "Zeek data unavailable");
+      return;
+    }
+    if (!d.enabled) {
+      els.secZeekHint.textContent = "not running";
+      els.secZeekBody.innerHTML =
+        `<tr><td colspan="5" class="empty">${esc(d.hint || "Zeek not available.")}</td></tr>`;
+      els.secZeekDevHint.textContent = "not running";
+      els.secZeekDevBody.innerHTML =
+        `<tr><td colspan="5" class="empty">${esc(d.hint || "Zeek not available.")}</td></tr>`;
+      return;
+    }
+    const notices = d.notices || [];
+    els.secZeekHint.textContent = notices.length
+      ? `${formatNumber(d.count_24h)} notices in last 24h`
+      : "no notices in last 24h";
+    els.secZeekBody.innerHTML = notices.map((n) => `
+      <tr>
+        <td class="mono">${formatTime(n.ts)}</td>
+        <td><span class="badge sev-LOW">${esc(n.note)}</span></td>
+        <td>${esc(n.msg || "—")}</td>
+        <td class="mono">${esc(n.src)}${n.sport ? ":" + esc(n.sport) : ""}</td>
+        <td class="mono">${esc(n.dst)}${n.dport ? ":" + esc(n.dport) : ""}</td>
+      </tr>`).join("")
+      || `<tr><td colspan="5" class="empty">No Zeek notices in the last 24h — normal for a quiet network.</td></tr>`;
+    const devices = d.devices || [];
+    els.secZeekDevHint.textContent = devices.length
+      ? `${devices.length} active devices · last hour`
+      : "no active devices · last hour";
+    els.secZeekDevBody.innerHTML = devices.map((v) => `
+      <tr>
+        <td class="mono">${esc(v.device)}</td>
+        <td>${formatNumber(v.conns)}</td>
+        <td>${formatNumber(v.peer_count)}</td>
+        <td class="mono">${esc(v.top_peer || "—")}${v.top_peer_hits ? ` <span class="muted">×${formatNumber(v.top_peer_hits)}</span>` : ""}</td>
+        <td class="mono">${formatTime(v.last_ts)}</td>
+      </tr>`).join("")
+      || `<tr><td colspan="5" class="empty">No LAN→external connections seen in the last hour.</td></tr>`;
+  }
+
+  async function refreshZeek() {
+    try {
+      const data = await fetchJSON("/api/security/zeek");
+      renderZeek(data);
+    } catch (err) {
+      showBanner(true, "Zeek error: " + err.message);
+    }
+  }
+
+  function renderZeekQuic(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "Zeek QUIC data unavailable");
+      return;
+    }
+    if (!d.enabled) {
+      els.secQuicHint.textContent = "no QUIC traffic seen yet";
+      els.secQuicBody.innerHTML =
+        `<tr><td colspan="5" class="empty">${esc(d.hint || "—")}</td></tr>`;
+      return;
+    }
+    const flows = d.flows || [];
+    els.secQuicHint.textContent = flows.length
+      ? `${formatNumber(d.count_1h)} QUIC flows · last hour`
+      : "no QUIC flows in last hour";
+    els.secQuicBody.innerHTML = flows.map((f) => {
+      const port = String(f.port || "");
+      const odd = !f.sni && port !== "443";
+      return `
+      <tr>
+        <td class="mono">${formatTime(f.ts)}</td>
+        <td class="mono">${esc(f.device)}</td>
+        <td class="mono">${esc(f.peer)}${port ? ":" + esc(port) : ""}</td>
+        <td>${esc(f.version || "—")}</td>
+        <td class="mono">${odd ? "<b>— (anonymous)</b>" : esc(f.sni || "—")}</td>
+      </tr>`; }).join("")
+      || `<tr><td colspan="5" class="empty">No QUIC flows in the last hour.</td></tr>`;
+  }
+
+  async function refreshZeekQuic() {
+    try {
+      const data = await fetchJSON("/api/security/zeek/quic");
+      renderZeekQuic(data);
+    } catch (err) {
+      showBanner(true, "Zeek QUIC error: " + err.message);
+    }
+  }
+
+  let aidePollTimer = null;
+
+  function renderAide(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "AIDE data unavailable");
+      return;
+    }
+    if (!d.enabled) {
+      els.secAideHint.textContent = "not installed";
+      els.secAideSummary.textContent = d.hint || "";
+      els.secAideBody.innerHTML =
+        `<tr><td colspan="2" class="empty">${esc(d.hint || "AIDE not available.")}</td></tr>`;
+      return;
+    }
+    const st = d.state || {};
+    const db = d.db;
+    const nightly = d.nightly || {};
+    const dbBits = db ? `baseline ${formatTime(db.mtime)}` : "no baseline database";
+
+    if (st.running) {
+      const mins = st.started_at ? Math.max(0, Math.round((Date.now() / 1000 - st.started_at) / 60)) : 0;
+      els.secAideHint.textContent = `running ${st.op}… ${mins} min`;
+      els.secAideSummary.textContent = "Full scan in progress (about 25 min on this system). This page will update automatically.";
+      els.secAideBody.innerHTML =
+        `<tr><td colspan="2" class="empty">AIDE ${esc(st.op)} running since ${formatTime(st.started_at)}…</td></tr>`;
+      if (!aidePollTimer) aidePollTimer = setInterval(async () => {
+        try {
+          const data = await fetchJSON("/api/security/aide");
+          if (!(data.state || {}).running) {
+            clearInterval(aidePollTimer);
+            aidePollTimer = null;
+          }
+          renderAide(data);
+        } catch (err) { /* transient */ }
+      }, 10000);
+    } else {
+      if (aidePollTimer) { clearInterval(aidePollTimer); aidePollTimer = null; }
+      const nightBits = nightly.enabled
+        ? `nightly check on${(nightly.last && nightly.last.summary) && nightly.last.summary.total != null ? ` · last: ${formatNumber(nightly.last.summary.total)} entries` : ""}`
+        : "nightly check off";
+      els.secAideHint.textContent = `v${d.version || "?"} · ${dbBits} · ${nightBits}`;
+
+      const summary = st.summary;
+      const changes = st.changes || [];
+      if (st.error) {
+        els.secAideSummary.textContent = "Last run error: " + st.error;
+      } else if (summary && (summary.added != null || summary.removed != null || summary.changed != null)) {
+        els.secAideSummary.textContent = `Last ${st.op || "check"}: ${formatNumber(summary.added || 0)} added · ${formatNumber(summary.removed || 0)} removed · ${formatNumber(summary.changed || 0)} changed — ${summary.added || summary.removed || summary.changed ? "review below" : "system clean"}`;
+      } else {
+        const last = nightly.last;
+        els.secAideSummary.textContent = last && last.summary && (last.summary.added != null || last.summary.changed != null || last.summary.removed != null)
+          ? `Nightly result: ${formatNumber(last.summary.added || 0)} added · ${formatNumber(last.summary.removed || 0)} removed · ${formatNumber(last.summary.changed || 0)} changed`
+          : "No check results yet — run a check (takes ~25 min).";
+      }
+      const source = (changes.length ? changes : ((nightly.last || {}).changes || []));
+      els.secAideBody.innerHTML = source.map((c) => {
+        const badge = c.type === "added" ? "sev-HIGH" : (c.type === "changed" ? "sev-MEDIUM" : "sev-LOW");
+        return `<tr><td><span class="badge ${badge}">${esc(c.type)}</span></td><td class="mono">${esc(c.path)}</td></tr>`;
+      }).join("")
+      || `<tr><td colspan="2" class="empty">No file changes detected since the baseline.</td></tr>`;
+    }
+    els.secAideRun.disabled = !!st.running;
+    els.secAideUpdate.disabled = !!st.running;
+  }
+
+  async function refreshAide() {
+    try {
+      const data = await fetchJSON("/api/security/aide");
+      renderAide(data);
+    } catch (err) {
+      showBanner(true, "AIDE error: " + err.message);
+    }
+  }
+
+  function bindAideActions() {
+    els.secAideRun.addEventListener("click", async () => {
+      try {
+        await postJSON("/api/security/aide/check", {});
+        await refreshAide();
+      } catch (err) {
+        showBanner(true, "AIDE check: " + err.message);
+      }
+    });
+    els.secAideUpdate.addEventListener("click", async () => {
+      if (!window.confirm("Re-baseline the AIDE database? This records every current file state as trusted — only do this after reviewing changes or intentional upgrades (~25 min).")) return;
+      try {
+        await postJSON("/api/security/aide/update", {});
+        await refreshAide();
+      } catch (err) {
+        showBanner(true, "AIDE update: " + err.message);
+      }
+    });
+  }
+
+  function renderHoneypot(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "Honeypot data unavailable");
+      return;
+    }
+    const conf = d.conf || {};
+    const st = d.state || {};
+    const stats = st.stats || {};
+    els.secHoneyPorts.value = (conf.ports || []).join(", ");
+    els.secHoneyAutoban.checked = !!conf.auto_ban;
+    els.secHoneyThreshold.value = conf.ban_threshold || 1;
+
+    if (st.listening) {
+      els.secHoneyHint.textContent = `active on ${st.wan_ip} · ports ${(st.ports || []).join(", ")}`;
+      els.secHoneyToggle.textContent = "Disable";
+      els.secHoneyToggle.className = "btn btn-sm btn-danger";
+    } else {
+      els.secHoneyHint.textContent = st.error ? `error: ${st.error}` : "disabled";
+      els.secHoneyToggle.textContent = "Enable";
+      els.secHoneyToggle.className = "btn btn-sm btn-primary";
+    }
+    const wastedH = stats.wasted ? (stats.wasted / 3600).toFixed(1) : "0.0";
+    els.secHoneySummary.innerHTML = stats.total
+      ? `<div class="honey-stat trapped"><div class="honey-stat-value">${formatNumber(stats.total)}</div><div class="honey-stat-label">Trapped</div></div>
+         <div class="honey-stat unique"><div class="honey-stat-value">${formatNumber(stats.unique)}</div><div class="honey-stat-label">Unique IPs</div></div>
+         <div class="honey-stat held"><div class="honey-stat-value">${stats.active_count || 0}</div><div class="honey-stat-label">Held Now</div></div>
+         <div class="honey-stat wasted"><div class="honey-stat-value">${wastedH}h</div><div class="honey-stat-label">Time Wasted</div></div>
+         <div class="honey-stat banned"><div class="honey-stat-value">${formatNumber(stats.banned || 0)}</div><div class="honey-stat-label">Auto-banned</div></div>`
+      : `<span class="muted" style="padding:0 4px;">No scanners trapped yet.</span>`;
+    const honeyDot = document.getElementById("honey-status-dot");
+    if (honeyDot) honeyDot.dataset.status = st.active ? "active" : "inactive";
+
+    const active = st.active || [];
+    const traps = st.traps || [];
+    const rows = [];
+    const now = Date.now() / 1000;
+    active.slice(0, 25).forEach((a) => {
+      rows.push(`<tr><td><span class="badge sev-HIGH">trapping</span></td><td class="mono">${esc(a.ip)}</td><td class="mono">${esc(a.port)}</td><td class="mono">${formatDuration(now - a.connected_at)}</td><td class="muted">${formatTime(a.connected_at)}</td></tr>`);
+    });
+    traps.slice(0, 15).forEach((t) => {
+      rows.push(`<tr><td><span class="badge sev-LOW">released</span></td><td class="mono">${esc(t.ip)}</td><td class="mono">${esc(t.port)}</td><td class="mono">${formatDuration(t.duration)}</td><td class="muted">${formatTime(t.connected_at)}</td></tr>`);
+    });
+    els.secHoneyBody.innerHTML = rows.join("")
+      || `<tr><td colspan="5" class="empty">Honeypot is ${st.listening ? "listening — no scanners yet" : "disabled"}.</td></tr>`;
+  }
+
+  async function refreshHoneypot() {
+    try {
+      const data = await fetchJSON("/api/security/honeypot");
+      renderHoneypot(data);
+    } catch (err) {
+      showBanner(true, "Honeypot error: " + err.message);
+    }
+  }
+
+  function bindHoneypotActions() {
+    const applyConf = async (extra = {}) => {
+      const ports = (els.secHoneyPorts.value || "")
+        .split(/[\s,;]+/).map((s) => parseInt(s, 10)).filter((n) => n > 0 && n < 65536);
+      if (!ports.length) {
+        showBanner(true, "Honeypot: enter at least one port");
+        return;
+      }
+      try {
+        await postJSON("/api/security/honeypot/config", {
+          ports,
+          auto_ban: els.secHoneyAutoban.checked,
+          ban_threshold: parseInt(els.secHoneyThreshold.value, 10) || 1,
+          ...extra,
+        });
+        showBanner(false, "");
+        await refreshHoneypot();
+      } catch (err) {
+        showBanner(true, "Honeypot: " + err.message);
+      }
+    };
+    els.secHoneyApply.addEventListener("click", () => applyConf());
+    els.secHoneyToggle.addEventListener("click", async () => {
+      const enabling = els.secHoneyToggle.textContent.trim() === "Enable";
+      if (enabling && !window.confirm("Enable the honeypot? This opens UFW allow rules for the listed ports on the WAN interface (enp5s0) ONLY, then traps and auto-bans anything that connects.")) return;
+      if (!enabling && !window.confirm("Disable the honeypot and close its UFW allow rules?")) return;
+      await applyConf({ enabled: enabling });
+    });
+  }
+
   // ===================== TRAFFIC MONITOR =====================
   const TM_LIMIT = 100;
   let tmPaused = false;
@@ -3650,6 +3959,14 @@
     } catch (err) {
       showBanner(true, "Blocklist error: " + err.message);
     }
+    try {
+      renderRpz(await fetchJSON("/api/rpz"));
+    } catch (err) {
+      // RPZ section is optional; only surface a real API failure
+      if (!err.message || !err.message.includes("HTTP 404")) {
+        showBanner(true, "RPZ error: " + err.message);
+      }
+    }
   }
 
   function bindBlocklistActions() {
@@ -3733,6 +4050,218 @@
       } catch (err) {
         showBanner(true, "Whitelist remove: " + err.message);
       }
+    });
+  }
+
+  const RPZ_ACTION_LABELS = {
+    block: "Block (NXDOMAIN)",
+    drop: "Drop (no answer)",
+    redirect: "Redirect",
+    passthru: "Passthru (exempt)",
+  };
+
+  function renderRpz(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "RPZ data unavailable");
+      return;
+    }
+    const entries = d.entries || [];
+    els.rpzEmpty.hidden = entries.length > 0;
+    els.rpzBody.innerHTML = entries.map((e) => `
+      <tr>
+        <td class="mono">${e.match === "ip" ? `<span class="muted" title="Answer-IP policy">IP</span> ` : ""}${e.match === "ip" ? esc(e.domain) : "*." + esc(e.domain)}</td>
+        <td>${RPZ_ACTION_LABELS[e.action] || esc(e.action)}</td>
+        <td class="mono">${e.action === "redirect" ? esc(e.target) : "—"}</td>
+        <td class="muted">${e.added_at ? formatRelative(e.added_at) : "—"}</td>
+        <td>
+          <button class="btn btn-sm btn-danger rpz-remove" data-domain="${esc(e.domain)}" type="button">Remove</button>
+        </td>
+      </tr>`).join("");
+    els.rpzHint.textContent = d.last_update ? `Zone last applied ${formatRelative(d.last_update)}` : "";
+
+    const stats = d.stats || {};
+    const statBits = [];
+    if (stats["num.rpz.action.rpz-nxdomain"] != null) statBits.push(`blocked ${formatNumber(stats["num.rpz.action.rpz-nxdomain"])}`);
+    if (stats["num.rpz.action.rpz-drop"] != null) statBits.push(`dropped ${formatNumber(stats["num.rpz.action.rpz-drop"])}`);
+    if (stats["num.rpz.action.rpz-cname"] != null) statBits.push(`redirected ${formatNumber(stats["num.rpz.action.rpz-cname"])}`);
+    if (stats["num.rpz.action.rpz-passthru"] != null) statBits.push(`passed ${formatNumber(stats["num.rpz.action.rpz-passthru"])}`);
+    els.rpzaStats.textContent = statBits.length ? `Since restart: ${statBits.join(" · ")}` : "No RPZ hits yet";
+
+    const hits = d.hits || [];
+    els.rpzaEmpty.hidden = hits.length > 0;
+    els.rpzaBody.innerHTML = hits.map((h) => `
+      <tr>
+        <td class="muted">${esc(h.time || "")}</td>
+        <td class="mono">${esc(h.zone || "")}</td>
+        <td class="mono">${esc(h.qname || "")}</td>
+        <td>${esc((h.action || "").replace("rpz-", ""))}</td>
+        <td class="mono">${esc(h.client || "")}</td>
+      </tr>`).join("");
+
+    const feeds = d.feeds || [];
+    els.rpzfEmpty.hidden = feeds.length > 0;
+    els.rpzfBody.innerHTML = feeds.map((f) => `
+      <tr>
+        <td>
+          <label class="toggle" title="Enable/disable this feed">
+            <input type="checkbox" class="rpzf-toggle" data-url="${esc(f.url)}" ${f.enabled ? "checked" : ""}>
+            <span class="toggle-track"></span>
+          </label>
+        </td>
+        <td class="mono" title="${esc(f.name || "")}">${esc(f.name || f.url)}${f.name ? ` <span class="muted">(${esc(f.url)})</span>` : ""}</td>
+        <td>${f.last_updated ? formatNumber(f.entries) : "—"}</td>
+        <td class="muted">${f.last_updated ? formatRelative(f.last_updated) : "pending first download"}</td>
+        <td>
+          <button class="btn btn-sm btn-danger rpzf-remove" data-url="${esc(f.url)}" type="button">Remove</button>
+        </td>
+      </tr>`).join("");
+  }
+
+  function bindRpzActions() {
+    const updateRpzPlaceholders = () => {
+      const ipMode = els.rpzMatch.value === "ip";
+      els.rpzDomain.placeholder = ipMode
+        ? "IP range, e.g. 192.0.2.0/24 (blocks any answer resolving into it)"
+        : "Domain, e.g. tracker.example.com (wildcard: covers subdomains too)";
+    };
+
+    els.rpzMatch.addEventListener("change", updateRpzPlaceholders);
+    updateRpzPlaceholders();
+
+    els.rpzAction.addEventListener("change", () => {
+      els.rpzTarget.hidden = els.rpzAction.value !== "redirect";
+    });
+
+    els.rpzAdd.addEventListener("click", async () => {
+      const domain = els.rpzDomain.value.trim();
+      if (!domain) return;
+      els.rpzAdd.disabled = true;
+      try {
+        await postJSON("/api/rpz/add", {
+          domain,
+          match: els.rpzMatch.value,
+          action: els.rpzAction.value,
+          target: els.rpzTarget.value.trim(),
+        });
+        els.rpzDomain.value = "";
+        els.rpzTarget.value = "";
+        await refreshBlocklists();
+      } catch (err) {
+        showBanner(true, "RPZ add: " + err.message);
+      } finally {
+        els.rpzAdd.disabled = false;
+      }
+    });
+
+    els.rpzDomain.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") els.rpzAdd.click();
+    });
+    els.rpzTarget.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") els.rpzAdd.click();
+    });
+
+    els.rpzBulk.addEventListener("click", () => {
+      els.rpzBulkRow.hidden = !els.rpzBulkRow.hidden;
+    });
+
+    els.rpzBulkGo.addEventListener("click", async () => {
+      const text = els.rpzBulkText.value.trim();
+      if (!text) return;
+      els.rpzBulkGo.disabled = true;
+      try {
+        const res = await postJSON("/api/rpz/import", { text });
+        if (res.errors && res.errors.length) {
+          showBanner(true, "RPZ import (partial): " + res.errors.join("; "));
+        } else {
+          showBanner(false, "");
+        }
+        els.rpzBulkText.value = "";
+        els.rpzBulkRow.hidden = true;
+        await refreshBlocklists();
+      } catch (err) {
+        showBanner(true, "RPZ import: " + err.message);
+      } finally {
+        els.rpzBulkGo.disabled = false;
+      }
+    });
+
+    els.rpzApply.addEventListener("click", async () => {
+      try {
+        await postJSON("/api/rpz/apply", {});
+      } catch (err) {
+        showBanner(true, "RPZ apply: " + err.message);
+      }
+      await refreshBlocklists();
+    });
+
+    els.rpzBody.addEventListener("click", async (e) => {
+      const btn = e.target.closest(".rpz-remove");
+      if (!btn) return;
+      if (!window.confirm(`Remove the RPZ policy for "${btn.dataset.domain}"?`)) return;
+      try {
+        await postJSON("/api/rpz/remove", { domain: btn.dataset.domain });
+        await refreshBlocklists();
+      } catch (err) {
+        showBanner(true, "RPZ remove: " + err.message);
+      }
+    });
+
+    els.rpzfAdd.addEventListener("click", async () => {
+      const url = els.rpzfUrl.value.trim();
+      if (!url) return;
+      els.rpzfAdd.disabled = true;
+      try {
+        await postJSON("/api/rpz/feed/add", { url, name: els.rpzfName.value.trim() });
+        els.rpzfUrl.value = "";
+        els.rpzfName.value = "";
+        await refreshBlocklists();
+      } catch (err) {
+        showBanner(true, "RPZ feed add: " + err.message);
+      } finally {
+        els.rpzfAdd.disabled = false;
+      }
+    });
+
+    els.rpzfUrl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") els.rpzfAdd.click();
+    });
+    els.rpzfName.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") els.rpzfAdd.click();
+    });
+
+    els.rpzfRefresh.addEventListener("click", async () => {
+      els.rpzfRefresh.disabled = true;
+      try {
+        await postJSON("/api/rpz/feed/refresh", {});
+      } catch (err) {
+        showBanner(true, "RPZ feed refresh: " + err.message);
+      } finally {
+        els.rpzfRefresh.disabled = false;
+      }
+      await refreshBlocklists();
+    });
+
+    els.rpzfBody.addEventListener("click", async (e) => {
+      const btn = e.target.closest(".rpzf-remove");
+      if (!btn) return;
+      if (!window.confirm("Remove this RPZ feed? Its zone is removed from Unbound on the next reload.")) return;
+      try {
+        await postJSON("/api/rpz/feed/remove", { url: btn.dataset.url });
+        await refreshBlocklists();
+      } catch (err) {
+        showBanner(true, "RPZ feed remove: " + err.message);
+      }
+    });
+
+    els.rpzfBody.addEventListener("change", async (e) => {
+      const toggle = e.target.closest(".rpzf-toggle");
+      if (!toggle) return;
+      try {
+        await postJSON("/api/rpz/feed/toggle", { url: toggle.dataset.url });
+      } catch (err) {
+        showBanner(true, "RPZ feed toggle: " + err.message);
+      }
+      await refreshBlocklists();
     });
   }
 
@@ -6338,6 +6867,10 @@
       if (!document.hidden && state.activeView === "security") {
         refreshSecurity();
         refreshSuricata();
+        refreshZeek();
+        refreshZeekQuic();
+      refreshAide();
+      refreshHoneypot();
       }
     }, SECURITY_POLL_MS);
     if (state.wgTimer) clearInterval(state.wgTimer);
@@ -6495,6 +7028,10 @@
     else if (state.activeView === "security") {
       refreshSecurity();
       refreshSuricata();
+      refreshZeek();
+      refreshZeekQuic();
+      refreshAide();
+      refreshHoneypot();
     } else if (state.activeView === "crowdsec") {
       refreshCrowdsec();
     }
@@ -6726,6 +7263,10 @@
         initSecurityMap();
         refreshSecurity();
         refreshSuricata();
+        refreshZeek();
+        refreshZeekQuic();
+      refreshAide();
+      refreshHoneypot();
         updateSecBanAvailability();
         loadReportingSettings();
         initTrafficMonitor();
@@ -8079,6 +8620,10 @@
       refreshFirewall();
       refreshSecurity();
       refreshSuricata();
+      refreshZeek();
+      refreshZeekQuic();
+      refreshAide();
+      refreshHoneypot();
       refreshCrowdsec();
       refreshCustomBlocklist();
       refreshBandwidth();
@@ -8155,6 +8700,7 @@
     switchView(VIEW_TITLES[initial] ? initial : "overview");
 
     bindBlocklistActions();
+    bindRpzActions();
     bindDomainActions();
     bindHostEdit();
     bindConfigEdit();
@@ -8165,6 +8711,8 @@
     bindWireguardActions();
     bindFirewallActions();
     bindSecurityBans();
+    bindAideActions();
+    bindHoneypotActions();
     bindReporting();
     bindCustomBlocklist();
     bindSettings();
@@ -8692,6 +9240,8 @@
     refreshFirewall();
     refreshSecurity();
     refreshSuricata();
+    refreshZeek();
+    refreshZeekQuic();
     updateSecBanAvailability();
     refreshCrowdsec();
     refreshCustomBlocklist();
@@ -8771,6 +9321,11 @@
     "sec-ips-table",
     "tm-table",
     "cs-bouncers-table",
+    "sec-zeek-table",
+    "sec-zeek-dev-table",
+    "sec-quic-table",
+    "sec-aide-table",
+    "sec-honey-table",
   ];
 
   const expanded = new Map();   // tableId -> bool

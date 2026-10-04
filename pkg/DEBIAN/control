@@ -1,10 +1,10 @@
 Package: tuxwall
-Version: 2.8.1
+Version: 2.9.0
 Section: admin
 Priority: optional
 Architecture: all
-Depends: python3, nginx, unbound, unbound-anchor, kea-dhcp4-server, kea-common, radvd, avahi-daemon, suricata, suricata-update, wireguard-tools, ufw, iptables, nftables, curl, jq, gzip, ieee-data, iproute2, rsync
-Suggests: crowdsec, crowdsec-firewall-bouncer-iptables, python3-maxminddb, speedtest, fastfetch
+Depends: python3, nginx, unbound, unbound-anchor, kea-dhcp4-server, kea-common, radvd, avahi-daemon, suricata, suricata-update, wireguard-tools, ufw, iptables, nftables, curl, jq, gzip, ieee-data, iproute2, rsync, aide
+Suggests: crowdsec, crowdsec-firewall-bouncer-iptables, python3-maxminddb, speedtest, fastfetch, zeek
 Maintainer: jeff <jeff@localhost>
 Description: TuxWall Network Firewall Dashboard
  Modern web dashboard for a home/edge router featuring DHCP lease management,
@@ -320,4 +320,46 @@ Description: TuxWall Network Firewall Dashboard
  notes 26.04, the SQM seed uses the detected WAN interface instead of eth0,
  and fastfetch moves from Depends to Suggests (the v2.8.0 System Info grid
  reads /api/system directly; the /api/system/fastfetch endpoint degrades
+ gracefully when absent).
+ .
+ v2.9.0 adds a DNS-layer and host-layer defense stack on top of the network
+ sensors. RPZ (response policy zones) comes to the Blocklists page:
+ per-domain policies (block/drop/redirect/passthru) plus answer-IP CIDR
+ policies (the RPZ ip encoding) are written to a live unbound rpz zone and
+ applied with a hot unbound-control reload — no restart, no downtime, with
+ backup/restore if checkconf fails; RPZ-format threat feeds (e.g. HaGeZi
+ TIF, ~351k entries) are consumed by unbound directly via url: stanzas
+ with automatic refresh and no cron; bulk import parses one policy per
+ line with per-line error reporting; and an RPZ Activity card surfaces
+ per-hit logs (time, zone, query, action, client) parsed live from the
+ unbound journal plus num.rpz.action counters from unbound-control
+ stats. File Integrity (AIDE) lands on the Security page: baseline
+ database info, nightly cron results parsed from /var/log/aide/aide.log,
+ on-demand check/update runs in a background thread (~25 min for 255k
+ entries, results appear on the card without page babysitting), promote-
+ on-success that treats AIDE's bitmask exit codes (1=added, 2=removed,
+ 4=changed) as results rather than errors, and a section-aware parser for
+ AIDE 0.19's f++++++++-style entry lines; a shipped appliance exclusions
+ file keeps live databases, regenerated unbound/tuxwall state and rotated
+ sensor logs out of the noise so nightly reports carry only surprises.
+ The Honeypot card adds a WAN port-garden tarpit: classic scan ports
+ (telnet 23/2323, RDP 3389, SMB 445, adb 5555) are bound on the WAN
+ address only, each connection is held open with a clamped TCP window
+ while a byte-every-10s dribble wastes the scanner's time, and — since
+ nothing legitimate ever connects to these ports — sources are auto-
+ banned via CrowdSec (1 year) and community-reported like any other
+ attacker, no reputation cross-checking needed. Safety: ports bind
+ BEFORE their UFW allow rules are opened so a port in use by a real
+ service can never be exposed; a watchdog removes any rule whose trap
+ socket dies so a future service can never inherit WAN exposure; LAN/
+ WireGuard and self-originated connections are dropped uncounted;
+ overflow beyond 256 concurrent / 8 per IP is dropped, not trapped; and
+ bans require a completed (unspoofable) TCP handshake. Also: the
+ Bandwidth page polls every 3s instead of 60s (charts sat still for a
+ minute at a time against the 10-minute window and read as frozen);
+ every info note shares one unified style — soft blue tint, glowing
+ left accent line, rounded corners, code chips, the DHCP green override
+ removed; and the AIDE and Honeypot tables join the standard 25-row
+ Show-all cap. Dependencies: aide moves to Depends (core feature);
+ zeek joins Suggests (Security page reads /opt/zeek logs, degrades
  gracefully when absent).
