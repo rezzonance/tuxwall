@@ -648,6 +648,7 @@ install_tuxwall_stack() {
         avahi-daemon
         suricata suricata-update
         crowdsec crowdsec-firewall-bouncer-iptables
+        aide
         nginx
         python3 curl jq gzip ca-certificates ieee-data python3-maxminddb fastfetch
     )

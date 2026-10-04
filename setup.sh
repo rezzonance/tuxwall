@@ -42,6 +42,7 @@ apt-get install -y --no-install-recommends \
     avahi-daemon \
     suricata suricata-update \
     crowdsec crowdsec-firewall-bouncer-iptables \
+    aide \
     nginx \
     python3 curl jq gzip ieee-data gnupg fastfetch \
     || fail "apt install failed"
