@@ -1,0 +1,26 @@
+[Unit]
+Description=OpenCanary deception honeypot (tuxwall)
+After=network-online.target tuxwall.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opencanary
+Group=opencanary
+ExecStartPre=+/usr/local/sbin/opencanary-render-conf
+ExecStart=/opt/opencanary/bin/twistd -noy /opt/opencanary/bin/opencanary.tac --pidfile /run/opencanary/opencanary.pid
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+LogsDirectory=opencanary
+RuntimeDirectory=opencanary
+ProtectSystem=strict
+ReadWritePaths=/etc/opencanaryd /var/log/opencanary
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

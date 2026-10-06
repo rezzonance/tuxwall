@@ -130,6 +130,28 @@ All of the following must be installed and working **before** tuxwall will funct
 | `crowdsec` | 1.7+ | Collaborative threat intelligence agent |
 | `crowdsec-firewall-bouncer-iptables` | 0.0.36+ | Applies CrowdSec bans via iptables |
 
+### Deception Services (OpenCanary)
+
+The WAN port-garden: a tarpit (built into the dashboard) plus OpenCanary
+emulators — SSH 22, VNC 5900, MSSQL 1433, Redis 6379, SNMP 161/udp — bound on
+the WAN address only, running as a sandboxed system user. Any event with a
+globally routable source IP is, by definition, hostile (nothing legitimate
+connects to services that do not exist), so sources are auto-banned via
+CrowdSec (1 year) and community-reported through the same pipeline as the
+tarpit. Deployed by `scripts/opencanary/deploy-opencanary.sh`.
+
+| Package | Source | Purpose |
+|---|---|---|
+| `python3-venv` | Ubuntu archives | The canary runs from a venv at `/opt/opencanary` (its deps are pip-only, so the system Python stays clean) |
+| `opencanary` | PyPI (not in Ubuntu archives) | The deception honeypot itself — SSH/VNC/MSSQL/Redis/SNMP emulators on Twisted |
+| `scapy` | PyPI (**not** a default dependency of `opencanary`) | Required by the SNMP canary module; must be installed explicitly or the service fails to start (all modules load together) |
+
+Runtime requirements handled by the deploy script: a dedicated `opencanary`
+system user, `CAP_NET_BIND_SERVICE` (ports 22/161) in a sandboxed systemd
+unit, `AF_NETLINK` in `RestrictAddressFamilies` (scapy route lookups), and a
+webhook token shared with the dashboard receiver
+(`/api/canary/hit`, loopback-only).
+
 ### Web Server
 
 | Package | Version | Purpose |

@@ -1,0 +1,31 @@
+{
+  "device.node_id": "tuxwall-canary",
+  "device.listen_addr": "__WAN_IP__",
+  "ip.ignorelist": ["127.0.0.1", "::1"],
+  "ssh.enabled": true,
+  "ssh.port": 22,
+  "vnc.enabled": true,
+  "vnc.port": 5900,
+  "mssql.enabled": true,
+  "mssql.port": 1433,
+  "redis.enabled": true,
+  "redis.port": 6379,
+  "snmp.enabled": true,
+  "snmp.port": 161,
+  "logger": {
+    "class": "PyLogger",
+    "kwargs": {
+      "handlers": {
+        "file": {
+          "class": "logging.FileHandler",
+          "filename": "/var/log/opencanary/opencanary.log"
+        },
+        "slack": {
+          "()": "opencanary.logger.SlackHandler",
+          "webhook_url": "http://127.0.0.1:8008/api/canary/hit?token=__TOKEN__",
+          "level": "NOTSET"
+        }
+      }
+    }
+  }
+}

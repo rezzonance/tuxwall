@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Render the OpenCanary config for tuxwall.
+
+Resolves the current WAN IPv4 (the canary binds it exclusively - never
+0.0.0.0 - so LAN/WireGuard addresses are unreachable by the emulators),
+reads or creates the shared webhook token, and writes
+/etc/opencanaryd/opencanary.conf from the .tmpl template.
+
+Run as root (systemd ExecStartPre=+), before the canary service starts.
+"""
+import ipaddress
+import json
+import os
+import secrets
+import socket
+import sys
+
+TMPL = "/etc/opencanaryd/opencanary.conf.tmpl"
+CONF = "/etc/opencanaryd/opencanary.conf"
+TOKEN_FILE = "/var/lib/tuxwall/canary-token"
+WAN_IFACE = "enp5s0"
+
+
+def wan_ip():
+    try:
+        import subprocess
+        out = subprocess.run(["ip", "-j", "-4", "addr", "show", WAN_IFACE],
+                             capture_output=True, text=True, timeout=5).stdout
+        for iface in json.loads(out or "[]"):
+            for a in iface.get("addr_info", []):
+                try:
+                    addr = ipaddress.ip_address(a.get("local", ""))
+                except ValueError:
+                    continue
+                if (addr.version == 4 and addr.is_global
+                        and not addr.is_private):
+                    return str(addr)
+    except Exception:
+        pass
+    return None
+
+
+def token():
+    try:
+        with open(TOKEN_FILE) as f:
+            tok = f.read().strip()
+            if tok:
+                return tok
+    except OSError:
+        pass
+    tok = secrets.token_hex(24)
+    os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+    with open(TOKEN_FILE, "w") as f:
+        f.write(tok)
+    os.chmod(TOKEN_FILE, 0o600)
+    return tok
+
+
+def main():
+    ip = wan_ip()
+    if not ip:
+        print("opencanary-render: no global WAN IPv4 on %s" % WAN_IFACE,
+              file=sys.stderr)
+        return 1
+    tok = token()
+    with open(TMPL) as f:
+        tmpl = f.read()
+    conf = (tmpl.replace("__WAN_IP__", ip)
+                .replace("__TOKEN__", tok))
+    tmp = CONF + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(conf)
+    # The canary runs as the sandboxed opencanary user and must be able to
+    # READ the config (it embeds the webhook token, so group-readable only,
+    # owned root:opencanary - never world-readable).
+    import grp
+    try:
+        gid = grp.getgrnam("opencanary").gr_gid
+    except KeyError:
+        gid = -1
+    os.chown(tmp, -1, gid)
+    os.chmod(tmp, 0o640)
+    os.replace(tmp, CONF)
+    print("opencanary-render: config written for WAN %s" % ip)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
