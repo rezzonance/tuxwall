@@ -65,15 +65,25 @@ SEVERITY_CRITICAL = "critical"
 SEVERITY_ORDER = [SEVERITY_LOW, SEVERITY_MEDIUM, SEVERITY_HIGH, SEVERITY_CRITICAL]
 
 
-def severity_for(hits, reporters):
-    """Severity driven by how much of the community has been hit and how hard."""
+def severity_for(hits, reporters, deception=False):
+    """Severity driven by how much of the community has been hit and how hard.
+
+    Deception-source reports (canary/honeypot) are definitionally hostile -
+    nothing legitimate connects to services that do not exist, so they carry
+    zero false-positive potential. A single confirmed canary touch is a
+    deliberate intrusion attempt (e.g. an SSH login with sprayed
+    credentials), not recon noise - so deception evidence floors the entry
+    at medium rather than letting volume alone speak.
+    """
     if reporters >= 10 or hits >= 5000:
         return SEVERITY_CRITICAL
     if reporters >= 5 or hits >= 500:
         return SEVERITY_HIGH
-    if reporters >= 2 or hits >= 50:
+    if reporters >= 2 or hits >= 50 or deception:
         return SEVERITY_MEDIUM
     return SEVERITY_LOW
+
+DECEPTION_SOURCES = ("canary", "honeypot")
 
 
 def severity_rank(sev):
@@ -379,7 +389,8 @@ class Store:
                 "WITH counts AS (SELECT ip, COUNT(*) AS reporters"
                 "   FROM report_reports GROUP BY ip)"
                 " SELECT r.ip, r.hits, r.first_seen, r.last_seen, r.country, r.iso,"
-                " r.city, r.isp, r.asn, COALESCE(c.reporters, 0) AS reporters"
+                " r.city, r.isp, r.asn, r.last_source,"
+                " COALESCE(c.reporters, 0) AS reporters"
                 " FROM reports r LEFT JOIN counts c ON c.ip = r.ip"
                 " WHERE " + " AND ".join(where)
                 + " ORDER BY r.hits DESC LIMIT ?",
@@ -387,8 +398,9 @@ class Store:
             rows = cur.fetchall()
         bans = []
         for (ip, hits, first_seen, last_seen, country, iso, city, isp, asn,
-             reporters) in rows:
-            sev = severity_for(hits, reporters)
+             last_source, reporters) in rows:
+            sev = severity_for(hits, reporters,
+                              deception=last_source in DECEPTION_SOURCES)
             if severity_rank(sev) < min_severity:
                 continue
             bans.append({
@@ -446,7 +458,9 @@ class Store:
             "asn": asn,
             "last_reason": last_reason,
             "last_source": last_source,
-            "severity": severity_for(hits, reporters),
+            "severity": severity_for(
+                hits, reporters,
+                deception=any(s in DECEPTION_SOURCES for s, _ in srcs)),
             "categories": {c: {"hits": h, "reports": n} for c, h, n in cats},
             "sources": {s: n for s, n in srcs},
             "suricata": [
