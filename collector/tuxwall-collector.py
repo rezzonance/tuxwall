@@ -337,6 +337,12 @@ class Store:
             self._conn.execute(
                 "DELETE FROM suricata_evidence WHERE last_ts < ?", (cutoff,))
             self._conn.commit()
+            # Long-running service: checkpoint the WAL so it never grows
+            # unbounded between restarts.
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                pass
 
     def remove_ip(self, ip):
         """Admin removal: purge an IP from every table. Returns deleted row
@@ -553,6 +559,14 @@ class Handler(BaseHTTPRequestHandler):
             return b""
 
     def _admin_authorized(self):
+        # Defense-in-depth: admin is loopback-only by design. nginx always
+        # sets X-Real-IP / X-Forwarded-For when proxying, so any request
+        # carrying them arrived via a proxy rather than from the local
+        # host - refuse regardless of key, so no future nginx change can
+        # ever expose the admin endpoints behind the key gate alone.
+        if (self.headers.get("X-Real-IP")
+                or self.headers.get("X-Forwarded-For")):
+            return False
         supplied = (self.headers.get("X-Admin-Key") or "").strip().encode("utf-8")
         return bool(supplied) and hmac.compare_digest(supplied, self._admin_key())
 
