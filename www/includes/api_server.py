@@ -2908,6 +2908,7 @@ HONEY_REASON = "honeypot/tuxwall"
 HONEY_STATE = {
     "listening": False,
     "wan_ip": None,
+    "wan_ip6": None,
     "ports": [],
     "threads": [],
     "active": {},            # (ip, port) -> {"ip","port","connected_at"}
@@ -2931,6 +2932,10 @@ def _honey_is_lan(ip):
         a = ipaddress.ip_address(ip)
     except ValueError:
         return True
+    if a.version == 6:
+        # Guard everything not globally routable: ULA (fc00::/7 covers the
+        # LAN fd00:1::/64 and WireGuard fd00:2::/64), link-local, loopback.
+        return not a.is_global
     return any(a in net for net in HONEY_LAN_NETS)
 
 
@@ -2976,9 +2981,11 @@ def _honey_log(line):
 
 
 def _honey_is_self(ip):
-    """True for the router's own current WAN address (self-originated)."""
+    """True for the router's own current WAN addresses (self-originated)."""
+    if not ip:
+        return False
     with HONEY_APPLY_LOCK:
-        return bool(ip) and ip == HONEY_STATE.get("wan_ip")
+        return ip in (HONEY_STATE.get("wan_ip"), HONEY_STATE.get("wan_ip6"))
 
 
 def _honey_wan_ip():
@@ -2995,6 +3002,28 @@ def _honey_wan_ip():
     if _honey_is_lan(ip):
         return None
     return ip
+
+
+def _honey_wan6():
+    """Resolve the WAN interface's global IPv6 (None if none/ULA-only)."""
+    try:
+        r = subprocess.run(
+            ["ip", "-j", "-6", "addr", "show", HONEY_WAN_IFACE],
+            capture_output=True, text=True, timeout=5,
+        )
+        for iface in json.loads(r.stdout or "[]"):
+            for a in iface.get("addr_info", []):
+                if a.get("scope") != "global":
+                    continue
+                try:
+                    addr = ipaddress.ip_address(a.get("local", ""))
+                except ValueError:
+                    continue
+                if addr.version == 6 and addr.is_global and not addr.is_private:
+                    return str(addr)
+    except Exception:
+        pass
+    return None
 
 
 def _honey_ban(ip):
@@ -3053,24 +3082,28 @@ def _honey_tarpit(conn, ip, port):
             HONEY_STATE["traps"] = HONEY_STATE["traps"][-400:]
 
 
-def _honey_bind(port, wan_ip):
+def _honey_bind(port, family, addr):
     """Bind one honeypot port synchronously. Returns the socket or None.
 
     Binding BEFORE opening the firewall rule guarantees a failed bind
     (port in use by a real service) can never expose that service to WAN.
+    IPv6 sockets are V6ONLY (never "::"), so only the WAN address binds.
     """
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock = socket.socket(family, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((wan_ip, port))
+        if family == socket.AF_INET6:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        sock.bind((addr, port))
         sock.listen(16)
         sock.settimeout(2)
         return sock
     except OSError as exc:
         with HONEY_APPLY_LOCK:
             HONEY_STATE["error"] = (
-                "port {} not bound ({}) - no firewall rule added"
-                .format(port, getattr(exc, "strerror", exc)))
+                "port {}/{} not bound ({}) - no firewall rule added"
+                .format(port, "v6" if family == socket.AF_INET6 else "v4",
+                        getattr(exc, "strerror", exc)))
         _honey_log(HONEY_STATE["error"])
         return None
 
@@ -3218,20 +3251,29 @@ def apply_honeypot(conf, touch_ufw=False):
     ports = _honey_valid_ports(conf.get("ports"))
     if not ports:
         return {"ok": False, "error": "no valid ports configured"}
-    # bind every port FIRST; only bound ports get a firewall allow rule
+    wan_ip6 = _honey_wan6()
+    # bind every port FIRST (both families); only bound ports get the
+    # firewall allow rule (one UFW rule covers v4 and v6)
     bound = {}
     for p in ports:
-        sock = _honey_bind(p, wan_ip)
+        sock = _honey_bind(p, socket.AF_INET, wan_ip)
         if sock is not None:
-            bound[p] = sock
+            bound["v4:%d" % p] = sock
+        if wan_ip6:
+            sock6 = _honey_bind(p, socket.AF_INET6, wan_ip6)
+            if sock6 is not None:
+                bound["v6:%d" % p] = sock6
     if not bound:
-        return {"ok": False, "error": "no ports could be bound on {}".format(wan_ip)}
+        return {"ok": False, "error": "no ports could be bound on {}"
+                .format(wan_ip)}
+    bound_ports = sorted({int(k.split(":")[1]) for k in bound})
     if touch_ufw:
-        for p in bound:
+        for p in bound_ports:
             _honey_ufw_allow(p)
-    for p, sock in bound.items():
+    for key, sock in bound.items():
         t = threading.Thread(
-            target=_honey_listener, args=(sock, p), daemon=True)
+            target=_honey_listener, args=(sock, int(key.split(":")[1])),
+            daemon=True)
         t.start()
         with HONEY_APPLY_LOCK:
             HONEY_STATE["threads"].append(t)
@@ -3239,7 +3281,8 @@ def apply_honeypot(conf, touch_ufw=False):
         HONEY_STATE["sockets"] = dict(bound)
         HONEY_STATE["listening"] = True
         HONEY_STATE["wan_ip"] = wan_ip
-        HONEY_STATE["ports"] = list(bound)
+        HONEY_STATE["wan_ip6"] = wan_ip6
+        HONEY_STATE["ports"] = bound_ports
         HONEY_STATE["started_at"] = time.time()
         if HONEY_STATE["error"] and HONEY_STATE["error"].startswith("port "):
             HONEY_STATE["error"] = None  # bind errors from this cycle are stale
@@ -3249,11 +3292,12 @@ def apply_honeypot(conf, touch_ufw=False):
         wd.start()
         with HONEY_APPLY_LOCK:
             HONEY_STATE["watchdog"] = wd
-    _honey_log("honeypot active on {} ports {}{}".format(
-        wan_ip, list(bound),
-        "" if len(bound) == len(ports)
-        else " (skipped {})".format(sorted(set(ports) - set(bound)))))
-    return {"ok": True, "enabled": True, "wan_ip": wan_ip, "ports": list(bound)}
+    _honey_log("honeypot active on {}{} ports {}{}".format(
+        wan_ip, " / " + wan_ip6 if wan_ip6 else "", bound_ports,
+        "" if len(bound_ports) == len(ports)
+        else " (skipped {})".format(sorted(set(ports) - set(bound_ports)))))
+    return {"ok": True, "enabled": True, "wan_ip": wan_ip, "wan_ip6": wan_ip6,
+            "ports": bound_ports}
 
 
 def start_honeypot_at_boot():
@@ -3277,6 +3321,7 @@ def build_honeypot():
         state = {
             "listening": HONEY_STATE["listening"],
             "wan_ip": HONEY_STATE["wan_ip"],
+            "wan_ip6": HONEY_STATE["wan_ip6"],
             "ports": HONEY_STATE["ports"],
             "started_at": HONEY_STATE["started_at"],
             "error": HONEY_STATE["error"],

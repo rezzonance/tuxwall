@@ -6,7 +6,7 @@
   <title>TuxWall - Network Dashboard</title>
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
-  <link rel="stylesheet" href="/css/style.css?v=202610032214">
+  <link rel="stylesheet" href="/css/style.css?v=202610041734">
 </head>
 <body>
 <div id="login-gate" class="login-gate" hidden>
@@ -1271,7 +1271,7 @@
             <tbody id="sec-honey-body"></tbody>
           </table>
         </div>
-        <p class="muted bl-note">A <b>port-garden tarpit</b>: classic scan ports (telnet, RDP, SMB, adb…) are bound on the <b>WAN address only</b> — every connection is held open with a clamped TCP window while the scanner waits forever for data that never comes. Any connection here is hostile by definition, so sources are <b>auto-banned via CrowdSec (1 year)</b> and reported like any other attacker — no manual banning, no AbuseIPDB cross-checking needed. LAN/WireGuard sources are closed immediately and never counted. Overflow connections beyond the safety caps (256 total / 8 per IP) are dropped, not trapped, so a botnet flood can't exhaust the router. <b>Keep the threshold at 1</b>: nothing legitimate ever connects to these ports, so a single completed handshake is hostile by definition — only raise it (to 3–5) if you add a port that could plausibly see innocent traffic (e.g. 80/443).</p>
+        <p class="muted bl-note">A <b>port-garden tarpit</b>: classic scan ports (telnet, RDP, SMB, adb…) are bound on the <b>WAN addresses only (IPv4 + IPv6)</b> — every connection is held open with a clamped TCP window while the scanner waits forever for data that never comes. Any connection here is hostile by definition, so sources are <b>auto-banned via CrowdSec (1 year)</b> and reported like any other attacker — no manual banning, no AbuseIPDB cross-checking needed. LAN/WireGuard sources are closed immediately and never counted. Overflow connections beyond the safety caps (256 total / 8 per IP) are dropped, not trapped, so a botnet flood can't exhaust the router. <b>Keep the threshold at 1</b>: nothing legitimate ever connects to these ports, so a single completed handshake is hostile by definition — only raise it (to 3–5) if you add a port that could plausibly see innocent traffic (e.g. 80/443).</p>
       </div>
 
       <div class="card card-mt">
@@ -2516,7 +2516,7 @@
 
 <script src="/scripts/leaflet.js"></script>
 <script src="/scripts/qrcode.js"></script>
-<script src="/scripts/dashboard.js?v=202610032206"></script>
+<script src="/scripts/dashboard.js?v=202610040300"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>

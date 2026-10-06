@@ -3025,7 +3025,7 @@
     els.secHoneyThreshold.value = conf.ban_threshold || 1;
 
     if (st.listening) {
-      els.secHoneyHint.textContent = `active on ${st.wan_ip} · ports ${(st.ports || []).join(", ")}`;
+      els.secHoneyHint.textContent = `active on ${st.wan_ip}${st.wan_ip6 ? " / " + st.wan_ip6 : ""} · ports ${(st.ports || []).join(", ")}`;
       els.secHoneyToggle.textContent = "Disable";
       els.secHoneyToggle.className = "btn btn-sm btn-danger";
     } else {
