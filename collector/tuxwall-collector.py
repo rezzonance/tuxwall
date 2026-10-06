@@ -366,11 +366,16 @@ class Store:
             self._conn.commit()
         return counts
 
-    def top_bans(self, min_severity=0, tier=None, limit=500):
-        """Aggregate ban rows ordered by hit count.
+    def top_bans(self, min_severity=0, tier=None, limit=500, before=None,
+                 order="hits"):
+        """Aggregate ban rows ordered by hit count (default) or newest first.
 
         min_severity: keep rows at rank >= this (a "at least this bad" filter).
         tier:         keep only rows whose severity is EXACTLY this tier.
+        before:       keyset cursor (last_seen, ip) - return only rows older
+                      than it. Stable under inserts: browsing page 2 never
+                      re-shows or skips rows when new bans arrive mid-browse.
+        order:        "hits" (default) or "recent" (last_seen DESC, ip DESC).
         """
         tier_constraints = {
             SEVERITY_LOW: "(r.hits < 50 AND c.reporters < 2)",
@@ -384,6 +389,9 @@ class Store:
         args = [time.time() - RETENTION_DAYS * 86400]
         if tier in tier_constraints:
             where.append(tier_constraints[tier])
+        if before is not None:
+            where.append("(r.last_seen, r.ip) < (?, ?)")
+            args += [before[0], before[1]]
         with self.lock:
             cur = self._conn.execute(
                 "WITH counts AS (SELECT ip, COUNT(*) AS reporters"
@@ -393,7 +401,9 @@ class Store:
                 " COALESCE(c.reporters, 0) AS reporters"
                 " FROM reports r LEFT JOIN counts c ON c.ip = r.ip"
                 " WHERE " + " AND ".join(where)
-                + " ORDER BY r.hits DESC LIMIT ?",
+                + (" ORDER BY r.last_seen DESC, r.ip DESC LIMIT ?"
+                   if order == "recent" else
+                   " ORDER BY r.hits DESC LIMIT ?"),
                 tuple(args) + (limit,))
             rows = cur.fetchall()
         bans = []
@@ -591,6 +601,51 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/healthz":
             self._ok_json(service="tuxwall-collector",
                           stats=_store().stats())
+            return
+        if path == "/api/public/bans/more":
+            # Load-more fragment for the /bans table: keyset pagination.
+            # Public like the table it feeds; the /api/public/ nginx
+            # location's rate limit applies. Requires a valid cursor.
+            try:
+                before = float((params.get("before") or ["0"])[0])
+            except (TypeError, ValueError):
+                before = 0.0
+            cursor_ip = ((params.get("ip") or [""])[0] or "").strip()
+            try:
+                if cursor_ip and ipaddress.ip_address(cursor_ip).version not in (4, 6):
+                    cursor_ip = ""
+            except ValueError:
+                cursor_ip = ""
+            if not before or not cursor_ip:
+                self._json(400, {"ok": False,
+                                 "error": "Valid before+ip cursor required"})
+                return
+            try:
+                sev = (params.get("severity") or ["all"])[0] or "all"
+                if sev != "all":
+                    severity_rank(sev)
+            except Exception:
+                sev = "all"
+            rank = 0 if sev == "all" else max(0, severity_rank(sev))
+            tier = sev if sev != "all" else None
+            PAGE = 2000
+            bans = _store().top_bans(min_severity=rank, tier=tier, limit=PAGE + 1,
+                                     order="recent", before=(before, cursor_ip))
+            more = len(bans) > PAGE
+            bans = bans[:PAGE]
+            # hit-bar scaling: consistent with the page, use the global max
+            top1 = _store().top_bans(limit=1)
+            max_hits = (top1[0]["hits"] if top1 else 1) or 1
+            now = time.time()
+            rows = "".join(_bans_row_html(b, max_hits, now) for b in bans)
+            out = {"ok": True, "count": len(bans), "more": more,
+                   "rows": rows}
+            if more and bans:
+                # exact float repr - %.6f can round UP, which would make
+                # the cursor row itself compare as "older" and duplicate
+                out["next_before"] = str(bans[-1]["last_seen"] or 0)
+                out["next_ip"] = bans[-1]["ip"]
+            self._json(200, out)
             return
         if path == "/api/public/bans":
             try:
@@ -873,6 +928,38 @@ def _bar_list(pairs, label_fn):
         for k, v in pairs)
 
 
+def _bans_row_html(b, max_hits, now):
+    """One <tr> of the /bans table. Shared by the page render and the
+    load-more fragment endpoint so appended rows match exactly."""
+    loc = " • ".join(x for x in (b["city"], b["country"]) if x) or "Unknown"
+    isp = _esc(b["isp"] or "")
+    search = " ".join(x for x in (b["ip"], b["city"], b["country"], b["iso"],
+                                  b["isp"], b["asn"], b["severity"]) if x).lower()
+    try:
+        a = ipaddress.ip_address(b["ip"])
+        ip_key = "%d-%s" % (a.version, a.packed.hex().zfill(32))
+    except ValueError:
+        ip_key = b["ip"]
+    try:
+        sev_key = severity_rank(b["severity"])
+    except ValueError:
+        sev_key = 0
+    return (
+        f"<tr data-search='{_esc(search)}'>"
+        f"<td class='mono' data-v='{ip_key}'><a class='ip-link' href='/ip/{_esc(b['ip'])}'>{_esc(b['ip'])}</a></td>"
+        f"<td data-v='{sev_key}'>{render_severity_badge(b['severity'])}</td>"
+        f"<td class='hits-cell' data-v='{int(b['hits'] or 0)}'><span class='hits-n'>{fmt_num(b['hits'])}</span>"
+        f"<span class='hits-bar'><i style='width:{b['hits'] * 100.0 / max_hits:.0f}%'></i></span></td>"
+        f"<td class='num-cell' data-v='{int(b['reporters'] or 0)}'>{fmt_num(b['reporters'])}</td>"
+        f"<td data-v='{_esc(loc.lower())}'><span class='flag'>{_flag_emoji(b['iso'])}</span> {_esc(loc)}</td>"
+        f"<td class='muted isp-cell' title='{isp}' data-v='{isp.lower()}'>{isp or '—'}"
+        + (f" <span class='asn'>AS{_esc(b['asn'])}</span>" if b.get('asn') else "")
+        + "</td>"
+        f"<td class='mono muted' title='{_fmt_utc(b['last_seen'])}' data-v='{float(b['last_seen'] or 0):.0f}'>{fmt_ago(b['last_seen'], now)}</td>"
+        "</tr>"
+    )
+
+
 def render_bans_page(sev="all"):
     # Every active ban, used for the page-wide aggregates (distribution,
     # countries, networks). The table itself shows the top 100 for the
@@ -888,11 +975,11 @@ def render_bans_page(sev="all"):
     # Capped at 500 rows for page weight; the aggregates above still use
     # the full set. Was: top 100 by hits, which hid new single-hit bans
     # below the cut even though the txt list and JSON API carried them.
-    rows = sorted(all_bans,
-                  key=lambda b: (b.get("last_seen") or 0), reverse=True)
+    rows_all = sorted(all_bans,
+                     key=lambda b: (b.get("last_seen") or 0), reverse=True)
     if sev != "all":
-        rows = [b for b in rows if b["severity"] == sev]
-    bans = rows[:500]
+        rows_all = [b for b in rows_all if b["severity"] == sev]
+    bans = rows_all[:2000]
     stats = _store().stats()
     now = time.time()
 
@@ -919,39 +1006,24 @@ def render_bans_page(sev="all"):
     n_countries = len({b["iso"] for b in all_bans if b["iso"]})
     last_ts = max((b["last_seen"] or 0 for b in all_bans), default=0)
 
-    rows = []
     max_hits = max((b["hits"] for b in bans), default=1) or 1
-    for b in bans:
-        loc = " • ".join(x for x in (b["city"], b["country"]) if x) or "Unknown"
-        isp = _esc(b["isp"] or "")
-        search = " ".join(x for x in (b["ip"], b["city"], b["country"], b["iso"],
-                                      b["isp"], b["asn"], b["severity"]) if x).lower()
-        try:
-            a = ipaddress.ip_address(b["ip"])
-            ip_key = "%d-%s" % (a.version, a.packed.hex().zfill(32))
-        except ValueError:
-            ip_key = b["ip"]
-        try:
-            sev_key = severity_rank(b["severity"])
-        except ValueError:
-            sev_key = 0
-        rows.append(
-            f"<tr data-search='{_esc(search)}'>"
-            f"<td class='mono' data-v='{ip_key}'><a class='ip-link' href='/ip/{_esc(b['ip'])}'>{_esc(b['ip'])}</a></td>"
-            f"<td data-v='{sev_key}'>{render_severity_badge(b['severity'])}</td>"
-            f"<td class='hits-cell' data-v='{int(b['hits'] or 0)}'><span class='hits-n'>{fmt_num(b['hits'])}</span>"
-            f"<span class='hits-bar'><i style='width:{b['hits'] * 100.0 / max_hits:.0f}%'></i></span></td>"
-            f"<td class='num-cell' data-v='{int(b['reporters'] or 0)}'>{fmt_num(b['reporters'])}</td>"
-            f"<td data-v='{_esc(loc.lower())}'><span class='flag'>{_flag_emoji(b['iso'])}</span> {_esc(loc)}</td>"
-            f"<td class='muted isp-cell' title='{isp}' data-v='{isp.lower()}'>{isp or '—'}"
-            + (f" <span class='asn'>AS{_esc(b['asn'])}</span>" if b.get('asn') else "")
-            + "</td>"
-            f"<td class='mono muted' title='{_fmt_utc(b['last_seen'])}' data-v='{float(b['last_seen'] or 0):.0f}'>{fmt_ago(b['last_seen'], now)}</td>"
-            "</tr>"
-        )
-    body = "".join(rows) or (
+    body = "".join(_bans_row_html(b, max_hits, now) for b in bans) or (
         "<tr><td colspan='7' class='empty'>No community bans yet. "
         "Installations that opt in to ban reporting will appear here.</td></tr>")
+    # Keyset pagination: the rendered slice ends at (last_seen, ip) of its
+    # last row; older rows load on demand. Aggregates above stay full-set.
+    loadmore = ""
+    if len(rows_all) > len(bans) and bans:
+        last = bans[-1]
+        remaining = len(rows_all) - len(bans)
+        loadmore = (
+            "<div class='load-more' id='loadMoreWrap' "
+            "style='text-align:center;padding:18px 0 8px;'>"
+            "<button type='button' id='loadMoreBtn' "
+            "class='filter-badge' "
+            f"data-before='{last['last_seen'] or 0}' "
+            f"data-ip='{_esc(last['ip'])}' data-sev='{_esc(sev)}'>"
+            f"Load more ({fmt_num(remaining)} older)</button></div>")
     filters = "".join(
         _filter_badge(s, (s.title() if s != "all" else "All")
                       + " <span class='cnt'>%s</span>" % fmt_num(
@@ -974,6 +1046,7 @@ def render_bans_page(sev="all"):
             .replace("__SHOWING__", showing)
             .replace("__FILTERS__", filters)
             .replace("__ROWS__", body)
+            .replace("__LOADMORE__", loadmore)
             .replace("__GENERATED__",
                      datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
             .replace("__PAGE_CSS__", PAGE_CSS))
@@ -1493,6 +1566,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           </tbody>
         </table>
       </div>
+      __LOADMORE__
     </section>
   </main>
 
@@ -1511,14 +1585,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     // Instant client-side table filter
     (function () {
       const input = document.getElementById('banSearch');
-      const rows = Array.from(document.querySelectorAll('#banTable tbody tr[data-search]'));
       const none = document.querySelector('#banTable .no-match');
       const count = document.getElementById('tableCount');
-      const initial = count.textContent;
-      if (!input || !rows.length) return;
+      const initial = count ? count.textContent : '';
+      if (!input) return;
       input.addEventListener('input', () => {
         const q = input.value.trim().toLowerCase();
         let shown = 0;
+        // re-query on every input so load-more appended rows filter too
+        const rows = Array.from(document.querySelectorAll('#banTable tbody tr[data-search]'));
         rows.forEach(r => {
           const hit = !q || r.dataset.search.includes(q);
           r.style.display = hit ? '' : 'none';
@@ -1562,6 +1637,38 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           label.textContent = 'sorted by ' + th.textContent.trim().toLowerCase() +
                               (dir === 'ascending' ? ' ↑' : ' ↓');
         });
+      });
+    })();
+    // Load older rows on demand (keyset pagination - stable under inserts)
+    (function () {
+      const btn = document.getElementById('loadMoreBtn');
+      const wrap = document.getElementById('loadMoreWrap');
+      if (!btn || !wrap) return;
+      const tbody = document.getElementById('banTable').tBodies[0];
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        const label = btn.textContent;
+        btn.textContent = 'Loading…';
+        try {
+          const u = '/api/public/bans/more?before=' + encodeURIComponent(btn.dataset.before)
+                  + '&ip=' + encodeURIComponent(btn.dataset.ip)
+                  + '&severity=' + encodeURIComponent(btn.dataset.sev);
+          const r = await fetch(u);
+          const d = await r.json();
+          if (!d.ok) throw new Error(d.error || 'failed');
+          if (d.rows) tbody.insertAdjacentHTML('beforeend', d.rows);
+          if (d.more && d.next_before != null) {
+            btn.dataset.before = d.next_before;
+            btn.dataset.ip = d.next_ip;
+            btn.disabled = false;
+            btn.textContent = 'Load more';
+          } else {
+            wrap.parentNode.removeChild(wrap);
+          }
+        } catch (e) {
+          btn.disabled = false;
+          btn.textContent = label + ' (retry)';
+        }
       });
     })();
   </script>
