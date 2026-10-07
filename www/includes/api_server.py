@@ -2790,7 +2790,13 @@ def _save_reported_ban_ids(ids):
 
 
 def ban_report_watcher():
-    """Report non-dashboard CrowdSec decisions to tuxwall.org, once each."""
+    """Report non-dashboard CrowdSec decisions to tuxwall.org, once each.
+
+    Never reports the router's own WAN addresses: the CrowdSec engine can
+    capture the router itself (e.g. its http-crawl scenario watching the
+    nginx log can flag the router's own rapid fetches of its community
+    site), and a self-capture must never reach the public community list.
+    """
     while True:
         time.sleep(BAN_REPORT_INTERVAL)
         try:
@@ -2820,6 +2826,10 @@ def ban_report_watcher():
                                         # reports those correctly at add time)
                     ip = value[3:]
                     if simulated or source not in BAN_REPORT_SOURCES:
+                        reported.add(dec_id)
+                        continue
+                    if ip in (_honey_wan_ip(), _honey_wan6()):
+                        # our own address (engine self-capture) - never report
                         reported.add(dec_id)
                         continue
                     if any(reason.startswith(p) for p in BAN_REPORT_SKIP_REASONS):
