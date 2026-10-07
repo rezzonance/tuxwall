@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.9.1
+Version: 2.9.2
 Section: admin
 Priority: optional
 Architecture: all
@@ -369,3 +369,29 @@ Description: TuxWall Network Firewall Dashboard
  v2.8.0 the System Info card reads /api/system directly and the
  /api/system/fastfetch endpoint degrades gracefully when the binary
  is absent, so nothing requires it. No dashboard changes.
+ .
+ v2.9.2 hardens DNS for fresh installs and restores the deception layer.
+ Fresh installs now receive the universal unbound configs (unix-socket
+ control - without it every tuxwall hot-reload path fails, DNSSEC trust
+ anchor, control-plane logging, local domains) installed-if-absent like
+ router-dns.conf, never clobbering hand-tuned files; and unbound ships
+ with a start-limit override so a transient bind failure (optional
+ interface address absent at restart, e.g. unplugged link or VPN down)
+ self-heals the moment the address returns instead of wedging LAN-wide
+ DNS permanently - observed live on 2026-10-06, where an unplugged
+ worknet link plus an unattended-upgrades restart took down all DNS
+ until manual console recovery. The Deception Canary card returns from
+ the 2.9.1 rollback with enable/disable (bind-first: rules open only
+ for ports the emulators actually bound; disable closes exactly the
+ canary's ports), stat-card counters matching the honeypot grid
+ including a Creds Captured counter (SSH login attempts with captured
+ username+password), and the token-gated loopback webhook receiver
+ with self/LAN guards and dedupe feeding the same CrowdSec ban +
+ community-report pipeline. The canary deployment ships from
+ scripts/opencanary/ with every live-deploy lesson baked in: scapy
+ installed explicitly (not a default dependency of the opencanary
+ package - without it the SNMP module never binds), AF_NETLINK
+ allowed for scapy route lookups, config rendered root:opencanary
+ 0640 with the current WAN address (never hardcoded), UMask=0027 so
+ captured credentials never land world-readable. Dashboard api_server
+ remains pure-stdlib Python (Depends unchanged: python3).

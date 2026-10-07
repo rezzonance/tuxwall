@@ -12,6 +12,7 @@ ExecStart=/opt/opencanary/bin/twistd -noy /opt/opencanary/bin/opencanary.tac --p
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 LogsDirectory=opencanary
+UMask=0027
 RuntimeDirectory=opencanary
 ProtectSystem=strict
 ReadWritePaths=/etc/opencanaryd /var/log/opencanary

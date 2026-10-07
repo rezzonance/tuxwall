@@ -62,6 +62,10 @@ systemctl is-active --quiet tuxwall.service || {
 }
 
 echo "== 5/6 start the canary =="
+# The log holds captured attack credentials - root/group readable only
+[ -f /var/log/opencanary/opencanary.log ] && \
+    chmod 0640 /var/log/opencanary/opencanary.log
+
 systemctl daemon-reload
 systemctl enable --now opencanary.service
 sleep 5
