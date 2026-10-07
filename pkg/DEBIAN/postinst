@@ -167,6 +167,70 @@ RADVD
       echo "   installed basic radvd config ($LAN_IF, ULA $_ula::/64)"
     fi
 
+    # Router base: resolv.conf + forwarding + WAN NAT. Same guarded
+    # style as everything above: each piece only lands when absent or
+    # still in the stock state, never over an admin's deliberate change.
+    # Without these a fresh install resolves (via the systemd-resolved
+    # stub, bypassing unbound) but ROUTES nothing: no ip_forward, no NAT.
+    WAN_IF="$(ip route show default 2>/dev/null | awk '{print $5; exit}')"
+
+    # 1. Point the router's own resolver at unbound. Only rewrite when the
+    #    file is still the stock resolved stub - a hand-pointed resolv.conf
+    #    (upstream resolver, VPN DNS, etc.) is left untouched.
+    if grep -qs '127.0.0.53' /etc/resolv.conf 2>/dev/null; then
+      systemctl disable --now systemd-resolved >/dev/null 2>&1 || true
+      systemctl disable systemd-resolved-varlink.socket \
+                          systemd-resolved-monitor.socket >/dev/null 2>&1 || true
+      printf 'nameserver 127.0.0.1\nnameserver ::1\nsearch home.arpa\n' \
+        > /etc/resolv.conf
+      echo "   systemd-resolved retired; resolv.conf -> unbound"
+    fi
+
+    # 2. Packet forwarding (v4 + v6): persisted and applied now.
+    for k in net.ipv4.ip_forward net.ipv6.conf.all.forwarding; do
+      if ! grep -qsE "^${k//./\.} *= *1" /etc/sysctl.d/99-tuxwall-router.conf 2>/dev/null; then
+        echo "$k=1" >> /etc/sysctl.d/99-tuxwall-router.conf
+      fi
+      sysctl -w "$k=1" >/dev/null 2>&1 || true
+    done
+    # ufw's own sysctl handling must agree (ufw reloads apply these)
+    grep -q '^net/ipv4/ip_forward' /etc/ufw/sysctl.conf 2>/dev/null || \
+      echo 'net/ipv4/ip_forward=1' >> /etc/ufw/sysctl.conf
+    grep -q '^net/ipv6/conf/all/forwarding' /etc/ufw/sysctl.conf 2>/dev/null || \
+      echo 'net/ipv6/conf/all/forwarding=1' >> /etc/ufw/sysctl.conf
+    # Route policy: keep ufw's default-deny routed posture and open
+    # exactly one explicit route allow (LAN -> WAN), matching the
+    # audited production design - never a blanket default allow routed.
+    LAN_IF_D=""; WAN_IF_D="$WAN_IF"
+    while read -r _if _ip; do
+      [[ -n "$LAN_IF_D" || "$_if" == "$WAN_IF_D" || "$_if" == "wg0" ]] && continue
+      case "$_ip" in
+        192.168.*|10.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) LAN_IF_D="$_if" ;;
+      esac
+    done < <(ip -4 -o addr show 2>/dev/null | awk '{print $2, $4}')
+    if [[ -n "$LAN_IF_D" && -n "$WAN_IF_D" ]] \
+       && ! ufw status 2>/dev/null | grep -q "on $LAN_IF_D.*out on $WAN_IF_D"; then
+      ufw route allow in on "$LAN_IF_D" out on "$WAN_IF_D" \
+        comment 'tuxwall: LAN -> WAN' >/dev/null 2>&1 || true
+    fi
+    echo "   IP forwarding enabled (v4 + v6, route: $LAN_IF_D -> $WAN_IF_D)"
+
+    # 3. WAN masquerade, persisted the ufw-native way: a *nat block at the
+    #    top of before.rules, which ufw itself applies on every boot and
+    #    reload - survives reboots without any extra restore mechanism.
+    if [[ -n "$WAN_IF" && -f /etc/ufw/before.rules ]] \
+       && ! grep -q '^\*nat' /etc/ufw/before.rules; then
+      cp -a /etc/ufw/before.rules /etc/ufw/before.rules.tuxwall-bak 2>/dev/null || true
+      sed -i '1i\
+*nat\
+:POSTROUTING ACCEPT [0:0]\
+-A POSTROUTING -o '"$WAN_IF"' -j MASQUERADE\
+COMMIT\
+' /etc/ufw/before.rules
+      ufw reload >/dev/null 2>&1 || true
+      echo "   WAN masquerade added to ufw before.rules ($WAN_IF)"
+    fi
+
     # Forwarder for fresh installs only. Never touch an existing
     # router-dns.conf - it may hold a full hand-tuned server config.
     if ! grep -qs '^forward-zone:' /etc/unbound/unbound.conf.d/*.conf /etc/unbound/unbound.conf 2>/dev/null; then

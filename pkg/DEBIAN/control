@@ -405,4 +405,14 @@ Description: TuxWall Network Firewall Dashboard
  manual-config hint. Reference versions of every config ship on
  tuxwall.org/configs. CrowdSec, Suricata (guarded af-packet/HOME_NET
  tuner + daily rule updates) and avahi (mDNS reflector, WAN denied)
- were already auto-configured by earlier releases.
+ were already auto-configured by earlier releases. The router base is
+ now completed for the .deb path too: systemd-resolved is retired and
+ /etc/resolv.conf points at unbound (only when still the stock resolved
+ stub - a hand-pointed resolver is never clobbered), IPv4/IPv6
+ forwarding is enabled (persisted in /etc/sysctl.d and ufw's sysctl
+ config), and the WAN masquerade is persisted the ufw-native way (a
+ *nat block in before.rules, applied by ufw itself on every boot and
+ reload) with exactly one explicit route allow LAN -> WAN so ufw's
+ default-deny routed posture is preserved. A fresh .deb install now
+ resolves through its own filtered DNS, routes packets, and NATs the
+ LAN from first boot.
