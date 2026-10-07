@@ -38,6 +38,32 @@ include: "/var/lib/unbound/blocklist.conf"
 include: "/var/lib/unbound/client-bans.conf"
 EOF
 
+    # Universal unbound configs: install only when absent, never clobber
+    # (same rule as router-dns.conf). Without these, a fresh install has no
+    # control socket (every tuxwall hot-reload path fails), no DNSSEC
+    # validation, no local domains, and no control-plane logging.
+    for f in remote-control.conf root-auto-trust-anchor-file.conf \
+             log-local-actions.conf 98-local-domains.conf; do
+      if [[ ! -s "/etc/unbound/unbound.conf.d/$f" ]]; then
+        cp "/usr/share/tuxwall/unbound/$f" "/etc/unbound/unbound.conf.d/$f"
+        echo "   installed $f (was absent)"
+      fi
+    done
+
+    # Resilience drop-in: unbound must never hit systemd's start limit.
+    # A transient bind failure (optional interface address absent at
+    # restart) must self-heal when the address returns, not wedge DNS
+    # permanently (observed live 2026-10-06: unplugged worknet link +
+    # unattended-upgrades restart = LAN-wide DNS outage until manual
+    # console recovery).
+    if [[ ! -f /etc/systemd/system/unbound.service.d/tuxwall-resilience.conf ]]; then
+      mkdir -p /etc/systemd/system/unbound.service.d
+      cp /usr/share/tuxwall/unbound/tuxwall-resilience.conf \
+         /etc/systemd/system/unbound.service.d/tuxwall-resilience.conf
+      systemctl daemon-reload || true
+      echo "   installed unbound start-limit resilience override"
+    fi
+
     # Forwarder for fresh installs only. Never touch an existing
     # router-dns.conf - it may hold a full hand-tuned server config.
     if ! grep -qs '^forward-zone:' /etc/unbound/unbound.conf.d/*.conf /etc/unbound/unbound.conf 2>/dev/null; then
