@@ -64,6 +64,109 @@ EOF
       echo "   installed unbound start-limit resilience override"
     fi
 
+    # Basic working Kea DHCP + radvd (IPv6 RA) configs for fresh installs -
+    # the same install-if-absent rule as router-dns.conf and the universal
+    # unbound configs. Both detect the LAN interface; the dashboard's DHCP
+    # page manages Kea thereafter via its API. Reference versions of every
+    # config live on tuxwall.org/configs.
+    LAN_IF=""; LAN_IP=""; LAN_SUBNET=""
+    WAN_IF="$(ip route show default 2>/dev/null | awk '{print $5; exit}')"
+    while read -r _if _ip; do
+      [[ -n "$LAN_IF" || "$_if" == "$WAN_IF" || "$_if" == "wg0" ]] && continue
+      case "$_ip" in
+        192.168.*|10.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) LAN_IF="$_if"; LAN_IP="$_ip" ;;
+      esac
+    done < <(ip -4 -o addr show 2>/dev/null | awk '{print $2, $4}')
+    if [[ -n "$LAN_IF" && -n "$LAN_IP" ]]; then
+      LAN_SUBNET="$(python3 -c "import ipaddress; print(ipaddress.ip_network('${LAN_IP}', strict=False))" 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$LAN_SUBNET" && ! -s /etc/kea/kea-dhcp4.conf ]]; then
+      _base="${LAN_SUBNET%/*}"; _base="${_base%.*}"
+      _mask="$(python3 -c "import ipaddress; print(ipaddress.ip_network('${LAN_SUBNET}').netmask)" 2>/dev/null || echo 255.255.255.0)"
+      _netip="${LAN_IP%/*}"
+      TMP="$(mktemp)"
+      cat > "$TMP" <<KEA
+{
+  "Dhcp4": {
+    "interfaces-config": {
+      "interfaces": [ "$LAN_IF" ]
+    },
+    "valid-lifetime": 7200,
+    "renew-timer": 3600,
+    "rebind-timer": 6300,
+    "lease-database": {
+      "type": "memfile",
+      "lfc-interval": 3600,
+      "persist": true,
+      "name": "/var/lib/kea/dhcp4.leases"
+    },
+    "control-socket": {
+      "socket-type": "unix",
+      "socket-address": "/run/kea/kea4-ctrl-socket"
+    },
+    "subnet4": [
+      {
+        "subnet": "$LAN_SUBNET",
+        "pools": [ { "pool": "$_base.100 - $_base.199" } ],
+        "option-data": [
+          { "name": "domain-name-servers", "data": "$_netip" },
+          { "name": "domain-name", "data": "housenetwork.site" },
+          { "name": "routers", "data": "$_netip" },
+          { "name": "subnet-mask", "data": "$_mask" }
+        ]
+      }
+    ],
+    "loggers": [
+      { "name": "kea-dhcp4", "output_options": [ { "output": "syslog" } ], "severity": "INFO" }
+    ]
+  }
+}
+KEA
+      # kea runs as the _kea/kea group and must be able to read its config
+      _keagrp=""
+      getent group _kea >/dev/null 2>&1 && _keagrp="_kea"
+      getent group kea   >/dev/null 2>&1 && _keagrp="kea"
+      if [[ -n "$_keagrp" ]]; then
+        install -o root -g "$_keagrp" -m 0640 "$TMP" /etc/kea/kea-dhcp4.conf
+      else
+        install -o root -g root -m 0644 "$TMP" /etc/kea/kea-dhcp4.conf
+      fi
+      rm -f "$TMP"
+      systemctl enable --now kea-dhcp4-server >/dev/null 2>&1 || true
+      echo "   installed basic Kea DHCP config ($LAN_IF, $LAN_SUBNET, pool $_base.100-$_base.199)"
+    fi
+
+    if [[ -n "$LAN_IF" && ! -s /etc/radvd.conf ]]; then
+      # Random RFC 4193 ULA /48 global id (stable once written - this file
+      # is never regenerated after the first install)
+      _gid="$(od -An -tx1 -N5 /dev/urandom 2>/dev/null | tr -d ' \n')"
+      [[ ${#_gid} -ne 10 ]] && _gid="0011223344"
+      _ula="fd${_gid:0:2}:${_gid:2:4}:${_gid:6:4}"
+      TMP="$(mktemp)"
+      cat > "$TMP" <<RADVD
+interface $LAN_IF
+{
+    AdvSendAdvert on;
+    MinRtrAdvInterval 30;
+    MaxRtrAdvInterval 100;
+    AdvManagedFlag off;
+    AdvOtherConfigFlag off;
+    prefix $_ula::/64
+    {
+        AdvOnLink on;
+        AdvAutonomous on;
+        AdvRouterAddr on;
+    };
+    RDNSS $_ula::1 { };
+};
+RADVD
+      install -o root -g root -m 0644 "$TMP" /etc/radvd.conf
+      rm -f "$TMP"
+      systemctl enable --now radvd >/dev/null 2>&1 || true
+      echo "   installed basic radvd config ($LAN_IF, ULA $_ula::/64)"
+    fi
+
     # Forwarder for fresh installs only. Never touch an existing
     # router-dns.conf - it may hold a full hand-tuned server config.
     if ! grep -qs '^forward-zone:' /etc/unbound/unbound.conf.d/*.conf /etc/unbound/unbound.conf 2>/dev/null; then
@@ -261,8 +364,8 @@ PY
     echo "Optional extras:"
     echo "  - Security (attack map):   sudo bash /var/www/html/scripts/geoip-setup.sh"
     echo "  - AI threat summaries:     edit /etc/tuxwall/llm.json"
-    echo "  - Kea DHCP leases page:    configure /etc/kea/kea-dhcp4.conf and run"
-    echo "                              sudo systemctl enable --now kea-dhcp4-server"
+    echo "  - Kea DHCP leases page:    auto-configured on fresh installs (pool .100-.199);"
+    echo "                              manage it from the dashboard DHCP page"
     echo
     ;;
 esac

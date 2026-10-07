@@ -394,4 +394,15 @@ Description: TuxWall Network Firewall Dashboard
  allowed for scapy route lookups, config rendered root:opencanary
  0640 with the current WAN address (never hardcoded), UMask=0027 so
  captured credentials never land world-readable. Dashboard api_server
- remains pure-stdlib Python (Depends unchanged: python3).
+ remains pure-stdlib Python (Depends unchanged: python3). Fresh installs
+ also receive basic working Kea DHCP and radvd configs (same
+ install-if-absent rule): Kea gets the detected LAN interface, its
+ subnet, a .100-.199 pool and the gateway as DNS/router (ownership
+ fixed for the kea service group, service enabled); radvd gets a
+ stable random RFC 4193 ULA /64 on the detected LAN interface with
+ RDNSS pointing at the gateway's ULA - so a fresh install hands out
+ addresses on both stacks from first boot instead of printing a
+ manual-config hint. Reference versions of every config ship on
+ tuxwall.org/configs. CrowdSec, Suricata (guarded af-packet/HOME_NET
+ tuner + daily rule updates) and avahi (mDNS reflector, WAN denied)
+ were already auto-configured by earlier releases.
