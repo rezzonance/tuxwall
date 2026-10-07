@@ -1276,6 +1276,30 @@
 
       <div class="card card-mt">
         <div class="card-head">
+          <h2>Deception Canary</h2>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            <span class="muted" id="sec-canary-hint"></span>
+            <button id="sec-canary-toggle" class="btn btn-sm" type="button">Enable</button>
+          </div>
+        </div>
+        <div class="honey-stats">
+          <div class="honey-stat trapped"><div class="honey-stat-value" id="sec-canary-events">—</div><div class="honey-stat-label">Events (24h)</div></div>
+          <div class="honey-stat unique"><div class="honey-stat-value" id="sec-canary-sources">—</div><div class="honey-stat-label">Sources (24h)</div></div>
+          <div class="honey-stat held"><div class="honey-stat-value" id="sec-canary-creds">—</div><div class="honey-stat-label">Creds Captured</div></div>
+          <div class="honey-stat banned"><div class="honey-stat-value" id="sec-canary-bans">—</div><div class="honey-stat-label">Canary Bans</div></div>
+        </div>
+        <div id="sec-canary-summary" class="muted" style="padding:0 16px 8px;"></div>
+        <div class="table-wrap">
+          <table id="sec-canary-table">
+            <thead><tr><th style="width:110px">Time</th><th>Source</th><th style="width:170px">Service</th><th style="width:70px">Port</th><th>Detail</th></tr></thead>
+            <tbody id="sec-canary-body"></tbody>
+          </table>
+        </div>
+        <p class="muted bl-note">The <b>OpenCanary</b> deception emulators — SSH, VNC, MSSQL, Redis, SNMP — bound on the <b>WAN address only</b>, running as a sandboxed service user. Any interaction is hostile by definition (nothing legitimate connects to services that do not exist), so sources are <b>auto-banned via CrowdSec (1 year)</b> and community-reported. The SSH canary on port 22 <b>captures the credentials bruteforcers spray</b> — usernames and passwords appear in the Detail column; they are attacker-submitted guesses at your router, not real credentials. <b>Enable</b> starts the service and opens WAN rules only for the ports it actually bound; <b>Disable</b> stops it and closes exactly its ports. The full record lives at <code>/var/log/opencanary/opencanary.log</code>.</p>
+      </div>
+
+      <div class="card card-mt">
+        <div class="card-head">
           <h2>Zeek Notices</h2>
           <span class="muted" id="sec-zeek-hint">Reading /opt/zeek/logs/current/notice.log…</span>
         </div>

@@ -153,6 +153,14 @@
     secHoneyThreshold: document.getElementById("sec-honey-threshold"),
     secHoneyApply: document.getElementById("sec-honey-apply"),
     secHoneyBody: document.getElementById("sec-honey-body"),
+    secCanaryHint: document.getElementById("sec-canary-hint"),
+    secCanaryToggle: document.getElementById("sec-canary-toggle"),
+    secCanaryEvents: document.getElementById("sec-canary-events"),
+    secCanarySources: document.getElementById("sec-canary-sources"),
+    secCanaryCreds: document.getElementById("sec-canary-creds"),
+    secCanaryBans: document.getElementById("sec-canary-bans"),
+    secCanarySummary: document.getElementById("sec-canary-summary"),
+    secCanaryBody: document.getElementById("sec-canary-body"),
     secZeekDevBody: document.querySelector("#sec-zeek-dev-body"),
     secZeekDevHint: document.getElementById("sec-zeek-dev-hint"),
     secQuicBody: document.querySelector("#sec-quic-body"),
@@ -3065,6 +3073,55 @@
     } catch (err) {
       showBanner(true, "Honeypot error: " + err.message);
     }
+  }
+
+  function renderCanary(c) {
+    if (!c.ok) {
+      els.secCanaryHint.textContent = "unavailable";
+      return;
+    }
+    const ports = (c.modules || []).map((m) => `${esc(m.name)}:${m.port}`).join(" · ");
+    els.secCanaryHint.textContent = c.active
+      ? `active · ${ports}`
+      : (c.hint || "disabled");
+    els.secCanaryToggle.textContent = c.active ? "Disable" : "Enable";
+    els.secCanaryToggle.className = "btn btn-sm " + (c.active ? "btn-danger" : "btn-primary");
+    els.secCanaryEvents.textContent = formatNumber(c.events_24h || 0);
+    els.secCanarySources.textContent = formatNumber(c.sources_24h || 0);
+    els.secCanaryCreds.textContent = formatNumber(c.creds_24h || 0);
+    els.secCanaryBans.textContent = formatNumber(c.bans_active || 0);
+    els.secCanarySummary.textContent = (c.events_24h || c.bans_active)
+      ? `last banned: ${esc(c.last_ban_ip || "—")}`
+      : "No canary events yet - the emulators are listening.";
+    const evs = c.events || [];
+    els.secCanaryBody.innerHTML = evs.map((e) => {
+      const cred = e.service === "ssh login attempt" ? " sev-MEDIUM" : "";
+      return `<tr><td class="muted">${formatTime(e.ts)}</td><td class="mono">${esc(e.src)}</td><td>${esc(e.service)}</td><td class="mono">${esc(e.dst_port)}</td><td class="mono${cred}">${esc(e.detail)}</td></tr>`;
+    }).join("")
+      || `<tr><td colspan="5" class="empty">No deception-service events yet.</td></tr>`;
+  }
+
+  async function refreshCanary() {
+    try {
+      renderCanary(await fetchJSON("/api/security/canary"));
+    } catch (err) { /* passive card */ }
+  }
+
+  function bindCanaryActions() {
+    els.secCanaryToggle.addEventListener("click", async () => {
+      const enabling = els.secCanaryToggle.textContent.trim() === "Enable";
+      if (enabling && !window.confirm("Enable the deception canary? Starts the emulators (SSH 22, VNC 5900, MSSQL 1433, Redis 6379, SNMP 161) on the WAN address and opens WAN rules only for the ports they bind.")) return;
+      if (!enabling && !window.confirm("Disable the deception canary? Stops the emulators and closes their WAN ports (the tarpit is unaffected).")) return;
+      els.secCanaryToggle.disabled = true;
+      try {
+        await postJSON("/api/security/canary/config", { enabled: enabling });
+        await refreshCanary();
+      } catch (err) {
+        showBanner(true, "Canary: " + err.message);
+      } finally {
+        els.secCanaryToggle.disabled = false;
+      }
+    });
   }
 
   function bindHoneypotActions() {
@@ -6871,6 +6928,7 @@
         refreshZeekQuic();
       refreshAide();
       refreshHoneypot();
+      refreshCanary();
       }
     }, SECURITY_POLL_MS);
     if (state.wgTimer) clearInterval(state.wgTimer);
@@ -7032,6 +7090,7 @@
       refreshZeekQuic();
       refreshAide();
       refreshHoneypot();
+      refreshCanary();
     } else if (state.activeView === "crowdsec") {
       refreshCrowdsec();
     }
@@ -7267,6 +7326,7 @@
         refreshZeekQuic();
       refreshAide();
       refreshHoneypot();
+      refreshCanary();
         updateSecBanAvailability();
         loadReportingSettings();
         initTrafficMonitor();
@@ -8624,6 +8684,7 @@
       refreshZeekQuic();
       refreshAide();
       refreshHoneypot();
+      refreshCanary();
       refreshCrowdsec();
       refreshCustomBlocklist();
       refreshBandwidth();
@@ -8712,6 +8773,7 @@
     bindFirewallActions();
     bindSecurityBans();
     bindAideActions();
+    bindCanaryActions();
     bindHoneypotActions();
     bindReporting();
     bindCustomBlocklist();
@@ -9326,6 +9388,7 @@
     "sec-quic-table",
     "sec-aide-table",
     "sec-honey-table",
+    "sec-canary-table",
   ];
 
   const expanded = new Map();   // tableId -> bool

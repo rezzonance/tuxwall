@@ -2461,6 +2461,296 @@ def _spawn_report(ip, reason, source, category=""):
     ).start()
 
 
+# --- OpenCanary deception services (receiver, status, control) ---------------
+# OpenCanary (systemd unit opencanary.service, /opt/opencanary) emulates
+# services on the WAN address only. Its Slack-style webhook alerts this
+# receiver; any event with a globally routable source IP is definitionally
+# hostile (nothing legitimate connects to services that do not exist), so
+# sources are auto-banned via CrowdSec and community-reported - the same
+# pipeline and the same reasoning as the tarpit.
+CANARY_TOKEN_FILE = os.path.join(BLOCKLIST_DIR, "canary-token")
+CANARY_LOG = "/var/log/opencanary/opencanary.log"
+CANARY_CONF = "/etc/opencanaryd/opencanary.conf"
+CANARY_SERVICE = "opencanary.service"
+CANARY_BAN_PREFIX = "canary/"
+CANARY_PORTS = (22, 5900, 1433, 6379)
+CANARY_SNMP_PORT = 161
+CANARY_EVENT_WINDOW = 86400
+CANARY_READ_LINES = 300
+CANARY_LOGTYPES = {
+    4000: "ssh connection",
+    4001: "ssh version exchange",
+    4002: "ssh login attempt",
+    9001: "mssql login",
+    9002: "mssql login",
+    12001: "vnc connection",
+    13001: "snmp command",
+    17001: "redis command",
+}
+CANARY_RECENT = {}
+CANARY_RECENT_TTL = 3600
+CANARY_LOCK = threading.Lock()
+
+
+def _canary_token():
+    try:
+        with open(CANARY_TOKEN_FILE, "r") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def ensure_canary_token():
+    """Create the shared webhook token on first use."""
+    tok = _canary_token()
+    if tok:
+        return tok
+    tok = secrets.token_hex(24)
+    os.makedirs(os.path.dirname(CANARY_TOKEN_FILE), exist_ok=True)
+    with open(CANARY_TOKEN_FILE, "w") as f:
+        f.write(tok)
+    try:
+        os.chmod(CANARY_TOKEN_FILE, 0o600)
+    except OSError:
+        pass
+    return tok
+
+
+def handle_canary_hit(body):
+    """Parse an OpenCanary webhook alert; ban + report global sources."""
+    fields = {}
+    atts = body.get("attachments") if isinstance(body, dict) else None
+    if isinstance(atts, list) and atts and isinstance(atts[0], dict):
+        for f in atts[0].get("fields", []) or []:
+            if isinstance(f, dict) and f.get("title") is not None:
+                fields[str(f["title"])] = f.get("value")
+    if not fields:
+        return {"ok": False, "error": "unrecognized payload"}
+    try:
+        logtype = int(fields.get("logtype") or 0)
+    except (TypeError, ValueError):
+        logtype = 0
+    ip = str(fields.get("src_host") or "").strip()
+    what = CANARY_LOGTYPES.get(logtype, "deception service event %s" % logtype)
+    if not ip:
+        return {"ok": True, "ignored": True, "message": "no source host"}
+    try:
+        if not ipaddress.ip_address(ip).is_global:
+            return {"ok": True, "ignored": True, "message": "non-global source"}
+    except ValueError:
+        return {"ok": False, "error": "invalid source host"}
+    if _honey_is_self(ip):
+        return {"ok": True, "ignored": True, "message": "self"}
+    with CANARY_LOCK:
+        last = CANARY_RECENT.get(ip)
+        now = time.time()
+        if last and now - last < CANARY_RECENT_TTL:
+            return {"ok": True, "ignored": True, "message": "recently handled"}
+        CANARY_RECENT[ip] = now
+    try:
+        subprocess.run(
+            [CROWDSEC_BIN, "decisions", "add", "--ip", ip,
+             "--duration", CUSTOM_BLOCKLIST_DURATION,
+             "--reason", "canary/" + what.replace(" ", "-")],
+            capture_output=True, text=True, timeout=CROWDSEC_TIMEOUT,
+        )
+    except Exception:
+        pass
+    _honey_log("canary: auto-banned {} ({})".format(ip, what))
+    _spawn_report(ip, "deception service: %s" % what, "canary",
+                  report_category_for(what, "canary"))
+    return {"ok": True, "banned": True, "ip": ip, "message": what}
+
+
+def _canary_event_detail(logtype, logdata):
+    """Human one-liner per event, credentials included where captured."""
+    d = logdata if isinstance(logdata, dict) else {}
+    if logtype == 4002:
+        return "creds {}/{} ({})".format(
+            d.get("USERNAME", "?"), d.get("PASSWORD", "?"),
+            str(d.get("REMOTEVERSION") or "?").split("-")[-1][:24])
+    if logtype == 17001:
+        return "CMD {} {}".format(d.get("CMD", "?"), str(d.get("ARGS", ""))[:40]).strip()
+    if logtype == 4001:
+        return str(d.get("REMOTEVERSION") or "?")[:48]
+    parts = []
+    for k in sorted(d):
+        v = str(d[k])
+        if len(v) > 40:
+            v = v[:37] + "..."
+        parts.append("{}={}".format(k, v))
+        if len(parts) >= 3:
+            break
+    return " ".join(parts) if parts else "connection"
+
+
+def build_canary():
+    """Deception-services overview: emulated ports, events (with captured
+    credentials), CrowdSec bans originated by the canary, and stat-card
+    counters matching the honeypot card's grid."""
+    active = False
+    try:
+        proc = subprocess.run(
+            ["systemctl", "is-active", CANARY_SERVICE],
+            capture_output=True, text=True, timeout=5)
+        active = (proc.stdout or "").strip() == "active"
+    except Exception:
+        pass
+
+    modules, ports = [], []
+    try:
+        with open(CANARY_CONF, "r") as f:
+            conf = json.load(f)
+        for k, v in conf.items():
+            if k.endswith(".enabled") and v:
+                name = k.rsplit(".", 1)[0]
+                modules.append({"name": name, "port": conf.get(name + ".port")})
+    except (OSError, ValueError):
+        pass
+    modules.sort(key=lambda m: m["port"] or 0)
+
+    events = []
+    total_24h = sources_24h = creds_24h = 0
+    seen = set()
+    now = time.time()
+    try:
+        with open(CANARY_LOG, "r") as f:
+            lines = f.readlines()[-CANARY_READ_LINES:]
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(e, dict) or e.get("src_host") in ("", None):
+                continue
+            ts = e.get("local_time_adjusted") or e.get("utc_time") or ""
+            try:
+                epoch = time.mktime(time.strptime(ts.split(".")[0], "%Y-%m-%d %H:%M:%S"))
+            except (ValueError, TypeError):
+                epoch = now
+            logtype = e.get("logtype")
+            if logtype in (1000, 1001, 1002, 1003, 1004, 1005):
+                continue    # service bookkeeping, not attacks
+            if now - epoch <= CANARY_EVENT_WINDOW:
+                total_24h += 1
+                seen.add(e.get("src_host"))
+                if logtype == 4002:
+                    creds_24h += 1
+            events.append({
+                "ts": epoch,
+                "src": e.get("src_host"),
+                "dst_port": e.get("dst_port"),
+                "service": CANARY_LOGTYPES.get(logtype, "event %s" % logtype),
+                "detail": _canary_event_detail(
+                    logtype, e.get("logdata") if isinstance(e.get("logdata"), dict) else {}),
+            })
+    except OSError:
+        pass
+    sources_24h = len(seen)
+    events.sort(key=lambda e: -e["ts"])
+    events = events[:25]
+
+    ban_count = 0
+    last_ban_ip = None
+    try:
+        proc = subprocess.run(
+            [CROWDSEC_BIN, "decisions", "list", "-o", "raw"],
+            capture_output=True, text=True, timeout=CROWDSEC_TIMEOUT)
+        for line in (proc.stdout or "").splitlines()[1:]:
+            parts = line.strip().split(",")
+            if len(parts) > 3 and parts[3].startswith(CANARY_BAN_PREFIX):
+                ban_count += 1
+                last_ban_ip = parts[2].replace("Ip:", "") or last_ban_ip
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "active": active,
+        "service": CANARY_SERVICE,
+        "modules": modules,
+        "events_24h": total_24h,
+        "sources_24h": sources_24h,
+        "creds_24h": creds_24h,
+        "bans_active": ban_count,
+        "last_ban_ip": last_ban_ip,
+        "events": events,
+        "hint": None if active else
+                "opencanary.service is not active - no emulators are listening",
+    }
+
+
+def _canary_can_manage():
+    """True if this host runs the canary (unit + config present)."""
+    return os.path.exists("/etc/systemd/system/opencanary.service")
+
+
+def set_canary_enabled(enabled):
+    """Enable or disable the canary service with matching firewall rules.
+
+    Enable: start the service first, then open WAN rules only for the
+    ports it actually bound (bind-first, the tarpit's invariant). Disable:
+    stop the service and close exactly its ports - the tarpit's ports and
+    every other rule stay untouched.
+    """
+    if not _canary_can_manage():
+        return {"ok": False, "error": "opencanary is not installed on this host"}
+    if enabled:
+        try:
+            subprocess.run(["systemctl", "enable", "--now", CANARY_SERVICE],
+                           capture_output=True, text=True, timeout=30)
+            time.sleep(4)     # let the emulators bind before opening rules
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        wan_ip = _honey_wan_ip()
+        opened = []
+        if wan_ip:
+            try:
+                proc = subprocess.run(
+                    ["ss", "-tln"], capture_output=True, text=True, timeout=10)
+                for line in (proc.stdout or "").splitlines():
+                    for p in CANARY_PORTS:
+                        if "{}:{}".format(wan_ip, p) in line:
+                            _ufw(["allow", "in", "on", HONEY_WAN_IFACE, "to", "any",
+                                  "port", str(p), "proto", "tcp",
+                                  "comment", "tuxwall canary"])
+                            opened.append(p)
+            except Exception:
+                pass
+        if os.popen("ss -uln 2>/dev/null | grep ':161 '").read().strip():
+            _ufw(["allow", "in", "on", HONEY_WAN_IFACE, "to", "any",
+                  "port", str(CANARY_SNMP_PORT), "proto", "udp",
+                  "comment", "tuxwall canary snmp"])
+            opened.append(CANARY_SNMP_PORT)
+        _honey_log("canary enabled (ports {})".format(opened))
+        return {"ok": True, "enabled": True, "ports": opened}
+    else:
+        try:
+            subprocess.run(["systemctl", "disable", "--now", CANARY_SERVICE],
+                           capture_output=True, text=True, timeout=30)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        closed = []
+        for p in CANARY_PORTS:
+            try:
+                _ufw(["delete", "allow", "in", "on", HONEY_WAN_IFACE, "to", "any",
+                      "port", str(p), "proto", "tcp"])
+                closed.append(p)
+            except Exception:
+                pass
+        try:
+            _ufw(["delete", "allow", "in", "on", HONEY_WAN_IFACE, "to", "any",
+                  "port", str(CANARY_SNMP_PORT), "proto", "udp"])
+            closed.append(CANARY_SNMP_PORT)
+        except Exception:
+            pass
+        _honey_log("canary disabled (ports closed: {})".format(closed))
+        return {"ok": True, "enabled": False, "ports": closed}
+
+
 # --- Community reporting bridge for non-dashboard bans -----------------------
 # Reporting previously fired only from dashboard actions (manual bans,
 # blocklist adds, honeypot auto-bans, the Report button). Bans created
@@ -9849,6 +10139,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_aide())
         elif path == "/api/security/honeypot":
             self._send(200, build_honeypot())
+        elif path == "/api/security/canary":
+            self._send(200, build_canary())
         elif path == "/api/agent/models":
             try:
                 data = self._agent_call("GET", "/config/providers", timeout=10)
@@ -10196,6 +10488,17 @@ class Handler(BaseHTTPRequestHandler):
                 _create_session(result["username"], "admin"),
             )
             self._send_auth(200, result, cookie=cookie)
+            return
+
+        # OpenCanary webhook: loopback-only, token-gated, no session auth.
+        if path == "/api/canary/hit":
+            if _client_key(self) not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+                self._send(403, {"ok": False, "error": "Forbidden"})
+                return
+            if (qs.get("token", [""])[0] or "") != ensure_canary_token():
+                self._send(403, {"ok": False, "error": "Forbidden"})
+                return
+            self._send(200, handle_canary_hit(body))
             return
 
         # Internal self-restart: localhost only, no auth required
@@ -10627,6 +10930,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, remove_custom_blocklist_entry(body.get("entry")))
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/security/canary/config":
+            result = set_canary_enabled(bool(body.get("enabled")))
+            self._send(200 if result.get("ok") else 400, result)
 
         elif path == "/api/security/honeypot/config":
             self._send(200, set_honeypot_conf(body))
