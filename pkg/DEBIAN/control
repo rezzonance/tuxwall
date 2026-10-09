@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.9.4
+Version: 2.9.5
 Section: admin
 Priority: optional
 Architecture: all
@@ -460,3 +460,16 @@ Description: TuxWall Network Firewall Dashboard
  the command line). Both selects now append the physical parent
  interfaces (labelled "(physical)") after the VLAN interfaces, using
  the parents list /api/vlans already returned.
+ .
+ v2.9.5 fixes a package-install stall: postinst pulled the first
+ Suricata ruleset by running suricata-update inline, so an upgrade
+ stalled on an internet fetch while holding the dpkg lock (observed
+ on 2026-10-08's v2.9.4 install as a multi-second hang at step 6d -
+ and on a new box with no internet yet it could sit there for the
+ fetch timeouts). The first pull now kicks the existing oneshot unit
+ with systemctl start --no-block: postinst returns immediately, the
+ fetch runs in the background under suricata-update.service with
+ journald logging, Nice=10 and idle IO - exactly like the daily timer
+ runs - and the install never waits on the network. The daily timer
+ still fetches rules on its own schedule, so a fresh install without
+ internet picks up its ruleset on the first online day.
