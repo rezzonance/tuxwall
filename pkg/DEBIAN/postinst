@@ -5,17 +5,36 @@ set -euo pipefail
 WWW=/var/www/html
 STATE_DIR=/var/lib/tuxwall
 
+# ── Step progress bar ─────────────────────────────────────────────────────
+# Prints each step with a filled bar so the install shows visual progress:
+#   [██████████░░░░░░░░░░░░░░░░] [6d/9] Enabling daily Suricata rule ...
+# Pure block characters, no ANSI cursor tricks - renders identically on a
+# terminal, in apt/dpkg logs, and under unattended-upgrades. Built with bash
+# string appends (not tr) because tr is byte-oriented and mangles UTF-8.
+STEP_TOTAL=12
+STEP_NOW=0
+step() {
+  local label="$1" text="$2" width=24 i
+  STEP_NOW=$((STEP_NOW + 1))
+  local filled=$(( STEP_NOW * width / STEP_TOTAL ))
+  (( filled > width )) && filled=$width
+  local bar="" empty=""
+  for ((i = 0; i < filled; i++)); do bar+="█"; done
+  for ((i = filled; i < width; i++)); do empty+="░"; done
+  printf '[%s%s] [%s/9] %s\n' "$bar" "$empty" "$label" "$text"
+}
+
 case "$1" in
   configure)
 
-    echo "[1/9] Creating state directory ($STATE_DIR)..."
+    step 1 "Creating state directory ($STATE_DIR)..."
     mkdir -p "$STATE_DIR"
     chmod 755 "$STATE_DIR"
 
-    echo "[2/9] Ensuring /etc/tuxwall exists..."
+    step 2 "Ensuring /etc/tuxwall exists..."
     mkdir -p /etc/tuxwall
 
-    echo "[3/9] Creating empty blocklist configs (so Unbound includes are valid)..."
+    step 3 "Creating empty blocklist configs (so Unbound includes are valid)..."
     # Must live under /var/lib/unbound/ - Unbound's AppArmor profile only allows
     # it to read /etc/unbound/** and /var/lib/unbound/**
     mkdir -p /var/lib/unbound
@@ -27,7 +46,7 @@ server:
 EOF
     fi
 
-    echo "[4/9] Wiring blocklists into Unbound..."
+    step 4 "Wiring blocklists into Unbound..."
     cat > /etc/unbound/unbound.conf.d/99-blocklists.conf <<'EOF'
 # Managed by the tuxwall Blocklists page - DO NOT EDIT
 server:
@@ -257,7 +276,7 @@ EOF
     ASSET_V="$(date +%Y%m%d%H%M)"
     sed -i -E "s/\.(js|css)\?v=[-A-Za-z0-9._]+/.\1?v=${ASSET_V}/g" /var/www/html/index.html 2>/dev/null || true
 
-    echo "[5/9] Configuring nginx reverse proxy..."
+    step 5 "Configuring nginx reverse proxy..."
     # Only manage the bundled vhost on fresh installs. If an enabled site
     # already serves the web root (custom router setup with SSL/vhosts),
     # leave nginx alone.
@@ -277,7 +296,7 @@ EOF
       nginx -t || true
     fi
 
-    echo "[6/9] Setting up firewall (ufw)..."
+    step 6 "Setting up firewall (ufw)..."
     # Only open SSH/HTTP when no such rule exists yet: upgrades must not
     # re-add a WAN-wide OpenSSH allow after the admin scoped it to LAN/VPN.
     ufw status 2>/dev/null | grep -q '22/tcp' || ufw allow OpenSSH >/dev/null 2>&1 || true
@@ -309,7 +328,7 @@ EOF
         ufw allow in on "$iface" to any port 5353 proto udp comment 'mDNS reflector' >/dev/null 2>&1 || true
     done
 
-    echo "[6b/9] Configuring Avahi mDNS reflector (Music Assistant discovery)..."
+    step 6b "Configuring Avahi mDNS reflector (Music Assistant discovery)..."
     # Best-effort: avahi-daemon is a hard Depends, but don't fail upgrades.
     if [[ -f /etc/avahi/avahi-daemon.conf ]]; then
       WAN_IF="$(ip route show default 2>/dev/null | awk '{print $5}' | head -n1)"
@@ -346,7 +365,7 @@ PY
       systemctl restart avahi-daemon >/dev/null 2>&1 || true
     fi
 
-    echo "[6c/9] Provisioning Suricata (guarded af-packet/HOME_NET tune)..."
+    step 6c "Provisioning Suricata (guarded af-packet/HOME_NET tune)..."
     # Stock suricata.yaml ships placeholder NIC names that fail to bind on a
     # fresh install, so suricata.service can exit immediately. The guarded
     # tuner rewrites af-packet to the detected WAN/LAN interfaces and HOME_NET
@@ -362,7 +381,7 @@ PY
       fi
     fi
 
-    echo "[6d/9] Enabling daily Suricata rule updates (suricata-update)..."
+    step 6d "Enabling daily Suricata rule updates (suricata-update)..."
     # Ubuntu's suricata-update package ships no systemd timer, so rule sets
     # are fetched never or once and go stale. Enable our daily timer and pull
     # a first ruleset now (best-effort; Suricata live-reloads via its socket).
@@ -377,17 +396,17 @@ PY
       systemctl start --no-block suricata-update.service >/dev/null 2>&1 || true
     fi
 
-    echo "[7/9] Enabling dashboard service and daily blocklist updates..."
+    step 7 "Enabling dashboard service and daily blocklist updates..."
     systemctl daemon-reload
     systemctl enable tuxwall.service >/dev/null 2>&1 || true
     systemctl enable tuxwall-blocklist-update.timer >/dev/null 2>&1 || true
     systemctl restart tuxwall.service || true
 
-    echo "[8/9] Triggering initial blocklist download (background)..."
+    step 8 "Triggering initial blocklist download (background)..."
     sleep 2
     curl -s -X POST http://127.0.0.1:8008/api/blocklists/update >/dev/null 2>&1 || true
 
-    echo "[9/9] Setting up the opencode AI agent (dashboard AI assistant)..."
+    step 9 "Setting up the opencode AI agent (dashboard AI assistant)..."
     # Best-effort: needs internet for the opencode installer. The dashboard
     # works fine without it; re-run the script later if it fails.
     AGENT_SETUP=""
