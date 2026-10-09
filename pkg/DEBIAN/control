@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.9.5
+Version: 2.9.6
 Section: admin
 Priority: optional
 Architecture: all
@@ -473,3 +473,13 @@ Description: TuxWall Network Firewall Dashboard
  runs - and the install never waits on the network. The daily timer
  still fetches rules on its own schedule, so a fresh install without
  internet picks up its ruleset on the first online day.
+ .
+ v2.9.6 gives the install steps progress bars: every postinst
+ step now prints with a filled bar showing overall progress
+ ([######..........] [6d/9] Enabling daily Suricata rule updates),
+ built from pure block characters (bash string appends, not tr -
+ tr is byte-oriented and mangles UTF-8) with no ANSI cursor
+ tricks, so it renders identically on a terminal, in apt/dpkg
+ logs, and under unattended-upgrades. The bar tracks the twelve
+ printed steps (the letter-suffixed sub-steps of phase 6 advance
+ it too); the familiar [n/9] step labels are unchanged.
