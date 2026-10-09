@@ -366,10 +366,15 @@ PY
     # Ubuntu's suricata-update package ships no systemd timer, so rule sets
     # are fetched never or once and go stale. Enable our daily timer and pull
     # a first ruleset now (best-effort; Suricata live-reloads via its socket).
+    # The first pull runs via systemd --no-block: it returns immediately and
+    # fetches in the background under suricata-update.service (journald logs,
+    # Nice=10, idle IO). Running suricata-update inline here stalls the whole
+    # apt upgrade on an internet fetch while holding the dpkg lock - observed
+    # on 2026-10-08's v2.9.4 install as a multi-second hang at this step.
     if [[ -f /etc/systemd/system/suricata-update.timer ]]; then
       systemctl daemon-reload >/dev/null 2>&1 || true
       systemctl enable --now suricata-update.timer >/dev/null 2>&1 || true
-      command -v suricata-update >/dev/null 2>&1 && suricata-update >/dev/null 2>&1 || true
+      systemctl start --no-block suricata-update.service >/dev/null 2>&1 || true
     fi
 
     echo "[7/9] Enabling dashboard service and daily blocklist updates..."
