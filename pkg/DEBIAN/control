@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.9.2
+Version: 2.9.3
 Section: admin
 Priority: optional
 Architecture: all
@@ -410,9 +410,43 @@ Description: TuxWall Network Firewall Dashboard
  /etc/resolv.conf points at unbound (only when still the stock resolved
  stub - a hand-pointed resolver is never clobbered), IPv4/IPv6
  forwarding is enabled (persisted in /etc/sysctl.d and ufw's sysctl
- config), and the WAN masquerade is persisted the ufw-native way (a
- *nat block in before.rules, applied by ufw itself on every boot and
- reload) with exactly one explicit route allow LAN -> WAN so ufw's
- default-deny routed posture is preserved. A fresh .deb install now
- resolves through its own filtered DNS, routes packets, and NATs the
- LAN from first boot.
+  config), and the WAN masquerade is persisted the ufw-native way (a
+  *nat block in before.rules, applied by ufw itself on every boot and
+  reload) with exactly one explicit route allow LAN -> WAN so ufw's
+  default-deny routed posture is preserved. A fresh .deb install now
+  resolves through its own filtered DNS, routes packets, and NATs the
+  LAN from first boot.
+ .
+ v2.9.3 adds a pfSense-style Services Status card to the overview page
+ and fixes four bugs observed live on 2026-10-08 while standing up the
+ first customer VLAN (an IoT VLAN 10 with internet + Home Assistant
+ only, LAN reachability denied). Overview now carries a Services Status
+ table (service, systemd description, status with a pulsing glowing
+ green/red dot, and admin start/stop/restart buttons wired to the
+ existing /api/system/services/action endpoint with the same confirm
+ prompts - nginx stays status-only since the API protects the unit that
+ serves the dashboard; the card is injected by dashboard.js, polls the
+ same /api/system/services data the System view uses, and now also
+ loads on first paint instead of only on the interval). The WAN IP stat
+ card no longer clips long addresses (fixed 17px, overflow-wrap so
+ dual-stack values wrap instead of hiding behind the card's overflow).
+ The four API fixes, all hit during the VLAN bring-up: (1) Kea config
+ reloads via the control socket could leave the daemon active with no
+ lease manager - every DHCPDISCOVER failed with 'no current lease
+ manager is available' while systemctl still showed active; _reload_kea
+ now health-checks with lease4-get-all after every reload and falls
+ back to a full restart (with retry) before reporting failure so pool
+ saves never silently take down DHCP. (2) save_dhcp_subnet now syncs
+ the subnet's interface into the top-level interfaces-config - Kea
+ only listens on listed interfaces, so a pool bound to a newly created
+ VLAN interface was silently never served. (3) add_firewall_rule
+ accepts a leading 'route' keyword and the inter-VLAN policy builder
+ emits 'route ...' rules - ufw requires the route verb for in-on/out-on
+ forwarding rules; the old output died with 'Wrong number of
+ arguments', so the VLAN policy UI and raw rule input could never add
+ inter-VLAN rules at all. (4) _rpz_stats reads stats_noreset - plain
+ 'unbound-control stats' RESETS every unbound counter on read, and the
+ dashboard's 30s blocklist/RPZ poll was zeroing the statistics right
+ before the overview's /api/dns read, periodically blanking the DNS
+ Sinkhole / Query Types / DNS IPv4-v6 / DNS Cache donut charts with
+ 'No data yet'.

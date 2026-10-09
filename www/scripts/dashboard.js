@@ -334,6 +334,7 @@
     ovLatJitter: document.getElementById("ov-lat-jitter"),
     ovWanIp: document.getElementById("ov-wan-ip"),
     ovWgPeers: document.getElementById("ov-wg-peers"),
+    ovWanGrid: document.getElementById("ov-wan-grid"),
     ovResHint: document.getElementById("ov-res-hint"),
     ovBwHint: document.getElementById("ov-bw-hint"),
     ovLatHint: document.getElementById("ov-lat-hint"),
@@ -6889,10 +6890,103 @@
       : `<tr><td colspan="4" class="empty">No services match this filter.</td></tr>`;
   }
 
+  const OV_SERVICES = [
+    ["unbound.service", "Unbound DNS"],
+    ["kea-dhcp4-server.service", "Kea DHCP"],
+    ["radvd.service", "radvd"],
+    ["nginx.service", "nginx"],
+    ["suricata.service", "Suricata IDS"],
+    ["crowdsec.service", "CrowdSec"],
+    ["crowdsec-firewall-bouncer.service", "CS Bouncer"],
+    ["wg-quick@wg0.service", "WireGuard"],
+    ["tuxwall.service", "tuxwall"],
+    ["tuxwall-agent.service", "tuxwall-agent"],
+    ["tuxwall-collector.service", "tuxwall-collector"],
+    ["tuxwall-nat.service", "tuxwall-nat"],
+    ["tuxwall-sqm.service", "tuxwall-sqm"],
+  ];
+  const OV_PROTECTED_SERVICES = { "nginx.service": "it serves this dashboard" };
+
+  function ensureOvServicesCard() {
+    if (!els.ovWanGrid || document.getElementById("ov-svc-card")) return;
+    els.ovWanGrid.insertAdjacentHTML("beforeend", `
+      <div class="card" id="ov-svc-card">
+        <div class="card-head"><h2>Services Status</h2><span class="muted" id="ov-svc-hint"></span></div>
+        <div class="table-wrap">
+          <table id="ov-svc-table">
+            <thead><tr><th>Service</th><th>Description</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody id="ov-svc-tbody"></tbody>
+          </table>
+        </div>
+      </div>`);
+    document.getElementById("ov-svc-tbody").addEventListener("click", async (ev) => {
+      const btn = ev.target.closest("button[data-action]");
+      if (!btn || btn.disabled) return;
+      const unit = btn.dataset.unit;
+      const action = btn.dataset.action;
+      const warn = {
+        stop: `Stop ${unit}? It will stay stopped until started again.`,
+        restart: `Restart ${unit}? Active connections through it may drop.`,
+        start: `Start ${unit}?`,
+      }[action];
+      if (!window.confirm(warn)) return;
+      btn.disabled = true;
+      try {
+        await postJSON("/api/system/services/action", { unit, action });
+        showBanner(false);
+      } catch (err) {
+        showBanner(true, `${unit} ${action}: ` + err.message);
+      }
+      await refreshServices();
+    });
+  }
+
+  function renderOvServices() {
+    ensureOvServicesCard();
+    const tbody = document.getElementById("ov-svc-tbody");
+    if (!tbody) return;
+    const rows = ((state.svcData || {}).services || []);
+    const byUnit = new Map(rows.map((s) => [s.unit, s]));
+    const isAdmin = state.role === "admin";
+    const trs = [];
+    let upCount = 0;
+    let seenCount = 0;
+    for (const [unit, name] of OV_SERVICES) {
+      const s = byUnit.get(unit);
+      if (!s) continue;
+      seenCount += 1;
+      const ok = s.active === "active";
+      if (ok) upCount += 1;
+      const stateLabel = s.active === "failed"
+        ? "Failed"
+        : ok ? (s.sub === "running" ? "Running" : "Active") : "Stopped";
+      let actions = "";
+      if (isAdmin && !OV_PROTECTED_SERVICES[unit]) {
+        actions = ok
+          ? `<button class="btn btn-sm icon-btn" data-action="restart" data-unit="${esc(unit)}" type="button" title="Restart ${esc(unit)}" aria-label="Restart ${esc(unit)}">${SVC_ACTION_ICONS.restart}</button>
+             <button class="btn btn-sm btn-danger icon-btn" data-action="stop" data-unit="${esc(unit)}" type="button" title="Stop ${esc(unit)}" aria-label="Stop ${esc(unit)}">${SVC_ACTION_ICONS.stop}</button>`
+          : `<button class="btn btn-sm icon-btn" data-action="start" data-unit="${esc(unit)}" type="button" title="Start ${esc(unit)}" aria-label="Start ${esc(unit)}">${SVC_ACTION_ICONS.start}</button>`;
+      } else if (OV_PROTECTED_SERVICES[unit]) {
+        actions = `<span class="muted" title="Protected (${OV_PROTECTED_SERVICES[unit]}) — status only">—</span>`;
+      }
+      trs.push(`
+        <tr class="${ok ? "" : "ov-svc-row-bad"}">
+          <td><b class="mono">${esc(name)}</b></td>
+          <td>${esc(s.desc || "—")}</td>
+          <td><span class="ov-svc-status ${ok ? "ov-svc-ok" : "ov-svc-bad"}"><span class="ov-svc-dot"></span>${esc(stateLabel)}</span></td>
+          <td><div class="svc-actions">${actions}</div></td>
+        </tr>`);
+    }
+    const hint = document.getElementById("ov-svc-hint");
+    if (hint) hint.textContent = rows.length ? `${upCount} / ${seenCount} up` : "";
+    tbody.innerHTML = trs.length ? trs.join("") : `<tr><td colspan="4" class="empty">No service data.</td></tr>`;
+  }
+
   async function refreshServices() {
     try {
       state.svcData = await fetchJSON("/api/system/services");
       renderServices();
+      renderOvServices();
     } catch (err) {
       /* best-effort; system view may not be visible */
     }
@@ -9310,6 +9404,7 @@
     refreshBandwidth();
     refreshBlocklists();
     refreshSystem();
+    refreshServices();
     refreshWireguard();
     refreshOverview();
     loadThemes();

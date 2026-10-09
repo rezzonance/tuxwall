@@ -263,8 +263,30 @@ def _write_kea(data):
     os.replace(tmp, KEA_CONF)
 
 
+def _kea_leases_healthy():
+    """True if Kea's lease manager answers on the control socket.
+
+    An in-process config-reload was observed leaving the daemon alive but
+    with 'no current lease manager is available' - every DHCPDISCOVER then
+    fails while the service still shows active. lease4-get-all is the same
+    probe the dashboard leases view uses, so a broken lease manager is
+    detected immediately instead of after clients start timing out."""
+    try:
+        resp = kea_command("lease4-get-all")
+        result = resp[0] if isinstance(resp, list) else (resp or {})
+        return bool(result.get("result") == 0)
+    except Exception:
+        return False
+
+
 def _reload_kea():
-    """Signal Kea to reload its config via the control socket."""
+    """Reload Kea's config via the control socket, then verify the lease
+    manager survived; fall back to a full restart if it did not.
+
+    A plain in-process reload can drop the lease manager (see
+    _kea_leases_healthy). A restart re-reads the config and re-opens the
+    lease file, and is the only reliable recovery - so it is used as the
+    fallback whenever the post-reload health check fails."""
     try:
         kea_command("config-reload")
     except Exception:
@@ -273,6 +295,21 @@ def _reload_kea():
             ["systemctl", "reload-or-restart", "kea-dhcp4-server"],
             capture_output=True, text=True, timeout=15
         )
+    if _kea_leases_healthy():
+        return
+    # Lease manager dropped (or reload never landed) - full restart
+    subprocess.run(
+        ["systemctl", "restart", "kea-dhcp4-server"],
+        capture_output=True, text=True, timeout=45
+    )
+    # The control socket needs a moment after a restart
+    import time as _time
+    for _ in range(10):
+        if _kea_leases_healthy():
+            return
+        _time.sleep(1)
+    raise RuntimeError(
+        "Kea reload left the lease manager broken (restart did not recover)")
 
 
 def _validate_reservation(ip, mac, hostname, existing_id=None):
@@ -1360,9 +1397,17 @@ def add_firewall_rule(rule_text):
     if not args:
         raise RuntimeError("Rule is empty")
     # Whitelist: only single-rule verbs may pass through here. Destructive /
-    # global subcommands (reset, disable, enable, default, logging, route,
+    # global subcommands (reset, disable, enable, default, logging,
     # delete, --force, ...) must go through their dedicated API functions.
-    verb = args[0].lower()
+    # A leading 'route' is permitted for forwarding rules (ufw requires it
+    # for in-on/out-on rules: 'route allow in on eth1 out on eth2'); the
+    # token after it still has to be one of the whitelisted verbs.
+    if args[0].lower() == "route":
+        if len(args) < 2:
+            raise RuntimeError("Rule is empty after 'route'")
+        verb = args[1].lower()
+    else:
+        verb = args[0].lower()
     if verb not in ("allow", "deny", "reject", "limit"):
         raise RuntimeError(
             "Unsupported rule verb %r (use allow/deny/reject/limit)" % args[0])
@@ -5767,11 +5812,18 @@ def _rpz_hits(limit=100):
 
 
 def _rpz_stats():
-    """Pull RPZ action counters from unbound-control stats (since restart)."""
+    """Pull RPZ action counters from unbound-control stats (since restart).
+
+    Uses stats_noreset - plain `unbound-control stats` RESETS every unbound
+    statistics counter (queries, cache hits, qtypes, ...) on read. The
+    dashboard's 30s blocklist/RPZ refresh polls this function, so a resetting
+    read periodically zeroed the counters just before the overview's /api/dns
+    read, blanking the DNS donut charts with "No data yet"."""
     stats = {}
     try:
         proc = subprocess.run(
-            ["unbound-control", "stats"], capture_output=True, text=True, timeout=15
+            ["unbound-control", "stats_noreset"], capture_output=True, text=True,
+            timeout=15
         )
         for line in proc.stdout.splitlines():
             if not line.startswith("num.rpz."):
@@ -9467,6 +9519,15 @@ def save_dhcp_subnet(body):
             raise ValueError("Interface %s already serves %s" %
                              (iface, other.get("subnet", "")))
 
+    # Sync the subnet's interface into the top-level interfaces-config:
+    # Kea only listens on listed interfaces, so a subnet bound to an
+    # interface that is not listed (e.g. a newly created VLAN) would never
+    # get DHCP service even though everything else looks correct.
+    ifaces_cfg = d4.setdefault("interfaces-config", {})
+    iface_list = ifaces_cfg.setdefault("interfaces", [])
+    if iface not in iface_list:
+        iface_list.append(iface)
+
     entry = target if target is not None else {}
     entry["subnet"] = str(net)
     entry["interface"] = iface
@@ -12619,7 +12680,8 @@ def add_vlan_policy(body):
     # Build UFW rule
     port_part  = f" port {port}" if port and port != "any" else ""
     proto_part = f" proto {proto}" if proto and proto != "any" else ""
-    rule = f"{policy} in on {src} out on {dst}{port_part}{proto_part}"
+    # 'route' keyword is required for in-on/out-on forwarding rules
+    rule = f"route {policy} in on {src} out on {dst}{port_part}{proto_part}"
     add_firewall_rule(rule)
 
     persist = _load_vlan_persist()

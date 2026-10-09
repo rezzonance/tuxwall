@@ -4645,3 +4645,35 @@ tr.tw-row-reveal {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
 }
+
+#ov-wan-ip {
+  font-size: 17px;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  line-height: 1.25;
+}
+
+/* ---------- Overview: Services Status card (pfSense style) ---------- */
+#ov-wan-grid > .card:nth-child(3) { grid-column: span 12; }
+#ov-svc-table th, #ov-svc-table td { white-space: normal; }
+#ov-svc-table td:nth-child(2) { color: var(--muted); }
+#ov-svc-table td:last-child { white-space: nowrap; }
+#ov-svc-table tbody tr.ov-svc-row-bad td { background: color-mix(in srgb, var(--red) 8%, transparent); }
+.ov-svc-status { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
+.ov-svc-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.ov-svc-ok .ov-svc-dot {
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green), 0 0 14px color-mix(in srgb, var(--green) 55%, transparent);
+  animation: ovSvcPulse 2s ease-in-out infinite;
+}
+.ov-svc-bad .ov-svc-dot {
+  background: var(--red);
+  box-shadow: 0 0 6px var(--red), 0 0 14px color-mix(in srgb, var(--red) 55%, transparent);
+  animation: ovSvcPulse 1.2s ease-in-out infinite;
+}
+.ov-svc-bad { color: var(--red); }
+@keyframes ovSvcPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
