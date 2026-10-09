@@ -1279,8 +1279,15 @@
       const polDst    = document.getElementById("pol-dst");
       parentSel.innerHTML = data.parents.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join("");
 
+      // Policy source/destination options: VLAN interfaces plus the
+      // physical parents (WAN/LAN) - inter-VLAN rules often need a physical
+      // destination ("deny in on <vlan> out on <lan>", "allow ... out on
+      // <wan>" for internet), which the VLAN-only list could not express.
       const vlanIfaceOpts = `<option value="">Source interface</option>` +
-        data.vlans.map(v => `<option value="${esc(v.iface)}">${esc(v.iface)} (VLAN ${esc(v.vlan_id)})</option>`).join("");
+        data.vlans.map(v => `<option value="${esc(v.iface)}">${esc(v.iface)} (VLAN ${esc(v.vlan_id)})</option>`).join("") +
+        data.parents
+          .filter(p => !data.vlans.some(v => v.iface === p))
+          .map(p => `<option value="${esc(p)}">${esc(p)} (physical)</option>`).join("");
       polSrc.innerHTML = vlanIfaceOpts.replace("Source interface", "Source interface");
       polDst.innerHTML = vlanIfaceOpts.replace("Source interface", "Destination interface");
 

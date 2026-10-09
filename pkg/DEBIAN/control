@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.9.3
+Version: 2.9.4
 Section: admin
 Priority: optional
 Architecture: all
@@ -450,3 +450,13 @@ Description: TuxWall Network Firewall Dashboard
  before the overview's /api/dns read, periodically blanking the DNS
  Sinkhole / Query Types / DNS IPv4-v6 / DNS Cache donut charts with
  'No data yet'.
+ .
+ v2.9.4 fixes the inter-VLAN policy dropdowns: source and
+ destination only ever listed VLAN interfaces, so rules involving a
+ physical interface - the most common cases: "deny in on <vlan> out on
+ <lan>" and "allow in on <vlan> out on <wan>" for internet - could not
+ be created in the UI at all (observed live on 2026-10-08 during the
+ first VLAN bring-up; the internet rule had to be added via raw ufw on
+ the command line). Both selects now append the physical parent
+ interfaces (labelled "(physical)") after the VLAN interfaces, using
+ the parents list /api/vlans already returned.
