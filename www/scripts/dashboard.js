@@ -727,6 +727,52 @@
     }
   }
 
+  // ---- Core service health banner -----------------------------------------
+  // Polls the systemd service list (same endpoint as System → Services)
+  // and raises a red banner whenever any core gateway service is not
+  // active, so a dead unbound/crowdsec/nginx is visible from any view
+  // instead of requiring manual systemctl guesswork.
+  const CORE_SERVICES = [
+    ["nginx.service", "nginx"],
+    ["unbound.service", "unbound (DNS)"],
+    ["kea-dhcp4-server.service", "DHCP (kea)"],
+    ["suricata.service", "suricata (IDS)"],
+    ["crowdsec.service", "crowdsec"],
+    ["crowdsec-firewall-bouncer.service", "firewall bouncer"],
+    ["tuxwall.service", "dashboard API"],
+    ["tuxwall-collector.service", "ban collector"],
+    ["php8.5-fpm.service", "php-fpm"],
+    ["wg-quick@wg0.service", "wireguard"],
+    ["ufw.service", "ufw firewall"],
+  ];
+  const svcBannerEl = document.getElementById("svc-banner");
+  let lastSvcDown = null;
+  async function checkCoreServices() {
+    if (!state.authed || document.hidden) return;
+    try {
+      const d = await fetchJSON("/api/system/services");
+      const byUnit = new Map((d.services || []).map(s => [s.unit, s]));
+      const down = CORE_SERVICES.filter(([unit]) => {
+        const s = byUnit.get(unit);
+        return !s || s.active !== "active";
+      });
+      const names = down.map(([, label]) => label).join(", ");
+      if (down.length) {
+        svcBannerEl.hidden = false;
+        svcBannerEl.textContent =
+          "CORE SERVICE DOWN: " + names + " — check System → Services";
+        if (names !== lastSvcDown) console.warn("core services down:", names);
+      } else {
+        svcBannerEl.hidden = true;
+      }
+      lastSvcDown = names;
+    } catch (_) {
+      // The generic dashboard-API banner already surfaces fetch failures.
+    }
+  }
+  setInterval(checkCoreServices, 30000);
+  checkCoreServices();
+
   async function refresh() {
     try {
       const data = await fetchJSON("/api/leases");
@@ -1166,7 +1212,10 @@
         <td class="mono">${esc(r.dst || r.to || "")}</td>
         <td class="mono">${r.port ? esc(r.port) : `<span class="muted">any</span>`}</td>
         <td>${r.proto ? `<span class="fw-proto-badge">${esc(r.proto)}</span>` : `<span class="muted">any</span>`}${r.v6 ? `<span class="fw-v6-badge">v6</span>` : ""}</td>
-        <td>${r.number ? `<button class="btn btn-sm btn-danger fw-remove" type="button" data-num="${r.number}" title="Remove rule">✕</button>` : ""}</td>
+        <td>${r.number ? `
+          <button class="btn btn-sm fw-move" type="button" data-num="${r.number}" data-dir="up" title="Move rule up">▲</button>
+          <button class="btn btn-sm fw-move" type="button" data-num="${r.number}" data-dir="down" title="Move rule down">▼</button>
+          <button class="btn btn-sm btn-danger fw-remove" type="button" data-num="${r.number}" title="Remove rule">✕</button>` : ""}</td>
       </tr>`;
     }).join("");
   }
@@ -1821,6 +1870,26 @@
     });
 
     els.fwRulesBody.addEventListener("click", async (e) => {
+      const moveBtn = e.target.closest(".fw-move");
+      if (moveBtn) {
+        // ufw evaluates top-down, so reordering past a rule with a
+        // different action (allow vs deny) changes what traffic matches.
+        if (!window.confirm(
+          `Move rule ${moveBtn.dataset.num} ${moveBtn.dataset.dir === "up" ? "above" : "below"} its neighbour? ` +
+          "Rules are evaluated top-down — if the two rules overlap with different actions, the effective outcome changes.")) return;
+        moveBtn.disabled = true;
+        try {
+          const res = await postJSON("/api/firewall/move",
+            { number: moveBtn.dataset.num, direction: moveBtn.dataset.dir });
+          els.fwHint.textContent = res.move?.note
+            ? "Rule moved" + res.move.note : "Rule moved.";
+          await refreshFirewall();
+        } catch (err) {
+          els.fwHint.textContent = "Error: " + err.message;
+          moveBtn.disabled = false;
+        }
+        return;
+      }
       const btn = e.target.closest(".fw-remove");
       if (!btn) return;
       if (!window.confirm("Remove this firewall rule?")) return;

@@ -1284,12 +1284,15 @@ def build_firewall():
     except Exception:
         vproc = None
 
+    # Verbose output carries the Status/Logging/Default header lines the
+    # numbered output lacks, but it also repeats every rule line without a
+    # number — parsing rules from both made each rule appear twice in the
+    # table. Header lines come from verbose; rules come only from numbered.
     status = ""
     logging_state = ""
     defaults = {}
-    rules = []
     for line in ((vproc.stdout if vproc and vproc.returncode == 0 else "")
-                 + "\n" + proc.stdout).splitlines():
+                 .splitlines()):
         ls = line.strip()
         if not ls:
             continue
@@ -1302,35 +1305,46 @@ def build_firewall():
                 m = re.match(r"\s*(\w+)\s*\((\w+)\)", part)
                 if m:
                     defaults[m.group(2)] = m.group(1)
-        else:
-            parts = re.split(r"\s{2,}", ls)
-            if len(parts) >= 3 and parts[1].split()[0].upper() in ("ALLOW", "DENY", "LIMIT", "REJECT"):
-                num = None
-                to = parts[0].strip()
-                m = re.match(r"^\[\s*(\d+)\]\s+(.*)$", parts[0])
-                if m:
-                    num = int(m.group(1))
-                    to = m.group(2).strip()
-                action_words = parts[1].split()
-                from_text = " ".join(parts[2:]).strip()
-                src = _parse_rule_side(from_text)
-                dst = _parse_rule_side(to)
-                rules.append({
-                    "number": num,
-                    "to": to,
-                    "action": " ".join(action_words),
-                    "from": from_text,
-                    # structured fields for the advanced UI
-                    "verb": action_words[0].upper(),
-                    "direction": (action_words[1].upper()
-                                  if len(action_words) > 1 else None),
-                    "iface": dst["iface"] or src["iface"],
-                    "proto": dst["proto"] or src["proto"],
-                    "port": dst["port"] or src["port"],
-                    "src": src["addr"],
-                    "dst": dst["addr"],
-                    "v6": src["v6"] or dst["v6"],
-                })
+
+    rules = []
+    for line in proc.stdout.splitlines():
+        ls = line.strip()
+        if not ls:
+            continue
+        # Column-split on 2+ spaces breaks when a long "To" value leaves
+        # only one space before the action word; pivot on the action
+        # keyword instead so every line parses the same way.
+        m = re.match(r"^(?P<to>.+?)\s+(?P<verb>ALLOW|DENY|LIMIT|REJECT)"
+                     r"(?:\s+(?P<dir>IN|OUT|FWD))?\s+(?P<from>.+)$", ls)
+        if not m:
+            continue
+        to = m.group("to").strip()
+        num = None
+        nm = re.match(r"^\[\s*(\d+)\]\s+(.*)$", to)
+        if nm:
+            num = int(nm.group(1))
+            to = nm.group(2).strip()
+        action_words = ([m.group("verb"), m.group("dir")]
+                        if m.group("dir") else [m.group("verb")])
+        from_text = m.group("from").strip()
+        src = _parse_rule_side(from_text)
+        dst = _parse_rule_side(to)
+        rules.append({
+            "number": num,
+            "to": to,
+            "action": " ".join(action_words),
+            "from": from_text,
+            # structured fields for the advanced UI
+            "verb": action_words[0].upper(),
+            "direction": (action_words[1].upper()
+                          if len(action_words) > 1 else None),
+            "iface": dst["iface"] or src["iface"],
+            "proto": dst["proto"] or src["proto"],
+            "port": dst["port"] or src["port"],
+            "src": src["addr"],
+            "dst": dst["addr"],
+            "v6": src["v6"] or dst["v6"],
+        })
 
     traffic = {"allow": 0, "block": 0, "top_sources": [], "top_ports": [], "recent": []}
     sources = {}
@@ -1433,6 +1447,111 @@ def delete_firewall_rule(number):
         raise RuntimeError("Invalid rule number")
     _ufw(["--force", "delete", str(num)])
     return build_firewall()
+
+
+# --- Firewall rule reordering (ufw backend API) ----------------------------
+# ufw's CLI cannot move rules (insert always appends the IPv6 half), but its
+# own backend can: get_rules() returns UFWRule objects in `ufw status
+# numbered` order (IPv4 list then IPv6 list), and _write_rules() +
+# _reload_user_rules() persist and apply a reordered list — the same code
+# path the CLI uses for every rule change. Reordering swaps two rules
+# within one family list (iptables and ip6tables evaluate independently);
+# when both swapped rules are dual-stack, their twins in the other family
+# list are swapped as well so both rulesets stay in step.
+_fw_move_lock = threading.Lock()
+
+
+def _ufw_backend():
+    import gettext
+    import ufw.common
+    import ufw.backend_iptables
+    # ufw's CLI installs gettext before using the backend; imported as a
+    # library that setup never runs, and any _do_checks warning or error
+    # path raises NameError on '_'. Install it exactly as /usr/sbin/ufw
+    # does (bound into builtins) so those paths behave normally.
+    gettext.install(ufw.common.programName)
+    return ufw.backend_iptables.UFWBackendIptables(dryrun=False)
+
+
+def _ufw_rule_key(r):
+    return (r.action, r.direction, r.forward, r.protocol, r.dport, r.sport,
+            r.src, r.dst, r.interface_in, r.interface_out, r.comment)
+
+
+def move_firewall_rule(number, direction):
+    """Swap the numbered rule with the adjacent rule in its family
+    (IPv4/IPv6) list. Numbering matches `ufw status numbered`."""
+    if direction not in ("up", "down"):
+        raise RuntimeError("Direction must be 'up' or 'down'")
+    try:
+        num = int(number)
+    except (TypeError, ValueError):
+        raise RuntimeError("Invalid rule number")
+    if num < 1:
+        raise RuntimeError("Invalid rule number")
+
+    with _fw_move_lock:
+        b = _ufw_backend()
+        rules = b.get_rules()
+        # Replicate ufw's app-profile dedup so numbers match the numbered
+        # list exactly (app rules expand to several entries).
+        flat, seen = [], {}
+        for r in rules:
+            if r.dapp or r.sapp:
+                tupl = r.get_app_tuple()
+                if tupl in seen:
+                    continue
+                seen[tupl] = True
+            flat.append(r)
+        if num > len(flat):
+            raise RuntimeError("Rule %d not found" % num)
+        rule = flat[num - 1]
+        if rule.dapp or rule.sapp:
+            raise RuntimeError(
+                "Application-profile rules cannot be reordered here")
+
+        fam = b.rules6 if rule.v6 else b.rules
+        i = next((k for k, r in enumerate(fam) if r is rule), None)
+        if i is None:
+            raise RuntimeError("Rule not found in its family list")
+        j = i - 1 if direction == "up" else i + 1
+        if j < 0:
+            raise RuntimeError("Rule is already at the top of its list")
+        if j >= len(fam):
+            raise RuntimeError("Rule is already at the bottom of its list")
+        other = fam[j]
+        if other.dapp or other.sapp:
+            raise RuntimeError(
+                "Cannot swap with an application-profile rule")
+
+        fam[i], fam[j] = other, rule
+
+        # Keep dual-stack rules in step: if both rules also exist in the
+        # other family list, swap their twins too (only when unambiguous).
+        note = ""
+        other_list = b.rules if rule.v6 else b.rules6
+
+        def _twin(entry):
+            key = _ufw_rule_key(entry)
+            hits = [k for k, r in enumerate(other_list)
+                    if _ufw_rule_key(r) == key]
+            return hits[0] if len(hits) == 1 else None
+
+        t1, t2 = _twin(rule), _twin(other)
+        if t1 is not None and t2 is not None:
+            other_list[t1], other_list[t2] = other_list[t2], other_list[t1]
+            note = " (twins in the other family list swapped to match)"
+        else:
+            note = " (single-family rules: other family untouched)"
+
+        b._write_rules(v6=False)
+        b._write_rules(v6=True)
+        b._reload_user_rules()
+
+    result = build_firewall()
+    result["move"] = {"ok": True, "rule": num, "direction": direction,
+                      "note": note}
+    return result
 
 
 _UFW_POLICIES = ("allow", "deny", "reject")
@@ -3536,6 +3655,28 @@ def _honey_watchdog():
                     HONEY_STATE["listening"] = False
                     HONEY_STATE["error"] = "all traps died - firewall rules removed"
                     _honey_log("all traps dead - honeypot stopped")
+
+        # Rebind on WAN address changes. Dynamic WAN addresses (Xfinity
+        # IPv4 and IPv6) can appear seconds after boot — a boot-time bind
+        # then misses the v6 trap entirely — and can change mid-run, which
+        # leaves traps bound to an address that no longer receives. Watch
+        # both families and re-apply whenever the live address differs.
+        with HONEY_APPLY_LOCK:
+            cur4 = HONEY_STATE.get("wan_ip")
+            cur6 = HONEY_STATE.get("wan_ip6")
+            listening = HONEY_STATE["listening"]
+        if listening:
+            new4 = _honey_wan_ip()
+            new6 = _honey_wan6()
+            if (new4 and new4 != cur4) or (new6 and new6 != cur6):
+                _honey_log(
+                    "watchdog: WAN address change ({} -> {} | {} -> {}) - "
+                    "rebinding traps".format(cur4, new4, cur6, new6))
+                try:
+                    apply_honeypot(_honey_load_conf(), touch_ufw=True)
+                except Exception as exc:
+                    HONEY_STATE["error"] = "rebind failed: %r" % (exc,)
+                    _honey_log(HONEY_STATE["error"])
 
 def _honey_ufw_allow(port):
     try:
@@ -10938,6 +11079,13 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/firewall/delete":
             try:
                 self._send(200, delete_firewall_rule(body.get("number")))
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/firewall/move":
+            try:
+                self._send(200, move_firewall_rule(body.get("number"),
+                                                   body.get("direction")))
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
 

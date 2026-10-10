@@ -653,12 +653,25 @@ class Handler(BaseHTTPRequestHandler):
                 sev = min_sev[0] or "all"
             except Exception:
                 sev = "all"
-            rank = 0 if sev == "all" else max(0, severity_rank(sev))
             try:
-                limit = max(1, min(1000, int((params.get("limit") or ["500"])[0])))
+                rank = 0 if sev == "all" else max(0, severity_rank(sev))
+            except ValueError:
+                sev, rank = "all", 0
+            # Optional exact-tier filter (matches the page's filter badges)
+            # and newest-first ordering, used by the PHP /bans page to mirror
+            # render_bans_page's row ordering. Both default to the historic
+            # behaviour, so existing callers are unaffected.
+            tier = (params.get("tier") or [""])[0]
+            if tier not in SEVERITY_ORDER:
+                tier = None
+            order = (params.get("order") or ["hits"])[0]
+            order = "recent" if order == "recent" else "hits"
+            try:
+                limit = max(1, min(5000, int((params.get("limit") or ["500"])[0])))
             except (TypeError, ValueError):
                 limit = 500
-            bans = _store().top_bans(min_severity=rank, limit=limit)
+            bans = _store().top_bans(min_severity=rank, tier=tier,
+                                     limit=limit, order=order)
             self._json(200, {
                 "ok": True,
                 "generated": datetime.now(timezone.utc).isoformat(),

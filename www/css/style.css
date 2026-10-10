@@ -4677,3 +4677,18 @@ tr.tw-row-reveal {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
+
+/* ========== CORE SERVICE HEALTH BANNER ========== */
+/* Raised by dashboard.js when any core gateway service is inactive.
+   Reuses .banner (red left bar); adds red tint + pulse for urgency. */
+.svc-banner {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+  font-family: var(--mono, monospace);
+  letter-spacing: 0.04em;
+  animation: ovSvcPulse 1.2s ease-in-out infinite;
+}
+body.light-theme .svc-banner {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 6%, transparent);
+}
