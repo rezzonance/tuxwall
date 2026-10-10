@@ -1,0 +1,32 @@
+Architectures: all amd64
+Codename: stable
+Components: main
+Date: Sat, 10 Oct 2026 23:56:33 +0000
+Description: TuxWall network firewall dashboard
+Label: TuxWall APT Repository
+Origin: TuxWall
+Suite: stable
+MD5Sum:
+ 14174f97fd80a40019d3f03a56ba82cf              205 Release
+ 6ba1fa810df6de2375347ac4b0a7b8b9            33760 main/binary-all/Packages
+ 175e8d66c82331a10ecc510ac207086b            14708 main/binary-all/Packages.gz
+ 6ba1fa810df6de2375347ac4b0a7b8b9            33760 main/binary-amd64/Packages
+ 175e8d66c82331a10ecc510ac207086b            14708 main/binary-amd64/Packages.gz
+SHA1:
+ 79d6564b972f54df695d8cc8f4f793494300eda5              205 Release
+ e1991e67ae79af79146ddc51a029d4a4f8488933            33760 main/binary-all/Packages
+ 22f8982cdf62f1372a1934454295ab7b0d61a9d9            14708 main/binary-all/Packages.gz
+ e1991e67ae79af79146ddc51a029d4a4f8488933            33760 main/binary-amd64/Packages
+ 22f8982cdf62f1372a1934454295ab7b0d61a9d9            14708 main/binary-amd64/Packages.gz
+SHA256:
+ 2b024440ace8004e24acd8fed86c32b0eecb2bfebda615572f87285284682d7d              205 Release
+ c554c1cbf6fdcc0748d6b9bcc4e8b38bda8fd836a18734ce2c7cbfc04057c5aa            33760 main/binary-all/Packages
+ e754e7c25a414408291493dff73d16cac735b0e10a909d58fde41784720e6631            14708 main/binary-all/Packages.gz
+ c554c1cbf6fdcc0748d6b9bcc4e8b38bda8fd836a18734ce2c7cbfc04057c5aa            33760 main/binary-amd64/Packages
+ e754e7c25a414408291493dff73d16cac735b0e10a909d58fde41784720e6631            14708 main/binary-amd64/Packages.gz
+SHA512:
+ eb0cc4f8663c74a60ffb5035775d7bbc38bada0c7365203eaf8befd6ffe29fc67fa8a3f3efe5caf87771b2871a59b58fe114fedd69b981f96e59094fad873704              205 Release
+ 496c7062baab03e4b672e228c5a0be445b300f9d33dc2d7d79b3a1cfb5cf8b102eb0a1abaf4110fc2cbb34eb7f2eb11c9129c8f89a987381d98fc2966ff2686c            33760 main/binary-all/Packages
+ eaeac00aec8564a72e6927511eed8793f80eeb4d6a13be0bc94ca0525472c72d6908c3b026c42d931e55e5884d3cdb8f817b1c8d93e48cef85539265234289b6            14708 main/binary-all/Packages.gz
+ 496c7062baab03e4b672e228c5a0be445b300f9d33dc2d7d79b3a1cfb5cf8b102eb0a1abaf4110fc2cbb34eb7f2eb11c9129c8f89a987381d98fc2966ff2686c            33760 main/binary-amd64/Packages
+ eaeac00aec8564a72e6927511eed8793f80eeb4d6a13be0bc94ca0525472c72d6908c3b026c42d931e55e5884d3cdb8f817b1c8d93e48cef85539265234289b6            14708 main/binary-amd64/Packages.gz
