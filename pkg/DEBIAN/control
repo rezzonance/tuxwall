@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.9.6
+Version: 2.9.7
 Section: admin
 Priority: optional
 Architecture: all
@@ -483,3 +483,48 @@ Description: TuxWall Network Firewall Dashboard
  logs, and under unattended-upgrades. The bar tracks the twelve
  printed steps (the letter-suffixed sub-steps of phase 6 advance
  it too); the familiar [n/9] step labels are unchanged.
+ .
+ v2.9.7 hardens the live-observed rough edges from the 2026-10-10
+ session. Firewall rules can now be reordered from the dashboard:
+ /api/firewall/move swaps a rule with its neighbour through ufw's
+ own backend (get_rules + _write_rules + _reload_user_rules), which
+ is the same persistence path the CLI uses and the only way to get
+ exact positioning in both family lists - the CLI's insert always
+ appends the IPv6 half. Dual-stack swaps carry their twins so the
+ v4/v6 lists stay in step; app-profile rules are refused; a
+ confirmation warns that top-down order changes can alter what
+ overlapping allow/deny pairs match.
+ .
+ The firewall table had been showing every rule twice: build_firewall
+ parsed rule lines from both `ufw status verbose` and `status
+ numbered`; headers still come from verbose but rules now come only
+ from the numbered output, pivoting on the action keyword - the old
+ 2+-space column split also silently dropped any rule whose To value
+ was long enough to shrink the column gap to one space (the fe80
+ DHCPv6 pair went entirely missing).
+ .
+ The dashboard API runs under ProtectSystem=full, so its System
+ Updates feature was spawning apt inside a read-only /usr,/etc,/var
+ sandbox: the openssh/postfix dist-upgrade died mid-transaction with
+ EROFS after ssh.service had already been stopped by the packaging,
+ leaving the gateway without SSH until a manual unsandboxed
+ apt --fix-broken. _apt_exec now escapes via systemd-run --pipe
+ --wait --collect, so dashboard updates run as a normal transient
+ root service identical to a shell invocation.
+ .
+ The honeypot now binds the WAN IPv6 traps too: the v6 support was
+ always there but raced the RA-assigned dynamic address at boot (wan
+ resolve returned None, v4-only sockets forever). The honeypot
+ watchdog re-checks both WAN families every cycle and rebinds on any
+ change, which also covers future ISP address swaps.
+ .
+ A red core-service banner now rides atop every dashboard view,
+ polled every 30s against the systemd unit list, so a dead
+ unbound/crowdsec/nginx is visible from anywhere instead of
+ requiring manual systemctl guesswork during an incident.
+ .
+ The collector's public bans JSON gains tier= (exact severity
+ filter), order=recent and a 5000-row cap, used by the tuxwall.org
+ PHP /bans page to mirror the collector's own row ordering; the
+ nginx tuxwall-org vhost now serves /bans from that PHP page and
+ denies direct access to the includes/ source directory.
