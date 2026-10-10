@@ -9952,6 +9952,17 @@ def _count_upgradable():
 def _apt_exec(args, pct_start, pct_end):
     env = dict(os.environ)
     env["DEBIAN_FRONTEND"] = "noninteractive"
+    # tuxwall.service sandboxes the API (ProtectSystem=full), and apt dies
+    # with EROFS mid-transaction once a package writes outside the sandbox
+    # - observed live: openssh's packaging stopped ssh.service first, the
+    # upgrade then died half-installed and the gateway lost SSH until a
+    # manual unsandboxed 'apt --fix-broken'. So run apt in a transient
+    # systemd unit instead: outside the service sandbox, output streamed
+    # back (--pipe), waited on (--wait), cleaned up on exit (--collect).
+    # Fall back to in-process only when systemd-run is unavailable.
+    if shutil.which("systemd-run"):
+        args = ["systemd-run", "--pipe", "--wait", "--collect",
+                "-p", "Environment=DEBIAN_FRONTEND=noninteractive"] + args
     proc = subprocess.Popen(
         args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
         bufsize=1,
