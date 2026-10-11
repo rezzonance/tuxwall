@@ -6,8 +6,14 @@ from typing import Any
 from homeassistant import config_entries
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_SCAN_INTERVAL, CONF_USERNAME
 from homeassistant.core import callback
-from homeassistant.data_entry_flow import FlowResult
 import voluptuous as vol
+
+try:
+    # HA >= 2024.11
+    from homeassistant.config_entries import ConfigFlowResult as FlowResult
+except ImportError:
+    # HA < 2024.11 (FlowResult was removed from data_entry_flow in 2024.12)
+    from homeassistant.data_entry_flow import FlowResult
 
 from .api import TuxwallApiClient, TuxwallApiError, TuxwallAuthError
 from .const import CONF_TOTP_CODE, DEFAULT_SCAN_INTERVAL, DOMAIN
