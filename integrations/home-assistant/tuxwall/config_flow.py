@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant import config_entries
-from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_SCAN_INTERVAL, CONF_USERNAME
+from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import callback
 import voluptuous as vol
 
@@ -16,7 +16,12 @@ except ImportError:
     from homeassistant.data_entry_flow import FlowResult
 
 from .api import TuxwallApiClient, TuxwallApiError, TuxwallAuthError
-from .const import CONF_TOTP_CODE, DEFAULT_SCAN_INTERVAL, DOMAIN
+from .const import (
+    CONF_SCAN_INTERVAL,
+    CONF_TOTP_CODE,
+    DEFAULT_SCAN_INTERVAL,
+    DOMAIN,
+)
 
 STEP_USER_SCHEMA = vol.Schema(
     {

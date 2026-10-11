@@ -6,12 +6,17 @@ import time
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import TuxwallApiClient, TuxwallApiError, TuxwallAuthError
-from .const import CONF_TOTP_CODE, DEFAULT_SCAN_INTERVAL, DOMAIN, EVENT_TYPE, LOGGER
+from .const import (
+    CONF_SCAN_INTERVAL,
+    DEFAULT_SCAN_INTERVAL,
+    DOMAIN,
+    EVENT_TYPE,
+    LOGGER,
+)
 
 
 class TuxwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):

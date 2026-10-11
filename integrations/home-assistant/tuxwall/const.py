@@ -8,6 +8,9 @@ DOMAIN: Final = "tuxwall"
 DEFAULT_SCAN_INTERVAL: Final = 30
 
 CONF_TOTP_CODE: Final = "totp_code"
+# Own constant: CONF_SCAN_INTERVAL was deprecated in HA 2024.10 and may be
+# removed on current versions - never import it from homeassistant.const.
+CONF_SCAN_INTERVAL: Final = "scan_interval"
 
 EVENT_TYPE: Final = "tuxwall_event"
 
