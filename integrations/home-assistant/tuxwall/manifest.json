@@ -1,0 +1,13 @@
+{
+  "domain": "tuxwall",
+  "name": "TuxWall",
+  "codeowners": ["rezzonance"],
+  "config_flow": true,
+  "documentation": "https://tuxwall.org/help.html",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/rezzonance/tuxwall/issues",
+  "loggers": ["custom_components.tuxwall"],
+  "requirements": [],
+  "version": "1.0.0"
+}

@@ -1,0 +1,39 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "TuxWall Gateway",
+        "description": "Connect to your TuxWall router's dashboard API.",
+        "data": {
+          "host": "Host or base URL (e.g. http://192.168.1.1)",
+          "username": "Username",
+          "password": "Password",
+          "totp_code": "TOTP code (only if 2FA is enabled on the account)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot reach the TuxWall dashboard at that host.",
+      "invalid_auth": "Invalid credentials (or wrong TOTP code / locked out)."
+    },
+    "abort": {
+      "already_configured": "This TuxWall host is already configured."
+    }
+  },
+  "services": {
+    "ban_device": {
+      "name": "Ban device",
+      "description": "Cuts a client's internet access (UFW deny + Unbound DNS block). Requires an admin tuxwall user.",
+      "fields": {
+        "ip": { "name": "IP", "description": "The IPv4 address to ban." }
+      }
+    },
+    "unban_device": {
+      "name": "Unban device",
+      "description": "Restores internet access for a banned client.",
+      "fields": {
+        "ip": { "name": "IP", "description": "The IPv4 address to unban." }
+      }
+    }
+  }
+}

@@ -1,0 +1,24 @@
+ban_device:
+  name: Ban device
+  description: >-
+    Cuts a client's internet access with a UFW deny rule plus an Unbound DNS
+    block. Requires an admin tuxwall user.
+  fields:
+    ip:
+      name: IP
+      description: The IPv4 address to ban.
+      required: true
+      example: "192.168.1.99"
+      selector:
+        text:
+unban_device:
+  name: Unban device
+  description: Restores internet access for a banned client.
+  fields:
+    ip:
+      name: IP
+      description: The IPv4 address to unban.
+      required: true
+      example: "192.168.1.99"
+      selector:
+        text:
