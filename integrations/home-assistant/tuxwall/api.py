@@ -32,8 +32,13 @@ class TuxwallApiClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
+            # unsafe=True: the gateway is addressed by IP (http://192.168.1.1),
+            # and aiohttp's default CookieJar silently discards cookies received
+            # from IP-address origins - the session cookie never stuck and every
+            # GET after login came back 401 (observed live on first install).
             self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=15)
+                timeout=aiohttp.ClientTimeout(total=15),
+                cookie_jar=aiohttp.CookieJar(unsafe=True),
             )
         return self._session
 

@@ -52,6 +52,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         await client.login()
         whoami = await client.whoami()
+        if not whoami.get("authenticated"):
+            # /api/auth/session returns 200 even unauthenticated - a 200
+            # alone proves nothing; only the body confirms the session.
+            raise TuxwallAuthError("Session was not established")
     except TuxwallAuthError as exc:
         await client.close()
         raise ConfigEntryAuthFailed(str(exc)) from exc

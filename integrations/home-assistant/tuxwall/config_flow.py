@@ -51,6 +51,10 @@ class TuxwallConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             try:
                 await client.login()
                 whoami = await client.whoami()
+                if not whoami.get("authenticated"):
+                    # /api/auth/session returns 200 even unauthenticated -
+                    # only the body confirms the session actually works.
+                    raise TuxwallAuthError("Session was not established")
             except TuxwallAuthError:
                 errors["base"] = "invalid_auth"
             except TuxwallApiError:
