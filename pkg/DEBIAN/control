@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.9.7
+Version: 2.9.8
 Section: admin
 Priority: optional
 Architecture: all
@@ -528,3 +528,16 @@ Description: TuxWall Network Firewall Dashboard
  PHP /bans page to mirror the collector's own row ordering; the
  nginx tuxwall-org vhost now serves /bans from that PHP page and
  denies direct access to the includes/ source directory.
+ .
+ v2.9.8 closes the dynamic-WAN self-report gap in community ban
+ reporting. The watcher's self-guard only knew the CURRENT WAN
+ addresses, so after an ISP address rotation the CrowdSec engine
+ could still self-capture the just-rotated-away address and report
+ it to the public community list (the same class as the 2026-10-07
+ self-report that survived on the public list for five days after
+ the original purge). Each 60s watcher cycle now records the last
+ five WAN addresses (both families) to
+ /var/lib/tuxwall/recent-wan-ips.json, and the guard sits centrally
+ in the report spawner - every report path (watcher, honeypot,
+ canary, manual ban, blocklist add, CLI decisions) refuses to
+ report any address the router currently holds or recently held.
