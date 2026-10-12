@@ -2564,8 +2564,62 @@ def report_ban_to_org(ip, hits=0, reason="", source="", category="",
         return {"ok": False, "reason": str(exc)}
 
 
+RECENT_WAN_FILE = os.path.join(BLOCKLIST_DIR, "recent-wan-ips.json")
+RECENT_WAN_MAX = 5
+RECENT_WAN_LOCK = threading.Lock()
+
+
+def _recent_wan_ips():
+    """The last few WAN addresses this router held (both families)."""
+    try:
+        with open(RECENT_WAN_FILE) as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return [str(a) for a in data if isinstance(a, str)][:RECENT_WAN_MAX]
+    except (OSError, ValueError):
+        pass
+    return []
+
+
+def _record_recent_wan():
+    """Track the last few WAN addresses (both families).
+
+    The watcher's self-guard only knows the CURRENT address; on a dynamic
+    WAN the engine can still self-capture the just-rotated-away address,
+    and that stale self-report must not reach the community list either
+    (observed live: an engine self-capture survived on the public list for
+    five days after the purge). Current addresses go first, then whatever
+    history the file holds, deduped, capped."""
+    now = [a for a in (_honey_wan_ip(), _honey_wan6()) if a]
+    try:
+        with RECENT_WAN_LOCK:
+            merged = []
+            for a in now + _recent_wan_ips():
+                if a and a not in merged:
+                    merged.append(a)
+            merged = merged[:RECENT_WAN_MAX]
+            try:
+                with open(RECENT_WAN_FILE, "w") as f:
+                    json.dump(merged, f, indent=2)
+            except OSError:
+                pass  # best-effort; the in-memory guard still applies
+    except Exception:
+        pass
+
+
+def _is_own_or_recent_wan(ip):
+    """True for any WAN address this router currently holds - or recently
+    held. Used by every report path so no self-capture (current or
+    rotated-away) is ever reported to the community list."""
+    return ip and ip in set(_recent_wan_ips()) | {_honey_wan_ip(), _honey_wan6()}
+
+
 def _spawn_report(ip, reason, source, category=""):
     """Fire a ban report in a daemon thread so the ban endpoint stays fast.
+
+    Self-guard: any WAN address this router holds - or recently held (the
+    WAN is dynamic; a self-capture of the rotated-away address is still a
+    self-capture) - is never reported, on any path.
 
     Evidence is attached so the tuxwall.org report card reflects the observed
     abuse type instead of how the IP happened to be banned locally:
@@ -2575,6 +2629,8 @@ def _spawn_report(ip, reason, source, category=""):
          the firewall (port scan, service probe) becomes the category and
          is appended to the reason.
     """
+    if _is_own_or_recent_wan(ip):
+        return
     try:
         sur_cat, sur_sig = suricata_evidence_for_ip(ip)
     except Exception:
@@ -2963,6 +3019,7 @@ def ban_report_watcher():
     """
     while True:
         time.sleep(BAN_REPORT_INTERVAL)
+        _record_recent_wan()
         try:
             proc = subprocess.run(
                 [CROWDSEC_BIN, "decisions", "list", "-o", "raw"],
@@ -2992,8 +3049,9 @@ def ban_report_watcher():
                     if simulated or source not in BAN_REPORT_SOURCES:
                         reported.add(dec_id)
                         continue
-                    if ip in (_honey_wan_ip(), _honey_wan6()):
-                        # our own address (engine self-capture) - never report
+                    if _is_own_or_recent_wan(ip):
+                        # our own address, current or recently rotated away
+                        # (engine self-capture) - never report
                         reported.add(dec_id)
                         continue
                     if any(reason.startswith(p) for p in BAN_REPORT_SKIP_REASONS):
