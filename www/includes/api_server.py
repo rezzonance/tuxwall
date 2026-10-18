@@ -2412,43 +2412,6 @@ def _mask_key(key):
     return "****" if key else ""
 
 
-def get_reporting_conf():
-    c = load_reporting_conf()
-    return {
-        "ok": True,
-        "enabled": c["enabled"],
-        "url": c["url"],
-        "key_masked": _mask_key(c["key"]),
-        "key_set": bool(c["key"]),
-        "last_report": c["last_report"],
-        "last_error": c["last_error"],
-    }
-
-
-def save_reporting_conf(body):
-    enabled = bool(body.get("enabled"))
-    data = load_reporting_conf()
-    url = (body.get("url") or "").strip().rstrip("/") or data["url"]
-    if not url:
-        raise ValueError("Reporting URL is required")
-    if not url.startswith("https://"):
-        raise ValueError("Reporting URL must use HTTPS")
-    if not data["key"]:
-        data["key"] = secrets.token_hex(16)
-    data["enabled"] = enabled
-    data["url"] = url
-    bak = REPORTING_CONF_FILE + ".bak-" + time.strftime("%Y%m%d%H%M%S")
-    try:
-        if os.path.exists(REPORTING_CONF_FILE):
-            shutil.copy2(REPORTING_CONF_FILE, bak)
-    except OSError:
-        pass
-    os.makedirs(os.path.dirname(REPORTING_CONF_FILE), exist_ok=True)
-    with open(REPORTING_CONF_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-    return {"ok": True, "backup": bak if os.path.exists(bak) else None}
-
-
 def _write_report_status(ok, error):
     """Record the outcome of the last report attempt in the conf file."""
     try:

@@ -6,7 +6,7 @@
   <title>TuxWall - Network Dashboard</title>
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
-  <link rel="stylesheet" href="/css/style.css?v=202610171556">
+  <link rel="stylesheet" href="/css/style.css?v=202610180015">
 </head>
 <body>
 <div id="login-gate" class="login-gate" hidden>
@@ -1480,6 +1480,9 @@
 
       </div>
 
+      <!-- Pane: Deception (tarpit + canary) -->
+      <div class="fw-pane" data-sec-pane="deception" hidden>
+
       <div class="deception-notice">
         <b>Trap catches are shared with the tuxwall.org community ban list.</b>
         Every IP caught here attacked a decoy — a verified threat, zero false positives.
@@ -1487,9 +1490,6 @@
         <b>The trade-off: no research, no report buttons — the traps do it for you.</b>
         If you don't want threats caught here shared, don't enable the deception layer.
       </div>
-
-      <!-- Pane: Deception (tarpit + canary) -->
-      <div class="fw-pane" data-sec-pane="deception" hidden>
 
       <div class="card card-mt">
         <div class="card-head">
@@ -2840,7 +2840,7 @@
 
 <script src="/scripts/leaflet.js"></script>
 <script src="/scripts/qrcode.js"></script>
-<script src="/scripts/dashboard.js?v=202610171556"></script>
+<script src="/scripts/dashboard.js?v=202610180015"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>

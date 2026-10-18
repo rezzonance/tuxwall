@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 3.0.0
+Version: 3.0.1
 Section: admin
 Priority: optional
 Architecture: all
@@ -574,3 +574,18 @@ Description: TuxWall Network Firewall Dashboard
  pages, a curated blocklist catalog with a Browse-lists modal, an AI
  side-panel restyle, an updated attack map, a broad styling pass (new
  security-enhancements.css) and numerous bug fixes.
+ .
+ v3.0.1 completes the community data model: community ban reporting is
+ now deception-only and always on. Trap catches are the only reports
+ that flow to tuxwall.org - a completed handshake to a service that
+ does not exist is its own evidence, carrying no contributor judgment,
+ so the community list becomes a pure record of verified threats.
+ The reporting toggle, the engine/CLI decision watcher and the
+ per-attacker manual Report button are removed (manual and engine
+ bans are only as good as the person banning; one bad ban pollutes
+ every install pulling the list), the per-install anonymous key is
+ generated automatically on first catch, and a prominent yellow
+ notice on the Deception tab discloses the trade up front: trap
+ catches are shared - attacker IPs and evidence only, none of your
+ information is saved - and the trade-off is no research, no report
+ buttons, the traps do it for you.

@@ -4094,6 +4094,8 @@
 
   // ---- Community ban reporting (tuxwall.org) ----
 
+
+
   async function banCrowdsec(ip) {
     const data = await postJSON("/api/crowdsec/blocklist/add", { entry: ip });
     if (!data.ok) throw new Error(data.error || "Ban failed");
@@ -4123,7 +4125,7 @@
           await banCrowdsec(ip);
           setSecBanStatus(`Added ${ip} to the custom blocklist (1y ban).`);
         }
-      } catch (err) {
+        } catch (err) {
         setSecBanStatus(`Failed: ${err.message}`);
       } finally {
         btn.disabled = false;
@@ -10419,7 +10421,6 @@
     bindAideActions();
     bindCanaryActions();
     bindHoneypotActions();
-    bindReporting();
     bindCustomBlocklist();
     bindSettings();
 

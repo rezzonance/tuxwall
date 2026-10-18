@@ -5863,7 +5863,7 @@ body.light-theme .svc-banner {
 }
 .dns-up-pihole-input:focus { border-color: var(--accent); outline: none; }
 
-/* ---------- Deception notice (Security page) ----------
+/* ---------- Deception notice (Security page, Deception pane) ----------
    Yellow, unmissable: the disclosure that trap catches are shared
    with the tuxwall.org community ban list. */
 .deception-notice {
