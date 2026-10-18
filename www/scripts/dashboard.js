@@ -4093,18 +4093,15 @@
     // buttons in Top Attackers. Bans are LOCAL CrowdSec decisions only -
     // nothing here reports to tuxwall.org (community reporting is
     // deception-only by design).
-    try {
-      const data = await fetchJSON("/api/crowdsec");
-      state.secCrowdsecUp = !!data.ok;
-    } catch (err) {
-      state.secCrowdsecUp = false;
-    }
-    try {
-      const bl = await fetchJSON("/api/crowdsec/blocklist");
-      state.secBannedIps = new Set((bl.entries || []).map((e) => e.value));
-    } catch (err) {
-      state.secBannedIps = new Set();
-    }
+    // parallel, not sequential: halves the view-switch latency
+    const [cs, bl] = await Promise.allSettled([
+      fetchJSON("/api/crowdsec"),
+      fetchJSON("/api/crowdsec/blocklist"),
+    ]);
+    state.secCrowdsecUp = cs.status === "fulfilled" && !!cs.value.ok;
+    state.secBannedIps = bl.status === "fulfilled"
+      ? new Set((bl.value.entries || []).map((e) => e.value))
+      : new Set();
     const up = state.secCrowdsecUp;
     els.secBanAll.disabled = !up;
     if (!up) setSecBanStatus("CrowdSec unavailable");
@@ -4143,13 +4140,17 @@
       try {
         if (unbanBtn) {
           await unbanCrowdsec(ip);
+          state.secBannedIps.delete(ip);
           setSecBanStatus(`Removed ${ip} from the custom blocklist.`);
-          await updateSecBanAvailability();
         } else {
           await banCrowdsec(ip);
+          state.secBannedIps.add(ip);
           setSecBanStatus(`Added ${ip} to the custom blocklist (1y ban).`);
         }
-        } catch (err) {
+        // One re-render, no availability chain: the outcome is already
+        // known locally, so the button flips on the next security fetch.
+        refreshSecurity();
+      } catch (err) {
         setSecBanStatus(`Failed: ${err.message}`);
       } finally {
         btn.disabled = false;
@@ -4175,6 +4176,9 @@
         btn.disabled = true;
       }
       els.secBanAll.disabled = false;
+      // one re-render for the whole batch - the rows above already flipped
+      // their buttons inline; this syncs anything missed
+      refreshSecurity();
       setSecBanStatus(`Added ${ok} of ${total} top attackers to the custom blocklist${failed ? ` (${failed} failed)` : ""}.`);
     });
 

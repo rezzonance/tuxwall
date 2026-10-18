@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 3.0.3
+Version: 3.0.4
 Section: admin
 Priority: optional
 Architecture: all
@@ -615,3 +615,12 @@ Description: TuxWall Network Firewall Dashboard
  reported to tuxwall.org (community reporting is deception-catch only,
  by design) - and the Top Attackers toolbar now states this directly:
  "Local CrowdSec bans only".
+ .
+ v3.0.4 fixes Ban/Unban click latency in Security -> Top Attackers
+ (~5s -> sub-second). The click handler had chained three sequential
+ fetches (CrowdSec availability + blocklist + security re-render,
+ including a server-side cscli decisions list) before the button
+ flipped. The handler now updates the banned-IP set locally on the
+ known outcome and fires a single re-render; the Add Top 25 batch
+ gets the same single re-render; and the CrowdSec availability checks
+ run in parallel on the security-view poll.
