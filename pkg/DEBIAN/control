@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 2.9.8
+Version: 3.0.0
 Section: admin
 Priority: optional
 Architecture: all
@@ -541,3 +541,20 @@ Description: TuxWall Network Firewall Dashboard
  in the report spawner - every report path (watcher, honeypot,
  canary, manual ban, blocklist add, CLI decisions) refuses to
  report any address the router currently holds or recently held.
+ .
+ v3.0.0 adds a Stats/Upstream subtab to the DNS page: eleven upstream
+ presets (recursive root servers, AdGuard, CleanBrowsing, Cloudflare,
+ Comodo, Control D, DNS.Watch, Google, Mullvad - marked shutting down
+ after 2026-11-02, OpenDNS, Quad9) plus a Pi-hole / custom LAN server
+ option. Providers with a published DoT hostname offer DNS-over-TLS
+ (forward-tls-upstream + tls-cert-bundle, IP@853#auth-name forwarders);
+ the tag marks support, the Encrypt-upstream checkbox turns it on.
+ Saves reuse the System -> DNS form path: router-dns.conf .bak backup,
+ listen-address/port/protocol preservation, unbound hot-reload with
+ auto-rollback on checkconf failure.
+ .
+ v3.0.0 also rolls up the UI work since 2.9.8: OPNsense-style subtabs
+ for the DHCP (Dynamic/Static) and Blocklists (Sources/RPZ/Whitelist)
+ pages, a curated blocklist catalog with a Browse-lists modal, an AI
+ side-panel restyle, an updated attack map, a broad styling pass (new
+ security-enhancements.css) and numerous bug fixes.

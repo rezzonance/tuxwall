@@ -1015,149 +1015,532 @@ table .btn { margin-left: 8px; }
 .honey-stat.wasted { --honey-c: #d29922; }
 .honey-stat.banned { --honey-c: #f85149; }
 
-/* ---------- Security / Attack Map ---------- */
+/* ══════════════════════════════════════════════════════════════════════════
+   Security / Attack Map  —  live threat visualisation
+   Used by #ov-map (Overview) and #sec-map (Security ▸ Attacks).
+   Appearance is configurable from Settings ▸ Map.
+   ══════════════════════════════════════════════════════════════════════════ */
 .sec-map {
   height: 480px; width: 100%;
   position: relative; z-index: 0;
-  background: #060a10;
+  background:
+    radial-gradient(ellipse at 50% 45%, #0b1626 0%, #060a12 55%, #03060b 100%);
   border-radius: 0 0 var(--radius) var(--radius);
   overflow: hidden;
+  isolation: isolate;
+  /* Keep the map's continuous repainting from invalidating the rest of the
+     dashboard - without this the Overview page repaints wholesale at 60fps. */
+  contain: layout paint;
+  --map-accent: #ff3b5c;
+  --map-accent-soft: rgba(255, 59, 92, 0.5);
+  --map-ink: rgba(5, 9, 16, 0.78);
 }
-.sec-map .leaflet-container { background: #060a10; font-family: var(--font); }
-.sec-map .leaflet-tile-pane { filter: saturate(0.4) brightness(0.75) hue-rotate(10deg); }
-.sec-map .leaflet-control-zoom a {
-  background: rgba(10,15,25,0.85); color: var(--text);
-  border-color: rgba(255,255,255,0.1);
-}
-.sec-map .leaflet-control-zoom a:hover { background: rgba(79,140,255,0.2); color: var(--accent); }
-/* sec-note: merged into the unified note block above */
+.sec-map[data-palette="cyber"]  { --map-accent: #27e6ff; --map-accent-soft: rgba(39,230,255,0.5); }
+.sec-map[data-palette="matrix"] { --map-accent: #3ef07a; --map-accent-soft: rgba(62,240,122,0.5); }
+.sec-map[data-palette="amber"]  { --map-accent: #ffa32e; --map-accent-soft: rgba(255,163,46,0.5); }
 
-/* SVG arc layer */
+.sec-map .leaflet-container { background: transparent; font-family: var(--font); }
+.sec-map .leaflet-tile-pane {
+  filter: saturate(0.35) brightness(0.62) contrast(1.15) hue-rotate(6deg);
+}
+.sec-map[data-palette="cyber"]  .leaflet-tile-pane { filter: saturate(0.4) brightness(0.6) contrast(1.2) hue-rotate(165deg); }
+.sec-map[data-palette="matrix"] .leaflet-tile-pane { filter: saturate(0.45) brightness(0.6) contrast(1.2) hue-rotate(95deg); }
+.sec-map[data-palette="amber"]  .leaflet-tile-pane { filter: saturate(0.5) brightness(0.65) contrast(1.15) hue-rotate(-18deg); }
+
+/* ── Leaflet chrome ─────────────────────────────────────────────────────── */
+.sec-map .leaflet-control-zoom {
+  border: none; box-shadow: 0 6px 22px rgba(0,0,0,0.55);
+  border-radius: 8px; overflow: hidden;
+}
+.sec-map .leaflet-control-zoom a {
+  background: rgba(8,13,22,0.82); color: rgba(255,255,255,0.75);
+  border-color: rgba(255,255,255,0.08);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  transition: background var(--transition), color var(--transition);
+}
+.sec-map .leaflet-control-zoom a:hover {
+  background: color-mix(in srgb, var(--map-accent) 28%, rgba(8,13,22,0.9));
+  color: #fff;
+}
+.sec-map .leaflet-control-attribution {
+  background: rgba(5,9,16,0.6); color: rgba(255,255,255,0.32);
+  font-size: 10px; padding: 2px 7px; border-radius: 6px 0 0 0;
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+}
+.sec-map .leaflet-control-attribution a { color: rgba(255,255,255,0.5); }
+
+/* ── Tactical grid ──────────────────────────────────────────────────────── */
+.sec-map-grid {
+  position: absolute; inset: 0; z-index: 402; pointer-events: none;
+  background-image:
+    repeating-linear-gradient(0deg, color-mix(in srgb, var(--map-accent) 9%, transparent) 0 1px, transparent 1px 56px),
+    repeating-linear-gradient(90deg, color-mix(in srgb, var(--map-accent) 9%, transparent) 0 1px, transparent 1px 56px);
+  opacity: 0.45;
+  mask-image: radial-gradient(ellipse at center, #000 20%, transparent 78%);
+  -webkit-mask-image: radial-gradient(ellipse at center, #000 20%, transparent 78%);
+}
+
+/* ── Radar sweep anchored on the gateway ────────────────────────────────── */
+.sec-map-sweep {
+  position: absolute; z-index: 403; pointer-events: none;
+  width: 600px; height: 600px; border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    color-mix(in srgb, var(--map-accent) 26%, transparent) 0deg,
+    color-mix(in srgb, var(--map-accent) 8%, transparent) 26deg,
+    transparent 62deg,
+    transparent 360deg);
+  mask-image: radial-gradient(circle, #000 0%, rgba(0,0,0,0.55) 55%, transparent 72%);
+  -webkit-mask-image: radial-gradient(circle, #000 0%, rgba(0,0,0,0.55) 55%, transparent 72%);
+  animation: sec-sweep-spin 7s linear infinite;
+  opacity: 0.75;
+  will-change: transform;
+}
+@keyframes sec-sweep-spin {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to   { transform: translate(-50%, -50%) rotate(360deg); }
+}
+
+/* ── SVG arc layer ──────────────────────────────────────────────────────── */
 .sec-arcs {
   position: absolute; left: 0; top: 0; z-index: 450;
   pointer-events: none; overflow: visible;
-  filter: drop-shadow(0 0 2px rgba(255,100,50,0.3));
+}
+.sec-arc-head {
+  animation-name: sec-arc-fly;
+  /* MUST stay linear — any easing makes the comet stall at the ends of each
+     cycle, which reads as the whole map freezing. */
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
 }
 @keyframes sec-arc-fly {
   to { stroke-dashoffset: var(--len, -400); }
 }
+.sec-arc-dot { /* no filter: it would re-rasterise on every animation frame */ }
 
-/* Vignette */
-.sec-map-vignette {
-  position: absolute; inset: 0; z-index: 460; pointer-events: none;
-  background: radial-gradient(ellipse at center,
-    transparent 40%,
-    rgba(4,8,16,0.45) 70%,
-    rgba(4,8,16,0.82) 100%);
+/* ── Impact shockwaves at the gateway ───────────────────────────────────── */
+.sec-impact-layer { position: absolute; inset: 0; z-index: 452; pointer-events: none; overflow: hidden; }
+.sec-impact {
+  position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px;
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--map-accent) 85%, #fff);
+  box-shadow: 0 0 14px var(--map-accent-soft), inset 0 0 10px var(--map-accent-soft);
+  animation: sec-impact-ring 1s cubic-bezier(0.1, 0.7, 0.3, 1) forwards;
+}
+@keyframes sec-impact-ring {
+  0%   { transform: scale(0.35); opacity: 0.95; }
+  70%  { opacity: 0.25; }
+  100% { transform: scale(6.5); opacity: 0; }
 }
 
-/* Scanlines */
+/* ── Vignette / scanlines / frame ───────────────────────────────────────── */
+.sec-map-vignette {
+  position: absolute; inset: 0; z-index: 460; pointer-events: none;
+  background:
+    radial-gradient(ellipse at center, transparent 38%, rgba(3,6,12,0.5) 72%, rgba(2,4,9,0.9) 100%),
+    linear-gradient(180deg, rgba(3,6,12,0.45) 0%, transparent 18%, transparent 84%, rgba(3,6,12,0.55) 100%);
+}
 .sec-map-scanlines {
   position: absolute; inset: 0; z-index: 461; pointer-events: none; overflow: hidden;
-  background: repeating-linear-gradient(
-    0deg,
-    transparent,
-    transparent 2px,
-    rgba(0,0,0,0.06) 2px,
-    rgba(0,0,0,0.06) 4px
-  );
+  background: repeating-linear-gradient(0deg,
+    transparent, transparent 2px,
+    rgba(0,0,0,0.085) 2px, rgba(0,0,0,0.085) 4px);
   animation: scan-scroll 8s linear infinite;
-  opacity: 0.5;
+  opacity: 0.45;
 }
 @keyframes scan-scroll {
   from { background-position: 0 0; }
   to   { background-position: 0 100px; }
 }
+.sec-map-frame { position: absolute; inset: 10px; z-index: 465; pointer-events: none; }
+.sec-map-frame i {
+  position: absolute; width: 18px; height: 18px;
+  border: 1.5px solid color-mix(in srgb, var(--map-accent) 55%, transparent);
+  opacity: 0.8;
+}
+.sec-map-frame .c1 { top: 0; left: 0; border-right: 0; border-bottom: 0; border-radius: 4px 0 0 0; }
+.sec-map-frame .c2 { top: 0; right: 0; border-left: 0; border-bottom: 0; border-radius: 0 4px 0 0; }
+.sec-map-frame .c3 { bottom: 0; left: 0; border-right: 0; border-top: 0; border-radius: 0 0 0 4px; }
+.sec-map-frame .c4 { bottom: 0; right: 0; border-left: 0; border-top: 0; border-radius: 0 0 4px 0; }
 
-/* HUD stats overlay */
+/* ── Threat monitor HUD ─────────────────────────────────────────────────── */
 .sec-map-hud {
   position: absolute; top: 14px; left: 14px; z-index: 470;
   pointer-events: none;
-  background: rgba(6,10,18,0.75);
-  border: 1px solid rgba(255,80,50,0.25);
-  border-radius: 8px;
-  padding: 10px 14px;
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  min-width: 140px;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,100,50,0.1);
+  background: linear-gradient(160deg, rgba(10,16,27,0.96), rgba(5,9,16,0.92));
+  border: 1px solid color-mix(in srgb, var(--map-accent) 28%, transparent);
+  border-radius: 10px;
+  padding: 11px 13px 12px;
+  min-width: 182px;
+  box-shadow:
+    0 10px 34px rgba(0,0,0,0.6),
+    inset 0 1px 0 color-mix(in srgb, var(--map-accent) 18%, transparent);
 }
-.sec-hud-row {
-  display: flex; align-items: center; gap: 6px;
-  margin-bottom: 8px;
+.sec-map-hud::before {
+  content: ""; position: absolute; left: 11px; right: 11px; top: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--map-accent), transparent);
+  opacity: 0.8;
 }
+.sec-hud-top { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
 .sec-hud-dot {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: #ff4444;
-  box-shadow: 0 0 6px #ff4444;
+  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+  background: var(--map-accent); box-shadow: 0 0 8px var(--map-accent);
   animation: dot-err-pulse 1.5s ease-in-out infinite;
-  flex-shrink: 0;
 }
 .sec-hud-label {
-  font-size: 9px; font-weight: 800; letter-spacing: 0.12em;
-  color: rgba(255,100,80,0.9); text-transform: uppercase;
+  font-size: 9px; font-weight: 800; letter-spacing: 0.14em; text-transform: uppercase;
+  color: color-mix(in srgb, var(--map-accent) 70%, #fff);
 }
-.sec-hud-stat {
-  display: flex; justify-content: space-between; align-items: baseline;
-  gap: 10px; margin-bottom: 4px;
+.sec-hud-live {
+  margin-left: auto; font-size: 8px; font-weight: 800; letter-spacing: 0.12em;
+  padding: 2px 5px; border-radius: 3px; color: #fff;
+  background: color-mix(in srgb, var(--map-accent) 70%, transparent);
+  animation: sec-hud-blink 2.2s ease-in-out infinite;
 }
+@keyframes sec-hud-blink { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+.sec-hud-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; }
+.sec-hud-stat { display: flex; flex-direction: column; gap: 1px; }
+.sec-hud-origin { margin-top: 7px; }
 .sec-hud-val {
-  font-size: 15px; font-weight: 700; color: #fff;
+  font-size: 17px; font-weight: 700; color: #fff; line-height: 1.1;
   font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 12px color-mix(in srgb, var(--map-accent) 40%, transparent);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sec-hud-val.tick { animation: sec-hud-tick 0.45s ease-out; }
+@keyframes sec-hud-tick {
+  0%  { transform: translateY(-3px); opacity: 0.2; color: var(--map-accent); }
+  100% { transform: none; opacity: 1; }
 }
 .sec-hud-key {
-  font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
-  color: rgba(255,255,255,0.35);
+  font-size: 8.5px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: rgba(255,255,255,0.38); font-weight: 600;
+}
+.sec-hud-level { margin-top: 10px; }
+.sec-hud-level-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 8.5px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+  color: rgba(255,255,255,0.38); margin-bottom: 4px;
+}
+.sec-hud-level-head span:last-child { color: #fff; }
+.sec-hud-meter {
+  height: 4px; border-radius: 3px; overflow: hidden;
+  background: rgba(255,255,255,0.08);
+}
+.sec-hud-meter i {
+  display: block; height: 100%; width: 0; border-radius: 3px;
+  transition: width 0.6s cubic-bezier(0.4,0,0.2,1);
 }
 
-/* Pulse dots at attack sources */
+/* ── Live attack feed ───────────────────────────────────────────────────── */
+.sec-map-feed {
+  position: absolute; top: 14px; right: 14px; z-index: 471;
+  width: 236px; max-height: calc(100% - 92px);
+  display: flex; flex-direction: column;
+  background: linear-gradient(160deg, rgba(10,16,27,0.96), rgba(5,9,16,0.93));
+  border: 1px solid rgba(255,255,255,0.09);
+  border-radius: 10px; overflow: hidden;
+  box-shadow: 0 10px 34px rgba(0,0,0,0.6);
+}
+.sec-feed-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 9px 11px; flex-shrink: 0;
+  font-size: 9px; font-weight: 800; letter-spacing: 0.13em; text-transform: uppercase;
+  color: rgba(255,255,255,0.6);
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--map-accent) 12%, transparent), transparent);
+}
+.sec-feed-dot {
+  width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0;
+  background: var(--map-accent); box-shadow: 0 0 7px var(--map-accent);
+  animation: dot-err-pulse 1.5s ease-in-out infinite;
+}
+.sec-feed-count { margin-left: auto; color: rgba(255,255,255,0.3); letter-spacing: 0.06em; }
+.sec-feed-list {
+  overflow-y: auto; overscroll-behavior: contain; padding: 4px;
+  mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - 22px), transparent 100%);
+  -webkit-mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - 22px), transparent 100%);
+}
+.sec-feed-list::-webkit-scrollbar { width: 5px; }
+.sec-feed-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 3px; }
+.sec-feed-empty { padding: 14px 11px; font-size: 11px; color: rgba(255,255,255,0.3); text-align: center; }
+.sec-feed-row {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 6px 8px; border: 0; border-radius: 6px;
+  background: transparent; color: inherit; cursor: pointer; text-align: left;
+  font: inherit; position: relative;
+  animation: sec-feed-in 0.4s cubic-bezier(0.2,0.8,0.3,1) backwards;
+  transition: background var(--transition);
+}
+.sec-feed-row:hover { background: rgba(255,255,255,0.07); }
+@keyframes sec-feed-in {
+  from { opacity: 0; transform: translateX(14px); }
+  to   { opacity: 1; transform: none; }
+}
+.sec-feed-bar {
+  width: 3px; align-self: stretch; min-height: 22px; border-radius: 2px; flex-shrink: 0;
+  background: var(--sev, #888); box-shadow: 0 0 8px var(--sev, #888);
+}
+.sec-feed-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
+.sec-feed-ip {
+  font-family: var(--mono); font-size: 11.5px; font-weight: 600;
+  color: var(--sev-core, #fff);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sec-feed-meta {
+  font-size: 9.5px; color: rgba(255,255,255,0.4);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sec-feed-hits {
+  font-size: 11px; font-weight: 700; color: #fff; flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 10px var(--sev, transparent);
+}
+
+/* ── Severity legend ────────────────────────────────────────────────────── */
+.sec-map-legend {
+  position: absolute; left: 14px; bottom: 14px; z-index: 471;
+  pointer-events: none;
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  padding: 6px 9px; border-radius: 9px;
+  background: rgba(5,9,16,0.9);
+  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 8px 26px rgba(0,0,0,0.55);
+}
+.sec-leg-title {
+  font-size: 8.5px; font-weight: 800; letter-spacing: 0.13em; text-transform: uppercase;
+  color: rgba(255,255,255,0.32); margin-right: 4px;
+}
+.sec-leg-item {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 9.5px; font-weight: 600; color: rgba(255,255,255,0.62);
+  padding: 2px 6px; border-radius: 20px;
+  background: color-mix(in srgb, var(--leg) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--leg) 30%, transparent);
+}
+.sec-leg-item i {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--leg); box-shadow: 0 0 7px var(--leg);
+}
+.sec-leg-item b { color: #fff; font-variant-numeric: tabular-nums; }
+
+/* ── Pulsing source markers ─────────────────────────────────────────────── */
 .sec-pulse-wrap.leaflet-div-icon { background: transparent; border: none; }
+.sec-pulse-stack { display: block; position: relative; }
 .sec-pulse {
-  display: block; border-radius: 50%;
+  position: absolute; inset: 0; border-radius: 50%;
+  border: 1.2px solid var(--pulse-color, #ff4444);
   background: radial-gradient(circle,
-    var(--pulse-color, #ff4444) 0%,
-    color-mix(in srgb, var(--pulse-color, #ff4444) 40%, transparent) 50%,
-    transparent 72%);
-  box-shadow: 0 0 12px var(--pulse-color, #ff4444);
-  animation: sec-pulse-ring 2s ease-out infinite;
+    color-mix(in srgb, var(--pulse-color, #ff4444) 55%, transparent) 0%,
+    color-mix(in srgb, var(--pulse-color, #ff4444) 18%, transparent) 45%,
+    transparent 70%);
+  box-shadow: 0 0 14px var(--pulse-color, #ff4444);
+  animation: sec-pulse-ring 2.4s cubic-bezier(0.2,0.6,0.4,1) infinite;
+  animation-delay: var(--pulse-delay, 0ms);
+  will-change: transform, opacity;
+}
+.sec-pulse-b { animation-delay: calc(var(--pulse-delay, 0ms) + 1.2s); }
+.sec-pulse-core {
+  position: absolute; left: 50%; top: 50%; width: 5px; height: 5px;
+  margin: -2.5px 0 0 -2.5px; border-radius: 50%;
+  background: var(--pulse-core, #fff);
+  box-shadow: 0 0 8px var(--pulse-color, #ff4444), 0 0 16px var(--pulse-color, #ff4444);
 }
 @keyframes sec-pulse-ring {
-  0%   { transform: scale(0.6);  opacity: 1; }
-  70%  { transform: scale(2.2);  opacity: 0.25; }
+  0%   { transform: scale(0.45); opacity: 1; }
+  70%  { transform: scale(2.1);  opacity: 0.2; }
   100% { transform: scale(2.6);  opacity: 0; }
 }
 
-/* Target marker — multi-ring */
-.sec-target-wrap.leaflet-div-icon { background: transparent; border: none; }
+/* ── Gateway target marker (own overlay, painted above the arcs) ────────── */
+.sec-target-layer {
+  position: absolute; z-index: 455; width: 0; height: 0;
+  pointer-events: none;
+}
 .sec-target {
-  position: relative; width: 48px; height: 48px;
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: 64px; height: 64px;
   display: flex; align-items: center; justify-content: center;
 }
 .sec-target-ring {
-  position: absolute; border-radius: 50%; border: 1px solid rgba(255,77,94,0.5);
+  position: absolute; border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--map-accent) 60%, transparent);
+  will-change: transform, opacity;
 }
-.sec-target-ring-1 { width: 20px; height: 20px; animation: tgt-ring 2s ease-out infinite 0s; }
-.sec-target-ring-2 { width: 32px; height: 32px; animation: tgt-ring 2s ease-out infinite 0.4s; }
-.sec-target-ring-3 { width: 46px; height: 46px; animation: tgt-ring 2s ease-out infinite 0.8s; }
+.sec-target-ring-1 { width: 22px; height: 22px; animation: tgt-ring 2.4s ease-out infinite 0s; }
+.sec-target-ring-2 { width: 38px; height: 38px; animation: tgt-ring 2.4s ease-out infinite 0.5s; }
+.sec-target-ring-3 { width: 56px; height: 56px; animation: tgt-ring 2.4s ease-out infinite 1s; }
 @keyframes tgt-ring {
-  0%   { transform: scale(0.7); opacity: 0.9; border-color: rgba(255,77,94,0.7); }
-  100% { transform: scale(1.15); opacity: 0; border-color: rgba(255,77,94,0); }
+  0%   { transform: scale(0.65); opacity: 0.9; }
+  100% { transform: scale(1.2);  opacity: 0; }
+}
+.sec-target-cross {
+  position: absolute;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--map-accent) 75%, transparent), transparent);
+}
+.sec-target-cross-h { width: 60px; height: 1px; }
+.sec-target-cross-v {
+  width: 1px; height: 60px;
+  background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--map-accent) 75%, transparent), transparent);
 }
 .sec-target-core {
-  position: relative; width: 10px; height: 10px; border-radius: 50%; z-index: 1;
-  background: #ff4d5e;
-  box-shadow: 0 0 8px 3px rgba(255,77,94,0.9), 0 0 20px rgba(255,77,94,0.5);
+  position: relative; width: 9px; height: 9px; border-radius: 50%; z-index: 1;
+  background: #fff;
+  box-shadow:
+    0 0 0 2px rgba(3, 6, 12, 0.9),
+    0 0 0 3.5px color-mix(in srgb, var(--map-accent) 75%, transparent),
+    0 0 14px 4px var(--map-accent),
+    0 0 30px var(--map-accent);
+  animation: sec-target-beat 2.4s ease-in-out infinite;
+}
+@keyframes sec-target-beat {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.22); }
+}
+.sec-target-label {
+  position: absolute; top: calc(50% + 17px);
+  padding: 1px 5px; border-radius: 3px;
+  background: rgba(3, 6, 12, 0.72); left: 50%; transform: translateX(-50%);
+  font-size: 8px; font-weight: 800; letter-spacing: 0.16em;
+  color: color-mix(in srgb, var(--map-accent) 60%, #fff);
+  text-shadow: 0 1px 6px rgba(0,0,0,0.9);
+  white-space: nowrap; pointer-events: none;
 }
 
-/* Popup styling */
-.sec-popup { font-size: 13px; line-height: 1.5; }
-.sec-popup-ip { font-weight: 700; font-family: var(--mono); color: #ff8888; }
+/* ── Popups ─────────────────────────────────────────────────────────────── */
+.sec-map .leaflet-popup-content-wrapper {
+  background: linear-gradient(160deg, rgba(14,21,34,0.97), rgba(7,11,19,0.97));
+  color: var(--text);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 10px;
+  box-shadow: 0 14px 42px rgba(0,0,0,0.7);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+}
+.sec-map .leaflet-popup-content { margin: 11px 13px; }
+.sec-map .leaflet-popup-tip {
+  background: rgba(10,16,26,0.97);
+  border: 1px solid rgba(255,255,255,0.12);
+  box-shadow: none;
+}
+.sec-map .leaflet-popup-close-button { color: rgba(255,255,255,0.4); }
+.sec-map .leaflet-popup-close-button:hover { color: #fff; }
+.sec-popup { font-size: 13px; line-height: 1.55; --sev-c: #ff6b7f; }
+.sec-popup.sev-low      { --sev-c: #2ee6ff; }
+.sec-popup.sev-elevated { --sev-c: #ffd400; }
+.sec-popup.sev-high     { --sev-c: #ff8a1f; }
+.sec-popup.sev-critical { --sev-c: #ff2d55; }
+.sec-popup-head { display: flex; align-items: center; gap: 7px; margin-bottom: 3px; }
+.sec-popup-sev {
+  font-size: 8.5px; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 20px; color: #fff;
+  background: color-mix(in srgb, var(--sev-c) 60%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sev-c) 80%, transparent);
+}
+.sec-popup-ip { font-weight: 700; font-family: var(--mono); color: var(--sev-c); font-size: 12.5px; }
 .sec-popup-loc { color: var(--muted); font-size: 12px; }
-.sec-popup-hits { margin-top: 4px; }
+.sec-popup-hits { margin-top: 5px; }
 .sec-popup-time { font-size: 11px; color: var(--muted); margin-top: 2px; }
 
+/* ── Settings ▸ Map toggles ─────────────────────────────────────────────── */
+.sec-map.fx-no-sweep     .sec-map-sweep,
+.sec-map.fx-no-grid      .sec-map-grid,
+.sec-map.fx-no-scanlines .sec-map-scanlines,
+.sec-map.fx-no-vignette  .sec-map-vignette,
+.sec-map.fx-no-frame     .sec-map-frame,
+.sec-map.fx-no-hud       .sec-map-hud,
+.sec-map.fx-no-feed      .sec-map-feed,
+.sec-map.fx-no-legend    .sec-map-legend { display: none; }
+
+/* ── Responsive map chrome (width measured in JS) ───────────────────────── */
+.sec-map.sec-map-compact .sec-map-feed { width: 190px; }
+.sec-map.sec-map-compact .sec-map-hud { min-width: 150px; padding: 9px 11px 10px; }
+.sec-map.sec-map-compact .sec-hud-val { font-size: 14px; }
+.sec-map.sec-map-compact .sec-leg-title { display: none; }
+.sec-map.sec-map-tiny .sec-map-feed,
+.sec-map.sec-map-tiny .sec-map-legend,
+.sec-map.sec-map-tiny .sec-map-frame,
+.sec-map.sec-map-tiny .sec-hud-origin,
+.sec-map.sec-map-tiny .sec-hud-level { display: none; }
+.sec-map.sec-map-tiny .sec-map-hud { top: 10px; left: 10px; min-width: 0; padding: 7px 10px 8px; }
+.sec-map.sec-map-tiny .sec-hud-grid { gap: 2px 14px; }
+.sec-map.sec-map-tiny .sec-hud-val { font-size: 13px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sec-map-sweep, .sec-map-scanlines, .sec-arc-head, .sec-pulse,
+  .sec-target-ring, .sec-target-core, .sec-hud-live, .sec-impact { animation: none !important; }
+  .sec-map-sweep, .sec-impact { opacity: 0.25; }
+}
+
+/* The map deliberately stays dark in light theme — satellite-ops look */
 body.light-theme .sec-map,
-body.light-theme .sec-map .leaflet-container { background: #10151b; }
+body.light-theme .sec-map .leaflet-container { background: #080d16; }
+
+/* ── Settings ▸ Map : appearance card ───────────────────────────────────── */
+.mapfx-body { padding: 14px; }
+.mapfx-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.mapfx-field { display: flex; flex-direction: column; gap: 5px; flex: 1 1 200px; }
+.mapfx-field-label {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--muted);
+}
+.mapfx-field select {
+  background: var(--bg-elev); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; font: inherit; font-size: 13px; cursor: pointer;
+}
+.mapfx-field select:focus { outline: none; border-color: var(--accent); }
+.mapfx-swatches { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.mapfx-swatch {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 600; color: var(--muted);
+  padding: 4px 10px; border-radius: 20px;
+  background: color-mix(in srgb, var(--sw) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sw) 35%, transparent);
+}
+.mapfx-swatch i {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: radial-gradient(circle, var(--sw-core), var(--sw));
+  box-shadow: 0 0 9px var(--sw);
+}
+.mapfx-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 8px;
+}
+.mapfx-toggle {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 9px 11px; border-radius: 9px; cursor: pointer;
+  background: var(--bg-elev); border: 1px solid var(--border);
+  transition: border-color var(--transition), background var(--transition);
+}
+.mapfx-toggle:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+.mapfx-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+.mapfx-switch {
+  position: relative; flex-shrink: 0; margin-top: 2px;
+  width: 32px; height: 18px; border-radius: 20px;
+  background: rgba(255,255,255,0.12);
+  border: 1px solid var(--border);
+  transition: background var(--transition), border-color var(--transition);
+}
+.mapfx-switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--muted);
+  transition: transform var(--transition), background var(--transition);
+}
+.mapfx-toggle input:checked + .mapfx-switch {
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+  border-color: var(--accent);
+}
+.mapfx-toggle input:checked + .mapfx-switch::after {
+  transform: translateX(14px); background: #fff;
+}
+.mapfx-toggle input:focus-visible + .mapfx-switch { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mapfx-toggle-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mapfx-toggle-text b { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.mapfx-toggle-text em { font-style: normal; font-size: 11px; color: var(--muted); line-height: 1.4; }
+.mapfx-actions { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+.mapfx-saved { opacity: 0; transition: opacity var(--transition); font-size: 12px; }
+.mapfx-saved.on { opacity: 1; color: var(--green); }
 
 /* ---------- WireGuard ---------- */
 .wg-form { padding: 14px; }
@@ -1539,21 +1922,7 @@ body.light-theme .sec-map .leaflet-container { background: #10151b; }
   to   { opacity: 1; background: transparent; }
 }
 
-/* ========== IP PILL (Top Attackers) ========== */
-.ip-pill {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 3px 8px 3px 10px; border-radius: 20px;
-  font-family: var(--mono); font-size: 12.5px; font-weight: 600;
-  border: 1px solid transparent;
-  transition: box-shadow var(--transition), transform var(--transition);
-  cursor: default; white-space: nowrap;
-}
-.ip-pill:hover { transform: scale(1.02); }
-.ip-pill-low    { background: rgba(139,148,158,0.12); color: #c9d1d9; border-color: rgba(139,148,158,0.25); }
-.ip-pill-med    { background: rgba(210,153,34,0.14);  color: var(--amber); border-color: rgba(210,153,34,0.3); box-shadow: 0 0 8px rgba(210,153,34,0.1); }
-.ip-pill-high   { background: rgba(248,81,73,0.14);   color: var(--red);   border-color: rgba(248,81,73,0.35); box-shadow: 0 0 10px rgba(248,81,73,0.15); }
-.ip-pill-banned { background: rgba(248,81,73,0.2);    color: #ff8080;      border-color: rgba(248,81,73,0.5);  box-shadow: 0 0 14px rgba(248,81,73,0.25); }
-
+/* ========== IP ADDRESS CELL (Top Attackers) ========== */
 .ip-copy-btn {
   background: none; border: none; cursor: pointer; padding: 0 2px;
   font-size: 13px; line-height: 1; color: inherit; opacity: 0.45;
@@ -1866,7 +2235,7 @@ body.light-theme .dot-off { background: #c3cad3; }
 body.light-theme .badge-static { background: rgba(90, 105, 130, 0.14); color: #57657e; }
 body.light-theme .sev-MEDIUM { color: #8a6508; }
 body.light-theme .sec-map,
-body.light-theme .sec-map .leaflet-container { background: #10151b; }
+body.light-theme .sec-map .leaflet-container { background: #080d16; }
 body.light-theme .btn,
 body.light-theme .seg-btn.active,
 body.light-theme .svc-tab.active,
@@ -3015,6 +3384,22 @@ body.light-theme .stat-card.stat-c:hover {
 
 .fw-pane { padding-top: 16px; }
 .fw-pane[hidden] { display: none; }
+.bl-browse-search {
+  width: 100%;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+}
+.bl-browse-url { font-size: 11px; }
+.view:not([hidden]) > .fw-pane:not([hidden]) > .card {
+  animation: card-rise 0.34s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+/* card-grid nested inside a sub-tab pane: keep grid spacing and the
+   card-rise entrance animation working through the extra wrapper */
+.view > .fw-pane > .card-grid > .card { margin-bottom: 0; }
+.view:not([hidden]) > .fw-pane:not([hidden]) > .card-grid > .card {
+  animation: card-rise 0.34s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
 
 /* Rule table */
 .fw-table thead th {
@@ -4692,3 +5077,788 @@ body.light-theme .svc-banner {
   color: var(--red);
   background: color-mix(in srgb, var(--red) 6%, transparent);
 }
+
+/* Map is off-screen or the tab is in the background: stop all of it. */
+.sec-map.fx-paused .sec-arc-head,
+.sec-map.fx-paused .sec-pulse,
+.sec-map.fx-paused .sec-target-ring,
+.sec-map.fx-paused .sec-target-core,
+.sec-map.fx-paused .sec-map-sweep,
+.sec-map.fx-paused .sec-map-scanlines,
+.sec-map.fx-paused .sec-hud-dot,
+.sec-map.fx-paused .sec-hud-live,
+.sec-map.fx-paused .sec-feed-dot { animation-play-state: paused; }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Overview redesign — health hero, service strip, posture cards
+   ══════════════════════════════════════════════════════════════════════════ */
+.ov-hero {
+  display: grid; gap: 14px; margin-bottom: 18px;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+}
+.ov-hero > .ov-health-card { grid-column: span 5; }
+.ov-hero > .ov-wan-card    { grid-column: span 4; }
+.ov-hero > .ov-lan-card    { grid-column: span 3; }
+.ov-hero > .card { margin-bottom: 0; min-width: 0; }
+
+/* ── Health hero ───────────────────────────────────────────────────────── */
+.ov-health-card { --hc: var(--green); position: relative; overflow: hidden; }
+.ov-health-card[data-state="warn"] { --hc: var(--amber); }
+.ov-health-card[data-state="bad"]  { --hc: var(--red); }
+.ov-health-card::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--hc), transparent);
+  opacity: 0.85;
+}
+.ov-health-body { display: flex; align-items: center; gap: 18px; padding: 16px 16px 18px; }
+.ov-gauge { position: relative; width: 132px; height: 132px; flex-shrink: 0; }
+.ov-gauge-svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.ov-gauge-track {
+  fill: none; stroke: var(--border); stroke-width: 9;
+  opacity: 0.55;
+}
+.ov-gauge-fill {
+  fill: none; stroke: var(--hc); stroke-width: 9; stroke-linecap: round;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--hc) 55%, transparent));
+  transition: stroke-dashoffset 0.9s cubic-bezier(0.22, 1, 0.36, 1), stroke 0.4s;
+}
+.ov-gauge-mid {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 1px; pointer-events: none;
+}
+.ov-gauge-score {
+  font-size: 38px; font-weight: 700; line-height: 1; color: var(--text);
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 20px color-mix(in srgb, var(--hc) 35%, transparent);
+}
+.ov-gauge-unit { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+.ov-health-detail { min-width: 0; flex: 1; }
+.ov-health-verdict {
+  font-size: 19px; font-weight: 700; color: var(--hc); line-height: 1.2;
+}
+.ov-health-sub { font-size: 12px; margin: 3px 0 10px; line-height: 1.45; }
+.ov-issues { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.ov-issue {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12.5px; padding: 4px 8px; border-radius: 6px;
+  background: var(--bg-elev); border: 1px solid var(--border);
+}
+.ov-issue-dot {
+  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+  background: var(--muted); box-shadow: 0 0 6px currentColor;
+}
+.ov-issue.sev-crit .ov-issue-dot { background: var(--red); }
+.ov-issue.sev-warn .ov-issue-dot { background: var(--amber); }
+.ov-issue.sev-info .ov-issue-dot { background: var(--accent); }
+.ov-issue.sev-ok   .ov-issue-dot { background: var(--green); }
+.ov-issue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-issue-pts {
+  font-size: 11px; font-weight: 700; color: var(--muted);
+  font-variant-numeric: tabular-nums; flex-shrink: 0;
+}
+.ov-issue.sev-crit .ov-issue-pts { color: var(--red); }
+
+/* ── DHCP pool bar ─────────────────────────────────────────────────────── */
+.ov-pool {
+  height: 5px; border-radius: 3px; background: var(--border);
+  overflow: hidden; margin-top: 2px;
+}
+.ov-pool i {
+  display: block; height: 100%; border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--green));
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.ov-pool i.hot { background: linear-gradient(90deg, var(--amber), var(--red)); }
+
+/* ── Service chip strip ────────────────────────────────────────────────── */
+.ov-svc-card { margin-bottom: 18px; }
+.ov-svc-grid {
+  display: grid; gap: 8px; padding: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(208px, 1fr));
+}
+.ov-svc-chip {
+  --sc: var(--green);
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border-radius: 8px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--sc);
+  transition: border-color var(--transition), background var(--transition);
+  min-width: 0;
+}
+.ov-svc-chip.warn { --sc: var(--amber); }
+.ov-svc-chip.bad  { --sc: var(--red); }
+.ov-svc-chip:hover { background: var(--card); }
+.ov-svc-chip .ov-svc-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: var(--sc); box-shadow: 0 0 7px var(--sc);
+}
+.ov-svc-chip.bad .ov-svc-dot { animation: dot-err-pulse 1.5s ease-in-out infinite; }
+.ov-svc-name {
+  font-size: 12.5px; font-weight: 600; color: var(--text);
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ov-svc-state {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--sc); flex-shrink: 0;
+}
+.ov-svc-act {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; flex-shrink: 0; padding: 0;
+  border-radius: 5px; cursor: pointer;
+  background: transparent; border: 1px solid var(--border); color: var(--muted);
+  transition: all var(--transition);
+}
+.ov-svc-act:hover { border-color: var(--accent); color: var(--accent); }
+.ov-svc-act svg { width: 13px; height: 13px; fill: currentColor; }
+.ov-svc-act:disabled { opacity: 0.4; cursor: default; }
+
+/* ── Tile mini-bars ────────────────────────────────────────────────────── */
+.ov-tile-bar {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
+  background: rgba(255, 255, 255, 0.07);
+}
+.ov-tile-bar i {
+  display: block; height: 100%; width: 0;
+  background: currentColor; opacity: 0.85;
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1), background 0.3s;
+}
+
+/* ── Posture cards ─────────────────────────────────────────────────────── */
+.ov-posture {
+  display: grid; gap: 14px; margin-bottom: 18px;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+}
+.ov-posture > .card { margin-bottom: 0; min-width: 0; grid-column: span 2; }
+.ov-posture > .ov-post-wide { grid-column: span 4; }
+.ov-post-card { --pc: var(--muted); padding: 13px 14px; display: flex; flex-direction: column; }
+.ov-post-card[data-state="ok"]   { --pc: var(--green); }
+.ov-post-card[data-state="info"] { --pc: var(--accent); }
+.ov-post-card[data-state="warn"] { --pc: var(--amber); }
+.ov-post-card[data-state="bad"]  { --pc: var(--red); }
+.ov-post-head { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
+.ov-post-ico { font-size: 13px; color: var(--pc); line-height: 1; }
+.ov-post-head h3 {
+  margin: 0; font-size: 10.5px; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+}
+.ov-post-head .muted { margin-left: auto; font-size: 11px; }
+.ov-post-val {
+  font-size: 24px; font-weight: 700; line-height: 1.1; color: var(--pc);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ov-post-sub { font-size: 11px; margin-top: 2px; }
+.ov-post-wide .ov-kv { padding: 0; }
+
+/* ── Responsive ────────────────────────────────────────────────────────── */
+@media (max-width: 1400px) {
+  .ov-hero > .ov-health-card { grid-column: span 12; }
+  .ov-hero > .ov-wan-card,
+  .ov-hero > .ov-lan-card { grid-column: span 6; }
+  .ov-posture > .card { grid-column: span 3; }
+  .ov-posture > .ov-post-wide { grid-column: span 12; }
+}
+@media (max-width: 900px) {
+  .ov-hero > .card { grid-column: span 12 !important; }
+  .ov-posture > .card { grid-column: span 6 !important; }
+  .ov-health-body { flex-direction: column; align-items: stretch; gap: 14px; }
+  .ov-gauge { align-self: center; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Agent permission cards — keep the decision, not the file viewer, on screen
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* Previews scale with the terminal instead of a flat 260px, which swallowed
+   most of a laptop-height screen. */
+.oc-perm-body .oc-tool-out { max-height: min(220px, 26vh); }
+
+/* Collapsible diff summary */
+.oc-perm-diff { margin: 8px 0 0; }
+.oc-perm-diff-toggle {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 6px 10px; cursor: pointer; text-align: left;
+  background: var(--oc-element); color: var(--oc-text);
+  border: 1px solid var(--oc-border-subtle); border-radius: 7px;
+  font: inherit; font-size: 12px;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.oc-perm-diff-toggle:hover { border-color: var(--oc-primary); }
+.oc-perm-diff.oc-open .oc-perm-diff-toggle {
+  border-radius: 7px 7px 0 0; border-bottom-color: transparent;
+}
+.oc-perm-caret {
+  flex-shrink: 0; width: 0; height: 0;
+  border-left: 5px solid var(--oc-muted);
+  border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+  transition: transform 0.15s ease;
+}
+.oc-perm-diff.oc-open .oc-perm-caret { transform: rotate(90deg); }
+.oc-perm-file {
+  font-family: var(--mono, monospace); color: var(--oc-text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.oc-perm-stat { display: inline-flex; gap: 6px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.oc-stat-add { color: var(--oc-diff-add, #4fd6be); }
+.oc-stat-del { color: var(--oc-diff-del, #c53b53); }
+.oc-perm-lines { margin-left: auto; color: var(--oc-muted); font-size: 11px; flex-shrink: 0; }
+.oc-perm-diff .oc-tool-out {
+  margin-top: 0; border-radius: 0 0 7px 7px; border-top-color: var(--oc-border-subtle);
+}
+.oc-perm-diff .oc-tool-out[hidden] { display: none; }
+
+/* Shell/tool payloads get the same treatment */
+.oc-perm-cmd { max-height: min(160px, 20vh); }
+
+/* The answer buttons must never be pushed out of reach */
+.oc-perm-btns {
+  position: sticky; bottom: 0; z-index: 1;
+  margin-top: 10px; padding: 9px 0 2px;
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--oc-panel) 70%, transparent) 0%,
+    var(--oc-panel) 38%);
+}
+
+/* Diff lines are one <span> per line with no newline between them, so any
+   line without an .oc-add/.oc-del rule (context, ---/+++ headers, @@ hunks)
+   stayed inline and ran together with its neighbours. */
+.oc-tool-out.oc-diff > span { display: block; min-height: 1.35em; }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   AI Assistant — sidebar density and terminal polish
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* The panel is a tall column with little in it; give the sections visible
+   structure instead of floating in ~400px of empty space. */
+.ai-side-panel { padding-bottom: 4px; }
+.ai-side-section + .ai-side-section { border-top: 1px solid var(--border); padding-top: 16px; }
+.ai-side-section.oc-brand { padding-bottom: 4px; }
+
+/* Agent status reads as a state, not a sentence */
+.agent-status {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-top: 8px; padding: 3px 9px; border-radius: 20px;
+  font-size: 11px; font-weight: 600;
+  background: var(--bg); border: 1px solid var(--border);
+}
+.agent-status.agent-on  { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, transparent); }
+.agent-status.agent-off { color: var(--red);   border-color: color-mix(in srgb, var(--red) 40%, transparent); }
+
+/* Usage stats: even columns, tabular figures so they stop jittering */
+.agent-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.agent-stat { padding: 9px 2px; gap: 2px; transition: border-color var(--transition); }
+.agent-stat:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.agent-stat-v { font-variant-numeric: tabular-nums; font-size: 15px; }
+.agent-stat-l { font-size: 9px; }
+
+/* Suggested prompts — fills the dead space with a way in.
+   This section absorbs the slack and scrolls internally; without
+   flex:1/min-height:0 the auto-margin on .ai-side-actions overflows the
+   column and the buttons render on top of the chips. */
+.ai-side-prompts {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.ai-prompt-list {
+  display: flex; flex-direction: column; gap: 6px;
+  overflow-y: auto; min-height: 0;
+  scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+  padding-right: 2px;
+}
+.ai-prompt-list::-webkit-scrollbar { width: 6px; }
+.ai-prompt-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.ai-side-section.ai-side-actions { margin-top: 0; flex-shrink: 0; }
+.ai-prompt-chip {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  font: inherit; font-size: 11.5px; line-height: 1.4;
+  color: var(--muted); background: var(--bg);
+  border: 1px solid var(--border); border-left: 2px solid transparent;
+  border-radius: 7px; padding: 7px 9px;
+  transition: color var(--transition), border-color var(--transition), background var(--transition);
+}
+.ai-prompt-chip:hover {
+  color: var(--text); background: var(--bg-elev);
+  border-left-color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+.ai-prompt-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.ai-side-hint {
+  background: var(--bg); border: 1px solid var(--border);
+  border-left: 2px solid var(--amber);
+  border-radius: 7px; padding: 8px 10px; margin-bottom: 10px;
+}
+
+/* 8vh of padding above the banner is a lot of nothing on a laptop */
+.oc-boot { padding: clamp(10px, 4vh, 44px) 0 18px; }
+.oc-logo { font-size: clamp(12px, 1.1vw, 17px); }
+
+/* ── Pending-request queue: one live prompt, the rest lined up ──────────── */
+.oc-perm-badge {
+  margin-left: auto; flex-shrink: 0;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+  padding: 2px 7px; border-radius: 20px;
+  color: var(--oc-warn);
+  background: color-mix(in srgb, var(--oc-warn) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--oc-warn) 38%, transparent);
+}
+.oc-question .oc-perm-badge {
+  color: var(--oc-accent, #4f8cff);
+  background: color-mix(in srgb, var(--oc-accent, #4f8cff) 14%, transparent);
+  border-color: color-mix(in srgb, var(--oc-accent, #4f8cff) 38%, transparent);
+}
+
+/* Queued requests shrink to a single dimmed line until they reach the front */
+.oc-perm-queued {
+  margin: 3px 0; opacity: 0.5;
+  border-color: var(--oc-border-subtle);
+  border-style: dashed;
+}
+.oc-perm-queued > .oc-perm-body,
+.oc-perm-queued > .oc-perm-head + * { display: none; }
+.oc-perm-queued .oc-perm-head {
+  padding: 5px 11px; font-size: 11.5px; font-weight: 600;
+  border-bottom: none; background: transparent;
+  color: var(--oc-muted);
+}
+.oc-perm-queued .oc-perm-head::after {
+  content: "queued"; margin-left: auto; flex-shrink: 0;
+  font-size: 10px; letter-spacing: 0.06em; color: var(--oc-muted); opacity: 0.8;
+}
+.oc-perm-queued:hover { opacity: 0.72; }
+
+/* The live one gets a little more presence now that it stands alone */
+.oc-perm-active { box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35); }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Cross-page polish: empty states, stat-row rhythm, log viewer
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* Tables whose renderer leaves the body empty (VLAN interfaces, VLAN
+   policies, DNS response codes, firewall rules, blocklists) were rendering
+   as bare column headers over nothing, which reads as broken rather than
+   empty. Renderers that already emit their own .empty row are unaffected. */
+.table-wrap:has(> table > tbody:empty)::after {
+  content: "Nothing to show yet";
+  display: block; padding: 26px 14px 28px; text-align: center;
+  color: var(--muted); font-size: 12.5px; letter-spacing: 0.01em;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-elev) 55%, transparent);
+}
+.empty {
+  padding: 34px 16px; text-align: center;
+  color: var(--muted); font-size: 12.5px;
+}
+
+/* Stat rows kept uneven heights whenever one value wrapped to a second line
+   (e.g. "191.00 GB / 480.00 GB (40%)" on System). Centre the contents and
+   let the value scale so every card in a row matches. */
+.stat-card {
+  display: flex; flex-direction: column; justify-content: center;
+  min-height: 86px;
+}
+.stat-value {
+  font-size: clamp(17px, 1.4vw, 22px);
+  line-height: 1.2; overflow-wrap: anywhere;
+}
+.stat-label { line-height: 1.3; }
+
+/* Log viewer: collapsed to a single line when there was little output, and
+   the meta/error line sat flush against the card edge. */
+.log-view {
+  margin: 14px; min-height: clamp(220px, 52vh, 640px);
+  scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+}
+.log-view::-webkit-scrollbar { width: 9px; }
+.log-view::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.log-meta { margin: -4px 14px 14px; }
+
+/* Consistent scrollbars for every scrollable table body on the site */
+.table-wrap { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+.table-wrap::-webkit-scrollbar { width: 9px; height: 9px; }
+.table-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+/* Cards already lift on hover; match the stat cards so the motion is uniform */
+.card:hover { transform: translateY(-1px); }
+.card { transition: box-shadow var(--transition), border-color var(--transition), transform var(--transition); }
+
+/* Stacked cards inside a sub-tab pane got their spacing from an explicit
+   .card-mt class, so any card that was missing it sat flush against the one
+   above (Settings > Appearance and > Map, Security > Attacks). The
+   :not(.card-mt) guard means this only fills the gap where one is missing —
+   cards that already carry the class keep their single 18px. */
+.fw-pane > .card + .card:not(.card-mt),
+.fw-pane > .card + .card-grid,
+.fw-pane > .card-grid + .card:not(.card-mt),
+.fw-pane > .card + .sec-full-cards,
+.fw-pane > .sec-full-cards + .card:not(.card-mt) { margin-top: 18px; }
+
+/* stats-row already carries an 18px bottom margin, so a card following it
+   directly picked up 36px (VLANs) where every other page gets 18. */
+.view > .stats-row + .card { margin-top: 0; }
+
+/* Sub-tab strip to pane content was 16px on Firewall and System but 34px
+   everywhere else. Make the pane's own padding the single source of that
+   spacing so every sub-tabbed page matches. */
+.view > .fw-subtabs + .fw-pane { margin-top: 0; }
+.fw-pane { padding-top: 18px; }
+
+/* These seven views are 12-column grids with an 18px gap (style.css:4182).
+   The legacy .stats-row margin-bottom, .view > .card margin-top and the
+   .fw-pane top padding all stack on top of that gap, which is why
+   Settings/VLANs/Security/Clients/etc. spaced at 36px while the block-layout
+   views (Firewall, System, DNS) spaced at 18px. In a grid view the gap is
+   the single source of spacing; block views keep their margins. */
+:is(#view-crowdsec, #view-blocklists, #view-bandwidth, #view-settings,
+    #view-security, #view-clients, #view-vlans) > .stats-row { margin-bottom: 0; }
+:is(#view-crowdsec, #view-blocklists, #view-bandwidth, #view-settings,
+    #view-security, #view-clients, #view-vlans) > .card { margin-top: 0; }
+:is(#view-crowdsec, #view-blocklists, #view-bandwidth, #view-settings,
+    #view-security, #view-clients, #view-vlans) > .fw-pane { padding-top: 0; }
+/* ...and the sub-tab strip's own 16px top margin likewise stacks on the gap */
+:is(#view-crowdsec, #view-blocklists, #view-bandwidth, #view-settings,
+    #view-security, #view-clients, #view-vlans) > .fw-subtabs { margin-top: 0; }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Sub-tabs — single indicator metaphor, scroll affordance, focus ring
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* The active tab previously carried a boxed border *and* an inset 2px accent
+   that landed 1px above the strip's own border, so it read as a floating box
+   rather than a tab joined to its pane. One animated underline that overlaps
+   the strip border does the job cleanly. */
+.fw-subtab {
+  position: relative;
+  border: 0; border-radius: 8px 8px 0 0;
+  padding: 10px 18px 11px;
+  transition: color var(--transition), background var(--transition);
+}
+.fw-subtab::after {
+  content: ""; position: absolute; left: 10px; right: 10px; bottom: -1px;
+  height: 2px; border-radius: 2px 2px 0 0;
+  background: var(--accent);
+  transform: scaleX(0);
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.fw-subtab:hover:not(.active) { color: var(--text); background: var(--glass-bg); }
+.fw-subtab:hover:not(.active)::after { transform: scaleX(0.4); background: var(--border); }
+.fw-subtab.active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  border-color: transparent;
+  box-shadow: none;
+}
+.fw-subtab.active::after { transform: scaleX(1); }
+.fw-subtab:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: -2px;
+  color: var(--text);
+}
+
+/* The strip scrolls with its scrollbar hidden, so at narrow widths there was
+   no sign that more tabs existed. JS adds .is-scrollable when it overflows. */
+.fw-subtabs.is-scrollable {
+  -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 26px), transparent 100%);
+  mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 26px), transparent 100%);
+}
+.fw-subtabs.is-scrollable.at-end {
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 26px, #000 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 26px, #000 100%);
+}
+.fw-subtabs.is-scrollable.at-mid {
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 26px, #000 calc(100% - 26px), transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 26px, #000 calc(100% - 26px), transparent 100%);
+}
+
+/* Card titles carrying a live status dot (Honeypot, Deception Canary) share
+   one layout rule instead of an inline style on whichever got it first. */
+.card-head h2:has(> .status-dot) { display: flex; align-items: center; gap: 8px; }
+
+/* ── System ▸ Status ▸ Network Interfaces ──────────────────────────────── */
+.if-name { display: inline-flex; align-items: center; gap: 8px; }
+.if-role {
+  --rc: var(--muted);
+  font-size: 9.5px; font-weight: 800; letter-spacing: 0.07em;
+  padding: 2px 6px; border-radius: 4px; color: var(--rc);
+  background: color-mix(in srgb, var(--rc) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--rc) 38%, transparent);
+}
+.if-role-wan    { --rc: var(--accent); }
+.if-role-lan    { --rc: var(--green); }
+.if-role-vpn    { --rc: #a371f7; }
+.if-role-vlan   { --rc: var(--amber); }
+.if-role-bridge { --rc: #3fb6c9; }
+.if-role-shaper { --rc: #d2a8ff; }
+.if-role-virt   { --rc: var(--muted); }
+
+.if-state { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; }
+.if-mac { color: var(--muted); }
+
+/* One address per line with its family tagged, instead of an untagged <br> list */
+.if-ip { display: flex; align-items: center; gap: 7px; line-height: 1.75; }
+.if-fam {
+  flex-shrink: 0; width: 20px; text-align: center;
+  font-size: 9px; font-weight: 800; font-style: normal; letter-spacing: 0.04em;
+  padding: 1px 0; border-radius: 3px;
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.if-fam.v6 { color: #a371f7; background: color-mix(in srgb, #a371f7 14%, transparent); }
+.if-more {
+  display: inline-block; margin-top: 3px; cursor: help;
+  font-size: 11px; color: var(--muted); border-bottom: 1px dotted var(--border);
+}
+/* Third state: no carrier reported (WireGuard, IFB) - neutral, not a fault */
+.status-dot[data-status="unknown"] {
+  background: var(--muted); box-shadow: 0 0 6px color-mix(in srgb, var(--muted) 60%, transparent);
+  animation: none;
+}
+.if-state[title]:not([title=""]) { cursor: help; }
+
+/* ── System ▸ Status ▸ System Info ─────────────────────────────────────── */
+/* Five groups in a minmax(225px) auto-fit grid gave four columns plus a lone
+   orphan on a second row, leaving a large empty block beside it. 190px fits
+   all five across at desktop widths and still wraps cleanly when narrow. */
+.sys-detail { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 18px 26px; }
+
+/* Let the logo sit with the group headings rather than floating at the
+   vertical centre of a block whose height varies with the interface count. */
+.ff-wrap { align-items: flex-start; }
+.ff-logo-svg { margin-top: 6px; }
+
+/* Usage rows carry a bar under the figure */
+.sys-drow-meter { flex-wrap: wrap; row-gap: 4px; }
+.sys-drow-meter > span, .sys-drow-meter > b { flex: 0 0 auto; }
+.sys-dbar { flex: 1 0 100%; height: 4px; margin-top: 1px; }
+.sys-dbar .bar-fill { transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1); }
+.sys-dbar.warn .bar-fill { background: var(--amber); }
+.sys-dbar.crit .bar-fill { background: var(--red); }
+
+/* Network has a variable number of LAN rows and was landing alone in a fifth
+   grid cell; as a full-width strip it uses the space instead of leaving it. */
+.sys-dgroup-net {
+  grid-column: 1 / -1;
+  margin-top: 2px;
+}
+.sys-dgroup-net h4 { margin-bottom: 8px; }
+.sys-dgroup-net .sys-drow {
+  display: inline-flex; width: auto; min-width: 190px;
+  margin-right: 26px; border-bottom: 0; padding: 3px 0;
+}
+.sys-dgroup-net .sys-drow span { margin-right: 10px; }
+
+/* Keep label and value on one line; only the bar wraps */
+.sys-drow-meter > span { flex: 0 0 auto; }
+.sys-drow-meter > b { flex: 1 1 auto; text-align: right; min-width: 0; }
+
+/* ── Settings ▸ Users ──────────────────────────────────────────────────── */
+.u-state { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); }
+.u-row-off td:not(.wg-actions) { opacity: 0.55; }
+.u-row-off .u-state { color: var(--red); }
+
+.u-you {
+  margin-left: 6px; font-size: 9.5px; font-weight: 700; letter-spacing: 0.05em;
+  padding: 1px 5px; border-radius: 4px; text-transform: uppercase;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* 2FA is a security fact an admin should be able to scan down the column */
+.u-2fa {
+  display: inline-block; min-width: 34px; text-align: center;
+  font-size: 10px; font-weight: 800; letter-spacing: 0.06em;
+  padding: 2px 7px; border-radius: 4px;
+}
+.u-2fa.on {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--green) 38%, transparent);
+}
+.u-2fa.off {
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 11%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber) 30%, transparent);
+}
+.u-created { color: var(--muted); font-size: 12px; cursor: help; }
+.users-table .wg-actions { white-space: nowrap; }
+/* .users-table th/td sets text-align:left at a higher specificity than
+   .td-right, so the Actions header ignored it and sat left of its buttons. */
+.users-table th.td-right, .users-table td.td-right { text-align: right; }
+
+/* ── Security ▸ Top Attackers ──────────────────────────────────────────── */
+/* .bar-fill-err (line 506) is declared before .bar-fill (line 681) at equal
+   specificity, so every "error" bar in the app was being painted accent-blue
+   instead of red. Scoping it to both classes makes it win regardless. */
+.bar-fill.bar-fill-err { background: var(--red); }
+
+.atk-hits b { display: block; font-variant-numeric: tabular-nums; margin-bottom: 4px; }
+.atk-hits .bar { height: 4px; }
+.atk-last { color: var(--muted); font-size: 12px; white-space: nowrap; cursor: help; }
+.port-chip {
+  font-family: var(--mono); font-size: 11.5px; font-weight: 600;
+  padding: 2px 7px; border-radius: 5px; color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+#sec-ips-table th.td-right, #sec-ips-table td.td-right { text-align: right; }
+
+/* ── Top Attackers: visual polish ──────────────────────────────────────── */
+
+/* HIGH / MED / LOW were three different widths, leaving the column ragged */
+.ip-threat { min-width: 52px; text-align: center; }
+
+/* Real icon instead of the U+2398 glyph, and enough contrast to be findable */
+.ip-copy-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; padding: 0; border-radius: 4px;
+  opacity: 0.55;
+  transition: opacity var(--transition), background var(--transition), color var(--transition);
+}
+.ip-copy-btn svg { width: 12px; height: 12px; }
+.ip-copy-btn:hover { opacity: 1; background: color-mix(in srgb, currentColor 16%, transparent); }
+.ip-copy-btn:focus-visible { opacity: 1; outline: 1px solid currentColor; outline-offset: 1px; }
+.ip-copy-btn.copied { opacity: 1; color: var(--green); background: color-mix(in srgb, var(--green) 18%, transparent); }
+
+/* Weight "last seen" by recency so a live attacker reads differently
+   from one that stopped a week ago */
+.atk-last.fresh  { color: var(--red); font-weight: 600; }
+.atk-last.recent { color: var(--text); }
+.atk-last.stale  { opacity: 0.55; }
+
+/* The hit figure is the row's headline - let it sit level with the pills */
+.atk-hits b { font-size: 13.5px; color: var(--text); }
+.atk-hits .bar { max-width: 110px; }
+/* Shrink-to-fit would size this column off the digits alone, collapsing the
+   proportional bar to a few pixels on low-count rows. Give it a floor. */
+#sec-ips-table th:nth-child(5), #sec-ips-table td:nth-child(5) { min-width: 96px; }
+
+/* Location/ISP is two stacked lines; give the rows a consistent rhythm
+   instead of letting the ISP line push the height around */
+#sec-ips-table tbody td { vertical-align: middle; }
+#sec-ips-table .ip-location { line-height: 1.35; }
+#sec-ips-table .ip-isp { line-height: 1.3; opacity: 0.85; }
+
+
+/* ── Top Attackers: column weighting + action emphasis ─────────────────── */
+
+/* Auto layout was sizing columns off the header words, not the data:
+   Source IP held 293px for a 133px pill, Port 135px for a 37px chip, while
+   Location/ISP - the only column with genuinely variable-length content -
+   was squeezed. Let the fixed-width columns shrink to content so the slack
+   lands where long ISP names actually need it. */
+#sec-ips-table th:nth-child(1), #sec-ips-table td:nth-child(1),
+#sec-ips-table th:nth-child(2), #sec-ips-table td:nth-child(2),
+#sec-ips-table th:nth-child(4), #sec-ips-table td:nth-child(4),
+#sec-ips-table th:nth-child(5), #sec-ips-table td:nth-child(5),
+#sec-ips-table th:nth-child(6), #sec-ips-table td:nth-child(6),
+#sec-ips-table th:nth-child(7), #sec-ips-table td:nth-child(7) {
+  width: 1%; white-space: nowrap;
+}
+/* width:100% + max-width:0 makes this the one shrinkable cell: the auto
+   layout gives it all remaining space but no longer lets its content set a
+   minimum, so long ISP/location text truncates instead of widening the
+   table. Without max-width:0 a percentage cap on the child is circular. */
+#sec-ips-table th:nth-child(3) { width: auto; }
+#sec-ips-table td:nth-child(3) {
+  width: 100%; max-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Long ISP names truncate rather than widening the table. max-width:100%
+   is circular in an auto-layout table (the cell is itself content-sized),
+   so the cap has to be concrete. Full name stays in textContent and is
+   shown by the row hover card. */
+#sec-ips-table .ip-isp {
+  display: block; max-width: 100%; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Every row carries a Ban button, so a permanently-red control becomes
+   wallpaper and competes with the signals that mean something (threat
+   badge, hit bar, fresh timestamp). Rest it neutral, commit to red on
+   hover/focus. Scoped to this table - .btn-danger is used app-wide. */
+#sec-ips-table .svc-actions .btn-danger {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--red) 28%, transparent);
+  color: color-mix(in srgb, var(--red) 55%, var(--muted));
+  text-shadow: none;
+  box-shadow: none;
+}
+#sec-ips-table .svc-actions .btn-danger:hover,
+#sec-ips-table .svc-actions .btn-danger:focus-visible {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--red) 22%, transparent) 0%, color-mix(in srgb, var(--red) 10%, transparent) 100%);
+  border-color: color-mix(in srgb, var(--red) 65%, transparent);
+  color: color-mix(in srgb, var(--red) 25%, #fff);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--red) 28%, transparent);
+}
+
+/* ── Top Attackers: plain address + row severity rail ──────────────────── */
+
+/* Identifier column: quiet, monospace, aligned digit-for-digit. */
+.atk-ip { display: inline-flex; align-items: center; gap: 6px; }
+.atk-ip-addr {
+  font-family: var(--mono); font-size: 12.5px; font-weight: 600;
+  color: var(--text); letter-spacing: -0.01em;
+}
+#sec-ips-table tr[data-threat="low"] .atk-ip-addr { color: var(--muted); }
+
+/* Severity rail: one 3px edge per row carries what the pill used to, at
+   ~3px of width instead of ~200px, and reads as a continuous column. */
+#sec-ips-table tbody td:first-child {
+  box-shadow: inset 3px 0 0 transparent;
+  transition: box-shadow var(--transition);
+}
+#sec-ips-table tr[data-threat="low"]    td:first-child { box-shadow: inset 3px 0 0 color-mix(in srgb, var(--muted) 45%, transparent); }
+#sec-ips-table tr[data-threat="med"]    td:first-child { box-shadow: inset 3px 0 0 var(--amber); }
+#sec-ips-table tr[data-threat="high"]   td:first-child { box-shadow: inset 3px 0 0 var(--red); }
+#sec-ips-table tr[data-threat="banned"] td:first-child { box-shadow: inset 3px 0 0 var(--red); }
+#sec-ips-table tr[data-threat="banned"] .atk-ip-addr { color: #ff8080; }
+
+/* Six always-visible copy icons are noise; reveal on row hover, but keep
+   the control reachable and visible for keyboard users. */
+#sec-ips-table .ip-copy-btn { opacity: 0; }
+#sec-ips-table tr:hover .ip-copy-btn { opacity: 0.55; }
+#sec-ips-table tr:hover .ip-copy-btn:hover,
+#sec-ips-table .ip-copy-btn:focus-visible,
+#sec-ips-table .ip-copy-btn.copied { opacity: 1; }
+
+/* ── Toolbar nested in a card head ─────────────────────────────────────── */
+
+/* .card-toolbar is styled as a full-width strip: its own padding, bottom
+   border and gradient. Three cards nest it *inside* .card-head - Top
+   Attackers ("Add Top 25"), System Configuration Backup and Server Logs -
+   and .card-head already supplies all three properties, so the toolbar
+   painted a second strip inside the first: a faint translucent box hugging
+   the button. Inside a head it is only an inline action group. The 19
+   standalone toolbars remain full-width strips and are untouched. */
+.card-head .card-toolbar {
+  background: none;
+  padding: 0;
+  border-bottom: none;
+}
+
+/* DNS page: small TLS tag on upstream providers with DoT support */
+.dns-up-tls {
+  padding: 1px 7px;
+  margin-left: 2px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  vertical-align: middle;
+  background: rgba(63, 185, 80, 0.15);
+  color: var(--green);
+}
+
+/* DNS page: Pi-hole/custom upstream input — site dark-field styling */
+.dns-up-pihole-input {
+  background: var(--bg-elev);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  width: 100%;
+  max-width: 300px;
+}
+.dns-up-pihole-input:focus { border-color: var(--accent); outline: none; }

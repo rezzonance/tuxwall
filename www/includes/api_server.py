@@ -6258,6 +6258,62 @@ def valid_blocklist_url(url):
     return parts.scheme in ("http", "https") and bool(parts.netloc)
 
 
+BLOCKLIST_CATALOG_SOURCES_URL = "https://tuxwall.org/blocklist/sources.txt"
+BLOCKLIST_CATALOG_RPZ_URL = "https://tuxwall.org/blocklist/rpz.txt"
+BLOCKLIST_CATALOG_TTL = 600  # seconds to cache the catalog in memory
+BLOCKLIST_CATALOG_MAX_BYTES = 1024 * 1024
+
+BLOCKLIST_CATALOG_CACHE = {"ts": 0.0, "data": None}
+
+
+def _parse_blocklist_catalog(text):
+    """Parse 'URL | Name | Description' lines from a catalog file."""
+    items = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        url = parts[0] if parts else ""
+        if not valid_blocklist_url(url):
+            continue
+        items.append({
+            "url": url,
+            "name": (parts[1] if len(parts) > 1 and parts[1] else url),
+            "description": parts[2] if len(parts) > 2 else "",
+        })
+    return items
+
+
+def build_blocklist_catalog():
+    now = time.time()
+    cached = BLOCKLIST_CATALOG_CACHE["data"]
+    if cached is not None and now - BLOCKLIST_CATALOG_CACHE["ts"] < BLOCKLIST_CATALOG_TTL:
+        out = dict(cached)
+        out["cached"] = True
+        return out
+    result = {"ok": True, "sources": [], "rpz": [], "errors": []}
+    for key, url in (("sources", BLOCKLIST_CATALOG_SOURCES_URL),
+                     ("rpz", BLOCKLIST_CATALOG_RPZ_URL)):
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "tuxwall-catalog/1.0",
+            })
+            with urllib.request.urlopen(req, timeout=BLOCKLIST_FETCH_TIMEOUT) as resp:
+                body = resp.read(BLOCKLIST_CATALOG_MAX_BYTES + 1)
+                if len(body) > BLOCKLIST_CATALOG_MAX_BYTES:
+                    raise RuntimeError("catalog file too large")
+                result[key] = _parse_blocklist_catalog(
+                    body.decode("utf-8", errors="replace"))
+        except Exception as exc:
+            result["errors"].append("%s: %s" % (key, exc))
+    BLOCKLIST_CATALOG_CACHE["ts"] = now
+    BLOCKLIST_CATALOG_CACHE["data"] = result
+    out = dict(result)
+    out["cached"] = False
+    return out
+
+
 def fetch_blocklist(url):
     try:
         parts = urllib.parse.urlsplit((url or "").strip())
@@ -9788,6 +9844,7 @@ def get_unbound_form():
     lines = _unbound_read_lines()
     interfaces, forwarders, fz_names = [], [], []
     port, do_ip4, do_ip6 = 53, True, True
+    tls_upstream = False
     in_fz = False
     for raw in lines:
         ls = raw.strip()
@@ -9803,6 +9860,9 @@ def get_unbound_form():
                 fz_names.append(ls.split(":", 1)[1].strip().strip('"'))
             elif ls.startswith("forward-addr:"):
                 forwarders.append(ls.split(":", 1)[1].strip())
+            elif ls.startswith("forward-tls-upstream:") and \
+                    ls.split(":", 1)[1].strip().lower() == "yes":
+                tls_upstream = True
             continue
         if ls.startswith("interface:"):
             interfaces.append(ls.split(":", 1)[1].strip())
@@ -9827,6 +9887,7 @@ def get_unbound_form():
         "do_ip4": do_ip4,
         "do_ip6": do_ip6,
         "forwarders": forwarders,
+        "tls_upstream": tls_upstream,
         "mode": "forward" if forwarders else "recursive",
     }
 
@@ -9856,14 +9917,38 @@ def save_unbound_form(body):
     if not (do_ip4 or do_ip6):
         raise ValueError("Enable at least one of IPv4 / IPv6")
     forwarders = []
+    tls_used = False
     for line in str(body.get("forwarders") or "").splitlines():
         line = line.strip()
         if not line:
             continue
+        # Accept the extended unbound forward-addr syntax:
+        #   IP[@port][#tls-auth-name]   e.g. 1.1.1.1@853#cloudflare-dns.com
+        # A #tls-auth-name turns on tls-upstream for the forward zone.
+        addr = line
+        auth = ""
+        if "#" in addr:
+            addr, auth = addr.split("#", 1)
+            auth = auth.strip()
+        fwd_port = None
+        if "@" in addr:
+            addr, p = addr.rsplit("@", 1)
+            try:
+                fwd_port = int(p.strip())
+            except ValueError:
+                raise ValueError("Invalid forwarder port in: %s" % line)
+            if not 1 <= fwd_port <= 65535:
+                raise ValueError("Invalid forwarder port in: %s" % line)
         try:
-            ipaddress.ip_address(line)
+            ipaddress.ip_address(addr.strip())
         except ValueError:
             raise ValueError("Invalid forwarder address: %s" % line)
+        if "#" in line and not auth:
+            raise ValueError("Missing TLS auth name in: %s" % line)
+        if auth:
+            if not re.match(r"^[A-Za-z0-9._-]+$", auth):
+                raise ValueError("Invalid TLS auth name in: %s" % line)
+            tls_used = True
         if line not in forwarders:
             forwarders.append(line)
 
@@ -9903,9 +9988,17 @@ def save_unbound_form(body):
     if not seen_port:
         out.append("    port: %d" % port)
     if forwarders:
+        if tls_used:
+            # tls-cert-bundle is a server: option; forward-tls-upstream
+            # is the forward-zone option that enables DoT for it.
+            out.append("")
+            out.append("server:")
+            out.append("    tls-cert-bundle: /etc/ssl/certs/ca-certificates.crt")
         out.append("")
         out.append('forward-zone:')
         out.append('    name: "."')
+        if tls_used:
+            out.append('    forward-tls-upstream: yes')
         out.extend("    forward-addr: %s" % f for f in forwarders)
 
     bak = UNBOUND_ROUTER_CONF + ".bak-" + time.strftime("%Y%m%d%H%M%S")
@@ -10526,6 +10619,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_bandwidth())
         elif path == "/api/blocklists":
             self._send(200, build_blocklists())
+        elif path == "/api/blocklists/catalog":
+            self._send(200, build_blocklist_catalog())
         elif path == "/api/rpz":
             self._send(200, build_rpz())
         elif path == "/api/system":

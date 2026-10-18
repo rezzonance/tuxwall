@@ -872,6 +872,18 @@
     });
   }
 
+  // ── OPNsense-style sub-tabs ─────────────────────────────────────────
+  function setDhcpTab(pane) {
+    document.querySelectorAll("#dhcp-subtabs .fw-subtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.dhcpPane === pane));
+    document.querySelectorAll("#view-clients .fw-pane[data-dhcp-pane]").forEach((p) => {
+      p.hidden = p.dataset.dhcpPane !== pane;
+    });
+  }
+  document.querySelectorAll("#dhcp-subtabs .fw-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => setDhcpTab(btn.dataset.dhcpPane));
+  });
+
   // Add reservation
   document.getElementById("res-add-btn").addEventListener("click", async () => {
     const btn      = document.getElementById("res-add-btn");
@@ -946,6 +958,7 @@
     if (!macIn.value && !ipIn.value) {
       macIn.value = mac;
       ipIn.value  = ip;
+      setDhcpTab("static");
       document.getElementById("reservations-card").scrollIntoView({ behavior: "smooth", block: "start" });
       macIn.focus();
     }
@@ -2030,9 +2043,13 @@
     refreshInterfaces();
   }
 
+  // ════════════════════════════════════════════════════════════════════════
+  // Attack map — Overview, Security ▸ Attacks, configured in Settings ▸ Map
+  // ════════════════════════════════════════════════════════════════════════
   let secMap = null;
   let ovMap = null;
   const SVG_NS = "http://www.w3.org/2000/svg";
+  const XLINK_NS = "http://www.w3.org/1999/xlink";
   const DEFAULT_TARGET = { lat: 39.9526, lon: -75.1652 }; // Philadelphia - fallback if no location set
   function routerTarget() {
     if (state.routerLat != null && state.routerLon != null) {
@@ -2040,14 +2057,111 @@
     }
     return DEFAULT_TARGET;
   }
-  const SEC_ARC_MAX = 40;
 
-  // Arc colour tiers by hit count
-  function arcTier(count) {
-    if (count >= 100) return { stroke: "#ff3333", glow: "#ff0000", core: "#ffaaaa" };
-    if (count >= 20)  return { stroke: "#ff7700", glow: "#ff5500", core: "#ffcc88" };
-    if (count >= 5)   return { stroke: "#ffcc00", glow: "#ffaa00", core: "#fff0aa" };
-    return                  { stroke: "#4488ff", glow: "#2266dd", core: "#aaccff" };
+  // ── FX preferences (Settings ▸ Map) ──────────────────────────────────────
+  const MAP_FX_KEY = "tuxwall.map.fx";
+  const MAP_FX_DEFAULTS = {
+    palette: "crimson",
+    density: "normal",   // calm | normal | intense
+    arcs: true,
+    particles: true,
+    pulses: true,
+    impacts: true,
+    sweep: true,
+    grid: true,
+    scanlines: true,
+    vignette: true,
+    frame: true,
+    hud: true,
+    feed: true,
+    legend: true,
+  };
+  let mapFx = Object.assign({}, MAP_FX_DEFAULTS);
+  function loadMapFx() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(MAP_FX_KEY) || "{}");
+      for (const k of Object.keys(MAP_FX_DEFAULTS)) {
+        if (raw[k] !== undefined) mapFx[k] = raw[k];
+      }
+    } catch (_) {}
+  }
+  function saveMapFx() {
+    try { localStorage.setItem(MAP_FX_KEY, JSON.stringify(mapFx)); } catch (_) {}
+  }
+  loadMapFx();
+
+  // Every comet travels at this constant speed (px per ms) regardless of how
+  // long its arc is, so nothing ever speeds up, slows down or stalls.
+  const ARC_SPEED = 0.19;
+  const ARC_SPACING = 230;   // target px between comets in a stream
+  // Each pulsing source is 3 animated nodes; past a few dozen the per-frame
+  // cost dominates the page. Arcs still cover every source up to the budget.
+  const PULSE_MAX = 28;
+
+  const MAP_DENSITY = { calm: 16, normal: 40, intense: 80 };
+  function arcBudget() { return MAP_DENSITY[mapFx.density] || MAP_DENSITY.normal; }
+  const SEC_ARC_MAX = 40; // legacy alias
+
+  // Severity palettes — index 0 = low … 3 = critical
+  const MAP_PALETTES = {
+    crimson: [
+      { key: "low",      label: "Low",      stroke: "#2ee6ff", glow: "#00b2e0", core: "#d6f8ff" },
+      { key: "elevated", label: "Elevated", stroke: "#ffd400", glow: "#ffae00", core: "#fff6c4" },
+      { key: "high",     label: "High",     stroke: "#ff8a1f", glow: "#ff6200", core: "#ffe2bd" },
+      { key: "critical", label: "Critical", stroke: "#ff2d55", glow: "#ff0033", core: "#ffd3dd" },
+    ],
+    cyber: [
+      { key: "low",      label: "Low",      stroke: "#39f6ff", glow: "#00c8d7", core: "#dcfeff" },
+      { key: "elevated", label: "Elevated", stroke: "#7b7bff", glow: "#4a4aff", core: "#e0e0ff" },
+      { key: "high",     label: "High",     stroke: "#c45cff", glow: "#9b19ff", core: "#f1dcff" },
+      { key: "critical", label: "Critical", stroke: "#ff2fb0", glow: "#ff008c", core: "#ffd6f0" },
+    ],
+    matrix: [
+      { key: "low",      label: "Low",      stroke: "#9bffb0", glow: "#45d46a", core: "#e9fff0" },
+      { key: "elevated", label: "Elevated", stroke: "#4bff7d", glow: "#12d14a", core: "#d8ffe4" },
+      { key: "high",     label: "High",     stroke: "#d6ff3b", glow: "#9fd400", core: "#f5ffd0" },
+      { key: "critical", label: "Critical", stroke: "#ffe14b", glow: "#ffae00", core: "#fff7cf" },
+    ],
+    amber: [
+      { key: "low",      label: "Low",      stroke: "#ffd79a", glow: "#e0a44a", core: "#fff3df" },
+      { key: "elevated", label: "Elevated", stroke: "#ffb13d", glow: "#ff8c00", core: "#ffe7c2" },
+      { key: "high",     label: "High",     stroke: "#ff7a2f", glow: "#ff4f00", core: "#ffdcc4" },
+      { key: "critical", label: "Critical", stroke: "#ff3d2e", glow: "#e01000", core: "#ffd2cd" },
+    ],
+  };
+  // Animation phase is derived from a per-source hash plus elapsed wall-clock
+  // time, so when the layer is rebuilt (5s poll, pan, zoom) every arc and pulse
+  // resumes exactly where it was instead of snapping back to the start.
+  const MAP_EPOCH = Date.now();
+  function hashUnit(str) {
+    let h = 2166136261;
+    const v = String(str);
+    for (let i = 0; i < v.length; i++) { h ^= v.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return ((h >>> 0) % 10000) / 10000;
+  }
+  // Negative animation-delay = "start this many ms into the cycle".
+  function phaseDelay(key, dur) {
+    return -(((hashUnit(key) * dur) + (Date.now() - MAP_EPOCH)) % dur);
+  }
+  function mapSignature(byIp) {
+    return (byIp || []).map((i) => i.ip + ":" + i.count + ":" + i.lat + "," + i.lon).join("|");
+  }
+
+  function mapPalette() { return MAP_PALETTES[mapFx.palette] || MAP_PALETTES.crimson; }
+  function tierIndex(count) {
+    const c = Number(count) || 0;
+    if (c >= 100) return 3;
+    if (c >= 20) return 2;
+    if (c >= 5) return 1;
+    return 0;
+  }
+  function arcTier(count) { return mapPalette()[tierIndex(count)]; }
+
+  function fxLayer(el, cls) {
+    const d = document.createElement("div");
+    d.className = cls;
+    el.appendChild(d);
+    return d;
   }
 
   function createAttackMap(el, target) {
@@ -2055,14 +2169,19 @@
     const m = {
       map: L.map(el, { worldCopyJump: true, zoomControl: false }).setView([25, 0], 2),
       target,
-      targetMarker: null,
+      targetEl: null,
       markers: null,
       svg: null,
       lastByIp: null,
       statsEl: null,
+      feedEl: null,
+      legendEl: null,
+      sweepEl: null,
+      impactEl: null,
+      impactTimer: null,
+      uid: (el.id || "map") + "-" + Math.random().toString(36).slice(2, 7),
     };
 
-    // Zoom control bottom-right
     L.control.zoom({ position: "bottomright" }).addTo(m.map);
 
     // CARTO dark basemap with registered API key (keyless tiles are watermarked)
@@ -2072,56 +2191,127 @@
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
     }).addTo(m.map);
 
-    // Target marker — multi-ring shield
-    m.targetMarker = L.marker([target.lat, target.lon], {
-      icon: L.divIcon({
-        className: "sec-target-wrap",
-        html: `<div class="sec-target">
-          <span class="sec-target-ring sec-target-ring-3"></span>
-          <span class="sec-target-ring sec-target-ring-2"></span>
-          <span class="sec-target-ring sec-target-ring-1"></span>
-          <span class="sec-target-core"></span>
-        </div>`,
-        iconSize: [48, 48],
-        iconAnchor: [24, 24],
-      }),
-      interactive: false,
-      keyboard: false,
-      zIndexOffset: 1000,
-    }).addTo(m.map);
+    // Gateway marker lives in its own overlay above the arcs — a Leaflet
+    // marker is trapped in the z-400 map pane and gets buried by the glow.
+    m.targetEl = document.createElement("div");
+    m.targetEl.className = "sec-target-layer";
+    m.targetEl.innerHTML = `<div class="sec-target">
+      <span class="sec-target-ring sec-target-ring-3"></span>
+      <span class="sec-target-ring sec-target-ring-2"></span>
+      <span class="sec-target-ring sec-target-ring-1"></span>
+      <span class="sec-target-cross sec-target-cross-h"></span>
+      <span class="sec-target-cross sec-target-cross-v"></span>
+      <span class="sec-target-core"></span>
+      <span class="sec-target-label">GATEWAY</span>
+    </div>`;
 
-    // SVG arc layer
-    m.svg = L.DomUtil.create("svg", "sec-arcs", el);
+    // Decorative layers (order here is DOM order; z-index does the stacking)
+    fxLayer(el, "sec-map-grid");
+    // (target overlay appended later so it sits above the arcs)
+    m.sweepEl = fxLayer(el, "sec-map-sweep");
+    // NB: must be createElementNS — L.DomUtil.create()/document.createElement()
+    // yields an *HTML* <svg> (xhtml namespace) that never paints its children.
+    m.svg = document.createElementNS(SVG_NS, "svg");
+    m.svg.setAttribute("class", "sec-arcs");
+    el.appendChild(m.svg);
+    m.impactEl = fxLayer(el, "sec-impact-layer");
+    el.appendChild(m.targetEl);
+    fxLayer(el, "sec-map-vignette");
+    fxLayer(el, "sec-map-scanlines");
 
-    // Vignette overlay
-    const vig = document.createElement("div");
-    vig.className = "sec-map-vignette";
-    el.appendChild(vig);
+    const frame = fxLayer(el, "sec-map-frame");
+    frame.innerHTML = `<i class="c1"></i><i class="c2"></i><i class="c3"></i><i class="c4"></i>`;
 
-    // Scanline overlay
-    const scan = document.createElement("div");
-    scan.className = "sec-map-scanlines";
-    el.appendChild(scan);
-
-    // HUD stats overlay
-    m.statsEl = document.createElement("div");
-    m.statsEl.className = "sec-map-hud";
+    // HUD stats
+    m.statsEl = fxLayer(el, "sec-map-hud");
     m.statsEl.innerHTML = `
-      <div class="sec-hud-row"><span class="sec-hud-dot"></span><span class="sec-hud-label">THREAT MONITOR</span></div>
-      <div class="sec-hud-stat"><span class="sec-hud-val" id="${el.id}-hud-attacks">—</span><span class="sec-hud-key">ATTACKS</span></div>
-      <div class="sec-hud-stat"><span class="sec-hud-val" id="${el.id}-hud-sources">—</span><span class="sec-hud-key">SOURCES</span></div>
-      <div class="sec-hud-stat"><span class="sec-hud-val" id="${el.id}-hud-top">—</span><span class="sec-hud-key">TOP COUNTRY</span></div>
-    `;
-    el.appendChild(m.statsEl);
+      <div class="sec-hud-top">
+        <span class="sec-hud-dot"></span>
+        <span class="sec-hud-label">Threat Monitor</span>
+        <span class="sec-hud-live">LIVE</span>
+      </div>
+      <div class="sec-hud-grid">
+        <div class="sec-hud-stat"><span class="sec-hud-val" data-hud="attacks">—</span><span class="sec-hud-key">Attacks</span></div>
+        <div class="sec-hud-stat"><span class="sec-hud-val" data-hud="sources">—</span><span class="sec-hud-key">Sources</span></div>
+      </div>
+      <div class="sec-hud-stat sec-hud-origin"><span class="sec-hud-val" data-hud="top">—</span><span class="sec-hud-key">Top origin</span></div>
+      <div class="sec-hud-level">
+        <div class="sec-hud-level-head"><span>Threat level</span><span data-hud="level">—</span></div>
+        <div class="sec-hud-meter"><i data-hud="meter"></i></div>
+      </div>`;
 
-    m.map.on("move zoom resize", () => drawAttackArcs(m));
+    // Live attack feed
+    m.feedEl = fxLayer(el, "sec-map-feed");
+    m.feedEl.innerHTML = `
+      <div class="sec-feed-head"><span class="sec-feed-dot"></span>Live attack feed<span class="sec-feed-count" data-feed="count"></span></div>
+      <div class="sec-feed-list" data-feed="list"></div>`;
+    // Keep feed interaction from panning/zooming the map underneath
+    L.DomEvent.disableClickPropagation(m.feedEl);
+    L.DomEvent.disableScrollPropagation(m.feedEl);
+    m.feedEl.addEventListener("click", (ev) => {
+      const row = ev.target.closest(".sec-feed-row");
+      if (!row) return;
+      const lat = Number(row.dataset.lat), lon = Number(row.dataset.lon);
+      if (!isFinite(lat) || !isFinite(lon)) return;
+      m.map.setView([lat, lon], Math.max(m.map.getZoom(), 4), { animate: true });
+      const rec = (m.markerIndex || {})[row.dataset.ip];
+      if (rec) setTimeout(() => rec.marker.openPopup(), 320);
+    });
+
+    // Severity legend
+    m.legendEl = fxLayer(el, "sec-map-legend");
+
+    // Redraws are rAF-coalesced; tracer particles are suspended mid-gesture so
+    // panning a busy map stays smooth.
+    m.map.on("movestart zoomstart", () => { m.moving = true; });
+    m.map.on("moveend zoomend", () => { m.moving = false; requestArcDraw(m); });
+    m.map.on("move zoom resize", () => requestArcDraw(m));
+
+    m.awake = true;
+    m.visible = true;
+    if (typeof IntersectionObserver !== "undefined") {
+      m.io = new IntersectionObserver((entries) => {
+        m.visible = entries.some((e) => e.isIntersecting);
+        refreshMapAwake();
+      }, { threshold: 0 });
+      m.io.observe(el);
+    }
+
+    applyMapFxTo(m, true);
     return m;
+  }
+
+  // Off-screen or backgrounded maps are stopped outright rather than left
+  // animating behind a scrolled viewport.
+  function setMapAwake(m, awake) {
+    if (!m || !m.map || m.awake === awake) return;
+    m.awake = awake;
+    m.map.getContainer().classList.toggle("fx-paused", !awake);
+    try {
+      if (awake) m.svg.unpauseAnimations(); else m.svg.pauseAnimations();
+    } catch (_) {}
+    if (awake) { scheduleImpacts(m); requestArcDraw(m); }
+    else if (m.impactTimer) { clearInterval(m.impactTimer); m.impactTimer = null; }
+  }
+
+  function refreshMapAwake() {
+    [secMap, ovMap].forEach((m) => {
+      if (!m || !m.map) return;
+      const el = m.map.getContainer();
+      const onScreen = !document.hidden && m.visible !== false && el.clientWidth > 0;
+      setMapAwake(m, onScreen);
+    });
+  }
+
+  function requestArcDraw(m) {
+    if (!m || m._raf) return;
+    m._raf = requestAnimationFrame(() => { m._raf = null; drawAttackArcs(m); });
   }
 
   function arcControlPoint(a, b) {
     const dx = b.x - a.x, dy = b.y - a.y;
     const dist = Math.hypot(dx, dy) || 1;
-    const k = Math.min(90, dist * 0.22);
+    const k = Math.min(110, dist * 0.26);
     return { x: (a.x + b.x) / 2 - (dy / dist) * k, y: (a.y + b.y) / 2 + (dx / dist) * k };
   }
 
@@ -2144,37 +2334,123 @@
     return Math.max(1, len);
   }
 
+  function pulseSize(count) {
+    return Math.round(Math.min(34, 12 + 8 * Math.log10(Math.max(1, count))));
+  }
+
+  function pulsePopupHtml(ip, tier) {
+    return `<div class="sec-popup sev-${tier.key}">` +
+      `<div class="sec-popup-head"><span class="sec-popup-sev">${tier.label}</span><span class="sec-popup-ip">${esc(ip.ip)}</span></div>` +
+      `<div class="sec-popup-loc">${esc(ip.country || "Unknown")}${ip.city ? " · " + esc(ip.city) : ""}</div>` +
+      `<div class="sec-popup-hits"><b>${formatNumber(ip.count)}</b> hits · port <span class="mono">${esc(ip.port || "?")}</span></div>` +
+      `<div class="sec-popup-time">Last seen ${formatRelative(ip.last)}</div>` +
+      `</div>`;
+  }
+
+  // Incremental diff keyed by IP. Tearing the layer down and rebuilding it on
+  // every poll restarted each pulse animation and slammed any open popup shut.
   function buildAttackPulses(m, byIp) {
     if (!m) return;
     if (!m.markers) m.markers = L.layerGroup().addTo(m.map);
-    m.markers.clearLayers();
-    for (const ip of byIp) {
+    if (!m.markerIndex) m.markerIndex = {};
+    if (!mapFx.pulses) {
+      m.markers.clearLayers();
+      m.markerIndex = {};
+      return;
+    }
+    const seen = new Set();
+    let shown = 0;
+    for (const ip of byIp) {        // already sorted by hit count, desc
       if (ip.lat == null || ip.lon == null) continue;
+      if (++shown > PULSE_MAX) break;
       const tier = arcTier(ip.count);
-      const size = Math.min(32, 12 + 8 * Math.log10(Math.max(1, ip.count)));
+      const size = pulseSize(ip.count);
+      const popup = pulsePopupHtml(ip, tier);
+      seen.add(ip.ip);
+      const rec = m.markerIndex[ip.ip];
+
+      if (rec) {
+        if (rec.lat !== ip.lat || rec.lon !== ip.lon) {
+          rec.marker.setLatLng([ip.lat, ip.lon]);
+          rec.lat = ip.lat; rec.lon = ip.lon;
+        }
+        if (rec.size !== size || rec.tier !== tier.key || rec.palette !== mapFx.palette) {
+          // Restyle in place rather than setIcon() — swapping the icon would
+          // recreate the node and restart its animation.
+          const node = rec.marker.getElement();
+          const stack = node && node.querySelector(".sec-pulse-stack");
+          if (stack) {
+            stack.style.width = size + "px";
+            stack.style.height = size + "px";
+            stack.style.setProperty("--pulse-color", tier.glow);
+            stack.style.setProperty("--pulse-core", tier.core);
+          }
+          if (node) {
+            node.style.width = size + "px";
+            node.style.height = size + "px";
+            node.style.marginLeft = (-size / 2) + "px";
+            node.style.marginTop = (-size / 2) + "px";
+          }
+          rec.size = size; rec.tier = tier.key; rec.palette = mapFx.palette;
+        }
+        if (rec.popup !== popup) { rec.marker.setPopupContent(popup); rec.popup = popup; }
+        continue;
+      }
+
       const marker = L.marker([ip.lat, ip.lon], {
         icon: L.divIcon({
           className: "sec-pulse-wrap",
-          html: `<span class="sec-pulse" style="width:${size}px;height:${size}px;--pulse-color:${tier.glow}"></span>`,
+          html: `<span class="sec-pulse-stack" style="width:${size}px;height:${size}px;--pulse-color:${tier.glow};--pulse-core:${tier.core};--pulse-delay:${phaseDelay(ip.ip, 2400).toFixed(0)}ms">
+            <span class="sec-pulse"></span>
+            <span class="sec-pulse sec-pulse-b"></span>
+            <span class="sec-pulse-core"></span>
+          </span>`,
           iconSize: [size, size],
           iconAnchor: [size / 2, size / 2],
         }),
         keyboard: false,
       });
-      marker.bindPopup(
-        `<div class="sec-popup">` +
-        `<div class="sec-popup-ip">${esc(ip.ip)}</div>` +
-        `<div class="sec-popup-loc">${esc(ip.country || "Unknown")}${ip.city ? " · " + esc(ip.city) : ""}</div>` +
-        `<div class="sec-popup-hits"><b>${formatNumber(ip.count)}</b> hits · port <span class="mono">${esc(ip.port || "?")}</span></div>` +
-        `<div class="sec-popup-time">Last seen ${formatRelative(ip.last)}</div>` +
-        `</div>`
-      );
+      marker.bindPopup(popup, { className: "sec-popup-shell" });
       marker.addTo(m.markers);
+      m.markerIndex[ip.ip] = {
+        marker, size, tier: tier.key, palette: mapFx.palette,
+        lat: ip.lat, lon: ip.lon, popup,
+      };
+    }
+    for (const key of Object.keys(m.markerIndex)) {
+      if (seen.has(key)) continue;
+      m.markers.removeLayer(m.markerIndex[key].marker);
+      delete m.markerIndex[key];
     }
   }
 
+  // Expanding shockwave at the gateway whenever a volley lands
+  function spawnImpact(m) {
+    if (!m || !m.impactEl || !mapFx.impacts) return;
+    const el = m.map.getContainer();
+    if (!el.clientWidth) return;
+    const p = m.map.latLngToContainerPoint([m.target.lat, m.target.lon]);
+    if (p.x < -80 || p.y < -80 || p.x > el.clientWidth + 80 || p.y > el.clientHeight + 80) return;
+    const ring = document.createElement("span");
+    ring.className = "sec-impact";
+    ring.style.left = p.x + "px";
+    ring.style.top = p.y + "px";
+    m.impactEl.appendChild(ring);
+    setTimeout(() => ring.remove(), 1100);
+  }
+
+  function scheduleImpacts(m) {
+    if (!m) return;
+    if (m.impactTimer) { clearInterval(m.impactTimer); m.impactTimer = null; }
+    if (!mapFx.impacts || m.awake === false) return;
+    const n = (m.lastByIp || []).filter((i) => i.lat != null).length;
+    if (!n) return;
+    const every = Math.max(220, Math.min(1600, 3200 / Math.max(1, Math.min(n, 12))));
+    m.impactTimer = setInterval(() => spawnImpact(m), every);
+  }
+
   function drawAttackArcs(m) {
-    if (!m || !m.map || !m.svg || !m.lastByIp) return;
+    if (!m || !m.map || !m.svg) return;
     const el = m.map.getContainer();
     const w = el.clientWidth, h = el.clientHeight;
     m.svg.setAttribute("width", w);
@@ -2182,12 +2458,30 @@
     m.svg.innerHTML = "";
     if (w < 10 || h < 10) return;
 
-    const tgt = m.map.latLngToContainerPoint([m.target.lat, m.target.lon]);
-    const recent = m.lastByIp
-      .filter((i) => i.lat != null && i.lon != null)
-      .slice(0, SEC_ARC_MAX);
+    // Responsive chrome: drop overlays that would crowd a narrow map
+    el.classList.toggle("sec-map-compact", w < 860);
+    el.classList.toggle("sec-map-tiny", w < 620);
 
-    // SVG defs for gradients
+    const tgt = m.map.latLngToContainerPoint([m.target.lat, m.target.lon]);
+
+    // Park the radar sweep on the gateway
+    if (m.sweepEl) {
+      m.sweepEl.style.left = tgt.x + "px";
+      m.sweepEl.style.top = tgt.y + "px";
+      const reach = Math.hypot(Math.max(tgt.x, w - tgt.x), Math.max(tgt.y, h - tgt.y));
+      const d = Math.max(220, Math.min(1500, reach * 2));
+      m.sweepEl.style.width = d + "px";
+      m.sweepEl.style.height = d + "px";
+    }
+
+    if (m.targetEl) {
+      m.targetEl.style.left = tgt.x + "px";
+      m.targetEl.style.top = tgt.y + "px";
+    }
+
+    const all = (m.lastByIp || []).filter((i) => i.lat != null && i.lon != null);
+    const recent = mapFx.arcs ? all.slice(0, arcBudget()) : [];
+
     const defs = document.createElementNS(SVG_NS, "defs");
     m.svg.appendChild(defs);
 
@@ -2197,83 +2491,223 @@
       const len = bezierLength(src, tgt);
       if (len < 20) return;
       const tier = arcTier(ip.count);
-      const gid = `arc-grad-${idx}`;
+      const gid = `${m.uid}-g${idx}`;
+      const pid = `${m.uid}-p${idx}`;
 
-      // Gradient: source colour → bright white-ish at target
+      // Gradient: faint at the source, hot white at the gateway
       const grad = document.createElementNS(SVG_NS, "linearGradient");
       grad.setAttribute("id", gid);
       grad.setAttribute("gradientUnits", "userSpaceOnUse");
       grad.setAttribute("x1", src.x); grad.setAttribute("y1", src.y);
       grad.setAttribute("x2", tgt.x); grad.setAttribute("y2", tgt.y);
-      const s1 = document.createElementNS(SVG_NS, "stop");
-      s1.setAttribute("offset", "0%"); s1.setAttribute("stop-color", tier.stroke); s1.setAttribute("stop-opacity", "0.15");
-      const s2 = document.createElementNS(SVG_NS, "stop");
-      s2.setAttribute("offset", "60%"); s2.setAttribute("stop-color", tier.stroke); s2.setAttribute("stop-opacity", "0.7");
-      const s3 = document.createElementNS(SVG_NS, "stop");
-      s3.setAttribute("offset", "100%"); s3.setAttribute("stop-color", tier.core); s3.setAttribute("stop-opacity", "0.95");
-      grad.appendChild(s1); grad.appendChild(s2); grad.appendChild(s3);
+      const stops = [
+        ["0%", tier.stroke, "0.05"],
+        ["45%", tier.stroke, "0.45"],
+        ["85%", tier.glow, "0.7"],
+        ["100%", tier.core, "0.85"],
+      ];
+      for (const [off, col, op] of stops) {
+        const s = document.createElementNS(SVG_NS, "stop");
+        s.setAttribute("offset", off);
+        s.setAttribute("stop-color", col);
+        s.setAttribute("stop-opacity", op);
+        grad.appendChild(s);
+      }
       defs.appendChild(grad);
 
-      const baseW = Math.min(5, 1.5 + Math.log10(Math.max(1, ip.count)));
+      const baseW = Math.min(5, 1.4 + Math.log10(Math.max(1, ip.count)));
+      // Tile the dash pattern along the path so that as one comet leaves the
+      // gateway the next is already entering — shifting the pattern by exactly
+      // one period makes the loop seamless, with no dead time at the wrap.
+      const streams = Math.max(1, Math.round(len / ARC_SPACING));
+      const period = len / streams;
+      const dur = period / ARC_SPEED;
+      const delay = phaseDelay(ip.ip, dur);
 
-      // Layer 1: wide outer glow
+      // Layer 1 — wide atmospheric glow
       const outerGlow = document.createElementNS(SVG_NS, "path");
       outerGlow.setAttribute("d", d);
       outerGlow.setAttribute("fill", "none");
       outerGlow.setAttribute("stroke", tier.glow);
       outerGlow.setAttribute("stroke-width", baseW * 4);
-      outerGlow.setAttribute("stroke-opacity", "0.08");
+      outerGlow.setAttribute("stroke-opacity", "0.045");
       outerGlow.setAttribute("stroke-linecap", "round");
       m.svg.appendChild(outerGlow);
 
-      // Layer 2: mid glow
+      // Layer 2 — the static trail
       const midGlow = document.createElementNS(SVG_NS, "path");
       midGlow.setAttribute("d", d);
       midGlow.setAttribute("fill", "none");
       midGlow.setAttribute("stroke", `url(#${gid})`);
-      midGlow.setAttribute("stroke-width", baseW * 1.8);
-      midGlow.setAttribute("stroke-opacity", "0.4");
+      midGlow.setAttribute("stroke-width", baseW * 1.25);
+      midGlow.setAttribute("stroke-opacity", "0.2");
       midGlow.setAttribute("stroke-linecap", "round");
       m.svg.appendChild(midGlow);
 
-      // Layer 3: animated bright head
+      // Layer 3 — the bright comet head sweeping the path
       const head = document.createElementNS(SVG_NS, "path");
+      head.setAttribute("id", pid);
       head.setAttribute("d", d);
       head.setAttribute("fill", "none");
       head.setAttribute("stroke", `url(#${gid})`);
-      head.setAttribute("stroke-width", baseW);
+      head.setAttribute("stroke-width", baseW * 0.95);
       head.setAttribute("stroke-linecap", "round");
-      const dash = Math.min(18, 5 + Math.log2(Math.max(1, ip.count)));
-      head.style.strokeDasharray = `${dash} ${Math.max(1, len - dash)}`;
-      head.style.setProperty("--len", `-${len.toFixed(1)}`);
-      head.style.animationName = "sec-arc-fly";
-      head.style.animationTimingFunction = "linear";
-      head.style.animationIterationCount = "infinite";
-      head.style.animationDuration = `${Math.max(300, Math.min(1200, len / 55)).toFixed(0)}ms`;
-      head.style.animationDelay = `${(Math.random() * 1500).toFixed(0)}ms`;
+      head.setAttribute("class", "sec-arc-head");
+      const dash = Math.max(10, Math.min(46, period * 0.26));
+      head.style.strokeDasharray = `${dash.toFixed(1)} ${Math.max(1, period - dash).toFixed(1)}`;
+      head.style.setProperty("--len", `-${period.toFixed(1)}`);
+      head.style.animationDuration = `${dur.toFixed(0)}ms`;
+      head.style.animationDelay = `${delay.toFixed(0)}ms`;
       m.svg.appendChild(head);
+
+      // Layer 4 — tracer particle riding the curve
+      if (mapFx.particles && !m.moving) {
+        const dot = document.createElementNS(SVG_NS, "circle");
+        dot.setAttribute("r", (1.5 + baseW * 0.55).toFixed(2));
+        dot.setAttribute("fill", tier.core);
+        dot.setAttribute("class", "sec-arc-dot");
+        dot.style.setProperty("--dot-glow", tier.glow);
+        const pdur = len / ARC_SPEED;   // same px/ms as the dash stream
+        const am = document.createElementNS(SVG_NS, "animateMotion");
+        am.setAttribute("dur", `${pdur.toFixed(0)}ms`);
+        am.setAttribute("begin", `${phaseDelay(ip.ip, pdur).toFixed(0)}ms`);
+        am.setAttribute("repeatCount", "indefinite");
+        am.setAttribute("rotate", "auto");
+        const mp = document.createElementNS(SVG_NS, "mpath");
+        mp.setAttributeNS(XLINK_NS, "xlink:href", `#${pid}`);
+        mp.setAttribute("href", `#${pid}`);
+        am.appendChild(mp);
+        dot.appendChild(am);
+        m.svg.appendChild(dot);
+      }
     });
 
-    // Update HUD stats
-    if (m.statsEl) {
-      const totalHits = m.lastByIp.reduce((s, i) => s + (i.count || 0), 0);
-      const sources = m.lastByIp.filter((i) => i.lat != null).length;
-      const topCountry = m.lastByIp[0]?.country || "—";
-      const hudId = el.id;
-      const hA = document.getElementById(`${hudId}-hud-attacks`);
-      const hS = document.getElementById(`${hudId}-hud-sources`);
-      const hT = document.getElementById(`${hudId}-hud-top`);
-      if (hA) hA.textContent = formatNumber(totalHits);
-      if (hS) hS.textContent = sources;
-      if (hT) hT.textContent = topCountry;
-    }
+    updateMapHud(m, all);
+    updateMapLegend(m);
   }
 
-  function renderAttackMap(m, byIp) {
+  function updateMapHud(m, geo) {
+    if (!m || !m.statsEl) return;
+    const list = m.lastByIp || [];
+    const totalHits = list.reduce((s, i) => s + (i.count || 0), 0);
+    const peak = list.reduce((s, i) => Math.max(s, i.count || 0), 0);
+    // Top origin = country with the most hits. Reading list[0].country broke
+    // whenever the single busiest IP had no geo record (country is "" for any
+    // address db-ip City Lite cannot resolve), pinning the read-out at "—".
+    const tally = new Map();
+    for (const i of list) {
+      const c = (i.country || "").trim();
+      if (c) tally.set(c, (tally.get(c) || 0) + (i.count || 0));
+    }
+    let topCountry = "—", best = -1;
+    for (const [c, n] of tally) if (n > best) { best = n; topCountry = c; }
+    const q = (k) => m.statsEl.querySelector(`[data-hud="${k}"]`);
+    const set = (k, v) => { const n = q(k); if (n && n.textContent !== String(v)) { n.textContent = v; n.classList.remove("tick"); void n.offsetWidth; n.classList.add("tick"); } };
+    set("attacks", formatNumber(totalHits));
+    set("sources", formatNumber(geo.length));
+    set("top", topCountry);
+
+    const tier = mapPalette()[tierIndex(peak)];
+    const pct = list.length ? Math.max(8, Math.min(100, Math.round((tierIndex(peak) + 1) / 4 * 100))) : 0;
+    const lvl = q("level"), meter = q("meter");
+    if (lvl) { lvl.textContent = list.length ? tier.label.toUpperCase() : "—"; }
+    if (meter) {
+      meter.style.width = pct + "%";
+      meter.style.background = `linear-gradient(90deg, ${tier.glow}, ${tier.core})`;
+      meter.style.boxShadow = `0 0 10px ${tier.glow}`;
+    }
+    m.statsEl.dataset.sev = list.length ? tier.key : "idle";
+  }
+
+  function updateMapLegend(m) {
+    if (!m || !m.legendEl) return;
+    const pal = mapPalette();
+    const counts = [0, 0, 0, 0];
+    for (const i of (m.lastByIp || [])) counts[tierIndex(i.count)]++;
+    m.legendEl.innerHTML =
+      `<span class="sec-leg-title">Severity</span>` +
+      pal.map((t, i) =>
+        `<span class="sec-leg-item" style="--leg:${t.glow};--leg-core:${t.core}">` +
+        `<i></i><span class="sec-leg-label">${t.label}</span><b>${counts[i]}</b></span>`
+      ).join("");
+  }
+
+  function renderAttackFeed(m) {
+    if (!m || !m.feedEl) return;
+    const list = (m.lastByIp || []).filter((i) => i.lat != null && i.lon != null).slice(0, 14);
+    const body = m.feedEl.querySelector('[data-feed="list"]');
+    const cnt = m.feedEl.querySelector('[data-feed="count"]');
+    if (cnt) cnt.textContent = (m.lastByIp || []).length ? `${formatNumber((m.lastByIp || []).length)} src` : "";
+    if (!body) return;
+    if (!list.length) {
+      body.innerHTML = `<div class="sec-feed-empty">No geolocated sources</div>`;
+      m.feedSig = "";
+      return;
+    }
+    const sig = list.map((i) => i.ip).join("|");
+    if (sig === m.feedSig && body.children.length === list.length) {
+      // Same sources in the same order — refresh the numbers in place so the
+      // rows do not replay their slide-in animation on every poll.
+      list.forEach((ip, idx) => {
+        const row = body.children[idx];
+        if (!row) return;
+        const t = arcTier(ip.count);
+        row.style.setProperty("--sev", t.glow);
+        row.style.setProperty("--sev-core", t.core);
+        const hits = row.querySelector(".sec-feed-hits");
+        if (hits) hits.textContent = formatNumber(ip.count);
+        row.title = `${ip.ip} — ${formatNumber(ip.count)} hits`;
+      });
+      return;
+    }
+    m.feedSig = sig;
+    body.innerHTML = list.map((ip, idx) => {
+      const t = arcTier(ip.count);
+      const where = [ip.country || "Unknown", ip.city].filter(Boolean).map(esc).join(" · ");
+      return `<button type="button" class="sec-feed-row" style="--sev:${t.glow};--sev-core:${t.core};animation-delay:${idx * 45}ms"` +
+        ` data-ip="${esc(ip.ip)}" data-lat="${ip.lat}" data-lon="${ip.lon}" title="${esc(ip.ip)} — ${formatNumber(ip.count)} hits">` +
+        `<span class="sec-feed-bar"></span>` +
+        `<span class="sec-feed-main"><span class="sec-feed-ip">${esc(ip.ip)}</span>` +
+        `<span class="sec-feed-meta">${where}${ip.port ? " · :" + esc(ip.port) : ""}</span></span>` +
+        `<span class="sec-feed-hits">${formatNumber(ip.count)}</span></button>`;
+    }).join("");
+  }
+
+  function renderAttackMap(m, byIp, force) {
     if (!m) return;
-    m.lastByIp = byIp || [];
-    buildAttackPulses(m, m.lastByIp);
-    drawAttackArcs(m);
+    const next = byIp || [];
+    m.lastByIp = next;
+    // Only positions and severity tier affect what is drawn. Hit counts tick on
+    // almost every poll of a live firewall, but they change the picture only
+    // when they cross a tier boundary — so a plain count bump no longer tears
+    // down the marker layer and the SVG (that was the 5s stutter).
+    const geomSig = next
+      .map((i) => i.ip + ":" + i.lat + "," + i.lon + ":" + tierIndex(i.count))
+      .join("|");
+    buildAttackPulses(m, next);   // cheap incremental diff, runs every poll
+    if (force || geomSig !== m.geomSig) {
+      m.geomSig = geomSig;
+      drawAttackArcs(m);       // also refreshes the HUD and legend
+      scheduleImpacts(m);
+    } else {
+      updateMapHud(m, next.filter((i) => i.lat != null && i.lon != null));
+      updateMapLegend(m);
+    }
+    renderAttackFeed(m);
+  }
+
+  // ── FX application ───────────────────────────────────────────────────────
+  function applyMapFxTo(m, skipRender) {
+    if (!m || !m.map) return;
+    const el = m.map.getContainer();
+    el.dataset.palette = mapFx.palette;
+    const flags = ["sweep", "grid", "scanlines", "vignette", "frame", "hud", "feed", "legend"];
+    for (const f of flags) el.classList.toggle("fx-no-" + f, !mapFx[f]);
+    if (!skipRender) renderAttackMap(m, m.lastByIp || [], true);
+  }
+  function applyMapFx() {
+    applyMapFxTo(secMap);
+    applyMapFxTo(ovMap);
   }
 
   function initSecurityMap() {
@@ -2291,7 +2725,6 @@
   function updateMapTarget(m, target) {
     if (!m) return;
     m.target = target;
-    if (m.targetMarker) m.targetMarker.setLatLng([target.lat, target.lon]);
     drawAttackArcs(m);
   }
 
@@ -2300,6 +2733,119 @@
     updateMapTarget(secMap, t);
     updateMapTarget(ovMap, t);
   }
+
+  // ── Settings ▸ Map : appearance controls (injected at runtime) ───────────
+  const MAP_FX_TOGGLES = [
+    ["arcs", "Attack arcs", "Curved trails from each source to the gateway"],
+    ["particles", "Tracer particles", "Glowing dot that rides each arc"],
+    ["pulses", "Source pulses", "Pulsing rings at attacking IP locations"],
+    ["impacts", "Impact shockwaves", "Ripple at the gateway as volleys land"],
+    ["sweep", "Radar sweep", "Rotating radar cone centred on the gateway"],
+    ["grid", "Tactical grid", "Faint coordinate grid over the basemap"],
+    ["scanlines", "Scanlines", "CRT-style scrolling scanline texture"],
+    ["vignette", "Vignette", "Darkened edges for focus"],
+    ["frame", "Corner brackets", "HUD framing brackets in each corner"],
+    ["hud", "Threat monitor HUD", "Live counters and threat level meter"],
+    ["feed", "Live attack feed", "Scrolling list of recent sources"],
+    ["legend", "Severity legend", "Colour key with per-tier counts"],
+  ];
+
+  let _mapFxUiReady = false;
+  function injectMapFxSettings() {
+    if (_mapFxUiReady) return;
+    // NB: must be scoped to .fw-pane — the subtab *button* carries the same
+    // data-settings-pane attribute and appears earlier in the DOM.
+    const pane = document.querySelector('.fw-pane[data-settings-pane="map"]');
+    if (!pane) return;
+    _mapFxUiReady = true;
+
+    const card = document.createElement("div");
+    card.className = "card mapfx-card";
+    card.innerHTML = `
+      <div class="card-head">
+        <h2>Attack map appearance</h2>
+        <span class="muted">Live preview — applies to Overview and Security ▸ Attacks</span>
+      </div>
+      <div class="mapfx-body">
+        <div class="mapfx-row">
+          <label class="mapfx-field">
+            <span class="mapfx-field-label">Threat palette</span>
+            <select id="mapfx-palette">
+              <option value="crimson">Crimson (default)</option>
+              <option value="cyber">Cyber neon</option>
+              <option value="matrix">Matrix</option>
+              <option value="amber">Amber alert</option>
+            </select>
+          </label>
+          <label class="mapfx-field">
+            <span class="mapfx-field-label">Arc density</span>
+            <select id="mapfx-density">
+              <option value="calm">Calm — 16 arcs</option>
+              <option value="normal">Normal — 40 arcs</option>
+              <option value="intense">Intense — 80 arcs</option>
+            </select>
+          </label>
+        </div>
+        <div class="mapfx-swatches" id="mapfx-swatches"></div>
+        <div class="mapfx-grid" id="mapfx-toggles">
+          ${MAP_FX_TOGGLES.map(([k, label, hint]) => `
+            <label class="mapfx-toggle" title="${esc(hint)}">
+              <input type="checkbox" data-fx="${k}">
+              <span class="mapfx-switch"></span>
+              <span class="mapfx-toggle-text"><b>${esc(label)}</b><em>${esc(hint)}</em></span>
+            </label>`).join("")}
+        </div>
+        <div class="mapfx-actions">
+          <button class="btn btn-sm" id="mapfx-reset" type="button">Reset to defaults</button>
+          <span class="muted mapfx-saved" id="mapfx-msg"></span>
+        </div>
+      </div>`;
+    pane.appendChild(card);
+
+    const selPal = card.querySelector("#mapfx-palette");
+    const selDen = card.querySelector("#mapfx-density");
+    const msg = card.querySelector("#mapfx-msg");
+
+    function flash(t) {
+      if (!msg) return;
+      msg.textContent = t;
+      msg.classList.add("on");
+      clearTimeout(msg._t);
+      msg._t = setTimeout(() => msg.classList.remove("on"), 1400);
+    }
+    function paintSwatches() {
+      const sw = card.querySelector("#mapfx-swatches");
+      sw.innerHTML = mapPalette().map((t) =>
+        `<span class="mapfx-swatch" style="--sw:${t.glow};--sw-core:${t.core}"><i></i>${esc(t.label)}</span>`
+      ).join("");
+    }
+    function syncUi() {
+      selPal.value = mapFx.palette;
+      selDen.value = mapFx.density;
+      card.querySelectorAll("[data-fx]").forEach((cb) => { cb.checked = !!mapFx[cb.dataset.fx]; });
+      paintSwatches();
+    }
+
+    selPal.addEventListener("change", () => { mapFx.palette = selPal.value; saveMapFx(); paintSwatches(); applyMapFx(); flash("Saved"); });
+    selDen.addEventListener("change", () => { mapFx.density = selDen.value; saveMapFx(); applyMapFx(); flash("Saved"); });
+    card.querySelectorAll("[data-fx]").forEach((cb) => {
+      cb.addEventListener("change", () => { mapFx[cb.dataset.fx] = cb.checked; saveMapFx(); applyMapFx(); flash("Saved"); });
+    });
+    card.querySelector("#mapfx-reset").addEventListener("click", () => {
+      mapFx = Object.assign({}, MAP_FX_DEFAULTS);
+      saveMapFx(); syncUi(); applyMapFx(); flash("Reset");
+    });
+
+    syncUi();
+  }
+
+  // Build the settings UI once the DOM is parsed, with a click fallback in
+  // case this module is evaluated before the settings markup exists.
+  document.addEventListener("visibilitychange", refreshMapAwake);
+  setTimeout(injectMapFxSettings, 0);
+  document.addEventListener("click", (ev) => {
+    if (ev.target.closest('[data-settings-pane="map"]')) setTimeout(injectMapFxSettings, 0);
+  }, true);
 
   // ── Security hits-over-time chart ─────────────────────────────────────────
   let _secChartSeries  = [];
@@ -2619,12 +3165,40 @@
       const lvl = threatLevel(count);
       return `<span class="ip-threat ip-threat-${lvl.toLowerCase()}">${lvl}</span>`;
     }
-    function ipPill(ip, count, banned) {
-      const lvl = banned ? "banned" : threatLevel(count).toLowerCase();
-      return `<span class="ip-pill ip-pill-${lvl}" data-ip="${esc(ip)}">
-        <span class="ip-pill-addr">${esc(ip)}</span>
-        <button class="ip-copy-btn" title="Copy IP" data-copy="${esc(ip)}">⎘</button>
-      </span>`;
+    const IP_COPY_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+    const IP_DONE_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`;
+
+    // How recently an attacker was last seen is the difference between a live
+    // problem and history, so the column is weighted rather than uniformly muted.
+    function recencyClass(ts) {
+      if (!ts) return "";
+      const age = Date.now() / 1000 - ts;
+      if (age < 300) return "fresh";
+      if (age < 3600) return "recent";
+      if (age > 86400) return "stale";
+      return "";
+    }
+
+    // The address is the row's identifier, so it is rendered as plain
+    // monospace that aligns down the column rather than as a coloured pill.
+    // Severity is carried once, by the threat badge plus the row rail.
+    //
+    // A full IPv6 address is 39 chars and would otherwise dictate the width
+    // of the whole column (measured: 329px vs 126px for v4), so the middle
+    // is elided. The complete value is kept in data-copy, the row's data-ip
+    // and the title, so copy / hover / ban all still use the real address.
+    const IP_SHORT_MAX = 24;
+    function shortenIp(ip) {
+      if (!ip || ip.length <= IP_SHORT_MAX || ip.indexOf(":") === -1) return ip;
+      return ip.slice(0, 13) + "\u2026" + ip.slice(-8);
+    }
+    function ipAddr(ip) {
+      const short = shortenIp(ip);
+      const attr  = short !== ip ? ` title="${esc(ip)}"` : "";
+      return `<span class="atk-ip">` +
+        `<span class="atk-ip-addr"${attr}>${esc(short)}</span>` +
+        `<button class="ip-copy-btn" title="Copy IP" data-copy="${esc(ip)}">${IP_COPY_SVG}</button>` +
+        `</span>`;
     }
 
     // tuxwall.org community info button — links to the per-IP report card.
@@ -2696,14 +3270,17 @@
           data-last="${esc(lastSeen)}"
           data-count="${i.count}"
           data-pct="${pct}"
-          data-banned="${banned}">
-        <td>${ipPill(i.ip, i.count, banned)}</td>
+          data-banned="${banned}"
+          data-threat="${banned ? "banned" : threatLevel(i.count).toLowerCase()}">
+        <td>${ipAddr(i.ip)}</td>
         <td>${threatBadge(i.count, banned)}</td>
         <td>${flagEmoji(i.iso)} <span class="ip-location">${esc(location)}</span>
             <span class="ip-isp muted" id="isp-${esc(i.ip).replace(/\./g,'-')}"></span></td>
-        <td>${formatNumber(i.count)}</td>
-        <td><div class="bar"><div class="bar-fill bar-fill-err" style="width:${pct}%"></div></div></td>
-        <td><div class="svc-actions">${banBtn}${repBtn}${abuseBtn}</div></td>
+        <td class="atk-port">${i.port ? `<span class="port-chip">:${esc(i.port)}</span>` : '<span class="muted">—</span>'}</td>
+        <td class="atk-hits"><b>${formatNumber(i.count)}</b>
+            <div class="bar"><div class="bar-fill bar-fill-err" style="width:${pct}%"></div></div></td>
+        <td class="atk-last ${recencyClass(i.last)}" title="${esc(lastSeen)}">${i.last ? esc(formatRelative(i.last)) : '<span class="muted">—</span>'}</td>
+        <td class="td-right"><div class="svc-actions">${banBtn}${repBtn}${abuseBtn}</div></td>
       </tr>`;
     }
 
@@ -2745,27 +3322,29 @@
 
           // Update cells that change on each refresh
           if (countChanged || bannedChanged) {
-            // IP pill threat class
-            const pill = row.querySelector(".ip-pill");
-            if (pill) {
-              const lvl = banned ? "banned" : threatLevel(entry.count).toLowerCase();
-              pill.className = `ip-pill ip-pill-${lvl}`;
-            }
+            // Row severity rail (replaces the old IP pill colour)
+            row.dataset.threat = banned ? "banned" : threatLevel(entry.count).toLowerCase();
             // Threat badge
             if (cells[1]) cells[1].innerHTML = threatBadge(entry.count, banned);
-            // Hit count
-            if (cells[3]) cells[3].textContent = formatNumber(entry.count);
-            // Bar
+            // Hit count + share bar now share one cell (index 4)
             if (cells[4]) cells[4].innerHTML =
+              `<b>${formatNumber(entry.count)}</b>` +
               `<div class="bar"><div class="bar-fill bar-fill-err" style="width:${pct}%"></div></div>`;
             // Update data attrs
             row.dataset.count  = entry.count;
             row.dataset.pct    = pct;
             row.dataset.banned = banned;
           }
+          // Relative timestamps go stale on their own, so this one is
+          // refreshed unconditionally rather than only when the count moves.
+          if (cells[5] && entry.last) {
+            cells[5].textContent = formatRelative(entry.last);
+            cells[5].title = new Date(entry.last * 1000).toLocaleString();
+            cells[5].className = "atk-last " + recencyClass(entry.last);
+          }
           // Always rebuild the actions cell — csUp may have changed since first render,
           // and this is just buttons so there's no flicker risk
-          if (cells[5]) {
+          if (cells[6]) {
             const abuseBtn = communityBadge(entry.ip);
             const banBtn = csUp
               ? (banned
@@ -2775,7 +3354,7 @@
             const repBtn = state.reportingEnabled
               ? `<button type="button" class="btn btn-sm sec-report" data-ip="${esc(entry.ip)}" data-count="${entry.count}" title="Report this attacker to tuxwall.org">Report</button>`
               : "";
-            cells[5].innerHTML = `<div class="svc-actions">${banBtn}${repBtn}${abuseBtn}</div>`;
+            cells[6].innerHTML = `<div class="svc-actions">${banBtn}${repBtn}${abuseBtn}</div>`;
           }
         }
 
@@ -2790,8 +3369,12 @@
             copyBtn.addEventListener("click", (e) => {
               e.stopPropagation();
               navigator.clipboard.writeText(copyBtn.dataset.copy).then(() => {
-                copyBtn.textContent = "✓";
-                setTimeout(() => { copyBtn.textContent = "⎘"; }, 1200);
+                copyBtn.innerHTML = IP_DONE_SVG;
+                copyBtn.classList.add("copied");
+                setTimeout(() => {
+                  copyBtn.innerHTML = IP_COPY_SVG;
+                  copyBtn.classList.remove("copied");
+                }, 1200);
               });
             });
           }
@@ -2842,7 +3425,7 @@
     byIp.forEach((i) => {
       if (i.isp) {
         const el = document.getElementById("isp-" + i.ip.replace(/\./g, "-"));
-        if (el && !el.textContent) el.textContent = "· " + i.isp;
+        if (el && !el.textContent) el.textContent = i.isp;
       }
     });
 
@@ -3077,6 +3660,17 @@
     }
   }
 
+  function setSecTab(pane) {
+    document.querySelectorAll("#sec-subtabs .fw-subtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.secPane === pane));
+    document.querySelectorAll("#view-security .fw-pane[data-sec-pane]").forEach((p) => {
+      p.hidden = p.dataset.secPane !== pane;
+    });
+  }
+  document.querySelectorAll("#sec-subtabs .fw-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => setSecTab(btn.dataset.secPane));
+  });
+
   function bindAideActions() {
     els.secAideRun.addEventListener("click", async () => {
       try {
@@ -3161,6 +3755,8 @@
     els.secCanaryHint.textContent = c.active
       ? `active · ${ports}`
       : (c.hint || "disabled");
+    const canaryDot = document.getElementById("canary-status-dot");
+    if (canaryDot) canaryDot.dataset.status = c.active ? "active" : "inactive";
     els.secCanaryToggle.textContent = c.active ? "Disable" : "Enable";
     els.secCanaryToggle.className = "btn btn-sm " + (c.active ? "btn-danger" : "btn-primary");
     els.secCanaryEvents.textContent = formatNumber(c.events_24h || 0);
@@ -3411,7 +4007,7 @@
         const el = document.getElementById(id);
         if (!el) return;
         const hosting = r.hosting ? " · <span class='ip-hosting-badge'>Hosting</span>" : "";
-        el.innerHTML = r.org ? `· ${esc(r.org)}${hosting}` : "";
+        el.innerHTML = r.org ? `${esc(r.org)}${hosting}` : "";
       });
     } catch (_) { /* ip-api unreachable, skip silently */ }
   }
@@ -3948,6 +4544,17 @@
     }
   }
 
+  function setCsTab(pane) {
+    document.querySelectorAll("#cs-subtabs .fw-subtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.csPane === pane));
+    document.querySelectorAll("#view-crowdsec .fw-pane[data-cs-pane]").forEach((p) => {
+      p.hidden = p.dataset.csPane !== pane;
+    });
+  }
+  document.querySelectorAll("#cs-subtabs .fw-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => setCsTab(btn.dataset.csPane));
+  });
+
   function bindCustomBlocklist() {
     els.cblAdd.addEventListener("click", async () => {
       const value = els.cblInput.value.trim();
@@ -4101,6 +4708,244 @@
         showBanner(true, "RPZ error: " + err.message);
       }
     }
+  }
+
+  function setBlTab(pane) {
+    document.querySelectorAll("#bl-subtabs .fw-subtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.blPane === pane));
+    document.querySelectorAll("#view-blocklists .fw-pane[data-bl-pane]").forEach((p) => {
+      p.hidden = p.dataset.blPane !== pane;
+    });
+  }
+  document.querySelectorAll("#bl-subtabs .fw-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => setBlTab(btn.dataset.blPane));
+  });
+
+  // ---- DNS page: Stats / Upstream subtabs + upstream resolver form ----
+  function setDnsTab(pane) {
+    document.querySelectorAll("#dns-subtabs .fw-subtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.dnsPane === pane));
+    document.querySelectorAll("#view-dns .fw-pane[data-dns-pane]").forEach((p) => {
+      p.hidden = p.dataset.dnsPane !== pane;
+    });
+  }
+  document.querySelectorAll("#dns-subtabs .fw-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => setDnsTab(btn.dataset.dnsPane));
+  });
+
+  const DNS_UPSTREAM_PRESETS = {
+    recursive: [],
+    adguard: ["94.140.14.14", "94.140.15.15", "2a10:50c0::ad1", "2a10:50c0::ad2"],
+    cleanbrowsing: ["185.228.168.168", "185.228.169.168", "2a0d:2a00:1::", "2a0d:2a00:2::"],
+    cloudflare: ["1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"],
+    comodo: ["8.26.56.26", "8.20.247.20"],
+    controd: ["76.76.10.0", "76.76.2.0", "2606:1a40::", "2606:1a40:1::"],
+    dnswatch: ["84.200.69.80", "84.200.70.40", "2001:1608:10:25::1c04:b12f", "2001:1608:10:25::9249:d69a"],
+    google: ["8.8.8.8", "8.8.4.4", "2001:4860:4860::8888", "2001:4860:4860::8844"],
+    mullvad: ["194.242.2.2", "2a07:a8c0::2"],
+    opendns: ["208.67.222.222", "208.67.220.220", "2620:119:35::35", "2620:119:53::53"],
+    quad9: ["9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"],
+  };
+
+  // Providers with a published DoT hostname (verified reachable/cert-valid
+  // from this router). Compose forwarders as IP@853#hostname when TLS is on.
+  // Mullvad excluded: their public DNS service shuts down Nov 2, 2026.
+  const DNS_UPSTREAM_DOT = {
+    adguard: "dns.adguard-dns.com",
+    cleanbrowsing: "family-filter-dns.cleanbrowsing.org",
+    cloudflare: "cloudflare-dns.com",
+    google: "dns.google",
+    opendns: "dnsovertls.opendns.com",
+    quad9: "dns.quad9.net",
+  };
+
+  function dnsUpCompose(choice, tls) {
+    const ips = DNS_UPSTREAM_PRESETS[choice] || [];
+    const host = tls ? DNS_UPSTREAM_DOT[choice] : null;
+    if (!host) return ips;
+    return ips.map((ip) => ip + "@853#" + host);
+  }
+
+  function dnsUpDetectChoice(fwd) {
+    if (!fwd || !fwd.length) return "recursive";
+    for (const name of Object.keys(DNS_UPSTREAM_PRESETS)) {
+      for (const tls of [false, true]) {
+        const ips = dnsUpCompose(name, tls);
+        if (ips.length && ips.length === fwd.length && ips.every((ip) => fwd.includes(ip)))
+          return name;
+      }
+    }
+    return "pihole";
+  }
+
+  function dnsUpSyncTlsBox(choice) {
+    const box = document.getElementById("dns-up-tls");
+    if (!box) return;
+    const supported = !!DNS_UPSTREAM_DOT[choice];
+    box.disabled = !supported;
+    if (!supported) box.checked = false;
+  }
+  document.querySelectorAll('input[name="dns-up-choice"]').forEach((r) => {
+    r.addEventListener("change", () => dnsUpSyncTlsBox(r.value));
+  });
+
+  async function loadDnsUpstream() {
+    const cur = document.getElementById("dns-up-current");
+    const hint = document.getElementById("dns-up-hint");
+    if (!cur) return;
+    try {
+      const d = await fetchJSON("/api/system/unbound-form");
+      if (!d.ok) throw new Error(d.error || "load failed");
+      const choice = dnsUpDetectChoice(d.forwarders || []);
+      const radio = document.querySelector('input[name="dns-up-choice"][value="' + choice + '"]');
+      if (radio) radio.checked = true;
+      if (choice === "pihole" && (d.forwarders || []).length)
+        document.getElementById("dns-up-pihole").value = d.forwarders[0];
+      const tlsBox = document.getElementById("dns-up-tls");
+      if (tlsBox) tlsBox.checked = !!d.tls_upstream;
+      dnsUpSyncTlsBox(choice);
+      cur.textContent = "Mode: " + (d.mode || "recursive") +
+        (d.tls_upstream ? " (DNS-over-TLS)" : "") +
+        ((d.forwarders || []).length ? " (" + d.forwarders.join(", ") + ")" : "");
+      hint.textContent = "";
+    } catch (err) {
+      cur.textContent = "error";
+      hint.textContent = err.message;
+    }
+  }
+
+  const dnsUpSaveBtn = document.getElementById("dns-up-save");
+  if (dnsUpSaveBtn) dnsUpSaveBtn.addEventListener("click", async () => {
+    const hint = document.getElementById("dns-up-hint");
+    const choice = (document.querySelector('input[name="dns-up-choice"]:checked') || {}).value || "recursive";
+    const tlsBox = document.getElementById("dns-up-tls");
+    const useTls = !!(tlsBox && tlsBox.checked && DNS_UPSTREAM_DOT[choice]);
+    let forwarders = [];
+    if (choice === "pihole") {
+      const ip = document.getElementById("dns-up-pihole").value.trim();
+      if (!ip) { hint.textContent = "Enter the Pi-hole / custom server address first."; return; }
+      forwarders = [ip];
+    } else {
+      forwarders = dnsUpCompose(choice, useTls);
+    }
+    if (!window.confirm("Change upstream DNS (" + (useTls ? "DNS-over-TLS" : "plaintext port 53") + ") and hot-reload Unbound? A backup of router-dns.conf is made first; LAN DNS blips for a second.")) return;
+    hint.textContent = "Saving…";
+    dnsUpSaveBtn.disabled = true;
+    try {
+      // read the live form first so listen addresses/port/protocols are preserved
+      const cur = await fetchJSON("/api/system/unbound-form");
+      if (!cur.ok) throw new Error(cur.error || "load failed");
+      await postJSON("/api/system/unbound-form", {
+        interfaces: (cur.interfaces || []).join("\n"),
+        port: String(cur.port != null ? cur.port : 53),
+        do_ip4: !!cur.do_ip4,
+        do_ip6: !!cur.do_ip6,
+        forwarders: forwarders.join("\n"),
+      });
+      hint.textContent = "Saved — Unbound reloaded.";
+      await loadDnsUpstream();
+    } catch (err) {
+      hint.textContent = err.message;
+    } finally {
+      dnsUpSaveBtn.disabled = false;
+    }
+  });
+
+  function bindBlocklistCatalog() {
+    const modal = document.getElementById("bl-browse-modal");
+    if (!modal) return;
+    const body = document.getElementById("bl-browse-body");
+    const search = document.getElementById("bl-browse-search");
+    const hint = document.getElementById("bl-browse-hint");
+    let mode = "sources";
+    let items = [];
+    let addedUrls = new Set();
+
+    const closeModal = () => { modal.hidden = true; };
+
+    function render() {
+      const q = search.value.trim().toLowerCase();
+      const rows = items.filter((i) =>
+        !q || (i.name + " " + i.description + " " + i.url).toLowerCase().includes(q));
+      body.innerHTML = rows.map((i) => {
+        const added = addedUrls.has(i.url);
+        return `<tr>
+          <td>
+            <b>${esc(i.name)}</b>${i.description ? ` <span class="muted">— ${esc(i.description)}</span>` : ""}<br>
+            <span class="mono muted bl-browse-url">${esc(i.url)}</span>
+          </td>
+          <td>${added
+            ? `<span class="muted">✓ added</span>`
+            : `<button class="btn btn-sm btn-primary bl-browse-add" data-url="${esc(i.url)}" type="button">Add</button>`}</td>
+        </tr>`;
+      }).join("") || `<tr><td class="empty">No matches.</td></tr>`;
+    }
+
+    async function openBrowse(m) {
+      mode = m;
+      document.getElementById("bl-browse-title").textContent =
+        m === "sources" ? "Browse blocklists" : "Browse RPZ feeds";
+      hint.textContent = "Curated lists from tuxwall.org — entries already on this router show a checkmark.";
+      search.value = "";
+      items = [];
+      render();
+      modal.hidden = false;
+      search.focus();
+      try {
+        // already-added sets from live table data
+        addedUrls = new Set();
+        try {
+          const bl = await fetchJSON("/api/blocklists");
+          (bl.sources || []).forEach((s) => addedUrls.add(s.url));
+        } catch (err) { /* optional */ }
+        if (mode === "rpz") {
+          try {
+            const rpz = await fetchJSON("/api/rpz");
+            ((rpz && rpz.feeds) || []).forEach((f) => addedUrls.add(f.url));
+          } catch (err) { /* optional */ }
+        }
+        const cat = await fetchJSON("/api/blocklists/catalog");
+        items = (mode === "sources" ? cat.sources : cat.rpz) || [];
+        if (!items.length) {
+          const errs = (cat.errors || []).join("; ");
+          hint.textContent = errs
+            ? "Catalog unavailable from tuxwall.org: " + errs
+            : "The catalog is empty — nothing published yet.";
+        }
+      } catch (err) {
+        hint.textContent = "Catalog unavailable: " + err.message;
+      }
+      render();
+    }
+
+    body.addEventListener("click", async (e) => {
+      const btn = e.target.closest(".bl-browse-add");
+      if (!btn) return;
+      btn.disabled = true;
+      try {
+        if (mode === "sources") {
+          await postJSON("/api/blocklists/add", { url: btn.dataset.url });
+        } else {
+          const item = items.find((it) => it.url === btn.dataset.url);
+          await postJSON("/api/rpz/feed/add", { url: btn.dataset.url, name: item ? item.name : "" });
+        }
+        addedUrls.add(btn.dataset.url);
+        render();
+        await refreshBlocklists();
+      } catch (err) {
+        showBanner(true, "Catalog add: " + err.message);
+        btn.disabled = false;
+      }
+    });
+
+    search.addEventListener("input", render);
+    document.getElementById("bl-browse").addEventListener("click", () => openBrowse("sources"));
+    document.getElementById("rpzf-browse").addEventListener("click", () => openBrowse("rpz"));
+    document.getElementById("bl-browse-close").addEventListener("click", closeModal);
+    modal.addEventListener("click", (e) => { if (e.target === modal) closeModal(); });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !modal.hidden) closeModal();
+    });
   }
 
   function bindBlocklistActions() {
@@ -4434,13 +5279,73 @@
       : "—";
     renderSysDetail(d);
 
-    els.sysInterfacesBody.innerHTML = (d.interfaces || []).map((i) => `
-      <tr>
-        <td><b class="mono">${esc(i.name)}</b></td>
-        <td><span class="badge ${i.state === "UP" ? "badge-ok" : "badge-err"}">${esc(i.state || "—")}</span></td>
-        <td class="mono">${esc(i.mac || "—")}</td>
-        <td class="mono">${(i.addrs || []).map((a) => `${esc(a.addr)}/${a.mask}`).join("<br>") || "—"}</td>
-      </tr>`).join("");
+    renderSysInterfaces(d);
+  }
+
+  // Interfaces arrive in kernel order with no indication of what each one is
+  // for. The /api/system payload already tells us the WAN device and the DHCP
+  // router address, so the role can be derived here without any API change.
+  const SYS_IF_ROLES = [
+    ["WAN", "wan"], ["LAN", "lan"], ["VPN", "vpn"], ["VLAN", "vlan"],
+    ["BRIDGE", "bridge"], ["SHAPER", "shaper"], ["VIRT", "virt"],
+  ];
+
+  function sysIfaceRole(iface, d) {
+    const name = iface.name || "";
+    if (name && name === (d.wan || {}).ifname) return "WAN";
+    if (/^wg\d/i.test(name)) return "VPN";
+    if (/^ifb/i.test(name)) return "SHAPER";
+    if (/[.@]\d+$/.test(name) || /^vlan/i.test(name)) return "VLAN";
+    if (/^(br|bond)/i.test(name)) return "BRIDGE";
+    const router = (d.dhcp || {}).router;
+    if (router && (iface.addrs || []).some((a) => a.addr === router)) return "LAN";
+    if (/^(docker|veth|virbr|tun|tap)/i.test(name)) return "VIRT";
+    return "";
+  }
+
+  function renderSysInterfaces(d) {
+    if (!els.sysInterfacesBody) return;
+    const order = SYS_IF_ROLES.map((r) => r[0]);
+    const list = (d.interfaces || []).map((i) => ({ i, role: sysIfaceRole(i, d) }));
+    // WAN first, then LAN, then the rest - kernel order is meaningless here
+    list.sort((a, b) => {
+      const ra = order.indexOf(a.role), rb = order.indexOf(b.role);
+      return (ra < 0 ? 99 : ra) - (rb < 0 ? 99 : rb)
+          || String(a.i.name).localeCompare(String(b.i.name));
+    });
+
+    els.sysInterfacesBody.innerHTML = list.map(({ i, role }) => {
+      // Point-to-point devices (wg0) and shaping devices (ifb*) report
+      // operstate UNKNOWN while working normally - red would imply a fault,
+      // so UNKNOWN gets its own neutral state rather than being lumped in
+      // with DOWN the way the old badge did.
+      const st = String(i.state || "").toUpperCase();
+      const dot = st === "UP" ? "active" : st === "DOWN" ? "inactive" : "unknown";
+      const stTitle = dot === "unknown"
+        ? "The kernel reports no carrier state for this device type; this is normal for WireGuard and shaping interfaces."
+        : "";
+      const cls = (SYS_IF_ROLES.find((r) => r[0] === role) || [])[1] || "";
+      const roleChip = role ? `<span class="if-role if-role-${cls}">${role}</span>` : "";
+
+      const addrs = i.addrs || [];
+      const MAX = 4;
+      const shown = addrs.slice(0, MAX).map((a) => {
+        const v6 = a.family === "inet6";
+        return `<span class="if-ip"><i class="if-fam${v6 ? " v6" : ""}">${v6 ? "v6" : "v4"}</i>` +
+               `<span class="mono">${esc(a.addr)}/${esc(a.mask)}</span></span>`;
+      }).join("");
+      const extra = addrs.length > MAX
+        ? `<span class="if-more" title="${esc(addrs.slice(MAX).map((a) => a.addr + "/" + a.mask).join("\n"))}">+${addrs.length - MAX} more</span>`
+        : "";
+
+      return `<tr>
+        <td><span class="if-name"><b class="mono">${esc(i.name)}</b>${roleChip}</span></td>
+        <td><span class="if-state" title="${esc(stTitle)}"><span class="status-dot" data-status="${dot}"></span>` +
+          `${esc(st || "UNKNOWN")}</span></td>
+        <td class="mono if-mac">${esc(i.mac || "—")}</td>
+        <td>${shown + extra || "<span class=\"muted\">—</span>"}</td>
+      </tr>`;
+    }).join("");
   }
 
   async function refreshFastfetch() {
@@ -4475,7 +5380,15 @@
     const model = (cpu.model || "").replace(/\(R\)|\(TM\)/g, "").replace(/\s+CPU.*$/i, "").replace(/\s+/g, " ").trim();
     const upIfaces = (d.interfaces || []).filter((i) => i && i.state === "UP");
     const row = (k, v) => `<div class="sys-drow"><span>${k}</span><b>${v}</b></div>`;
-    const grp = (title, rows) => `<div class="sys-dgroup"><h4>${title}</h4>${rows}</div>`;
+    // Usage figures read as bare text; a bar makes "how full is it" scannable
+    // at a glance and colours the warning levels.
+    const meter = (k, v, used, total) => {
+      const p = total ? Math.max(0, Math.min(100, (used / total) * 100)) : 0;
+      const lvl = p >= 90 ? "crit" : p >= 75 ? "warn" : "";
+      return `<div class="sys-drow sys-drow-meter"><span>${k}</span><b>${v}</b>` +
+             `<div class="bar sys-dbar ${lvl}"><div class="bar-fill" style="width:${p.toFixed(1)}%"></div></div></div>`;
+    };
+    const grp = (title, rows, cls) => `<div class="sys-dgroup${cls ? " " + cls : ""}"><h4>${title}</h4>${rows}</div>`;
     const lanRows = upIfaces
       .filter((i) => i.name !== wan.ifname)
       .map((i) => {
@@ -4496,16 +5409,24 @@
         row("Temp", val(cpu.temp != null ? cpu.temp + "\u00B0C" : "")) +
         row("Load", val((d.load || []).map((x) => Number(x).toFixed(2)).join(" / ")))) +
       grp("Memory",
-        row("RAM", mem.total ? `${esc(formatBytes(mem.used))} / ${esc(formatBytes(mem.total))}${pct(mem.used, mem.total)}` : dash) +
-        row("Swap", swap.total ? `${esc(formatBytes(swap.used))} / ${esc(formatBytes(swap.total))}` : dash)) +
+        (mem.total
+          ? meter("RAM", `${esc(formatBytes(mem.used))} / ${esc(formatBytes(mem.total))}`, mem.used, mem.total)
+          : row("RAM", dash)) +
+        (swap.total
+          ? meter("Swap", `${esc(formatBytes(swap.used))} / ${esc(formatBytes(swap.total))}`, swap.used, swap.total)
+          : row("Swap", "none")) +
+        row("Available", val(mem.available != null ? formatBytes(mem.available) : ""))) +
       grp("Storage",
+        (disk.total
+          ? meter("Used", `${esc(formatBytes(disk.used))} / ${esc(formatBytes(disk.total))}`, disk.used, disk.total)
+          : row("Used", dash)) +
+        row("Free", val(disk.avail != null ? formatBytes(disk.avail) : "")) +
         row("Device", val(disk.fs)) +
-        row("Used", disk.total ? `${esc(formatBytes(disk.used))} / ${esc(formatBytes(disk.total))}${pct(disk.used, disk.total)}` : dash) +
         row("Mount", val(disk.mount))) +
       grp("Network",
         row("WAN", val(wan.ifname ? `${wan.ifname}${wan.ipv4 ? " · " + wan.ipv4 : ""}` : "")) +
         row("Gateway", val(wan.gateway4)) +
-        (lanRows || row("LAN", upIfaces.length ? `${upIfaces.length} up` : dash)));
+        (lanRows || row("LAN", upIfaces.length ? `${upIfaces.length} up` : dash)), "sys-dgroup-net");
   }
 
   async function refreshSystem() {
@@ -4550,6 +5471,17 @@
       els.sqmStatusNote.textContent = err.message;
     }
   }
+
+  function setSysTab(pane) {
+    document.querySelectorAll("#sys-subtabs .fw-subtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.sysPane === pane));
+    document.querySelectorAll("#view-system .fw-pane[data-sys-pane]").forEach((p) => {
+      p.hidden = p.dataset.sysPane !== pane;
+    });
+  }
+  document.querySelectorAll("#sys-subtabs .fw-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => setSysTab(btn.dataset.sysPane));
+  });
 
   function bindSqm() {
     if (!els.sqmApply) return;
@@ -5484,11 +6416,18 @@
     if (els.ovBwUp) els.ovBwUp.textContent = formatBits(totUp);
     liveBwSnap = bw;
   }
+  function liveChartsVisible() {
+    return [els.ovResChart, els.ovBwChart, els.ovLatChart, els.ovJitChart]
+      .some((c) => c && ovChartVisible.get(c) !== false);
+  }
+
   function startLiveGraphs() {
     if (liveGraphsTimer) return;
+    [els.ovResChart, els.ovBwChart, els.ovLatChart, els.ovJitChart].forEach(ovWatchChart);
     requestAnimationFrame(sweepFrame);
     liveGraphsTimer = setInterval(async () => {
       if (!state.authed || !els.auto.checked || state.activeView !== "overview" || document.hidden) return;
+      if (!liveChartsVisible()) return;   // charts are scrolled away - nothing to paint
       try {
         const [sys, bw, latH] = await Promise.all([fetchJSON("/api/system"), fetchJSON("/api/bandwidth"), fetchJSON("/api/latency/history?hours=1").catch(() => ({ series: [] }))]);
         paintLiveGraphs(sys, bw, latH.series || []);
@@ -5534,35 +6473,46 @@
     const f = (t - a[0]) / Math.max(1e-6, b[0] - a[0]);
     return a[1] + (b[1] - a[1]) * f;
   }
+  // The latency/jitter charts show a full hour across ~900px, so one pixel is
+  // about four seconds of data - repainting them 30x a second buys nothing.
+  // They get a 1s cadence; only the 5-minute CPU/bandwidth traces sweep.
+  const SWEEP_SLOW_REDRAW_MS = 1000;
+  let _sweepSlowLast = 0;
   function paintLiveSweep() {
     const now = Date.now() / 1000;
+    const nowMsAbs = now * 1000;
+    const slowDue = (nowMsAbs - _sweepSlowLast) >= SWEEP_SLOW_REDRAW_MS;
+    if (slowDue) _sweepSlowLast = nowMsAbs;
+    const vis = (c) => c && ovChartVisible.get(c) !== false;
+    const visSlow = (c) => slowDue && vis(c);
     // CPU & Memory: fast 5-minute sweep.
     const hist = (liveSysSnap && liveSysSnap.history) || [];
     if (!hist.length) {
-      drawResourceChart(els.ovResChart, []);
+      if (vis(els.ovResChart)) drawResourceChart(els.ovResChart, []);
     } else {
-      drawResourceChart(els.ovResChart, sweepRows(now, SWEEP_FAST_SEC, SWEEP_FAST_PTS,
+      if (vis(els.ovResChart)) drawResourceChart(els.ovResChart, sweepRows(now, SWEEP_FAST_SEC, SWEEP_FAST_PTS,
         [hist.map((r) => [r[0], r[1]]), hist.map((r) => [r[0], r[2]])]));
     }
     // Bandwidth.
     const ifaces = (liveBwSnap && liveBwSnap.interfaces) || [];
     const merged = mergeInterfaceHistory(ifaces);
     if (!merged.length) {
-      drawBandwidth(els.ovBwChart, [], 1);
+      if (vis(els.ovBwChart)) drawBandwidth(els.ovBwChart, [], 1);
     } else {
       let maxBps = 1;
       for (const m of merged) {
         if (m[1] > maxBps) maxBps = m[1];
         if (m[2] > maxBps) maxBps = m[2];
       }
-      drawBandwidth(els.ovBwChart, sweepRows(now, SWEEP_FAST_SEC, SWEEP_FAST_PTS,
+      if (vis(els.ovBwChart)) drawBandwidth(els.ovBwChart, sweepRows(now, SWEEP_FAST_SEC, SWEEP_FAST_PTS,
         [merged.map((r) => [r[0], r[1]]), merged.map((r) => [r[0], r[2]])]), maxBps);
     }
     // WAN latency (avg + max) and jitter (mdev) share one history.
     const latBase = (liveSysSnap && liveSysSnap.latency && liveSysSnap.latency.baseline_ms) || 0;
-    if (!liveLatSnap.length) {
-      drawLatencyChart(els.ovLatChart, [], 0);
-      drawJitterChart(els.ovJitChart, []);
+    if (!slowDue) { /* latency/jitter not due this frame */ }
+    else if (!liveLatSnap.length) {
+      if (visSlow(els.ovLatChart)) drawLatencyChart(els.ovLatChart, [], 0);
+      if (visSlow(els.ovJitChart)) drawJitterChart(els.ovJitChart, []);
     } else {
       const lRows = sweepRows(now, SWEEP_SLOW_SEC, SWEEP_SLOW_PTS,
         [liveLatSnap.map((r) => [r[0], r[1]]), liveLatSnap.map((r) => [r[0], r[2]])]);
@@ -5595,12 +6545,31 @@
         ? latMaxT : liveScale.lat + (latMaxT - liveScale.lat) * kScale;
       liveScale.jit = (!liveScale.jit || jitMaxT > liveScale.jit)
         ? jitMaxT : liveScale.jit + (jitMaxT - liveScale.jit) * kScale;
-      drawLatencyChart(els.ovLatChart, lRows, latBase, liveScale.lat);
-      drawJitterChart(els.ovJitChart, jRows, liveScale.jit);
+      if (visSlow(els.ovLatChart)) drawLatencyChart(els.ovLatChart, lRows, latBase, liveScale.lat);
+      if (visSlow(els.ovJitChart)) drawJitterChart(els.ovJitChart, jRows, liveScale.jit);
     }
   }
-  function sweepFrame() {
-    if (state.authed && els.auto.checked && state.activeView === "overview" && !document.hidden) {
+  // paintLiveSweep() redraws four canvases from scratch off ~1000 resampled
+  // points. At a full 60fps that was the heaviest thing on the Overview page
+  // by a wide margin, so cap it to ~30fps (visually identical for a trace
+  // that drifts a couple of pixels a second) and skip it outright when the
+  // charts are not on screen.
+  // Sweep frame budget. 20fps is visually identical for a trace that drifts a
+  // couple of pixels a second, and roughly halves the cost of the heaviest
+  // thing on this page. Override with localStorage tuxwall.sweepFps if needed.
+  let SWEEP_MIN_MS = 50;
+  try {
+    const fps = parseFloat(localStorage.getItem("tuxwall.sweepFps"));
+    if (fps > 0 && fps <= 60) SWEEP_MIN_MS = 1000 / fps;
+  } catch (_) {}
+  let _sweepLast = 0;
+  let _sweepPaints = 0;
+  function sweepFrame(ts) {
+    const t = ts || 0;
+    if (state.authed && els.auto.checked && state.activeView === "overview"
+        && !document.hidden && (t - _sweepLast) >= SWEEP_MIN_MS && liveChartsVisible()) {
+      _sweepLast = t;
+      _sweepPaints++;
       paintLiveSweep();
     }
     requestAnimationFrame(sweepFrame);
@@ -5886,6 +6855,18 @@
     const titleTag = title ? `<title>${title}</title>` : "";
     return `<path class="bw-pie-slice" d="${d}" fill="${fill}"${filter}>${titleTag}</path>`;
   }
+
+  function setBwTab(pane) {
+    document.querySelectorAll("#bw-subtabs .fw-subtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.bwPane === pane));
+    document.querySelectorAll("#view-bandwidth .fw-pane[data-bw-pane]").forEach((p) => {
+      p.hidden = p.dataset.bwPane !== pane;
+    });
+    if (pane === "interfaces" && state.bwData) renderBandwidth(state.bwData);
+  }
+  document.querySelectorAll("#bw-subtabs .fw-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => setBwTab(btn.dataset.bwPane));
+  });
 
   async function refreshBandwidth() {
     try {
@@ -6643,8 +7624,36 @@
     return [...byTs.values()].sort((a, b) => a[0] - b[0]);
   }
 
+  // The eight overview donuts sit below the fold. Redrawing them every poll
+  // while they are scrolled out of sight was the single biggest cost on the
+  // page, so they are gated on visibility and catch up when scrolled back to.
+  const ovChartVisible = new WeakMap();
+  const ovChartPending = new WeakMap();
+  let ovChartIO = null;
+  function ovWatchChart(canvas) {
+    if (!canvas || ovChartVisible.has(canvas)) return;
+    ovChartVisible.set(canvas, true);
+    if (typeof IntersectionObserver === "undefined") return;
+    if (!ovChartIO) {
+      ovChartIO = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          ovChartVisible.set(e.target, e.isIntersecting);
+          if (!e.isIntersecting) continue;
+          const pending = ovChartPending.get(e.target);
+          if (pending) { ovChartPending.delete(e.target); pending(); }
+        }
+      }, { rootMargin: "150px" });
+    }
+    ovChartIO.observe(canvas);
+  }
+
   function ovPie(canvas, slices, centerLabel, totalLabel) {
-    requestAnimationFrame(() => drawDonut(canvas, slices, centerLabel, totalLabel));
+    if (!canvas) return;
+    ovWatchChart(canvas);
+    const draw = () => requestAnimationFrame(
+      () => drawDonut(canvas, slices, centerLabel, totalLabel));
+    if (ovChartVisible.get(canvas) === false) ovChartPending.set(canvas, draw);
+    else draw();
   }
 
   function renderOverview(d) {
@@ -6889,20 +7898,355 @@
       : `<p class="muted" style="margin-top:6px">No peers configured.</p>`);
   }
 
-  async function refreshOverview() {
+
+  // ══════════════════════════════════════════════════════════════════════
+  // Overview: system health score
+  // ══════════════════════════════════════════════════════════════════════
+  const ovPosture = {};          // slow-tier data (updates, exposure, bans, backups)
+
+  function ovPenalty(list, points, severity, text, view) {
+    if (points <= 0) return 0;
+    list.push({ points, severity, text, view });
+    return points;
+  }
+
+  function computeOvHealth() {
+    const issues = [];
+    let lost = 0;
+    const sys = (state.ovData && state.ovData.sys) || {};
+    const usage = sys.usage || {};
+    const rows = ((state.svcData || {}).services || []);
+    const byUnit = new Map(rows.map((r) => [r.unit, r]));
+
+    // ── services ──────────────────────────────────────────────────────
+    let known = 0;
+    for (const [unit, name] of OV_SERVICES) {
+      const svc = byUnit.get(unit);
+      if (!svc) continue;                       // not installed
+      known += 1;
+      if (svc.active === "active") continue;
+      const w = OV_SERVICE_WEIGHT[unit] || 3;
+      const failed = svc.active === "failed";
+      lost += ovPenalty(issues, w, failed ? "crit" : "warn",
+        `${name} is ${failed ? "failed" : "stopped"}`, "system");
+    }
+
+    // ── resource pressure ─────────────────────────────────────────────
+    const cpu = usage.cpu_pct, mem = usage.mem_pct, disk = usage.disk_pct, swap = usage.swap_pct;
+    if (cpu != null) lost += ovPenalty(issues, cpu > 90 ? 8 : cpu > 75 ? 4 : 0,
+      cpu > 90 ? "crit" : "warn", `CPU at ${Math.round(cpu)}%`, "system");
+    if (mem != null) lost += ovPenalty(issues, mem > 92 ? 8 : mem > 85 ? 4 : 0,
+      mem > 92 ? "crit" : "warn", `Memory at ${Math.round(mem)}%`, "system");
+    if (disk != null) lost += ovPenalty(issues, disk > 95 ? 15 : disk > 90 ? 8 : disk > 80 ? 3 : 0,
+      disk > 90 ? "crit" : "warn", `Root filesystem ${Math.round(disk)}% full`, "system");
+    if (swap != null) lost += ovPenalty(issues, swap > 50 ? 4 : 0, "warn",
+      `Swap in use (${Math.round(swap)}%)`, "system");
+
+    const temp = (sys.cpu || {}).temp;
+    if (temp) lost += ovPenalty(issues, temp > 85 ? 10 : temp > 75 ? 5 : 0,
+      temp > 85 ? "crit" : "warn", `CPU temperature ${Math.round(temp)}\u00b0C`, "system");
+
+    const cores = (sys.cpu || {}).cores || 1;
+    const load1 = (sys.load || usage.load || [0])[0] || 0;
+    lost += ovPenalty(issues, load1 > cores * 2 ? 6 : load1 > cores ? 3 : 0, "warn",
+      `Load ${load1.toFixed(2)} on ${cores} core${cores === 1 ? "" : "s"}`, "system");
+
+    // ── WAN quality ───────────────────────────────────────────────────
+    // Field names must match build_latency(): current_ms / loss_1h_pct /
+    // jitter_ms / baseline_ms.
+    const lat = sys.latency || {};
+    const loss = lat.loss_1h_pct;
+    if (loss != null) lost += ovPenalty(issues, loss > 5 ? 12 : loss > 1 ? 5 : 0,
+      loss > 5 ? "crit" : "warn", `WAN packet loss ${Number(loss).toFixed(1)}%`, "overview");
+    const rtt = lat.current_ms;
+    if (rtt != null) lost += ovPenalty(issues, rtt > 150 ? 5 : 0, "warn",
+      `WAN latency ${Math.round(rtt)} ms`, "overview");
+    const jit = lat.jitter_ms;
+    if (jit != null) lost += ovPenalty(issues, jit > 30 ? 4 : 0, "warn",
+      `WAN jitter ${Number(jit).toFixed(1)} ms`, "overview");
+    if ((sys.wan || {}).state && sys.wan.state !== "UP" && sys.wan.state !== "UNKNOWN") {
+      lost += ovPenalty(issues, 25, "crit", `WAN link is ${sys.wan.state}`, "overview");
+    }
+
+    // ── posture (advisory) ────────────────────────────────────────────
+    if (ovPosture.updates && ovPosture.updates.upgradable > 0) {
+      const n = ovPosture.updates.upgradable;
+      lost += ovPenalty(issues, n > 30 ? 5 : 3, "info",
+        `${n} package update${n === 1 ? "" : "s"} available`, "system");
+    }
+    if (ovPosture.backupAgeDays != null && ovPosture.backupAgeDays > 30) {
+      lost += ovPenalty(issues, 3, "info",
+        `Last backup ${Math.round(ovPosture.backupAgeDays)} days ago`, "backups");
+    }
+    if (ovPosture.failedUnits > 0) {
+      lost += ovPenalty(issues, Math.min(6, ovPosture.failedUnits * 2), "warn",
+        `${ovPosture.failedUnits} failed systemd unit${ovPosture.failedUnits === 1 ? "" : "s"}`, "system");
+    }
+
+    const score = Math.max(0, Math.min(100, Math.round(100 - lost)));
+    issues.sort((a, b) => b.points - a.points);
+    return { score, issues, known, ready: known > 0 || !!sys.uptime };
+  }
+
+  const OV_HEALTH_BANDS = [
+    [90, "Healthy",  "ok",   "Every monitored service is up and resources are comfortable."],
+    [75, "Good",     "ok",   "Running normally with a few things worth a look."],
+    [50, "Degraded", "warn", "Something is off \u2014 review the items below."],
+    [25, "At risk",  "bad",  "Multiple problems are affecting this router."],
+    [0,  "Critical", "bad",  "Core services are down. The network is likely impacted."],
+  ];
+
+  function renderOvHealth() {
+    const ring = document.getElementById("ov-health-ring");
+    if (!ring) return;
+    const { score, issues, ready } = computeOvHealth();
+    const scoreEl = document.getElementById("ov-health-score");
+    const verdictEl = document.getElementById("ov-health-verdict");
+    const subEl = document.getElementById("ov-health-sub");
+    const listEl = document.getElementById("ov-health-issues");
+    const hintEl = document.getElementById("ov-health-hint");
+
+    if (!ready) {
+      if (scoreEl) scoreEl.textContent = "\u2014";
+      if (verdictEl) verdictEl.textContent = "Checking\u2026";
+      return;
+    }
+
+    const band = OV_HEALTH_BANDS.find((b) => score >= b[0]) || OV_HEALTH_BANDS[OV_HEALTH_BANDS.length - 1];
+    const card = ring.closest(".ov-health-card");
+    if (card) card.dataset.state = band[2];
+
+    // r=52 -> circumference 326.7
+    const CIRC = 2 * Math.PI * 52;
+    ring.style.strokeDasharray = CIRC.toFixed(1);
+    ring.style.strokeDashoffset = (CIRC * (1 - score / 100)).toFixed(1);
+
+    if (scoreEl) scoreEl.textContent = score;
+    if (verdictEl) verdictEl.textContent = band[1];
+    if (subEl) subEl.textContent = issues.length ? band[3] : band[3];
+    if (hintEl) hintEl.textContent = issues.length
+      ? `${issues.length} item${issues.length === 1 ? " needs" : "s need"} attention`
+      : "nothing to report";
+
+    if (listEl) {
+      listEl.innerHTML = issues.length
+        ? issues.slice(0, 6).map((i) =>
+            `<li class="ov-issue sev-${i.severity}" data-view="${esc(i.view || "")}">` +
+            `<span class="ov-issue-dot"></span>` +
+            `<span class="ov-issue-text">${esc(i.text)}</span>` +
+            `<span class="ov-issue-pts">-${i.points}</span></li>`).join("")
+        : `<li class="ov-issue sev-ok"><span class="ov-issue-dot"></span>` +
+          `<span class="ov-issue-text">No problems detected</span></li>`;
+    }
+  }
+
+  // ── Swap / temperature / load tiles + usage mini-bars ───────────────
+  function renderOvTiles(sys) {
+    const usage = sys.usage || {};
+    const set = (id, text, title) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = text;
+      if (title) el.title = title;
+    };
+    const bar = (id, pct, warn, crit) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const v = Math.max(0, Math.min(100, pct || 0));
+      el.style.width = v + "%";
+      el.style.background = v >= crit ? cssVar("--red", "#f85149")
+        : v >= warn ? cssVar("--amber", "#d29922") : "";
+    };
+
+    const swap = (sys.swap || {});
+    set("ov-swap", swap.total ? Math.round(usage.swap_pct || 0) + "%" : "off",
+      swap.total ? `${formatBytes(swap.used || 0)} of ${formatBytes(swap.total)} swap in use`
+                 : "No swap configured");
+
+    const temp = (sys.cpu || {}).temp;
+    set("ov-temp", temp ? Math.round(temp) + "\u00b0C" : "\u2014",
+      temp ? "CPU package temperature" : "No temperature sensor exposed");
+    const tEl = document.getElementById("ov-temp");
+    // Colour must mean "hot", not just "this tile is red"
+    if (tEl) tEl.style.color = temp == null ? ""
+      : temp > 85 ? cssVar("--red", "#f85149")
+      : temp > 75 ? cssVar("--amber", "#d29922")
+      : cssVar("--green", "#3fb950");
+
+    const load = (sys.load || usage.load || []);
+    const cores = (sys.cpu || {}).cores || 1;
+    set("ov-load", load.length ? Number(load[0]).toFixed(2) : "\u2014",
+      load.length ? `1m ${load[0]} \u00b7 5m ${load[1]} \u00b7 15m ${load[2]} across ${cores} core${cores === 1 ? "" : "s"}` : "");
+    const lEl = document.getElementById("ov-load");
+    if (lEl && load.length) lEl.style.color = load[0] > cores * 2 ? cssVar("--red", "#f85149")
+      : load[0] > cores ? cssVar("--amber", "#d29922") : "";
+
+    bar("ov-cpu-bar", usage.cpu_pct, 75, 90);
+    bar("ov-mem-bar", usage.mem_pct, 85, 92);
+    bar("ov-disk-bar", usage.disk_pct, 80, 90);
+    bar("ov-swap-bar", usage.swap_pct, 25, 50);
+  }
+
+  // ── LAN / DHCP panel ────────────────────────────────────────────────
+  function renderOvLan(d) {
+    const body = document.getElementById("ov-lan-body");
+    if (!body) return;
+    const sys = d.sys || {};
+    const dhcp = sys.dhcp || {};
+    const leases = d.leases || [];
+    const online = leases.filter((l) => l.online).length;
+
+    // Pool size from the first "start - end" range Kea reports
+    let poolSize = 0;
+    for (const pool of (dhcp.pools || [])) {
+      const m = String(pool).split("-").map((x) => x.trim());
+      if (m.length !== 2) continue;
+      const toInt = (ip) => ip.split(".").reduce((n, o) => (n << 8) + (parseInt(o, 10) || 0), 0) >>> 0;
+      const a = toInt(m[0]), b = toInt(m[1]);
+      if (b >= a) poolSize += (b - a + 1);
+    }
+    const used = leases.length;
+    const pct = poolSize ? Math.min(100, Math.round(used / poolSize * 100)) : 0;
+    const poolCls = pct > 90 ? "down" : pct > 75 ? "" : "ok";
+
+    const row = (label, value, cls) =>
+      `<div class="ov-kv-row"><span class="ov-kv-label">${esc(label)}</span>` +
+      `<span class="ov-kv-value ${cls || ""}">${esc(value == null || value === "" ? "\u2014" : String(value))}</span></div>`;
+
+    let html = "";
+    html += row("Subnet", dhcp.subnet || "\u2014");
+    html += row("Gateway", dhcp.router || "\u2014");
+    html += row("Clients online", `${online} of ${leases.length} known`, online ? "ok" : "");
+    if (poolSize) {
+      html += row("DHCP pool", `${used} / ${poolSize} (${pct}%)`, poolCls);
+      html += `<div class="ov-pool"><i style="width:${pct}%" class="${poolCls === "down" ? "hot" : ""}"></i></div>`;
+    } else if ((dhcp.pools || []).length) {
+      html += row("DHCP pool", (dhcp.pools || []).join(", "));
+    }
+    const lanV6 = (sys.interfaces || []).find((i) => (i.ipv6 || []).length && i.name !== (sys.wan || {}).ifname);
+    if (lanV6) html += row("IPv6", (lanV6.ipv6 || [])[0]);
+    body.innerHTML = html;
+
+    const hint = document.getElementById("ov-lan-hint");
+    if (hint) hint.textContent = dhcp.domain ? dhcp.domain : "";
+  }
+
+  // ── Posture cards (slow tier) ───────────────────────────────────────
+  function setPost(valId, subId, value, sub, cardId, state) {
+    const v = document.getElementById(valId), sEl = document.getElementById(subId);
+    if (v) v.textContent = value;
+    if (sEl && sub != null) sEl.textContent = sub;
+    const card = cardId && document.getElementById(cardId);
+    if (card) card.dataset.state = state || "";
+  }
+
+  function renderOvPosture() {
+    const u = ovPosture.updates;
+    if (u) {
+      const n = u.upgradable || 0;
+      setPost("ov-updates-val", "ov-updates-sub", n === 0 ? "Up to date" : String(n),
+        n === 0 ? (u.last_check ? "checked " + formatRelative(u.last_check) : "no updates pending")
+                : `package${n === 1 ? "" : "s"} upgradable`,
+        "ov-post-updates", n === 0 ? "ok" : n > 30 ? "warn" : "info");
+    }
+    if (ovPosture.exposed != null) {
+      const n = ovPosture.exposed, d = ovPosture.dmzCount || 0;
+      setPost("ov-exposed-val", "ov-exposed-sub", String(n + d),
+        d ? `${n} port forward${n === 1 ? "" : "s"} + ${d} DMZ host${d === 1 ? "" : "s"}`
+          : `${n} port forward${n === 1 ? "" : "s"}`,
+        "ov-post-exposed", d ? "warn" : n ? "info" : "ok");
+    }
+    if (ovPosture.bans != null) {
+      setPost("ov-bans-val", "ov-bans-sub", formatNumber(ovPosture.bans),
+        "CrowdSec decisions", "ov-post-bans", ovPosture.bans ? "info" : "ok");
+    }
+    if (ovPosture.backupAgeDays !== undefined) {
+      const a = ovPosture.backupAgeDays;
+      setPost("ov-backup-val", "ov-backup-sub",
+        a == null ? "None" : a < 1 ? "Today" : `${Math.round(a)}d ago`,
+        a == null ? "no system snapshot" : "system snapshot",
+        "ov-post-backup", a == null ? "warn" : a > 30 ? "warn" : "ok");
+    }
+    renderOvHealth();
+  }
+
+  async function refreshOvPosture() {
+    const pick = (p) => p.catch(() => null);
+    const [updates, pf, dmz, cs, bks, svcs] = await Promise.all([
+      pick(fetchJSON("/api/system/updates")),
+      pick(fetchJSON("/api/portforward")),
+      pick(fetchJSON("/api/dmz")),
+      pick(fetchJSON("/api/crowdsec")),
+      pick(fetchJSON("/api/backups/system")),
+      pick(fetchJSON("/api/system/services")),
+    ]);
+    if (updates) ovPosture.updates = updates;
+    if (pf) ovPosture.exposed = (pf.rules || []).filter((r) => r.enabled !== false).length;
+    if (dmz) ovPosture.dmzCount = dmz.dmz_count || 0;
+    if (cs) ovPosture.bans = (cs.decisions || []).length;
+    if (bks) {
+      const newest = (bks.backups || []).reduce((t, b) => Math.max(t, b.time || 0), 0);
+      ovPosture.backupAgeDays = newest ? (Date.now() / 1000 - newest) / 86400 : null;
+    }
+    if (svcs) {
+      state.svcData = svcs;
+      ovPosture.failedUnits = (svcs.services || []).filter((x) => x.active === "failed").length;
+      renderOvServices();
+    }
+    renderOvPosture();
+  }
+
+  // Refresh tiers. Live tiles genuinely need 5s; trends do not, and posture
+  // (updates, bans, backups) changes on the order of hours. Splitting these
+  // cut the Overview's per-cycle work without losing any freshness that
+  // matters - and it costs fewer requests per second than the old flat 5s.
+  const OV_MID_MS = 15000;
+  const OV_SLOW_MS = 30000;
+  const ovTier = { mid: 0, slow: 0 };
+  const ovCache = { dns: {}, fw: {}, sur: {}, leases: [], latHistory: [], wg: {} };
+
+  async function refreshOverview(opts) {
+    const force = !!(opts && opts.force);
+    const now = Date.now();
     try {
-      const [sys, bw, dns, sec, fw, sur, leaseResp, latHist, wg] = await Promise.all([
+      const [sys, bw, sec] = await Promise.all([
         fetchJSON("/api/system"),
         fetchJSON("/api/bandwidth"),
-        fetchJSON("/api/dns"),
         fetchJSON("/api/security"),
-        fetchJSON("/api/firewall"),
-        fetchJSON("/api/security/suricata"),
-        fetchJSON("/api/leases"),
-        fetchJSON("/api/latency/history?hours=24").catch(() => ({ series: [] })),
-        fetchJSON("/api/wireguard").catch(() => ({})),
       ]);
-      renderOverview({ sys, bw, dns, sec, fw, sur, leases: leaseResp.leases || [], latHistory: latHist.series || [], wg });
+
+      if (force || now - ovTier.mid >= OV_MID_MS) {
+        ovTier.mid = now;
+        const [dns, fw, sur, leaseResp, latHist, wg] = await Promise.all([
+          fetchJSON("/api/dns").catch(() => ovCache.dns),
+          fetchJSON("/api/firewall").catch(() => ovCache.fw),
+          fetchJSON("/api/security/suricata").catch(() => ovCache.sur),
+          fetchJSON("/api/leases").catch(() => ({ leases: ovCache.leases })),
+          fetchJSON("/api/latency/history?hours=24").catch(() => ({ series: ovCache.latHistory })),
+          fetchJSON("/api/wireguard").catch(() => ovCache.wg),
+        ]);
+        ovCache.dns = dns || {};
+        ovCache.fw = fw || {};
+        ovCache.sur = sur || {};
+        ovCache.leases = (leaseResp && leaseResp.leases) || [];
+        ovCache.latHistory = (latHist && latHist.series) || [];
+        ovCache.wg = wg || {};
+      }
+
+      if (force || now - ovTier.slow >= OV_SLOW_MS) {
+        ovTier.slow = now;
+        refreshOvPosture();        // self-rendering, must not block the tiles
+      }
+
+      const payload = {
+        sys, bw, sec,
+        dns: ovCache.dns, fw: ovCache.fw, sur: ovCache.sur,
+        leases: ovCache.leases, latHistory: ovCache.latHistory, wg: ovCache.wg,
+      };
+      renderOverview(payload);
+      renderOvTiles(sys);
+      renderOvLan(payload);
+      renderOvHealth();
     } catch (err) {
       showBanner(true, "Overview error: " + err.message);
     }
@@ -7017,45 +8361,82 @@
     });
   }
 
+  // Weight = how much of the 100-point health budget this unit is worth.
+  // DNS and NAT take the whole LAN down; the agent does not.
+  const OV_SERVICE_WEIGHT = {
+    "unbound.service": 25,
+    "tuxwall-nat.service": 14,
+    "kea-dhcp4-server.service": 12,
+    "nginx.service": 8,
+    "tuxwall.service": 8,
+    "suricata.service": 7,
+    "crowdsec.service": 7,
+    "crowdsec-firewall-bouncer.service": 5,
+    "wg-quick@wg0.service": 4,
+    "radvd.service": 4,
+    "tuxwall-sqm.service": 2,
+    "tuxwall-agent.service": 1,
+    "tuxwall-collector.service": 1,
+  };
+
+  let _ovSvcBound = false;
   function renderOvServices() {
-    ensureOvServicesCard();
-    const tbody = document.getElementById("ov-svc-tbody");
-    if (!tbody) return;
+    const grid = document.getElementById("ov-svc-grid");
+    if (!grid) return;
     const rows = ((state.svcData || {}).services || []);
     const byUnit = new Map(rows.map((s) => [s.unit, s]));
     const isAdmin = state.role === "admin";
-    const trs = [];
-    let upCount = 0;
-    let seenCount = 0;
+    const chips = [];
+    let up = 0, seen = 0;
+
     for (const [unit, name] of OV_SERVICES) {
-      const s = byUnit.get(unit);
-      if (!s) continue;
-      seenCount += 1;
-      const ok = s.active === "active";
-      if (ok) upCount += 1;
-      const stateLabel = s.active === "failed"
-        ? "Failed"
-        : ok ? (s.sub === "running" ? "Running" : "Active") : "Stopped";
-      let actions = "";
+      const svc = byUnit.get(unit);
+      if (!svc) continue;                     // not installed - do not judge it
+      seen += 1;
+      const ok = svc.active === "active";
+      const failed = svc.active === "failed";
+      if (ok) up += 1;
+      const label = failed ? "Failed" : ok ? (svc.sub === "running" ? "Running" : "Active") : "Stopped";
+      const cls = failed ? "bad" : ok ? "ok" : "warn";
+      let action = "";
       if (isAdmin && !OV_PROTECTED_SERVICES[unit]) {
-        actions = ok
-          ? `<button class="btn btn-sm icon-btn" data-action="restart" data-unit="${esc(unit)}" type="button" title="Restart ${esc(unit)}" aria-label="Restart ${esc(unit)}">${SVC_ACTION_ICONS.restart}</button>
-             <button class="btn btn-sm btn-danger icon-btn" data-action="stop" data-unit="${esc(unit)}" type="button" title="Stop ${esc(unit)}" aria-label="Stop ${esc(unit)}">${SVC_ACTION_ICONS.stop}</button>`
-          : `<button class="btn btn-sm icon-btn" data-action="start" data-unit="${esc(unit)}" type="button" title="Start ${esc(unit)}" aria-label="Start ${esc(unit)}">${SVC_ACTION_ICONS.start}</button>`;
-      } else if (OV_PROTECTED_SERVICES[unit]) {
-        actions = `<span class="muted" title="Protected (${OV_PROTECTED_SERVICES[unit]}) — status only">—</span>`;
+        action = ok
+          ? `<button class="ov-svc-act" data-action="restart" data-unit="${esc(unit)}" type="button" title="Restart ${esc(unit)}">${SVC_ACTION_ICONS.restart}</button>`
+          : `<button class="ov-svc-act" data-action="start" data-unit="${esc(unit)}" type="button" title="Start ${esc(unit)}">${SVC_ACTION_ICONS.start}</button>`;
       }
-      trs.push(`
-        <tr class="${ok ? "" : "ov-svc-row-bad"}">
-          <td><b class="mono">${esc(name)}</b></td>
-          <td>${esc(s.desc || "—")}</td>
-          <td><span class="ov-svc-status ${ok ? "ov-svc-ok" : "ov-svc-bad"}"><span class="ov-svc-dot"></span>${esc(stateLabel)}</span></td>
-          <td><div class="svc-actions">${actions}</div></td>
-        </tr>`);
+      chips.push(
+        `<div class="ov-svc-chip ${cls}" title="${esc(unit)} - ${esc(svc.desc || "")}">` +
+        `<span class="ov-svc-dot"></span>` +
+        `<span class="ov-svc-name">${esc(name)}</span>` +
+        `<span class="ov-svc-state">${esc(label)}</span>${action}</div>`);
     }
+
     const hint = document.getElementById("ov-svc-hint");
-    if (hint) hint.textContent = rows.length ? `${upCount} / ${seenCount} up` : "";
-    tbody.innerHTML = trs.length ? trs.join("") : `<tr><td colspan="4" class="empty">No service data.</td></tr>`;
+    if (hint) hint.textContent = seen ? `${up} of ${seen} running` : "";
+    grid.innerHTML = chips.length ? chips.join("") : `<p class="muted">No service data.</p>`;
+
+    if (!_ovSvcBound) {
+      _ovSvcBound = true;
+      grid.addEventListener("click", async (ev) => {
+        const btn = ev.target.closest("button[data-action]");
+        if (!btn || btn.disabled) return;
+        const unit = btn.dataset.unit, action = btn.dataset.action;
+        const warn = {
+          restart: `Restart ${unit}? Active connections through it may drop.`,
+          start: `Start ${unit}?`,
+        }[action];
+        if (warn && !window.confirm(warn)) return;
+        btn.disabled = true;
+        try {
+          await postJSON("/api/system/services/action", { unit, action });
+          showBanner(false);
+        } catch (err) {
+          showBanner(true, `${unit} ${action}: ` + err.message);
+        }
+        await refreshServices();
+      });
+    }
+    renderOvHealth();
   }
 
   async function refreshServices() {
@@ -7371,6 +8752,17 @@
     if (els.routerLocMsg) els.routerLocMsg.textContent = "";
   }
 
+  function setSettingsTab(pane) {
+    document.querySelectorAll("#settings-subtabs .fw-subtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.settingsPane === pane));
+    document.querySelectorAll("#view-settings .fw-pane[data-settings-pane]").forEach((p) => {
+      p.hidden = p.dataset.settingsPane !== pane;
+    });
+  }
+  document.querySelectorAll("#settings-subtabs .fw-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => setSettingsTab(btn.dataset.settingsPane));
+  });
+
   function bindSettings() {
     els.themeFormatSample.textContent = JSON.stringify({
       name: "My Theme",
@@ -7465,11 +8857,68 @@
     });
   }
 
+  // ── Sub-tab strips: tablist semantics, keyboard nav, scroll affordance ──
+  // Each page wires its own click handler; this layers the missing ARIA and
+  // arrow-key support on top without touching any of that.
+  function ocSubtabStrips() { return document.querySelectorAll(".fw-subtabs"); }
+
+  function syncSubtabState() {
+    ocSubtabStrips().forEach((strip) => {
+      const tabs = [...strip.querySelectorAll(".fw-subtab")];
+      tabs.forEach((t) => {
+        const on = t.classList.contains("active");
+        t.setAttribute("aria-selected", on ? "true" : "false");
+        t.tabIndex = on ? 0 : -1;        // roving tabindex
+      });
+      const scrollable = strip.scrollWidth > strip.clientWidth + 1;
+      strip.classList.toggle("is-scrollable", scrollable);
+      if (scrollable) {
+        const atStart = strip.scrollLeft <= 1;
+        const atEnd = strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 1;
+        strip.classList.toggle("at-end", atEnd && !atStart);
+        strip.classList.toggle("at-mid", !atEnd && !atStart);
+      } else {
+        strip.classList.remove("at-end", "at-mid");
+      }
+    });
+  }
+
+  function initSubtabs() {
+    ocSubtabStrips().forEach((strip) => {
+      if (strip.dataset.tabsReady) return;
+      strip.dataset.tabsReady = "1";
+      strip.setAttribute("role", "tablist");
+      strip.querySelectorAll(".fw-subtab").forEach((t) => t.setAttribute("role", "tab"));
+      strip.addEventListener("scroll", syncSubtabState, { passive: true });
+      strip.addEventListener("keydown", (ev) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(ev.key)) return;
+        const tabs = [...strip.querySelectorAll(".fw-subtab")]
+          .filter((t) => !t.disabled && t.offsetParent !== null);
+        const cur = tabs.indexOf(document.activeElement);
+        if (cur === -1) return;
+        ev.preventDefault();
+        const next = ev.key === "ArrowLeft" ? (cur - 1 + tabs.length) % tabs.length
+                   : ev.key === "ArrowRight" ? (cur + 1) % tabs.length
+                   : ev.key === "Home" ? 0 : tabs.length - 1;
+        tabs[next].focus();
+        tabs[next].click();
+        tabs[next].scrollIntoView({ block: "nearest", inline: "nearest" });
+      });
+    });
+    syncSubtabState();
+  }
+
+  document.addEventListener("click", (ev) => {
+    if (ev.target.closest(".fw-subtab")) setTimeout(syncSubtabState, 0);
+  });
+  window.addEventListener("resize", syncSubtabState);
+
   function switchView(view) {
     document.querySelectorAll(".nav-item").forEach((i) => {
       i.classList.toggle("active", i.dataset.view === view);
     });
     els.title.textContent = VIEW_TITLES[view] || "Dashboard";
+    setTimeout(() => { initSubtabs(); syncSubtabState(); }, 0);
     state.activeView = view;
     const implemented = view === "overview" || view === "clients" || view === "dns" || view === "domains" || view === "firewall" || view === "vlans" || view === "security" || view === "wireguard" || view === "crowdsec" || view === "bandwidth" || view === "blocklists" || view === "system" || view === "backups" || view === "logs" || view === "settings" || view === "ai";
     document.querySelectorAll(".view").forEach((v) => { v.hidden = true; });
@@ -7482,7 +8931,7 @@
       document.getElementById("view-" + view).hidden = false;
       if (view === "overview") {
         initOverviewMap();
-        refreshOverview();
+        refreshOverview({ force: true });
         setTimeout(() => { if (ovMap) ovMap.map.invalidateSize(); }, 60);
       }
       if (view === "firewall") { refreshFirewall(); refreshPortForward(); refreshDmz(); }
@@ -7572,12 +9021,32 @@
       left:  ["                   ", "█▀▀█ █▀▀█ █▀▀█ █▀▀▄", "█__█ █__█ █^^^ █__█", "▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀"],
       right: ["             ▄     ", "█▀▀▀ █▀▀█ █▀▀█ █▀▀█", "█___ █__█ █__█ █^^^", "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"],
     };
-    const OC_PLACEHOLDERS = [
-      "What is the tech stack of this project?",
-      "Audit my firewall rules for misconfigurations",
-      "Explain @includes/api_server.py",
-      "Fix broken tests",
+    const OC_SUGGESTIONS = [
+      "Audit my firewall rules for anything risky",
+      "Why is DNS resolution slow right now?",
+      "Summarise today's Suricata alerts",
+      "Which clients are using the most bandwidth?",
+      "Is anything exposed to the WAN that shouldn't be?",
+      "Check WireGuard peer handshakes",
     ];
+    const OC_PLACEHOLDERS = OC_SUGGESTIONS.slice(0, 4);
+
+    // The sidebar had ~400px of dead space below the usage stats; these fill
+    // it with something useful and give a one-click way into the agent.
+    function ocRenderSuggestions() {
+      const list = document.getElementById("ai-prompt-list");
+      if (!list || list.dataset.ready) return;
+      list.dataset.ready = "1";
+      list.innerHTML = OC_SUGGESTIONS.map((q) =>
+        `<button type="button" class="ai-prompt-chip">${esc(q)}</button>`).join("");
+      list.addEventListener("click", (ev) => {
+        const chip = ev.target.closest(".ai-prompt-chip");
+        if (!chip || !elOcInput) return;
+        elOcInput.value = chip.textContent;
+        elOcInput.focus();
+        elOcInput.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    }
     const OC_COMMANDS = [
       { cmd: "/new",      desc: "start a new session",                       alias: "/clear" },
       { cmd: "/sessions", desc: "list and switch sessions",                  alias: "/resume" },
@@ -7662,6 +9131,7 @@
       agentCheckHealth();
       agentLoadModels();
       agentUpdateStats();
+      ocRenderSuggestions();
       if (!agent.booted) { agent.booted = true; ocBootScreen(); agentLoadBootInfo(); }
       if (elOcInput) setTimeout(() => elOcInput.focus(), 50);
     }
@@ -7941,6 +9411,37 @@
 
     // collapse a resolved permission card to a one-line note, then remove it
     // so resolved cards don't pile up and bury the agent's response
+    // opencode's TUI asks one thing at a time. The web terminal appended every
+    // pending request full-size, so a turn with ten questions buried the
+    // console. Only the front request stays interactive; the rest collapse to
+    // one-line placeholders and promote as each is answered.
+    function ocPermPending() {
+      return [...document.querySelectorAll(".oc-perm")].filter(
+        (c) => !c.dataset.resolved &&
+               !c.classList.contains("oc-approved") &&
+               !c.classList.contains("oc-denied"));
+    }
+
+    function ocPermQueueUpdate() {
+      const pending = ocPermPending();
+      pending.forEach((card, i) => {
+        card.classList.toggle("oc-perm-active", i === 0);
+        card.classList.toggle("oc-perm-queued", i > 0);
+      });
+      document.querySelectorAll(".oc-perm-badge").forEach((b) => b.remove());
+      const active = pending[0];
+      const waiting = pending.length - 1;
+      if (active && waiting > 0) {
+        const head = active.querySelector(".oc-perm-head");
+        if (head) {
+          const badge = document.createElement("span");
+          badge.className = "oc-perm-badge";
+          badge.textContent = `+${waiting} waiting`;
+          head.appendChild(badge);
+        }
+      }
+    }
+
     function ocPermResolve(card, note) {
       if (!card || card.dataset.resolved) return;
       card.dataset.resolved = "1";
@@ -7948,8 +9449,62 @@
       const head = card.querySelector(".oc-perm-head");
       if (head) card.innerHTML = `<div class="oc-perm-head oc-perm-done">${head.textContent} — ${esc(note)}</div>`;
       card.classList.add("oc-perm-collapse");
+      card.classList.remove("oc-perm-active", "oc-perm-queued");
+      ocPermQueueUpdate();                 // promote the next request now
       ocRenderStatus();
-      setTimeout(() => { card.remove(); ocRenderStatus(); }, 1500);
+      setTimeout(() => { card.remove(); ocPermQueueUpdate(); ocRenderStatus(); }, 1500);
+    }
+
+    // A permission card is a decision prompt, not a file viewer. Long diffs
+    // collapse behind a one-line summary so the Allow/Reject buttons stay on
+    // screen - on a 1366x768 laptop the old card filled 72% of the terminal.
+    const OC_DIFF_INLINE_MAX = 12;      // lines shown without asking
+
+    function ocPermDiffBlock(diffText) {
+      const lines = String(diffText || "").split("\n");
+      let adds = 0, dels = 0, file = "";
+      for (const ln of lines) {
+        if (/^\+\+\+\s/.test(ln)) { file = ln.replace(/^\+\+\+\s+b?\/?/, "").trim() || file; continue; }
+        if (/^---\s/.test(ln)) { if (!file) file = ln.replace(/^---\s+a?\/?/, "").trim(); continue; }
+        if (/^\+/.test(ln)) adds++;
+        else if (/^-/.test(ln)) dels++;
+      }
+      const body = document.createElement("div");
+      body.className = "oc-tool-out oc-diff";
+      lines.forEach((ln) => {
+        const span = document.createElement("span");
+        if (/^\+/.test(ln) && !/^\+\+\+/.test(ln)) span.className = "oc-add";
+        else if (/^-/.test(ln) && !/^---/.test(ln)) span.className = "oc-del";
+        else if (/^@@/.test(ln)) span.className = "oc-hunk";
+        span.textContent = ln || " ";
+        body.appendChild(span);
+      });
+
+      const wrap = document.createElement("div");
+      wrap.className = "oc-perm-diff";
+      const long = lines.length > OC_DIFF_INLINE_MAX;
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "oc-perm-diff-toggle";
+      toggle.innerHTML =
+        `<span class="oc-perm-caret"></span>` +
+        `<span class="oc-perm-file">${esc(file || "changes")}</span>` +
+        `<span class="oc-perm-stat">` +
+          (adds ? `<b class="oc-stat-add">+${adds}</b>` : "") +
+          (dels ? `<b class="oc-stat-del">\u2212${dels}</b>` : "") +
+        `</span>` +
+        `<span class="oc-perm-lines">${lines.length} line${lines.length === 1 ? "" : "s"}</span>`;
+      wrap.appendChild(toggle);
+      wrap.appendChild(body);
+
+      const setOpen = (open) => {
+        wrap.classList.toggle("oc-open", open);
+        toggle.setAttribute("aria-expanded", String(open));
+        body.hidden = !open;
+      };
+      setOpen(!long);
+      toggle.addEventListener("click", () => setOpen(body.hidden));
+      return wrap;
     }
 
     function ocPermCard(r) {
@@ -7968,11 +9523,10 @@
         </div>`;
       const bodyBox = card.querySelector(".oc-perm-body");
       if (meta.diff) {
-        bodyBox.appendChild(ocDiffBlock(meta.diff));
-        bodyBox.lastChild.classList.add("oc-diff");
+        bodyBox.appendChild(ocPermDiffBlock(meta.diff));
       } else if (body) {
         const pre = document.createElement("div");
-        pre.className = "oc-tool-out";
+        pre.className = "oc-tool-out oc-perm-cmd";
         pre.textContent = body;
         bodyBox.appendChild(pre);
       }
@@ -7988,6 +9542,7 @@
       });
       bodyBox.appendChild(btns);
       if (elOcScreen) elOcScreen.appendChild(card);
+      ocPermQueueUpdate();
       ocScroll();
       ocRenderStatus();
       return card;
@@ -8123,6 +9678,7 @@
       box.appendChild(errEl);
       card.appendChild(box);
       if (elOcScreen) elOcScreen.appendChild(card);
+      ocPermQueueUpdate();
       ocScroll();
       ocRenderStatus();
       return card;
@@ -8932,6 +10488,7 @@
 
     bindBlocklistActions();
     bindRpzActions();
+    bindBlocklistCatalog();
     bindDomainActions();
     bindHostEdit();
     bindConfigEdit();
@@ -9085,9 +10642,18 @@
         : u.role === "admin"
           ? `<span class="badge badge-ok">Admin</span>`
           : `<span class="badge">Viewer</span>`;
-      const status = u.disabled
-        ? `<span class="badge badge-err">Disabled</span>`
-        : `<span class="badge badge-ok">Enabled</span>`;
+      // Everyone being "Enabled" was visual noise that made the one account
+      // that *is* disabled no easier to spot. A quiet dot for the normal case
+      // lets the exception carry the weight instead.
+      const status = `<span class="u-state"><span class="status-dot" data-status="${u.disabled ? "inactive" : "active"}"></span>` +
+        `${u.disabled ? "Disabled" : "Enabled"}</span>`;
+      // /api/auth/users already returns these two; neither was ever shown.
+      const twofa = u.totp
+        ? `<span class="u-2fa on" title="Two-factor authentication is enabled">ON</span>`
+        : `<span class="u-2fa off" title="Password only - no second factor">OFF</span>`;
+      const created = u.created
+        ? `<span class="u-created" title="${esc(new Date(u.created * 1000).toLocaleString())}">${esc(formatRelative(u.created))}</span>`
+        : `<span class="muted">—</span>`;
       const actions = u.owner
         ? (
           iconBtn("edit", "Edit", `data-edit="${esc(u.username)}"`) +
@@ -9099,12 +10665,14 @@
           iconBtn("trash", "Remove", `data-del="${esc(u.username)}" class="icon-btn icon-btn-danger"`)
         );
       return `
-        <tr>
-          <td><b>${esc(u.username)}</b>${u.username === me ? ` <span class="muted">(you)</span>` : ""}</td>
+        <tr class="${u.disabled ? "u-row-off" : ""}">
+          <td><b>${esc(u.username)}</b>${u.username === me ? ` <span class="u-you">you</span>` : ""}</td>
           <td>${u.fullname ? esc(u.fullname) : '<span class="muted">—</span>'}</td>
           <td>${badge}</td>
           <td>${status}</td>
-          <td class="wg-actions">${actions}</td>
+          <td>${twofa}</td>
+          <td>${created}</td>
+          <td class="wg-actions td-right">${actions}</td>
         </tr>`;
     }).join("");
   }
@@ -9468,6 +11036,7 @@
     schedule();
     refresh();
     refreshDns();
+    loadDnsUpstream();
     refreshDomains();
     refreshFirewall();
     refreshSecurity();
