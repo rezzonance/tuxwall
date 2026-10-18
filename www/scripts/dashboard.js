@@ -4088,6 +4088,29 @@
 
 
 
+  async function updateSecBanAvailability() {
+    // CrowdSec availability + banned-IP set: gates the local Ban/Unban
+    // buttons in Top Attackers. Bans are LOCAL CrowdSec decisions only -
+    // nothing here reports to tuxwall.org (community reporting is
+    // deception-only by design).
+    try {
+      const data = await fetchJSON("/api/crowdsec");
+      state.secCrowdsecUp = !!data.ok;
+    } catch (err) {
+      state.secCrowdsecUp = false;
+    }
+    try {
+      const bl = await fetchJSON("/api/crowdsec/blocklist");
+      state.secBannedIps = new Set((bl.entries || []).map((e) => e.value));
+    } catch (err) {
+      state.secBannedIps = new Set();
+    }
+    const up = state.secCrowdsecUp;
+    els.secBanAll.disabled = !up;
+    if (!up) setSecBanStatus("CrowdSec unavailable");
+    if (els.secIpsBody.rows.length) refreshSecurity();
+  }
+
   function setSecBanStatus(text) {
     els.secBanStatus.textContent = text || "";
   }
@@ -4121,6 +4144,7 @@
         if (unbanBtn) {
           await unbanCrowdsec(ip);
           setSecBanStatus(`Removed ${ip} from the custom blocklist.`);
+          await updateSecBanAvailability();
         } else {
           await banCrowdsec(ip);
           setSecBanStatus(`Added ${ip} to the custom blocklist (1y ban).`);
@@ -8395,6 +8419,7 @@
     state.secTimer = setInterval(() => {
       if (!document.hidden && state.activeView === "security") {
         refreshSecurity();
+        updateSecBanAvailability();
         refreshSuricata();
         refreshZeek();
         refreshZeekQuic();

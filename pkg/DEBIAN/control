@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 3.0.2
+Version: 3.0.3
 Section: admin
 Priority: optional
 Architecture: all
@@ -607,3 +607,11 @@ Description: TuxWall Network Firewall Dashboard
  tuxwall understanding instead of from scratch every conversation.
  Context refresh is interaction-driven (the agent refetches and
  re-caches on every fetch) - no timer shipped.
+ .
+ v3.0.3 restores the Ban/Unban buttons in Security -> Top Attackers,
+ accidentally removed with the v3.0.1 reporting cleanup (the CrowdSec
+ availability check that gated them was collateral damage - the buttons
+ rendered empty). Bans remain local CrowdSec decisions only - never
+ reported to tuxwall.org (community reporting is deception-catch only,
+ by design) - and the Top Attackers toolbar now states this directly:
+ "Local CrowdSec bans only".
