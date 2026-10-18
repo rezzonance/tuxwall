@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 3.0.1
+Version: 3.0.2
 Section: admin
 Priority: optional
 Architecture: all
@@ -589,3 +589,21 @@ Description: TuxWall Network Firewall Dashboard
  catches are shared - attacker IPs and evidence only, none of your
  information is saved - and the trade-off is no research, no report
  buttons, the traps do it for you.
+ .
+ v3.0.2 ships a working default opencode.json and agent instructions
+ for fresh installs. The packaged opencode.json no longer points at the
+ maintainer's LAN address (a fresh install's AI agent was broken out of
+ the box); it now defaults to opencode's free hosted models
+ (deepseek-v4-flash-free + ling-3.0-flash-free, zero setup) with a
+ conservative read-only permission allowlist - the agent can inspect
+ everything and changes nothing without permission. Existing installs
+ keep their configured copy (conffile). The package also ships
+ AGENTS.md, installed-if-absent into the tuxwall-agent user's config:
+ the canonical context protocol (fetch tuxwall.org/agent/tuxwall.json
+ first, cache it for offline use, live-system-wins verification), the
+ six safety rules, the dashboard file map with the .bak rollback
+ convention, the offline-operation and weak-model reading guide for
+ the context fragments - so every install's AI agent starts with
+ tuxwall understanding instead of from scratch every conversation.
+ Context refresh is interaction-driven (the agent refetches and
+ re-caches on every fetch) - no timer shipped.

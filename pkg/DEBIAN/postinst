@@ -69,6 +69,22 @@ EOF
       fi
     done
 
+    # AGENTS.md for the dashboard's opencode agent: install-if-absent into
+    # the tuxwall-agent user's config (never clobber an edited copy). Gives
+    # every install's AI agent base tuxwall understanding - the canonical
+    # context URL, the safety rules, the file map, offline operation - so it
+    # never starts from scratch.
+    AGENTS_SRC="/usr/share/tuxwall/AGENTS.md"
+    AGENTS_DST_DIR="/home/tuxwall-agent/.config/opencode"
+    if [[ -f "$AGENTS_SRC" ]]; then
+      mkdir -p "$AGENTS_DST_DIR"
+      if [[ ! -f "$AGENTS_DST_DIR/AGENTS.md" ]]; then
+        install -o tuxwall-agent -g tuxwall-agent -m 0644 \
+          "$AGENTS_SRC" "$AGENTS_DST_DIR/AGENTS.md"
+        echo "   installed AGENTS.md (agent context) for tuxwall-agent"
+      fi
+    fi
+
     # Resilience drop-in: unbound must never hit systemd's start limit.
     # A transient bind failure (optional interface address absent at
     # restart) must self-heal when the address returns, not wedge DNS
