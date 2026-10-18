@@ -1357,24 +1357,6 @@
 
       <!-- Pane: Attacks (map + top lists + chart) -->
       <div class="fw-pane" data-sec-pane="attacks">
-      <div class="card" id="sec-report-card">
-        <div class="card-head">
-          <h2>Community Ban Reporting</h2>
-          <div class="fw-setting-head" style="gap:10px;">
-            <div id="sec-report-detail" class="muted" style="margin-right:8px;"></div>
-            <label class="fw-switch" title="Report banned IPs to tuxwall.org">
-              <input type="checkbox" id="sec-report-enabled">
-              <span class="fw-switch-slider"></span>
-            </label>
-          </div>
-        </div>
-        <p class="muted bl-note">When enabled, every IP you ban (CrowdSec / custom blocklist) is posted to
-          <a href="https://tuxwall.org/bans" target="_blank" rel="noopener">tuxwall.org</a> behind an anonymous
-          per-install key — never your public IP or identity. Your attackers are aggregated into the public
-          <b>Community Bans</b> list with hit counts, ISP, location and severity, and power
-          <b>tuxwall.org/lists/community-bans.txt</b> for your own blocklists. You can also report any attacker
-          manually with the <b>Report</b> button in the Top Attackers table.</p>
-      </div>
       <div class="card">
         <div class="card-head">
           <h2>Attack Map</h2>
@@ -1498,6 +1480,14 @@
 
       </div>
 
+      <div class="deception-notice">
+        <b>Trap catches are shared with the tuxwall.org community ban list.</b>
+        Every IP caught here attacked a decoy — a verified threat, zero false positives.
+        Only attacker IPs and evidence are shared; none of your information is saved.
+        <b>The trade-off: no research, no report buttons — the traps do it for you.</b>
+        If you don't want threats caught here shared, don't enable the deception layer.
+      </div>
+
       <!-- Pane: Deception (tarpit + canary) -->
       <div class="fw-pane" data-sec-pane="deception" hidden>
 
@@ -1527,7 +1517,7 @@
             <tbody id="sec-honey-body"></tbody>
           </table>
         </div>
-        <p class="muted bl-note">A <b>port-garden tarpit</b>: classic scan ports (telnet, RDP, SMB, adb…) are bound on the <b>WAN addresses only (IPv4 + IPv6)</b> — every connection is held open with a clamped TCP window while the scanner waits forever for data that never comes. Any connection here is hostile by definition, so sources are <b>auto-banned via CrowdSec (1 year)</b> and reported like any other attacker — no manual banning, no AbuseIPDB cross-checking needed. LAN/WireGuard sources are closed immediately and never counted. Overflow connections beyond the safety caps (256 total / 8 per IP) are dropped, not trapped, so a botnet flood can't exhaust the router. <b>Keep the threshold at 1</b>: nothing legitimate ever connects to these ports, so a single completed handshake is hostile by definition — only raise it (to 3–5) if you add a port that could plausibly see innocent traffic (e.g. 80/443). When <b>Community Ban Reporting</b> is enabled (Security tab; off by default, anonymous per-install key — never your IP or identity), these catches are reported to the tuxwall.org <a href="https://tuxwall.org/bans" target="_blank" rel="noopener">Community Ban list</a>: they are the community's highest-confidence data, because nothing legitimate ever touches a trap.</p>
+        <p class="muted bl-note">A <b>port-garden tarpit</b>: classic scan ports (telnet, RDP, SMB, adb…) are bound on the <b>WAN addresses only (IPv4 + IPv6)</b> — every connection is held open with a clamped TCP window while the scanner waits forever for data that never comes. Any connection here is hostile by definition, so sources are <b>auto-banned via CrowdSec (1 year)</b> — no manual banning, no AbuseIPDB cross-checking needed, and the catch is shared with the community list above. LAN/WireGuard sources are closed immediately and never counted. Overflow connections beyond the safety caps (256 total / 8 per IP) are dropped, not trapped, so a botnet flood can't exhaust the router. <b>Keep the threshold at 1</b>: nothing legitimate ever connects to these ports, so a single completed handshake is hostile by definition — only raise it (to 3–5) if you add a port that could plausibly see innocent traffic (e.g. 80/443).</p>
       </div>
 
       <div class="card card-mt">
@@ -1551,7 +1541,7 @@
             <tbody id="sec-canary-body"></tbody>
           </table>
         </div>
-        <p class="muted bl-note">The <b>OpenCanary</b> deception emulators — SSH, VNC, MSSQL, Redis, SNMP — bound on the <b>WAN address only</b>, running as a sandboxed service user. Any interaction is hostile by definition (nothing legitimate connects to services that do not exist), so sources are <b>auto-banned via CrowdSec (1 year)</b> and community-reported. The SSH canary on port 22 <b>captures the credentials bruteforcers spray</b> — usernames and passwords appear in the Detail column; they are attacker-submitted guesses at your router, not real credentials. <b>Enable</b> starts the service and opens WAN rules only for the ports it actually bound; <b>Disable</b> stops it and closes exactly its ports. The full record lives at <code>/var/log/opencanary/opencanary.log</code>. When <b>Community Ban Reporting</b> is enabled (Security tab; off by default, anonymous per-install key — never your IP or identity), these catches are reported to the tuxwall.org <a href="https://tuxwall.org/bans" target="_blank" rel="noopener">Community Ban list</a>: they are the community's highest-confidence data, because nothing legitimate ever touches a trap.</p>
+        <p class="muted bl-note">The <b>OpenCanary</b> deception emulators — SSH, VNC, MSSQL, Redis, SNMP — bound on the <b>WAN address only</b>, running as a sandboxed service user. Any interaction is hostile by definition (nothing legitimate connects to services that do not exist), so sources are <b>auto-banned via CrowdSec (1 year)</b> and the catch is shared with the community list above. The SSH canary on port 22 <b>captures the credentials bruteforcers spray</b> — usernames and passwords appear in the Detail column; they are attacker-submitted guesses at your router, not real credentials. <b>Enable</b> starts the service and opens WAN rules only for the ports it actually bound; <b>Disable</b> stops it and closes exactly its ports. The full record lives at <code>/var/log/opencanary/opencanary.log</code>.</p>
       </div>
 
       </div>

@@ -2502,14 +2502,37 @@ def report_category_for(reason, source):
     return "other"
 
 
+def ensure_reporting_key():
+    """Create the anonymous per-install reporting key on first use."""
+    conf = load_reporting_conf()
+    if conf["key"]:
+        return conf
+    conf["key"] = secrets.token_hex(16)
+    try:
+        os.makedirs(os.path.dirname(REPORTING_CONF_FILE), exist_ok=True)
+        with open(REPORTING_CONF_FILE, "w") as f:
+            json.dump(conf, f, indent=2)
+        try:
+            os.chmod(REPORTING_CONF_FILE, 0o600)
+        except OSError:
+            pass
+    except OSError:
+        pass
+    return conf
+
+
 def report_ban_to_org(ip, hits=0, reason="", source="", category="",
                       suricata=None):
     """Send a ban report to tuxwall.org. Never raises; returns a status dict.
     run a daemon thread when it outlives the request."""
     try:
+        # Deception-source reporting is always on: every trap catch is a
+        # verified threat (a completed handshake to a service that does not
+        # exist) and carries no contributor judgment or user data. The
+        # per-install key is generated on first use.
         conf = load_reporting_conf()
-        if not conf["enabled"] or not conf["key"]:
-            return {"ok": False, "reason": "disabled"}
+        if not conf["key"]:
+            conf = ensure_reporting_key()
         ip = (ip or "").strip()
         try:
             addr = ipaddress.ip_address(ip)
@@ -3009,78 +3032,12 @@ def _save_reported_ban_ids(ids):
     os.replace(tmp, BAN_REPORT_STATE)
 
 
-def ban_report_watcher():
-    """Report non-dashboard CrowdSec decisions to tuxwall.org, once each.
-
-    Never reports the router's own WAN addresses: the CrowdSec engine can
-    capture the router itself (e.g. its http-crawl scenario watching the
-    nginx log can flag the router's own rapid fetches of its community
-    site), and a self-capture must never reach the public community list.
-    """
-    while True:
-        time.sleep(BAN_REPORT_INTERVAL)
-        _record_recent_wan()
-        try:
-            proc = subprocess.run(
-                [CROWDSEC_BIN, "decisions", "list", "-o", "raw"],
-                capture_output=True, text=True, timeout=15,
-            )
-            if proc.returncode != 0:
-                continue
-            with BAN_REPORT_LOCK:
-                reported = _load_reported_ban_ids()
-                fresh = []
-                for line in proc.stdout.splitlines()[1:]:
-                    parts = line.strip().split(",")
-                    if len(parts) < 11:
-                        continue
-                    try:
-                        dec_id = int(parts[0])
-                    except ValueError:
-                        continue
-                    source = parts[1].strip().lower()
-                    value = parts[2].strip()
-                    reason = parts[3].strip()
-                    simulated = parts[9].strip().lower() == "true"
-                    if not value.startswith("Ip:"):
-                        continue        # ranges/scopes: skip (dashboard path
-                                        # reports those correctly at add time)
-                    ip = value[3:]
-                    if simulated or source not in BAN_REPORT_SOURCES:
-                        reported.add(dec_id)
-                        continue
-                    if _is_own_or_recent_wan(ip):
-                        # our own address, current or recently rotated away
-                        # (engine self-capture) - never report
-                        reported.add(dec_id)
-                        continue
-                    if any(reason.startswith(p) for p in BAN_REPORT_SKIP_REASONS):
-                        reported.add(dec_id)   # honeypot reports at ban time
-                        continue
-                    if dec_id in reported:
-                        continue
-                    try:
-                        if not ipaddress.ip_address(ip).is_global:
-                            reported.add(dec_id)
-                            continue
-                    except ValueError:
-                        continue
-                    _spawn_report(ip, "crowdsec decision: %s" % reason[:60],
-                                 "crowdsec", report_category_for(reason, "crowdsec"))
-                    reported.add(dec_id)
-                    fresh.append((dec_id, ip))
-                if fresh:
-                    _save_reported_ban_ids(reported)
-        except Exception:
-            pass
-
-
-def start_ban_report_watcher():
-    conf = load_reporting_conf()
-    if not conf.get("enabled"):
-        return
-    threading.Thread(target=ban_report_watcher, daemon=True).start()
-
+# NOTE: engine/CLI CrowdSec decisions are deliberately NOT reported.
+# Manual and engine bans carry contributor judgment (only as good as the
+# person banning; one bad ban pollutes every install pulling the list).
+# Deception catches carry their own evidence - a completed handshake to a
+# service that does not exist - so they are the only community data.
+# The watcher that reported engine/CLI decisions was removed with this.
 
 # --- Suricata IDS ----------------------------------------------------------
 SURICATA_EVE_LOG = "/var/log/suricata/eve.json"
@@ -10497,8 +10454,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, llm_model_list())
         elif path == "/api/security/ai-config":
             self._send(200, get_llm_conf())
-        elif path == "/api/security/reporting":
-            self._send(200, get_reporting_conf())
         elif path == "/api/security/ai-summary":
             qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             model = (qs.get("model") or [None])[0]
@@ -11327,37 +11282,6 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/security/aide/update":
             self._send(200, start_aide_run("update"))
 
-        elif path == "/api/security/reporting":
-            try:
-                self._send(200, save_reporting_conf(body))
-            except ValueError as exc:
-                self._send(400, {"ok": False, "error": str(exc)})
-            except Exception as exc:
-                self._send(500, {"ok": False, "error": str(exc)})
-
-        elif path == "/api/security/report":
-            ip = (body.get("ip") or "").strip()
-            try:
-                addr = ipaddress.ip_address(ip)
-            except ValueError:
-                self._send(400, {"ok": False, "error": "Invalid IP: %r" % ip})
-                return
-            if not addr.is_global:
-                self._send(400, {"ok": False, "error": "Refusing to report non-global IP %s." % ip})
-                return
-            hits = int(body.get("hits") or 0)
-            conf = load_reporting_conf()
-            if not conf["enabled"] or not conf["key"]:
-                self._send(400, {"ok": False,
-                                 "error": "Community ban reporting is not enabled."})
-                return
-            result = report_ban_to_org(ip, max(0, hits), "manual report", "manual", "manual")
-            if result.get("ok"):
-                self._send(200, {"ok": True})
-            else:
-                self._send(502, {"ok": False,
-                                 "error": result.get("reason") or "Report failed"})
-            return
 
         elif path == "/api/domains/add":
             try:
@@ -13101,7 +13025,6 @@ def main():
     _ensure_unbound_local_actions()
     _restore_nat_on_boot()
     start_honeypot_at_boot()
-    start_ban_report_watcher()
     get_security_monitor()
     get_system_monitor()
     get_latency_monitor()

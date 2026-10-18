@@ -24,7 +24,6 @@
     wgData: null,
     secCrowdsecUp: null,
     secBannedIps: new Set(),
-    reportingEnabled: false,
     domains: [],
     domEditId: null,
     domEditSource: null,
@@ -131,8 +130,6 @@
     secIpsBody: document.querySelector("#sec-ips-body"),
     secBanAll: document.getElementById("sec-ban-all"),
     secBanStatus: document.getElementById("sec-ban-status"),
-    secReportEnabled: document.getElementById("sec-report-enabled"),
-    secReportDetail: document.getElementById("sec-report-detail"),
     secEventsBody: null,
     secEventCount: null,
     secSuricataBody: document.querySelector("#sec-suricata-body"),
@@ -3259,9 +3256,6 @@
             ? `<button type="button" class="btn btn-sm sec-unban" data-ip="${esc(i.ip)}" title="Remove CrowdSec ban">Unban</button>`
             : `<button type="button" class="btn btn-sm btn-danger sec-ban" data-ip="${esc(i.ip)}" title="Add to CrowdSec blocklist">Ban</button>`)
         : "";
-      const repBtn = state.reportingEnabled
-        ? `<button type="button" class="btn btn-sm sec-report" data-ip="${esc(i.ip)}" data-count="${i.count}" title="Report this attacker to tuxwall.org">Report</button>`
-        : "";
       const abuseBtn = communityBadge(i.ip);
       return `<tr class="ip-row" data-ip="${esc(i.ip)}"
           data-location="${esc(location)}"
@@ -3280,7 +3274,7 @@
         <td class="atk-hits"><b>${formatNumber(i.count)}</b>
             <div class="bar"><div class="bar-fill bar-fill-err" style="width:${pct}%"></div></div></td>
         <td class="atk-last ${recencyClass(i.last)}" title="${esc(lastSeen)}">${i.last ? esc(formatRelative(i.last)) : '<span class="muted">—</span>'}</td>
-        <td class="td-right"><div class="svc-actions">${banBtn}${repBtn}${abuseBtn}</div></td>
+        <td class="td-right"><div class="svc-actions">${banBtn}${abuseBtn}</div></td>
       </tr>`;
     }
 
@@ -3351,10 +3345,7 @@
                   ? `<button type="button" class="btn btn-sm sec-unban" data-ip="${esc(entry.ip)}" title="Remove CrowdSec ban">Unban</button>`
                   : `<button type="button" class="btn btn-sm btn-danger sec-ban" data-ip="${esc(entry.ip)}" title="Add to CrowdSec blocklist">Ban</button>`)
               : "";
-            const repBtn = state.reportingEnabled
-              ? `<button type="button" class="btn btn-sm sec-report" data-ip="${esc(entry.ip)}" data-count="${entry.count}" title="Report this attacker to tuxwall.org">Report</button>`
-              : "";
-            cells[6].innerHTML = `<div class="svc-actions">${banBtn}${repBtn}${abuseBtn}</div>`;
+            cells[6].innerHTML = `<div class="svc-actions">${banBtn}${abuseBtn}</div>`;
           }
         }
 
@@ -4102,53 +4093,6 @@
   }
 
   // ---- Community ban reporting (tuxwall.org) ----
-  async function loadReportingSettings() {
-    try {
-      const d = await fetchJSON("/api/security/reporting");
-      state.reportingEnabled = !!(d.ok && d.enabled);
-      if (els.secReportEnabled) els.secReportEnabled.checked = state.reportingEnabled;
-      let detail = "";
-      if (d.ok && d.enabled && d.last_report) {
-        detail = `Last report ${new Date(d.last_report * 1000).toLocaleString()}`;
-        if (d.last_error) detail += ` · last error: ${esc(d.last_error)}`;
-      } else if (d.ok && !d.enabled) {
-        detail = "Opt-in to share your bans anonymously.";
-      }
-      if (els.secReportDetail) els.secReportDetail.textContent = detail;
-      // Rows show/hide the Report button based on the state
-      const visible = els.secIpsBody && els.secIpsBody.rows.length;
-      if (visible) refreshSecurity();
-    } catch (err) {
-      els.secReportEnabled.checked = false;
-    }
-  }
-
-  function bindReporting() {
-    if (!els.secReportEnabled) return;
-    els.secReportEnabled.addEventListener("change", async () => {
-      const enabled = els.secReportEnabled.checked;
-      els.secReportEnabled.disabled = true;
-      try {
-        const d = await postJSON("/api/security/reporting", { enabled });
-        if (!d.ok) throw new Error(d.error || "Save failed");
-        state.reportingEnabled = enabled;
-        setSecBanStatus(enabled ? "Community ban reporting enabled." : "Community ban reporting disabled.");
-        els.secReportEnabled.checked = enabled;
-        await loadReportingSettings();
-      } catch (err) {
-        els.secReportEnabled.checked = !enabled;
-        showBanner(true, "Could not update reporting: " + err.message);
-      } finally {
-        els.secReportEnabled.disabled = false;
-      }
-    });
-  }
-
-  async function reportIp(ip, hits) {
-    const d = await postJSON("/api/security/report", { ip, hits: hits || 0 });
-    if (!d.ok) throw new Error(d.error || "Report failed");
-    return d;
-  }
 
   async function banCrowdsec(ip) {
     const data = await postJSON("/api/crowdsec/blocklist/add", { entry: ip });
@@ -4162,31 +4106,12 @@
     return data;
   }
 
-  async function updateSecBanAvailability() {
-    try {
-      const data = await fetchJSON("/api/crowdsec");
-      state.secCrowdsecUp = !!data.ok;
-    } catch (err) {
-      state.secCrowdsecUp = false;
-    }
-    try {
-      const bl = await fetchJSON("/api/crowdsec/blocklist");
-      state.secBannedIps = new Set((bl.entries || []).map((e) => e.value));
-    } catch (err) {
-      state.secBannedIps = new Set();
-    }
-    const up = state.secCrowdsecUp;
-    els.secBanAll.disabled = !up;
-    if (!up) setSecBanStatus("CrowdSec unavailable");
-    if (els.secIpsBody.rows.length) refreshSecurity();
-  }
 
   function bindSecurityBans() {
     els.secIpsBody.addEventListener("click", async (e) => {
       const banBtn = e.target.closest(".sec-ban");
       const unbanBtn = e.target.closest(".sec-unban");
-      const repBtn = e.target.closest(".sec-report");
-      const btn = banBtn || unbanBtn || repBtn;
+      const btn = banBtn || unbanBtn;
       if (!btn) return;
       const ip = btn.dataset.ip;
       btn.disabled = true;
@@ -4194,14 +4119,10 @@
         if (unbanBtn) {
           await unbanCrowdsec(ip);
           setSecBanStatus(`Removed ${ip} from the custom blocklist.`);
-        } else if (repBtn) {
-          await reportIp(ip, btn.dataset.count || "0");
-          setSecBanStatus(`Reported ${ip} to tuxwall.org.`);
         } else {
           await banCrowdsec(ip);
           setSecBanStatus(`Added ${ip} to the custom blocklist (1y ban).`);
         }
-        await updateSecBanAvailability();
       } catch (err) {
         setSecBanStatus(`Failed: ${err.message}`);
       } finally {
@@ -4227,12 +4148,10 @@
         }
         btn.disabled = true;
       }
-      await updateSecBanAvailability();
       els.secBanAll.disabled = false;
       setSecBanStatus(`Added ${ok} of ${total} top attackers to the custom blocklist${failed ? ` (${failed} failed)` : ""}.`);
     });
 
-    updateSecBanAvailability();
 
     // Modal close buttons
     document.getElementById("sec-countries-modal-close").onclick = () => {
@@ -8946,9 +8865,7 @@
       refreshAide();
       refreshHoneypot();
       refreshCanary();
-        updateSecBanAvailability();
-        loadReportingSettings();
-        initTrafficMonitor();
+            initTrafficMonitor();
         initDiagnose();
         setTimeout(() => { if (secMap) secMap.map.invalidateSize(); }, 60);
       }
@@ -11043,7 +10960,6 @@
     refreshSuricata();
     refreshZeek();
     refreshZeekQuic();
-    updateSecBanAvailability();
     refreshCrowdsec();
     refreshCustomBlocklist();
     refreshBandwidth();
