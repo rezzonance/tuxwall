@@ -563,7 +563,10 @@ input[type="file"]::file-selector-button:active {
 #ov-talkers-body td,
 #ov-suricata-body td { white-space: normal; word-break: break-word; }
 #ov-talkers-body td:first-child,
-#ov-suricata-body td:first-child { min-width: 0; }
+#ov-suricata-body td:first-child {
+  min-width: 0;
+  font-weight: 400;
+}
 #ov-suricata-body td:last-child,
 #ov-talkers-body td:last-child { white-space: nowrap; }
 

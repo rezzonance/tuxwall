@@ -1,5 +1,5 @@
 Package: tuxwall
-Version: 3.0.4
+Version: 3.0.5
 Section: admin
 Priority: optional
 Architecture: all
@@ -624,3 +624,14 @@ Description: TuxWall Network Firewall Dashboard
  known outcome and fires a single re-render; the Add Top 25 batch
  gets the same single re-render; and the CrowdSec availability checks
  run in parallel on the security-view poll.
+ .
+ v3.0.5 brings the bento UI redesign across all 16 dashboard views:
+ the firewall page's bento design system (firewall.css) extended to
+ Overview and Security (bento.css) with dot-grid background, restyled
+ cards, kicker tiles, entrance motion and the FirewallBento render
+ hook in dashboard.js; per-view hero art (heroes.css + 16 webp icons);
+ glass sidebar (polish.css), dedicated firewall stylesheet, sidebar /
+ action-icon / subtab-icon icon stylesheets; mobile nav-toggle with
+ aria-expanded; a user menu replacing the sidebar profile chip with
+ avatar upload/preview (initials fallback); WireGuard toggle on
+ Overview; and a responsive/mobile pass completed across all 16 views.

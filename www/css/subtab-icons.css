@@ -1,0 +1,36 @@
+/* Sub-tab icons — small stroke glyphs in the shared .fw-subtab strips.
+   Icons are injected by dashboard.js (SUBTAB_ICONS map, keyed by the
+   data-*-pane value) so every strip across views stays consistent. */
+
+.fw-subtab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.fw-subtab > .tab-ic {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: .78;
+  transition: opacity .18s ease, transform .18s ease;
+}
+
+.fw-subtab:hover > .tab-ic,
+.fw-subtab.active > .tab-ic { opacity: 1; }
+
+.fw-subtab.active > .tab-ic { transform: scale(1.04); }
+
+/* Keep the sliding pill aligned when the icon changes a tab's width — the
+   runtime re-syncs, but avoid a jump during the width transition. */
+.fw-subtab.has-ind > .tab-ic { opacity: 1; }
+
+@media (max-width: 560px) {
+  .fw-subtab { gap: 6px; }
+  .fw-subtab > .tab-ic { width: 15px; height: 15px; }
+}
