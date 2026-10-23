@@ -114,6 +114,24 @@
     cblFile: document.getElementById("cbl-file"),
     cblBody: document.querySelector("#cbl-body"),
     cblEmpty: document.getElementById("cbl-empty"),
+    cbanBody: document.querySelector("#cban-body"),
+    cbanGenerated: document.getElementById("cban-generated"),
+    cbanStatus: document.getElementById("cban-status"),
+    cbanShare: document.getElementById("cban-share"),
+    cbanShareStatus: document.getElementById("cban-share-status"),
+    cbanShareBadge: document.getElementById("cban-share-badge"),
+    cbanAuto: document.getElementById("cban-auto"),
+    cbanAutoBadge: document.getElementById("cban-auto-badge"),
+    cbanAutoStats: document.getElementById("cban-auto-stats"),
+    cbanBanAll: document.getElementById("cban-ban-all"),
+    csBanModal: document.getElementById("cs-ban-modal"),
+    csBanTitle: document.getElementById("cs-ban-title"),
+    csBanTarget: document.getElementById("cs-ban-target"),
+    csBanDuration: document.getElementById("cs-ban-duration"),
+    csBanConfirm: document.getElementById("cs-ban-confirm"),
+    csBanCancel: document.getElementById("cs-ban-cancel"),
+    csBanClose: document.getElementById("cs-ban-close"),
+    csBanStatus: document.getElementById("cs-ban-status"),
     bwDown: document.getElementById("bw-down"),
     bwUp: document.getElementById("bw-up"),
     bwWindow: document.getElementById("bw-window"),
@@ -271,6 +289,8 @@
     logLines: document.getElementById("log-lines"),
     logRefresh: document.getElementById("log-refresh"),
     logFollow: document.getElementById("log-follow"),
+    logCopy: document.getElementById("log-copy"),
+    logLive: document.getElementById("log-live"),
     logView: document.getElementById("log-view"),
     logMeta: document.getElementById("log-meta"),
     bkSysCreate: document.getElementById("bk-sys-create"),
@@ -3183,6 +3203,8 @@
     const countries = d.countries || [];
     const cTotal = countries.reduce((s, c) => s + c.count, 0) || 1;
     const cMax   = countries[0] ? countries[0].count : 1;
+    const cChip  = document.getElementById("sec-countries-chip");
+    if (cChip) cChip.textContent = `${formatNumber(countries.length)} ${countries.length === 1 ? "country" : "countries"}`;
 
     // Colour ramp for rank: top 3 get distinct colours, rest fade through amber→muted
     const RANK_COLORS = ["#f85149", "#ffa657", "#d29922"];
@@ -3225,6 +3247,8 @@
     const byIp = d.by_ip || [];
     const ipMax = byIp[0] ? byIp[0].count : 1;
     const csUp = state.secCrowdsecUp;
+    const iChip = document.getElementById("sec-ips-chip");
+    if (iChip) iChip.textContent = `${formatNumber(byIp.length)} sources`;
 
     // Threat level derived from hit-count percentile
     function threatLevel(count) {
@@ -3240,6 +3264,7 @@
     }
     const IP_COPY_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
     const IP_DONE_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`;
+    const REPORT_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3Z"/></svg>`;
 
     // How recently an attacker was last seen is the difference between a live
     // problem and history, so the column is weighted rather than uniformly muted.
@@ -3294,12 +3319,12 @@
       const fresh = cached && Date.now() - cached.ts < COMMUNITY_TTL;
       const sev = fresh ? cached.sev : "";
       if (!fresh) communityLookup(ip);
-      return `<a class="btn btn-sm com-badge com-sev-${esc(sev || "pending")}" href="https://tuxwall.org/ip/${safe}" target="_blank" rel="noopener" data-cip="${safe}" title="${esc(communityTitle(sev))}" aria-label="Community info for ${safe}"><i class="com-badge-icon" aria-hidden="true">ℹ</i></a>`;
+      return `<a class="act-btn act-report com-badge com-sev-${esc(sev || "pending")}" href="https://tuxwall.org/ip/${safe}" target="_blank" rel="noopener" data-cip="${safe}" title="${esc(communityTitle(sev))}" aria-label="Community report for ${safe}">${REPORT_SVG}</a>`;
     }
 
     function applyCommunitySev(ip, sev) {
       document.querySelectorAll(`.com-badge[data-cip="${CSS.escape(ip)}"]`).forEach(el => {
-        el.className = `btn btn-sm com-badge com-sev-${sev}`;
+        el.className = `act-btn act-report com-badge com-sev-${sev}`;
         el.title = communityTitle(sev);
       });
     }
@@ -3330,7 +3355,7 @@
       const banBtn    = csUp
         ? (banned
             ? actBtn("active", "Remove CrowdSec ban", `data-ip="${esc(i.ip)}"`, "sec-unban")
-            : actBtn("ban", "Add to CrowdSec blocklist", `data-ip="${esc(i.ip)}"`, "sec-ban act-danger"))
+            : actBtn("ban", "Ban via CrowdSec", `data-ip="${esc(i.ip)}"`, "sec-ban act-danger"))
         : "";
       const abuseBtn = communityBadge(i.ip);
       return `<tr class="ip-row" data-ip="${esc(i.ip)}"
@@ -3419,7 +3444,7 @@
             const banBtn = csUp
               ? (banned
                   ? actBtn("active", "Remove CrowdSec ban", `data-ip="${esc(entry.ip)}"`, "sec-unban")
-                  : actBtn("ban", "Add to CrowdSec blocklist", `data-ip="${esc(entry.ip)}"`, "sec-ban act-danger"))
+                  : actBtn("ban", "Ban via CrowdSec", `data-ip="${esc(entry.ip)}"`, "sec-ban act-danger"))
               : "";
             cells[6].innerHTML = `<div class="svc-actions">${banBtn}${abuseBtn}</div>`;
           }
@@ -4175,9 +4200,18 @@
       fetchJSON("/api/crowdsec/blocklist"),
     ]);
     state.secCrowdsecUp = cs.status === "fulfilled" && !!cs.value.ok;
-    state.secBannedIps = bl.status === "fulfilled"
-      ? new Set((bl.value.entries || []).map((e) => e.value))
-      : new Set();
+    // Banned = permanent banlist entries AND any active local decision,
+    // so timed bans (custom/local-ban) also flip the button to "remove".
+    const banned = new Set();
+    if (bl.status === "fulfilled") {
+      (bl.value.entries || []).forEach((e) => banned.add(e.value));
+    }
+    if (cs.status === "fulfilled" && cs.value.ok) {
+      (cs.value.decisions || []).forEach((d) => {
+        if (d.ip && d.type !== "unban") banned.add(d.ip);
+      });
+    }
+    state.secBannedIps = banned;
     const up = state.secCrowdsecUp;
     els.secBanAll.disabled = !up;
     if (!up) setSecBanStatus("CrowdSec unavailable");
@@ -4192,16 +4226,99 @@
 
 
 
-  async function banCrowdsec(ip) {
-    const data = await postJSON("/api/crowdsec/blocklist/add", { entry: ip });
+  // ---- Local bans (CrowdSec) --------------------------------------------
+  // All bans from this dashboard are LOCAL decisions on this firewall and
+  // are never reported to tuxwall.org - the community ban list is built
+  // exclusively from canary/honeypot evidence, never user judgment.
+  // - duration "perm" -> permanent file-backed banlist entry (1y)
+  // - anything else    -> timed local decision (tagged custom/local-ban)
+
+  async function banCrowdsec(ip, duration) {
+    const data = duration === "perm"
+      ? await postJSON("/api/crowdsec/blocklist/add", { entry: ip })
+      : await postJSON("/api/crowdsec/ban", { ip, duration });
     if (!data.ok) throw new Error(data.error || "Ban failed");
     return data;
   }
 
   async function unbanCrowdsec(ip) {
+    // The backend remove handles both kinds: file entries take the full
+    // path (file line + decision), timed local bans fall back to plain
+    // decision deletion.
     const data = await postJSON("/api/crowdsec/blocklist/remove", { entry: ip });
     if (!data.ok) throw new Error(data.error || "Unban failed");
     return data;
+  }
+
+  // ---- Ban duration modal (Top Attackers + Community Bans) -------------
+
+  const csBanCtx = { ips: [] };
+
+  function openCsBanModal(ipOrIps) {
+    const ips = Array.isArray(ipOrIps) ? ipOrIps : [ipOrIps];
+    if (!ips.length) return;
+    csBanCtx.ips = ips;
+    els.csBanTitle.textContent = ips.length > 1
+      ? `Ban ${ips.length} IPs via CrowdSec`
+      : "Ban via CrowdSec";
+    els.csBanTarget.textContent = ips.length > 1
+      ? `${ips.length} IPs`
+      : ips[0];
+    els.csBanStatus.textContent = "";
+    els.csBanConfirm.disabled = false;
+    els.csBanModal.hidden = false;
+  }
+
+  function closeCsBanModal() {
+    els.csBanModal.hidden = true;
+  }
+
+  async function confirmCsBan() {
+    const duration = els.csBanDuration.value;
+    const label = duration === "perm" ? "permanent banlist entry" : duration;
+    const ips = csBanCtx.ips;
+    els.csBanConfirm.disabled = true;
+    let ok = 0;
+    let failed = 0;
+    for (const ip of ips) {
+      try {
+        await banCrowdsec(ip, duration);
+        state.secBannedIps.add(ip);
+        ok++;
+        if (ips.length > 1) {
+          els.csBanStatus.textContent = `Banned ${ok}/${ips.length} (${ip}, ${label}).`;
+        }
+      } catch (err) {
+        failed++;
+        els.csBanStatus.textContent = `Failed on ${ip}: ${err.message}`;
+      }
+    }
+    els.csBanConfirm.disabled = false;
+    if (!failed) {
+      closeCsBanModal();
+      setSecBanStatus(ips.length === 1
+        ? `Banned ${ips[0]} locally (${label}). Never reported to tuxwall.org.`
+        : `Banned ${ok} IPs locally (${label}). Never reported to tuxwall.org.`);
+      refreshSecurity();
+      refreshCrowdsec();
+      refreshCustomBlocklist();
+    }
+  }
+
+  function bindCsBanModal() {
+    // Guard: if the modal markup is ever missing/misplaced, skip binding
+    // rather than killing the whole boot chain (a null addEventListener here
+    // once bricked the dashboard - no login gate, no logout).
+    if (!els.csBanModal || !els.csBanConfirm) return;
+    els.csBanConfirm.addEventListener("click", confirmCsBan);
+    els.csBanCancel.addEventListener("click", closeCsBanModal);
+    els.csBanClose.addEventListener("click", closeCsBanModal);
+    els.csBanModal.addEventListener("click", (e) => {
+      if (e.target === e.currentTarget) closeCsBanModal();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !els.csBanModal.hidden) closeCsBanModal();
+    });
   }
 
 
@@ -4209,20 +4326,19 @@
     els.secIpsBody.addEventListener("click", async (e) => {
       const banBtn = e.target.closest(".sec-ban");
       const unbanBtn = e.target.closest(".sec-unban");
+      if (!banBtn && !unbanBtn) return;
       const btn = banBtn || unbanBtn;
-      if (!btn) return;
       const ip = btn.dataset.ip;
+      if (banBtn) {
+        // Duration choice first - never an instant ban.
+        openCsBanModal(ip);
+        return;
+      }
       btn.disabled = true;
       try {
-        if (unbanBtn) {
-          await unbanCrowdsec(ip);
-          state.secBannedIps.delete(ip);
-          setSecBanStatus(`Removed ${ip} from the custom blocklist.`);
-        } else {
-          await banCrowdsec(ip);
-          state.secBannedIps.add(ip);
-          setSecBanStatus(`Added ${ip} to the custom blocklist (1y ban).`);
-        }
+        await unbanCrowdsec(ip);
+        state.secBannedIps.delete(ip);
+        setSecBanStatus(`Removed the local ban for ${ip}.`);
         // One re-render, no availability chain: the outcome is already
         // known locally, so the button flips on the next security fetch.
         refreshSecurity();
@@ -4233,29 +4349,11 @@
       }
     });
 
-    els.secBanAll.addEventListener("click", async () => {
-      const rows = els.secIpsBody.querySelectorAll(".sec-ban");
-      if (!rows.length) return;
-      els.secBanAll.disabled = true;
-      let ok = 0;
-      let failed = 0;
-      const total = rows.length;
-      for (const btn of rows) {
-        const ip = btn.dataset.ip;
-        try {
-          await banCrowdsec(ip);
-          ok++;
-          setSecBanStatus(`Added ${ok}/${total} (${ip}).`);
-        } catch (err) {
-          failed++;
-        }
-        btn.disabled = true;
-      }
-      els.secBanAll.disabled = false;
-      // one re-render for the whole batch - the rows above already flipped
-      // their buttons inline; this syncs anything missed
-      refreshSecurity();
-      setSecBanStatus(`Added ${ok} of ${total} top attackers to the custom blocklist${failed ? ` (${failed} failed)` : ""}.`);
+    els.secBanAll.addEventListener("click", () => {
+      const ips = [...els.secIpsBody.querySelectorAll(".sec-ban")]
+        .map((b) => b.dataset.ip);
+      if (!ips.length) return;
+      openCsBanModal(ips);
     });
 
 
@@ -4542,23 +4640,34 @@
 
   function renderCustomBlocklist(d) {
     if (!d.ok) {
-      if (els.cblStatus) els.cblStatus.textContent = d.error || "Blocklist unavailable";
+      if (els.cblStatus) els.cblStatus.textContent = d.error || "Banlist unavailable";
       return;
     }
     if (els.cblFile) els.cblFile.textContent = d.file || "";
     const entries = d.entries || [];
     els.cblEmpty.hidden = entries.length > 0;
-    els.cblBody.innerHTML = entries.map((e) => `
+    els.cblBody.innerHTML = entries.map((e) => {
+      const timed = e.kind === "timed";
+      const remaining = e.until_ts
+        ? formatDuration(e.until_ts - Math.floor(Date.now() / 1000))
+        : null;
+      return `
       <tr>
         <td class="mono">${esc(e.value)}</td>
+        <td>${timed
+          ? '<span class="badge">Timed</span>'
+          : '<span class="badge badge-ok">Permanent</span>'}</td>
         <td>${e.banned
           ? `<span class="badge badge-err">Banned${e.simulated ? " (simulated)" : ""}</span>`
           : '<span class="badge">Not active</span>'}</td>
-        <td class="mono">${e.banned ? (e.until_ts ? esc(formatRelative(e.until_ts)) : "1y") : "—"}</td>
+        <td class="mono">${timed
+          ? (remaining != null ? esc(remaining) : "—")
+          : "1y"}</td>
         <td style="text-align:right">
-          ${actBtn("delete", "Remove entry", `data-entry="${esc(e.value)}"`, "cbl-remove")}
+          ${actBtn("delete", timed ? "Remove timed ban" : "Remove entry", `data-entry="${esc(e.value)}"`, "cbl-remove")}
         </td>
-      </tr>`).join("");
+      </tr>`;
+    }).join("");
     if (els.cblStatus) els.cblStatus.textContent = "";
   }
 
@@ -4571,12 +4680,283 @@
     }
   }
 
+  // ---- Community bans (tuxwall.org) ------------------------------------
+  // Deception-evidence only (enforced collector-side): every listed IP has
+  // canary/honeypot proof. Banning from here is a local action; nothing
+  // here ever flows back to tuxwall.org.
+
+  const CBAN_SEV_RANK = { low: 1, medium: 2, high: 3, critical: 4 };
+  const CBAN_PAGE = 25; // rows per chunk — keeps the table panel compact
+  const CBAN_AUTO_KEY = "tuxwall-cban-auto";
+  const communityBans = { data: null, filter: "all", shown: CBAN_PAGE, loadedAt: 0, auto: null };
+
+  function setCbanAutoBadge(enabled, label) {
+    if (!els.cbanAutoBadge) return;
+    els.cbanAutoBadge.dataset.state = enabled ? "active" : "inactive";
+    els.cbanAutoBadge.textContent = label || (enabled ? "Active" : "Inactive");
+  }
+
+  function setCbanShareBadge(state, label) {
+    if (!els.cbanShareBadge) return;
+    els.cbanShareBadge.dataset.state = state;
+    els.cbanShareBadge.textContent = label;
+  }
+
+  function readCbanAutoCache() {
+    try {
+      const v = JSON.parse(localStorage.getItem(CBAN_AUTO_KEY) || "null");
+      if (v && typeof v.enabled === "boolean") return v;
+    } catch (err) { /* ignore */ }
+    return null;
+  }
+
+  function writeCbanAutoCache(state) {
+    try {
+      localStorage.setItem(CBAN_AUTO_KEY, JSON.stringify({
+        enabled: !!state.enabled,
+        last_sync: state.last_sync || 0,
+        added_total: state.added_total || 0,
+        pending: state.pending || 0,
+        ts: Date.now(),
+      }));
+    } catch (err) { /* ignore */ }
+  }
+
+  function cbanFilteredRows() {
+    const d = communityBans.data;
+    if (!d || !d.ok) return [];
+    const rank = CBAN_SEV_RANK[communityBans.filter] || 0;
+    return (d.bans || []).filter((b) => (CBAN_SEV_RANK[b.severity] || 0) >= rank);
+  }
+
+  function cbanSevBadge(sev) {
+    const s = ["critical", "high", "medium", "low"].includes(sev) ? sev : "low";
+    return `<span class="cban-sev cban-sev-${s}">${esc((sev || "?").toUpperCase())}</span>`;
+  }
+
+  function renderCommunityBans() {
+    const d = communityBans.data;
+    if (!d || !d.ok) return;
+    const rows = cbanFilteredRows();
+    const shown = rows.slice(0, communityBans.shown);
+    const auto = communityBans.auto || {};
+    // Automatic mode owns enforcement: hide the manual bulk button (every
+    // listed IP is already covered by the background sync) and show its
+    // stats instead.
+    if (els.cbanBanAll) els.cbanBanAll.hidden = !!auto.enabled;
+    setCbanAutoBadge(!!auto.enabled);
+    if (els.cbanAuto) els.cbanAuto.checked = !!auto.enabled;
+    if (els.cbanAutoStats) {
+      if (auto.enabled) {
+        const synced = auto.last_sync ? formatRelative(auto.last_sync) : "never";
+        els.cbanAutoStats.textContent =
+          `Last sync ${synced}` +
+          (auto.pending ? ` · ${formatNumber(auto.pending)} pending` : "") +
+          (auto.added_total ? ` · ${formatNumber(auto.added_total)} ensured` : "");
+      } else {
+        els.cbanAutoStats.textContent = "Manual mode — per-row ban buttons";
+      }
+    }
+    els.cbanGenerated.textContent =
+      `${formatNumber(rows.length)} of ${formatNumber(d.bans ? d.bans.length : 0)} IPs` +
+      (d.cached ? " · cached" : "");
+    els.cbanBanAll.textContent = `Ban all shown (${formatNumber(shown.length)}) (90d)`;
+    els.cbanBody.innerHTML = shown.map((b) => `
+      <tr>
+        <td class="mono">${esc(b.ip)}</td>
+        <td>${cbanSevBadge(b.severity)}</td>
+        <td class="mono">${esc(formatNumber(b.hits))}</td>
+        <td class="mono">${esc(formatNumber(b.reporters))}</td>
+        <td>${esc([b.city, b.country].filter(Boolean).join(", ") || "—")}</td>
+        <td>${esc(b.isp || "—")}${b.asn ? ` <span class="muted">AS${esc(b.asn)}</span>` : ""}</td>
+        <td class="mono muted">${esc(formatRelative(b.last_seen))}</td>
+        <td style="text-align:right">
+          ${actBtn("ban", "Ban via CrowdSec", `data-ip="${esc(b.ip)}"`, "cban-ban act-danger")}
+        </td>
+      </tr>`).join("") || '<tr><td colspan="8" class="empty">No community bans match this filter</td></tr>';
+    if (rows.length > communityBans.shown) {
+      els.cbanBody.insertAdjacentHTML("beforeend", `
+        <tr class="cban-more-row">
+          <td colspan="8" style="text-align:center;padding:10px">
+            <button class="btn" type="button" id="cban-more">Load ${Math.min(CBAN_PAGE, rows.length - communityBans.shown)} more
+              (${formatNumber(communityBans.shown)} of ${formatNumber(rows.length)} shown)</button>
+          </td>
+        </tr>`);
+    }
+  }
+
+  async function refreshCommunityBans(force) {
+    if (!force && communityBans.data && Date.now() - communityBans.loadedAt < 300000) {
+      renderCommunityBans();
+      return;
+    }
+    els.cbanStatus.textContent = "Loading…";
+    try {
+      const data = await fetchJSON("/api/crowdsec/community-bans");
+      if (!data.ok) throw new Error(data.error || "unavailable");
+      communityBans.data = data;
+      // The cached community-bans response can omit `auto`; keep the last
+      // known server state (or the browser cache) instead of flipping the
+      // switch off on every refresh.
+      const serverAuto = data.auto || null;
+      communityBans.auto = serverAuto || communityBans.auto || readCbanAutoCache() || { enabled: false };
+      if (serverAuto) writeCbanAutoCache(serverAuto);
+      communityBans.loadedAt = Date.now();
+      renderCommunityBans();
+      els.cbanStatus.textContent = "";
+    } catch (err) {
+      els.cbanStatus.textContent = "Error: " + err.message;
+    }
+  }
+
+  // ---- Community sharing (key registration) ----------------------------
+  // Sends ONLY this install's key to tuxwall.org: registration starts the
+  // 7-day trust clock at install time, after which this install's deception
+  // evidence counts fully toward community severity.
+
+  async function updateShareStatus() {
+    if (!els.cbanShare || !els.cbanShareStatus) return;
+    try {
+      const d = await fetchJSON("/api/crowdsec/reporting/status");
+      if (!d.ok) throw new Error(d.error || "status unavailable");
+      if (d.warning) {
+        els.cbanShareStatus.textContent = "Sharing status unavailable";
+        els.cbanShare.textContent = "Retry";
+        setCbanShareBadge("unknown", "Unknown");
+        return;
+      }
+      if (d.registered && d.status !== "revoked") {
+        const trustedAt = d.trusted_after || 0;
+        setCbanShareBadge("active", "Active");
+        if (trustedAt && trustedAt <= Date.now() / 1000) {
+          els.cbanShareStatus.textContent = "Community sharing active — evidence fully trusted";
+        } else {
+          const wait = trustedAt - Date.now() / 1000;
+          els.cbanShareStatus.textContent =
+            "Sharing active — full trust in " + formatDuration(wait);
+        }
+        els.cbanShare.textContent = "Registered";
+        els.cbanShare.disabled = true;
+      } else {
+        setCbanShareBadge("inactive", "Inactive");
+        els.cbanShareStatus.textContent = "Not registered — local only";
+        els.cbanShare.textContent = "Enable community sharing";
+        els.cbanShare.disabled = false;
+      }
+    } catch (err) {
+      els.cbanShareStatus.textContent = "Sharing status unavailable";
+      setCbanShareBadge("unknown", "Unknown");
+    }
+  }
+
+  function bindCommunityBans() {
+    // Guard: never let a missing element kill the boot chain.
+    if (!els.cbanBody || !els.cbanBanAll) return;
+    if (els.cbanShare) {
+      els.cbanShare.addEventListener("click", async () => {
+        els.cbanShare.disabled = true;
+        setCbanShareBadge("pending", "Registering…");
+        els.cbanShareStatus.textContent = "Registering…";
+        try {
+          const d = await postJSON("/api/crowdsec/reporting/register", {});
+          if (!d.ok) throw new Error(d.error || "registration failed");
+          els.cbanShareStatus.textContent = "Registered — sharing active.";
+        } catch (err) {
+          els.cbanShareStatus.textContent = "Failed: " + err.message;
+          setCbanShareBadge("inactive", "Inactive");
+          els.cbanShare.disabled = false;
+          return;
+        }
+        await updateShareStatus();
+      });
+    }
+    if (els.cbanAuto) {
+      els.cbanAuto.addEventListener("change", async () => {
+        const enabled = els.cbanAuto.checked;
+        const previous = !enabled;
+        els.cbanAuto.disabled = true;
+        setCbanAutoBadge(enabled, "Updating…");
+        els.cbanAutoStats.textContent = enabled ? "Enabling… first sync within ~30s." : "Disabling…";
+        try {
+          const d = await postJSON("/api/crowdsec/community-bans/auto", { enabled });
+          if (!d.ok) throw new Error(d.error || "toggle failed");
+          communityBans.auto = d.auto || { enabled };
+          writeCbanAutoCache(communityBans.auto);
+          renderCommunityBans();
+        } catch (err) {
+          els.cbanAuto.checked = previous;
+          setCbanAutoBadge(previous);
+          els.cbanAutoStats.textContent = "Failed: " + err.message;
+        } finally {
+          els.cbanAuto.disabled = false;
+        }
+      });
+    }
+    document.querySelectorAll("[data-cban-sev]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        communityBans.filter = btn.dataset.cbanSev;
+        communityBans.shown = CBAN_PAGE; // new filter: back to the first page
+        document.querySelectorAll("[data-cban-sev]").forEach((b) =>
+          b.classList.toggle("btn-primary", b === btn));
+        renderCommunityBans();
+      });
+    });
+
+    els.cbanBody.addEventListener("click", (e) => {
+      const more = e.target.closest("#cban-more");
+      if (more) {
+        communityBans.shown += CBAN_PAGE;
+        renderCommunityBans();
+        return;
+      }
+      const btn = e.target.closest(".cban-ban");
+      if (!btn) return;
+      openCsBanModal(btn.dataset.ip);
+    });
+
+    els.cbanBanAll.addEventListener("click", async () => {
+      const d = communityBans.data;
+      if (!d || !d.ok) return;
+      // Bans what is actually displayed (respecting filter + paging), so
+      // the button label "Ban all shown (N)" is always truthful.
+      const ips = cbanFilteredRows()
+        .slice(0, communityBans.shown)
+        .map((b) => b.ip);
+      if (!ips.length) return;
+      if (!window.confirm(`Ban all ${ips.length} shown community IPs for 90 days? (local bans - nothing is reported to tuxwall.org)`)) return;
+      els.cbanBanAll.disabled = true;
+      let ok = 0;
+      let failed = 0;
+      for (const ip of ips) {
+        try {
+          const data = await postJSON("/api/crowdsec/ban", { ip, duration: "90d" });
+          if (!data.ok) throw new Error(data.error || "ban failed");
+          ok++;
+          els.cbanStatus.textContent = `Banned ${ok}/${ips.length} (${ip}).`;
+        } catch (err) {
+          failed++;
+        }
+      }
+      els.cbanBanAll.disabled = false;
+      els.cbanStatus.textContent = `Banned ${ok} of ${ips.length} community IPs (90d, local only)${failed ? ` - ${failed} failed` : ""}.`;
+      refreshCustomBlocklist();
+      refreshCrowdsec();
+    });
+  }
+
   function setCsTab(pane) {
     document.querySelectorAll("#cs-subtabs .fw-subtab").forEach((b) =>
       b.classList.toggle("active", b.dataset.csPane === pane));
     document.querySelectorAll("#view-crowdsec .fw-pane[data-cs-pane]").forEach((p) => {
       p.hidden = p.dataset.csPane !== pane;
     });
+    // Lazy loads: the community tab pulls (cached) on first open; the
+    // banlist tab refetches so timed bans/expiry are fresh.
+    if (pane === "community") {
+      refreshCommunityBans();
+      updateShareStatus();
+    }
+    if (pane === "blocklist") refreshCustomBlocklist();
   }
   document.querySelectorAll("#cs-subtabs .fw-subtab").forEach((btn) => {
     btn.addEventListener("click", () => setCsTab(btn.dataset.csPane));
@@ -6432,11 +6812,55 @@
     }
   }
 
+  function updateLogLive() {
+    if (!els.logLive || !els.logFollow) return;
+    const live = els.logFollow.checked;
+    els.logLive.textContent = live ? "Live" : "Paused";
+    els.logLive.classList.toggle("is-live", live);
+    els.logLive.classList.toggle("is-paused", !live);
+  }
+
+  async function copyLogText(text) {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) { /* fall through to execCommand */ }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0";
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    } catch (_) {
+      return false;
+    }
+  }
+
   function bindLogs() {
     els.logRefresh.addEventListener("click", refreshLog);
     els.logSource.addEventListener("change", refreshLog);
     els.logPriority.addEventListener("change", refreshLog);
     els.logLines.addEventListener("change", refreshLog);
+    els.logFollow.addEventListener("change", () => {
+      updateLogLive();
+      if (els.logFollow.checked) refreshLog();
+    });
+    if (els.logCopy) {
+      els.logCopy.addEventListener("click", async () => {
+        const ok = await copyLogText(els.logView.textContent || "");
+        const prev = els.logCopy.textContent;
+        els.logCopy.textContent = ok ? "Copied" : "Copy failed";
+        setTimeout(() => { els.logCopy.textContent = prev; }, 1400);
+      });
+    }
+    updateLogLive();
   }
 
   function hexToRgba(hex, alpha) {
@@ -11340,6 +11764,8 @@
     bindCanaryActions();
     bindHoneypotActions();
     bindCustomBlocklist();
+    bindCsBanModal();
+    bindCommunityBans();
     bindSettings();
 
     let cachedTheme = null;
@@ -12209,4 +12635,42 @@
     new MutationObserver(() => schedule(view)).observe(view, { childList: true, subtree: true });
     schedule(view);
   });
+})();
+
+/* ── Animated top glow on every dashboard card ───────────────────────────── */
+(function cardTopGlow() {
+  "use strict";
+  const SELECTOR = ".card, .ov-mon, .stat-card, .fw-card";
+  let scheduled = false;
+
+  function ensure() {
+    document.querySelectorAll(SELECTOR).forEach((el) => {
+      if (el.querySelector(":scope > .card-topglow")) return;
+      el.classList.add("card-topglow-host");
+      const glow = document.createElement("span");
+      glow.className = "card-topglow";
+      glow.setAttribute("aria-hidden", "true");
+      if (el.children.length > 1) {
+        el.insertBefore(glow, el.lastElementChild);
+      } else {
+        el.appendChild(glow);
+      }
+    });
+  }
+
+  function schedule() {
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(() => {
+      scheduled = false;
+      ensure();
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", ensure, { once: true });
+  } else {
+    ensure();
+  }
+  new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
 })();

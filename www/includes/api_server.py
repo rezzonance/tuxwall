@@ -1689,7 +1689,11 @@ def _parse_iso(ts):
 def build_crowdsec():
     try:
         proc = subprocess.run(
-            [CROWDSEC_BIN, "decisions", "list", "-o", "json"],
+            # --limit 0 is essential: cscli defaults to 100 alerts, and with
+            # thousands of live decisions (honeypot/canary/file bans) the
+            # dashboard saw only the newest 100 - every older banlist entry
+            # then wrongly showed as "not active".
+            [CROWDSEC_BIN, "decisions", "list", "-o", "json", "--limit", "0"],
             capture_output=True, text=True, timeout=CROWDSEC_TIMEOUT,
         )
         if proc.returncode != 0:
@@ -1745,8 +1749,12 @@ BAN_DURATION_SECONDS = {"m": 60, "h": 3600, "d": 86400}
 
 
 def ban_crowdsec_ip(ip, duration="24h"):
-    """Ban a single IP via `cscli decisions add`. Rejects non-global
-    (private/reserved) addresses and durations beyond 30 days."""
+    """Ban a single IP locally via `cscli decisions add` (timed local ban).
+
+    Never reported to tuxwall.org - community data is deception-only
+    (canary/honeypot), and manual bans carry contributor judgment (one bad
+    ban must never reach every install pulling the community list). Rejects
+    non-global (private/reserved) addresses and durations beyond 90 days."""
     ip = (ip or "").strip()
     try:
         addr = ipaddress.ip_address(ip)
@@ -1756,20 +1764,20 @@ def ban_crowdsec_ip(ip, duration="24h"):
         return {"ok": False, "error": "Refusing to ban non-global IP %s (private/reserved)." % ip}
     duration = (duration or "").strip()
     if not BAN_DURATION_RE.match(duration):
-        return {"ok": False, "error": "Duration must be like 24h, 7d, or 30d."}
+        return {"ok": False, "error": "Duration must be like 24h, 7d, or 90d."}
     seconds = int(duration[:-1]) * BAN_DURATION_SECONDS[duration[-1]]
-    if seconds > 30 * 86400:
-        return {"ok": False, "error": "Duration too long (max 30d)."}
+    if seconds > 90 * 86400:
+        return {"ok": False, "error": "Duration too long (max 90d)."}
     try:
         proc = subprocess.run(
-            [CROWDSEC_BIN, "decisions", "add", "--ip", ip, "--duration", duration],
+            [CROWDSEC_BIN, "decisions", "add", "--ip", ip, "--duration", duration,
+             "--reason", CUSTOM_LOCAL_BAN_REASON],
             capture_output=True, text=True, timeout=CROWDSEC_TIMEOUT,
         )
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
     if proc.returncode != 0:
         return {"ok": False, "error": (proc.stderr or proc.stdout or "cscli failed").strip()}
-    _spawn_report(ip, "manual crowdsec ban (%s)" % duration, "crowdsec", "other")
     return {
         "ok": True,
         "ip": ip,
@@ -1810,6 +1818,10 @@ def unban_crowdsec_ip(ip):
 CUSTOM_BLOCKLIST_FILE = "/etc/tuxwall/custom-blocklist.txt"
 CUSTOM_BLOCKLIST_REASON = "custom/custom-blocklist"
 CUSTOM_BLOCKLIST_DURATION = "8760h"  # 1 year
+# Timed local bans (Top Attackers popup / community rows). Same tag scheme
+# so the UI can tell them from scenario decisions; live only in the
+# CrowdSec decision DB (no file entry, nothing reported to tuxwall.org).
+CUSTOM_LOCAL_BAN_REASON = "custom/local-ban"
 
 
 def _parse_blocklist_entry(value):
@@ -1890,66 +1902,120 @@ def _drop_custom_blocklist_entry(entry):
 
 
 def build_custom_blocklist():
-    """Status view: each file entry with whether a matching ban is active."""
+    """Status view: the custom banlist.
+
+    Two kinds of rows, one view:
+      - "permanent": file entries (1y bans refreshed by the CrowdSec
+        custom-blocklist parser chain), shown even if their decision has
+        lapsed ("not active" until re-applied).
+      - "timed": custom/local-ban decisions made from Top Attackers or the
+        community tab. They live only in the CrowdSec decision DB and
+        expire on their own - once expired they are gone from this view.
+    Nothing here is ever reported to tuxwall.org."""
     entries = _read_custom_blocklist()
     active = {}
+    timed = {}
     cs = build_crowdsec()
     if cs.get("ok"):
         for d in cs.get("decisions", []):
-            if d.get("scenario") == CUSTOM_BLOCKLIST_REASON and d.get("ip"):
+            if d.get("ip") and d.get("scenario") == CUSTOM_BLOCKLIST_REASON:
                 active[d["ip"]] = d
+            elif d.get("ip") and d.get("scenario") == CUSTOM_LOCAL_BAN_REASON:
+                timed[d["ip"]] = d
     rows = []
     for e in entries:
         d = active.get(e)
         rows.append({
             "value": e,
+            "kind": "permanent",
+            "duration": "1y",
             "banned": bool(d),
             "until": (d or {}).get("until") or "",
             "until_ts": (d or {}).get("until_ts"),
             "simulated": bool((d or {}).get("simulated")),
         })
+    # Timed local bans that are not also permanent file entries
+    for ip, d in timed.items():
+        if ip in entries:
+            continue
+        rows.append({
+            "value": ip,
+            "kind": "timed",
+            "duration": "timed",
+            "banned": True,
+            "until": d.get("until") or "",
+            "until_ts": d.get("until_ts"),
+            "simulated": bool(d.get("simulated")),
+        })
     return {
         "ok": True,
         "file": CUSTOM_BLOCKLIST_FILE,
         "entries": rows,
-        "active_count": len(active),
+        "active_count": len(active) + len(timed),
     }
 
 
+def _apply_blocklist_decision(parsed):
+    """Create the long-lived CrowdSec decision for a banlist entry."""
+    args = [CROWDSEC_BIN, "decisions", "add"]
+    if parsed["type"] == "range":
+        args += ["--range", parsed["value"]]
+    else:
+        args += ["--ip", parsed["value"]]
+    args += ["--duration", CUSTOM_BLOCKLIST_DURATION, "--reason", CUSTOM_BLOCKLIST_REASON]
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True,
+                               timeout=CROWDSEC_TIMEOUT)
+    except Exception as exc:
+        return {"ok": False, "warning": str(exc)}
+    if proc.returncode != 0:
+        return {"ok": False, "warning": (proc.stderr or proc.stdout or "cscli failed").strip()}
+    return {"ok": True}
+
+
 def add_custom_blocklist_entry(value):
-    """Add an entry to the list and create a matching long-lived CrowdSec ban."""
+    """Add an entry to the list and create a matching long-lived CrowdSec ban.
+
+    Idempotent: re-adding an entry already in the file re-applies the 1y
+    ban instead of dead-ending (the old "already on the blocklist" error
+    is what left stale "not active" rows with no way to revive them)."""
     parsed, err = _parse_blocklist_entry(value)
     if err:
         return {"ok": False, "error": err}
     entry = parsed["value"]
     if entry in _read_custom_blocklist():
-        return {"ok": False, "error": "%s is already on the blocklist." % entry}
+        # Already listed - make sure the ban is actually alive.
+        result = _apply_blocklist_decision(parsed)
+        if not result.get("ok"):
+            return {"ok": True, "warning": result.get("warning"),
+                    "message": "%s is already on the banlist; the 1y ban re-apply failed "
+                               "(the engine re-applies the file on crowdsec restarts)." % entry}
+        return {"ok": True, "message": "%s is already on the banlist - 1y ban re-applied." % entry}
     if not _append_custom_blocklist_entry(entry):
         return {"ok": False, "error": "Could not write %s." % CUSTOM_BLOCKLIST_FILE}
-    args = [CROWDSEC_BIN, "decisions", "add"]
-    if parsed["type"] == "range":
-        args += ["--range", entry]
-    else:
-        args += ["--ip", entry]
-    args += ["--duration", CUSTOM_BLOCKLIST_DURATION, "--reason", CUSTOM_BLOCKLIST_REASON]
-    try:
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=CROWDSEC_TIMEOUT)
-    except Exception as exc:
-        return {"ok": True, "warning": str(exc),
+    result = _apply_blocklist_decision(parsed)
+    if not result.get("ok"):
+        return {"ok": True, "warning": result.get("warning"),
                 "message": "Added %s to the list, but the CrowdSec ban failed." % entry}
-    if proc.returncode != 0:
-        return {"ok": True, "warning": (proc.stderr or proc.stdout or "").strip(),
-                "message": "Added %s to the list, but the CrowdSec ban failed." % entry}
-    if parsed["type"] == "ip":
-        _spawn_report(entry, "added to custom blocklist", "blocklist", "blocklist")
-    return {"ok": True, "message": "Added %s to the blocklist (1y ban)." % entry}
+    # Deliberately NOT reported to tuxwall.org: community data is
+    # deception-only (canary/honeypot). Blocklist adds are user judgment
+    # and could break services on every install if one leaked into the
+    # community list.
+    return {"ok": True, "message": "Added %s to the banlist (1y ban)." % entry}
 
 
 def remove_custom_blocklist_entry(value):
-    """Drop an entry from the list and delete its CrowdSec decisions."""
+    """Drop an entry from the banlist and delete its CrowdSec decisions.
+
+    File entries follow the rewrite path; timed local bans (not in the
+    file) fall back to plain decision deletion."""
     value = (value or "").strip()
     if value not in _read_custom_blocklist():
-        return {"ok": False, "error": "%s is not on the blocklist." % value}
+        # Not a file entry - a timed local ban. Lift the decision instead.
+        data = unban_crowdsec_ip(value)
+        if data.get("ok"):
+            data["message"] = "Removed the timed ban for %s." % value
+        return data
     if not _drop_custom_blocklist_entry(value):
         return {"ok": False, "error": "Could not write %s." % CUSTOM_BLOCKLIST_FILE}
     parsed, _ = _parse_blocklist_entry(value)
@@ -1967,6 +2033,240 @@ def remove_custom_blocklist_entry(value):
         return {"ok": True, "warning": (proc.stderr or proc.stdout or "").strip(),
                 "message": "Removed %s from the list, but the CrowdSec ban cleanup failed." % value}
     return {"ok": True, "message": "Removed %s from the blocklist." % value}
+
+
+# --- Community bans (tuxwall.org) ------------------------------------------
+# Server-side proxy of the public community ban list for the CrowdSec page.
+# Cached so browsing the tab doesn't re-download 500+ rows on every view;
+# the browser talks only to the local API. Deception-evidence only by
+# policy (enforced collector-side) - see the collector's top_bans().
+# ?limit=20000: the collector's JSON API ceiling (same as its plain-text
+# list endpoint), so the dashboard tab always sees the ENTIRE published
+# list - currently ~3000 IPs / ~850KB; even at the full 20000-row ceiling
+# it stays under the 4MB read guard below. Cached server-side 10 minutes.
+COMMUNITY_BANS_URL = "https://tuxwall.org/api/public/bans?limit=20000"
+COMMUNITY_BANS_TTL = 600  # seconds
+COMMUNITY_BANS_MAX_BYTES = 4 * 1024 * 1024
+COMMUNITY_BANS_CACHE = {"ts": 0.0, "data": None}
+COMMUNITY_BANS_LOCK = threading.Lock()
+
+
+def build_community_bans():
+    now = time.time()
+    with COMMUNITY_BANS_LOCK:
+        cached = COMMUNITY_BANS_CACHE["data"]
+        if cached is not None and now - COMMUNITY_BANS_CACHE["ts"] < COMMUNITY_BANS_TTL:
+            out = dict(cached)
+            out["cached"] = True
+            out["auto"] = _load_community_auto()
+            return out
+    try:
+        req = urllib.request.Request(COMMUNITY_BANS_URL, headers={
+            "User-Agent": "tuxwall-community-bans/1.0",
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read(COMMUNITY_BANS_MAX_BYTES + 1)
+        if len(body) > COMMUNITY_BANS_MAX_BYTES:
+            raise RuntimeError("community ban list too large")
+        payload = json.loads(body.decode("utf-8", errors="replace"))
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            raise RuntimeError("bad payload from tuxwall.org")
+        bans = payload.get("bans")
+        if not isinstance(bans, list):
+            bans = []
+        data = {
+            "ok": True,
+            "generated": payload.get("generated") or "",
+            "total": payload.get("total", len(bans)),
+            "bans": bans,
+        }
+    except Exception as exc:
+        # Serve stale cache if we have it, else surface the error
+        with COMMUNITY_BANS_LOCK:
+            stale = COMMUNITY_BANS_CACHE["data"]
+        if stale is not None:
+            out = dict(stale)
+            out["cached"] = True
+            out["stale"] = True
+            out["auto"] = _load_community_auto()
+            return out
+        return {"ok": False, "error": "tuxwall.org unreachable: %s" % exc,
+                "bans": []}
+    with COMMUNITY_BANS_LOCK:
+        COMMUNITY_BANS_CACHE["ts"] = now
+        COMMUNITY_BANS_CACHE["data"] = data
+    out = dict(data)
+    out["cached"] = False
+    out["auto"] = _load_community_auto()
+    return out
+
+
+# --- Community sharing registration (tuxwall.org) -------------------------
+# Key-only registration so an install's deception evidence becomes
+# "trusted" after TRUST_SECONDS (collector-side). These endpoints send
+# ONLY the locally generated key - no IPs, no logs, nothing else.
+# NOTE: the register URL is derived lazily (in _reporting_register_url)
+# because REPORTING_DEFAULT_URL is defined further down in this file -
+# computing it at module level caused a NameError crash loop.
+
+
+def _reporting_register_url():
+    """tuxwall.org /register endpoint, derived from the configured
+    report URL so a custom reporting host carries over."""
+    conf = load_reporting_conf()
+    base = (conf.get("url") or REPORTING_DEFAULT_URL).rstrip("/")
+    return base.rsplit("/", 1)[0] + "/register"
+
+
+def _reporting_key():
+    """The local install key, created on first use if needed."""
+    conf = load_reporting_conf()
+    if not conf["key"]:
+        conf = ensure_reporting_key()
+    return conf["key"]
+
+
+def community_reporting_status():
+    """Is this install's key registered, and when is its evidence fully
+    trusted? Pure lookup - no data is reported by this call."""
+    key = _reporting_key()
+    out = {"ok": True, "registered": False, "status": "unknown"}
+    try:
+        url = _reporting_register_url() + "?" + urllib.parse.urlencode({"key": key})
+        req = urllib.request.Request(url, headers={"User-Agent": "tuxwall-report/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8") or "{}")
+        if data.get("found"):
+            out["registered"] = True
+            out["status"] = data.get("status") or "active"
+            out["created"] = data.get("created")
+            out["trusted_after"] = data.get("trusted_after")
+    except Exception as exc:
+        out["warning"] = "tuxwall.org unreachable: %s" % exc
+    return out
+
+
+def community_reporting_register():
+    """Register this install's key with tuxwall.org - starts the trust
+    clock at install time instead of at the first catch. Sends ONLY the
+    key."""
+    key = _reporting_key()
+    try:
+        req = urllib.request.Request(
+            _reporting_register_url(),
+            data=json.dumps({"key": key}).encode("utf-8"),
+            headers={"Content-Type": "application/json",
+                     "User-Agent": "tuxwall-report/1.0"},
+            method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8") or "{}")
+        if not data.get("ok"):
+            return {"ok": False, "error": data.get("error") or "registration refused"}
+        return {"ok": True, "status": data.get("status"),
+                "created": data.get("created"),
+                "trusted_after": data.get("trusted_after")}
+    except Exception as exc:
+        return {"ok": False, "error": "tuxwall.org unreachable: %s" % exc}
+
+
+# --- Community auto-ban (tuxwall.org intel -> local enforcement) ---------
+# Optional mode for the Community Bans tab: when enabled, a background
+# worker keeps EVERY listed community IP banned locally (90d decisions,
+# tagged custom/local-ban, never reported). Diff-based: each pass only
+# adds IPs that don't already have an active decision, and 90d expiry
+# self-cleans IPs that fall off the community list.
+COMMUNITY_AUTO_STATE = "/etc/tuxwall/community-auto.json"
+COMMUNITY_AUTO_INTERVAL = 600   # seconds between sync passes
+COMMUNITY_AUTO_BATCH = 800      # max cscli calls per pass (keeps passes short)
+COMMUNITY_AUTO_LOCK = threading.Lock()
+
+
+def _load_community_auto():
+    state = {"enabled": False, "last_sync": 0, "last_pass_added": 0,
+             "added_total": 0, "pending": 0}
+    try:
+        with open(COMMUNITY_AUTO_STATE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            for k in state:
+                if k in data:
+                    state[k] = data[k]
+    except (OSError, ValueError):
+        pass
+    return state
+
+
+def _save_community_auto(state):
+    tmp = COMMUNITY_AUTO_STATE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(state, fh)
+    os.replace(tmp, COMMUNITY_AUTO_STATE)
+
+
+def set_community_auto(enabled):
+    """Toggle automatic community banning. Takes effect immediately (the
+    worker wakes within ~30s; enabling forces a pass on the next tick)."""
+    with COMMUNITY_AUTO_LOCK:
+        state = _load_community_auto()
+        state["enabled"] = bool(enabled)
+        if enabled and not state.get("last_sync"):
+            state["last_sync"] = 0  # force an immediate first pass
+        _save_community_auto(state)
+    return {"ok": True, "auto": state}
+
+
+class CommunityAutoWorker(threading.Thread):
+    """Keeps local 90d bans in sync with the community ban list."""
+
+    def __init__(self):
+        super().__init__(name="community-auto", daemon=True)
+
+    def run(self):
+        while True:
+            try:
+                state = _load_community_auto()
+                if state["enabled"] and time.time() - state["last_sync"] >= COMMUNITY_AUTO_INTERVAL:
+                    self._pass()
+            except Exception:
+                pass
+            time.sleep(30)
+
+    def _pass(self):
+        data = build_community_bans()   # cached (10-min TTL) - shared with UI
+        cs = build_crowdsec()
+        if not data.get("ok") or not cs.get("ok"):
+            return  # unreachable or crowdsec down: retry next tick
+        banned = set()
+        for d in cs.get("decisions", []):
+            if d.get("ip") and d.get("type") != "unban":
+                banned.add(d["ip"])
+        missing = [b["ip"] for b in data.get("bans", [])
+                   if isinstance(b, dict) and b.get("ip") and b["ip"] not in banned]
+        added = 0
+        for ip in missing[:COMMUNITY_AUTO_BATCH]:
+            result = ban_crowdsec_ip(ip, "90d")
+            if result.get("ok"):
+                added += 1
+        with COMMUNITY_AUTO_LOCK:
+            state = _load_community_auto()
+            state["last_sync"] = time.time()
+            state["last_pass_added"] = added
+            state["added_total"] = (state.get("added_total") or 0) + added
+            state["pending"] = max(0, len(missing) - added)
+            _save_community_auto(state)
+
+
+_COMMUNITY_AUTO = None
+_COMMUNITY_AUTO_LOCK2 = threading.Lock()
+
+
+def get_community_auto_worker():
+    global _COMMUNITY_AUTO
+    with _COMMUNITY_AUTO_LOCK2:
+        if _COMMUNITY_AUTO is None:
+            _COMMUNITY_AUTO = CommunityAutoWorker()
+            _COMMUNITY_AUTO.start()
+        return _COMMUNITY_AUTO
 
 
 # --- Security / attack map -----------------------------------------------
@@ -2957,13 +3257,16 @@ def set_canary_enabled(enabled):
         return {"ok": True, "enabled": False, "ports": closed}
 
 
-# --- Community reporting bridge for non-dashboard bans -----------------------
-# Reporting previously fired only from dashboard actions (manual bans,
-# blocklist adds, honeypot auto-bans, the Report button). Bans created
-# outside the dashboard — the CrowdSec engine's own scenario captures and
-# CLI-made cscli decisions — never touched those paths and were silently
-# never reported to tuxwall.org. This watcher polls the live decision list
-# and reports every new non-dashboard decision once (deduped by decision id).
+# --- Community reporting policy ---------------------------------------------
+# tuxwall.org receives deception evidence ONLY: canary and honeypot catches
+# (a completed handshake to a service that does not exist - zero
+# false-positive potential). Manual actions - local timed bans, custom
+# blocklist adds, CLI decisions - are NEVER reported: they carry user
+# judgment, and one bad ban (someone blocking Netflix "thinking it was an
+# attacker") must never be able to break services on every install
+# pulling the community list. The states/helpers below remain for the
+# (removed) engine/CLI decision watcher; kept so old state files and any
+# future watcher skip-list stay consistent with that policy.
 BAN_REPORT_STATE = os.path.join(BLOCKLIST_DIR, "reported-decisions.json")
 BAN_REPORT_LOCK = threading.Lock()
 BAN_REPORT_INTERVAL = 60
@@ -10533,6 +10836,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_crowdsec())
         elif path == "/api/crowdsec/blocklist":
             self._send(200, build_custom_blocklist())
+        elif path == "/api/crowdsec/community-bans":
+            self._send(200, build_community_bans())
+        elif path == "/api/crowdsec/reporting/status":
+            self._send(200, community_reporting_status())
         elif path == "/api/bandwidth":
             self._send(200, build_bandwidth())
         elif path == "/api/blocklists":
@@ -11211,6 +11518,16 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/crowdsec/ban":
             try:
                 self._send(200, ban_crowdsec_ip(body.get("ip"), body.get("duration")))
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+        elif path == "/api/crowdsec/reporting/register":
+            try:
+                self._send(200, community_reporting_register())
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+        elif path == "/api/crowdsec/community-bans/auto":
+            try:
+                self._send(200, set_community_auto(bool(body.get("enabled"))))
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
 
@@ -12991,6 +13308,7 @@ def main():
     get_security_monitor()
     get_system_monitor()
     get_latency_monitor()
+    get_community_auto_worker()   # community auto-ban sync (no-op until enabled)
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     server.daemon_threads = True
     print(f"tuxwall API listening on http://{LISTEN_HOST}:{LISTEN_PORT}", flush=True)

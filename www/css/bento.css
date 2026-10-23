@@ -2089,3 +2089,866 @@ body.light-theme #view-security .card::after { opacity: .35; }
     grid-column: 1 / -1;
   }
 }
+
+/* ============================================================================
+   Security ▸ Attacks — Top Countries, Top Attackers, Hits Over Time
+   ========================================================================= */
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-attack-card {
+  --atk-accent: var(--red);
+  position: relative;
+  overflow: hidden;
+  border-radius: 14px;
+  border-top: 3px solid var(--atk-accent);
+  background:
+    radial-gradient(120% 100% at 100% 0%,
+      color-mix(in srgb, var(--atk-accent) 9%, transparent), transparent 58%),
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--atk-accent) 4%, var(--card)) 0%,
+      color-mix(in srgb, var(--card) 96%, var(--bg)) 62%);
+  box-shadow: var(--shadow-1);
+}
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-countries-card { --atk-accent: var(--red); }
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-ips-card     { --atk-accent: #ff8a3d; }
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-chart-card   { --atk-accent: var(--amber); }
+
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-attack-head {
+  justify-content: flex-start;
+  gap: 10px;
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--atk-accent) 7%, transparent) 0%,
+    transparent 72%);
+  border-bottom-color: color-mix(in srgb, var(--atk-accent) 16%, var(--border));
+}
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-attack-head::before {
+  background: linear-gradient(180deg, var(--atk-accent),
+    color-mix(in srgb, var(--atk-accent) 30%, transparent));
+  opacity: .85;
+}
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-attack-head h2 {
+  padding-left: 0;
+  background: none;
+  -webkit-text-fill-color: currentColor;
+  color: var(--text);
+}
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-head-copy {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-head-copy .muted {
+  font-size: 11px; line-height: 1.4;
+}
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-ico {
+  display: grid; place-items: center; flex: none;
+  width: 30px; height: 30px; border-radius: 9px;
+  color: var(--atk-accent);
+  background: color-mix(in srgb, var(--atk-accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--atk-accent) 30%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 10%, transparent);
+}
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-ico svg {
+  width: 16px; height: 16px; display: block;
+  fill: none; stroke: currentColor; stroke-width: 1.7;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin-left: auto; flex: none;
+  padding: 4px 10px; border-radius: 999px;
+  font-size: 9.5px; font-weight: 700;
+  letter-spacing: .06em; text-transform: uppercase;
+  color: var(--atk-accent);
+  background: color-mix(in srgb, var(--atk-accent) 11%, transparent);
+  border: 1px solid color-mix(in srgb, var(--atk-accent) 32%, transparent);
+  white-space: nowrap;
+}
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-chip-live {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 10%, transparent);
+  border-color: color-mix(in srgb, var(--green) 32%, transparent);
+}
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-chip-live::before {
+  content: ""; width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 7px currentColor;
+  animation: ov-dot-pulse 2.2s ease-in-out infinite;
+}
+
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-attack-toolbar {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--text) 2%, transparent);
+}
+#view-security .fw-pane[data-sec-pane="attacks"] #sec-ban-status {
+  font-size: 11px;
+}
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-bans-note {
+  padding: 3px 8px;
+  border: 1px solid color-mix(in srgb, var(--amber) 24%, var(--border));
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.4;
+}
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-bans-note b { color: var(--amber); font-weight: 600; }
+
+/* Inset tables / chart body */
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-countries-card > .table-wrap,
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-ips-card > .table-wrap {
+  margin: 0 14px;
+  border: 1px solid color-mix(in srgb, var(--atk-accent) 12%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text) 2%, transparent);
+}
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-chart-card .bw-canvas-wrap {
+  margin: 0 14px 14px;
+  padding: 8px 10px 6px;
+  border: 1px solid color-mix(in srgb, var(--atk-accent) 14%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text) 2%, transparent);
+}
+
+/* Country bars */
+#view-security #sec-countries-table .country-bar-wrap {
+  height: 8px;
+  border-radius: 999px;
+}
+#view-security #sec-countries-table .country-bar-fill {
+  border-radius: 999px;
+}
+#view-security #sec-countries-table tbody tr:hover {
+  background: color-mix(in srgb, var(--red) 5%, transparent);
+}
+
+/* Row actions: Ban and community report are the same action-button size. */
+#view-security #sec-ips-table .com-badge {
+  width: 32px; height: 32px; min-width: 32px; min-height: 0;
+  padding: 0; border-radius: 9px;
+  color: var(--sev, var(--muted));
+  background: color-mix(in srgb, var(--sev, var(--muted)) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sev, var(--muted)) 36%, var(--border));
+  box-shadow: none;
+}
+#view-security #sec-ips-table .com-badge svg {
+  width: 15px; height: 15px; display: block;
+  fill: none; stroke: currentColor;
+  stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+}
+#view-security #sec-ips-table .com-badge:hover {
+  color: var(--sev, var(--text));
+  background: color-mix(in srgb, var(--sev, var(--muted)) 18%, transparent);
+  border-color: color-mix(in srgb, var(--sev, var(--muted)) 62%, var(--border));
+  box-shadow: 0 0 12px color-mix(in srgb, var(--sev, var(--muted)) 24%, transparent);
+}
+
+@media (max-width: 560px) {
+  #view-security #sec-ips-body .com-badge {
+    width: auto; min-width: 34px; height: 36px; min-height: 36px;
+    padding: 0 9px; gap: 6px;
+  }
+  #view-security #sec-ips-body .com-badge::after {
+    content: "Report";
+    font-size: 11px; font-weight: 600; letter-spacing: .01em;
+  }
+}
+
+@media (max-width: 900px) {
+  /* Honour the 10-row cap in the mobile card layout. */
+  #view-security #sec-countries-table tbody tr.tw-row-capped,
+  #view-security #sec-ips-table tbody tr.tw-row-capped { display: none; }
+  #view-security .fw-pane[data-sec-pane="attacks"] .sec-countries-card > .table-wrap,
+  #view-security .fw-pane[data-sec-pane="attacks"] .sec-ips-card > .table-wrap {
+    margin: 0 10px;
+  }
+  #view-security .fw-pane[data-sec-pane="attacks"] .sec-attack-head { flex-wrap: wrap; }
+  #view-security .fw-pane[data-sec-pane="attacks"] .sec-chip { font-size: 9px; }
+}
+
+/* Keep the inset tables inside the bento card and keep the action column visible. */
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-countries-card > .table-wrap,
+#view-security .fw-pane[data-sec-pane="attacks"] .sec-ips-card > .table-wrap {
+  width: calc(100% - 28px);
+  max-width: calc(100% - 28px);
+  min-width: 0;
+}
+#view-security #sec-ips-table th,
+#view-security #sec-ips-table td {
+  padding-left: 8px;
+  padding-right: 8px;
+}
+@media (max-width: 900px) {
+  #view-security .fw-pane[data-sec-pane="attacks"] .sec-countries-card > .table-wrap,
+  #view-security .fw-pane[data-sec-pane="attacks"] .sec-ips-card > .table-wrap {
+    width: calc(100% - 20px);
+    max-width: calc(100% - 20px);
+  }
+}
+
+/* ============================================================================
+   CrowdSec ▸ Community Bans — bento card, sharing controls, auto slider
+   ========================================================================= */
+#view-crowdsec .fw-pane[data-cs-pane="community"] .cban-card {
+  --cban-accent: var(--green);
+  position: relative;
+  overflow: hidden;
+  border-radius: 14px;
+  border-top: 3px solid var(--cban-accent);
+  background:
+    radial-gradient(120% 100% at 100% 0%,
+      color-mix(in srgb, var(--cban-accent) 9%, transparent), transparent 58%),
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--cban-accent) 4%, var(--card)) 0%,
+      color-mix(in srgb, var(--card) 96%, var(--bg)) 62%);
+  box-shadow: var(--shadow-1);
+}
+#view-crowdsec .fw-pane[data-cs-pane="community"] .cban-head {
+  justify-content: flex-start;
+  gap: 10px;
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--cban-accent) 7%, transparent) 0%,
+    transparent 72%);
+  border-bottom-color: color-mix(in srgb, var(--cban-accent) 16%, var(--border));
+}
+#view-crowdsec .fw-pane[data-cs-pane="community"] .cban-head::before {
+  background: linear-gradient(180deg, var(--cban-accent),
+    color-mix(in srgb, var(--cban-accent) 30%, transparent));
+  opacity: .85;
+}
+#view-crowdsec .fw-pane[data-cs-pane="community"] .cban-head h2 {
+  padding-left: 0;
+  background: none;
+  -webkit-text-fill-color: currentColor;
+  color: var(--text);
+}
+#view-crowdsec .fw-pane[data-cs-pane="community"] .cban-head-copy {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+#view-crowdsec .fw-pane[data-cs-pane="community"] .cban-head-copy .muted {
+  font-size: 11px; line-height: 1.4;
+}
+#view-crowdsec .fw-pane[data-cs-pane="community"] .cban-ico {
+  display: grid; place-items: center; flex: none;
+  width: 30px; height: 30px; border-radius: 9px;
+  color: var(--cban-accent);
+  background: color-mix(in srgb, var(--cban-accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--cban-accent) 30%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 10%, transparent);
+}
+#view-crowdsec .fw-pane[data-cs-pane="community"] .cban-ico svg {
+  width: 16px; height: 16px; display: block;
+  fill: none; stroke: currentColor; stroke-width: 1.7;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+#view-crowdsec .fw-pane[data-cs-pane="community"] .cban-chip {
+  flex: none; margin-left: auto;
+  max-width: 230px;
+  padding: 4px 9px; border-radius: 999px;
+  color: var(--cban-accent);
+  background: color-mix(in srgb, var(--cban-accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--cban-accent) 30%, transparent);
+  font-size: 9.5px; font-weight: 700;
+  letter-spacing: .03em; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+
+#view-crowdsec .fw-pane[data-cs-pane="community"] .cban-toolbar {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--text) 2%, transparent);
+}
+#view-crowdsec .cban-filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+#view-crowdsec .cban-filters .btn {
+  padding: 5px 11px; font-size: 10.5px; letter-spacing: .06em;
+}
+#view-crowdsec .cban-filters .btn.btn-primary {
+  color: #06130a;
+  background: var(--green);
+  border-color: var(--green);
+}
+#view-crowdsec .cban-status { font-size: 11px; }
+
+#view-crowdsec .fw-pane[data-cs-pane="community"] .cban-controls {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 12px; padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+#view-crowdsec .fw-pane[data-cs-pane="community"] .cban-auto-panel,
+#view-crowdsec .fw-pane[data-cs-pane="community"] .cban-share-panel {
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: 9px; padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--text) 2.5%, transparent);
+}
+#view-crowdsec .cban-auto-copy,
+#view-crowdsec .cban-share-copy {
+  flex: 1 1 190px; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+#view-crowdsec .cban-auto-copy strong,
+#view-crowdsec .cban-share-copy strong {
+  font-size: 12px; color: var(--text);
+}
+#view-crowdsec .cban-auto-copy .muted,
+#view-crowdsec .cban-share-copy .muted {
+  font-size: 11px; line-height: 1.4;
+}
+#view-crowdsec .cban-share-copy .muted { overflow-wrap: anywhere; }
+#view-crowdsec .cban-switch { margin-left: auto; }
+#view-crowdsec .fw-switch input:checked + .fw-switch-slider {
+  background: var(--green);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--green) 35%, transparent);
+}
+#view-crowdsec .cban-auto-stats {
+  flex: 1 1 100%; margin: 0;
+  font-size: 10.5px; color: var(--muted);
+}
+
+/* Green / red state pills for auto mode + community sharing. */
+#view-crowdsec .cban-state-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  flex: none; padding: 3px 9px; border-radius: 999px;
+  font-size: 9px; font-weight: 800;
+  letter-spacing: .06em; text-transform: uppercase;
+  white-space: nowrap;
+}
+#view-crowdsec .cban-state-badge::before {
+  content: ""; width: 5px; height: 5px; border-radius: 50%;
+  background: currentColor; box-shadow: 0 0 6px currentColor;
+}
+#view-crowdsec .cban-state-badge[data-state="active"] {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 11%, transparent);
+  border: 1px solid color-mix(in srgb, var(--green) 36%, transparent);
+}
+#view-crowdsec .cban-state-badge[data-state="inactive"] {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 34%, transparent);
+}
+#view-crowdsec .cban-state-badge[data-state="pending"] {
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 11%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber) 34%, transparent);
+}
+#view-crowdsec .cban-state-badge[data-state="unknown"] {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--muted) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--muted) 26%, transparent);
+}
+
+/* Severity pills */
+#view-crowdsec .cban-sev {
+  display: inline-block; padding: 2px 8px; border-radius: 999px;
+  font-size: 9px; font-weight: 800; letter-spacing: .05em;
+  border: 1px solid transparent;
+}
+#view-crowdsec .cban-sev-low {
+  color: var(--muted); background: color-mix(in srgb, var(--muted) 10%, transparent);
+  border-color: color-mix(in srgb, var(--muted) 25%, transparent);
+}
+#view-crowdsec .cban-sev-medium {
+  color: var(--amber); background: color-mix(in srgb, var(--amber) 11%, transparent);
+  border-color: color-mix(in srgb, var(--amber) 32%, transparent);
+}
+#view-crowdsec .cban-sev-high {
+  color: var(--red); background: color-mix(in srgb, var(--red) 11%, transparent);
+  border-color: color-mix(in srgb, var(--red) 34%, transparent);
+}
+#view-crowdsec .cban-sev-critical {
+  color: #bc8cff; background: rgba(188,140,255,0.11);
+  border-color: rgba(188,140,255,0.35);
+}
+
+/* Table inset + internal scroll so a 3,000-row list stays a compact panel. */
+#view-crowdsec .fw-pane[data-cs-pane="community"] .cban-table-wrap {
+  width: calc(100% - 28px);
+  max-width: calc(100% - 28px);
+  max-height: 600px;
+  margin: 14px;
+  border: 1px solid color-mix(in srgb, var(--cban-accent) 14%, var(--border));
+  border-radius: 10px;
+  overflow: auto;
+  background: color-mix(in srgb, var(--text) 2%, transparent);
+}
+#view-crowdsec #cban-table thead th {
+  position: sticky; top: 0; z-index: 2;
+  background: var(--card);
+}
+#view-crowdsec #cban-table tbody tr:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
+#view-crowdsec .cban-more-row td { border-bottom: 0; }
+
+@media (max-width: 900px) {
+  #view-crowdsec .fw-pane[data-cs-pane="community"] .cban-controls { grid-template-columns: 1fr; }
+  #view-crowdsec .fw-pane[data-cs-pane="community"] .cban-table-wrap {
+    width: calc(100% - 20px);
+    max-width: calc(100% - 20px);
+    max-height: 68vh;
+    margin: 10px;
+    overflow-x: hidden;
+  }
+  #view-crowdsec #cban-table { display: block; width: 100%; min-width: 0; }
+  #view-crowdsec #cban-table thead { display: none; }
+  #view-crowdsec #cban-table tbody { display: block; }
+  #view-crowdsec #cban-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 5px 10px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  #view-crowdsec #cban-table tbody tr:last-child { border-bottom: 0; }
+  #view-crowdsec #cban-table tbody td {
+    display: block; min-width: 0; padding: 0; border: 0;
+    white-space: normal; overflow-wrap: anywhere;
+  }
+  #view-crowdsec #cban-table tbody td:nth-child(1) {
+    grid-column: 1 / -1; grid-row: 1;
+    font-size: 12px; line-height: 1.45;
+  }
+  #view-crowdsec #cban-table tbody td:nth-child(2) { grid-column: 1; grid-row: 2; }
+  #view-crowdsec #cban-table tbody td:nth-child(3) { grid-column: 2; grid-row: 2; justify-self: end; text-align: right; }
+  #view-crowdsec #cban-table tbody td:nth-child(4) { grid-column: 3; grid-row: 2; justify-self: end; text-align: right; }
+  #view-crowdsec #cban-table tbody td:nth-child(5) { grid-column: 1 / -1; grid-row: 3; color: var(--muted); font-size: 12px; }
+  #view-crowdsec #cban-table tbody td:nth-child(6) { grid-column: 1 / -1; grid-row: 4; color: var(--muted); font-size: 12px; }
+  #view-crowdsec #cban-table tbody td:nth-child(7) { grid-column: 1; grid-row: 5; font-size: 11px; }
+  #view-crowdsec #cban-table tbody td:nth-child(8) {
+    grid-column: 2 / -1; grid-row: 5;
+    display: flex; justify-content: flex-end;
+  }
+  #view-crowdsec #cban-table tbody td:nth-child(3)::before { content: "Hits "; font-size: 9px; letter-spacing: .06em; color: var(--muted); }
+  #view-crowdsec #cban-table tbody td:nth-child(4)::before { content: "Reporters "; font-size: 9px; letter-spacing: .06em; color: var(--muted); }
+  #view-crowdsec #cban-table tbody td:nth-child(5)::before { content: "Location "; font-size: 9px; letter-spacing: .06em; text-transform: uppercase; }
+  #view-crowdsec #cban-table tbody td:nth-child(6)::before { content: "ISP / AS "; font-size: 9px; letter-spacing: .06em; text-transform: uppercase; }
+  #view-crowdsec #cban-table tbody td:nth-child(7)::before { content: "Last seen "; font-size: 9px; letter-spacing: .06em; text-transform: uppercase; }
+  #view-crowdsec #cban-table tbody tr.cban-more-row { display: block; padding: 10px; }
+  #view-crowdsec #cban-table tbody tr.cban-more-row td { grid-column: 1 / -1; }
+}
+
+@media (max-width: 560px) {
+  #view-crowdsec #cban-body .cban-ban {
+    width: auto; min-width: 34px; height: 36px;
+    padding: 0 9px; gap: 6px;
+  }
+  #view-crowdsec #cban-body .cban-ban::after {
+    content: "Ban"; font-size: 11px; font-weight: 600; letter-spacing: .01em;
+  }
+}
+
+/* ============================================================================
+   Global card glow — a moving theme-coloured light along the top edge of every
+   dashboard card. The span is injected by dashboard.js so it never fights the
+   existing ::before/::after styling on individual cards.
+   ========================================================================= */
+.card-topglow {
+  position: absolute;
+  z-index: 6;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  display: block;
+  border-radius: 999px 999px 0 0;
+  pointer-events: none;
+  background: linear-gradient(90deg,
+    var(--accent), var(--green), var(--teal, #39c5cf),
+    var(--amber), var(--red), #a371f7, var(--accent));
+  background-size: 300% 100%;
+  background-position: 0% 50%;
+  opacity: .9;
+  animation: card-topglow-slide 9s linear infinite;
+}
+.card-topglow::before {
+  content: "";
+  position: absolute;
+  inset: -5px 0 -10px 0;
+  background: inherit;
+  background-size: 300% 100%;
+  filter: blur(11px);
+  opacity: .38;
+  animation: inherit;
+}
+@keyframes card-topglow-slide {
+  from { background-position: 0% 50%; }
+  to   { background-position: 300% 50%; }
+}
+/* Needed for plain stat tiles, which did not establish a containing block. */
+.card-topglow-host,
+.stat-card { position: relative; overflow: hidden; }
+body.light-theme .card-topglow { opacity: .72; }
+body.light-theme .card-topglow::before { opacity: .26; }
+@media (prefers-reduced-motion: reduce) {
+  .card-topglow,
+  .card-topglow::before { animation: none; }
+}
+
+/* Remove the legacy vertical accent bar in card headers. The animated top
+   glow now provides the colour cue; keep the heading aligned with content. */
+.card-head::before { display: none !important; }
+.card-head h2 { padding-left: 0; }
+
+/* The rotating top glow is now the single source of top light. Neutralise
+   the old static card top borders, stat bars, sheens and corner glow discs
+   so nothing doubles up behind it. */
+:is(.card, .ov-mon, .stat-card, .fw-card) {
+  border-top-width: 1px !important;
+  border-top-color: var(--border) !important;
+}
+.stat-card.stat-c::before { display: none !important; }
+#view-overview .card::after,
+#view-security .card::after,
+.fw-card::after { display: none !important; }
+#view-overview .ov-post-card::after,
+#view-overview .ov-wan-card::after,
+#view-overview .ov-lan-card::after { display: none !important; }
+#view-overview .ov-mon {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--c, var(--accent)) 7%, var(--card)) 0%,
+    color-mix(in srgb, var(--card) 96%, var(--bg)) 60%);
+}
+
+/* One uniform surface for every card now that the top glow carries the
+   per-card colour. This deliberately drops the accent-tinted backgrounds so
+   cards on different pages match exactly. */
+:is(.card, .ov-mon, .stat-card, .fw-card) {
+  background: linear-gradient(160deg,
+    var(--card) 0%,
+    color-mix(in srgb, var(--card) 92%, var(--bg)) 100%) !important;
+}
+:is(.card, .ov-mon, .stat-card, .fw-card) .card-head {
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--border) 40%, var(--card)) 0%,
+    var(--card) 100%) !important;
+}
+
+/* ============================================================================
+   System ▸ Traffic Shaping — neutral solid surface, no tinted mixes
+   ========================================================================= */
+#sqm-card {
+  background: var(--card) !important;
+  border-color: var(--border);
+  overflow: hidden;
+}
+#sqm-card > .card-head {
+  background: var(--card) !important;
+  justify-content: flex-start;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+}
+#sqm-card .sqm-ico {
+  display: grid; place-items: center; flex: none;
+  width: 30px; height: 30px; border-radius: 9px;
+  color: var(--accent);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+}
+#sqm-card .sqm-ico svg {
+  width: 16px; height: 16px; display: block;
+  fill: none; stroke: currentColor; stroke-width: 1.7;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+#sqm-card .sqm-head-copy {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+#sqm-card .sqm-head-copy h2 {
+  padding-left: 0;
+  background: none;
+  -webkit-text-fill-color: currentColor;
+  color: var(--text);
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 7px;
+  font-size: 14px;
+}
+#sqm-card .sqm-head-copy h2 .muted {
+  font-size: 9.5px; font-weight: 600;
+  letter-spacing: .08em; text-transform: uppercase;
+}
+#sqm-card #sqm-status-note {
+  font-size: 11px; line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+#sqm-card .sqm-state {
+  display: inline-flex; align-items: center; flex: none;
+  margin-left: auto; padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  color: var(--muted);
+  font-size: 9.5px; font-weight: 700;
+  letter-spacing: .06em; text-transform: uppercase;
+  white-space: nowrap;
+}
+#sqm-card #sqm-status { display: inline-flex; align-items: center; }
+#sqm-card .sqm-status-dot { margin-right: 7px; }
+
+#sqm-card .sqm-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+}
+#sqm-card .sys-cache-item {
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  transition: none;
+}
+#sqm-card .sys-cache-item:hover {
+  transform: none;
+  border-color: var(--border);
+  background: var(--bg-elev);
+}
+#sqm-card .sys-cache-item > span {
+  display: flex; align-items: center; gap: 4px;
+  color: var(--muted);
+  font-size: 9.5px; font-weight: 700;
+  letter-spacing: .07em; text-transform: uppercase;
+}
+#sqm-card .sys-cache-item > b {
+  display: block;
+  margin-top: 4px;
+  color: var(--text);
+  font-size: 15px; font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+#sqm-card #sqm-drops { font-size: 13px; line-height: 1.45; }
+#sqm-card .sqm-down-value,
+#sqm-card .sqm-up-value { color: var(--text) !important; }
+#sqm-card .sys-arrow {
+  color: var(--muted);
+  text-shadow: none;
+  animation: none;
+  font-size: 12px;
+}
+
+#sqm-card .sqm-form {
+  margin: 14px 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border) !important;
+  border-radius: 10px;
+  background: var(--bg-elev) !important;
+}
+#sqm-card .sqm-form label {
+  color: var(--muted);
+  font-size: 10px; font-weight: 700;
+  letter-spacing: .06em; text-transform: uppercase;
+}
+#sqm-card .sqm-form input[type="number"] {
+  width: 104px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--card);
+  color: var(--text);
+  font: inherit; font-size: 12.5px;
+}
+#sqm-card .sqm-form input[type="number"]:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+#sqm-card .sqm-form .btn { border-radius: 7px; }
+#sqm-card #sqm-hint { font-size: 11px; }
+#sqm-card .sqm-note {
+  margin: 0 16px 16px !important;
+  padding: 12px 14px !important;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elev) !important;
+  color: var(--muted);
+}
+#sqm-card #sqm-test-box {
+  margin: 0 16px 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elev);
+}
+
+@media (max-width: 700px) {
+  #sqm-card .sqm-stats { grid-template-columns: 1fr 1fr; }
+  #sqm-card .sqm-stats .sys-cache-item:last-child { grid-column: 1 / -1; }
+  #sqm-card .sqm-form .toolbar-spacer { display: none; }
+  #sqm-card .sqm-form .btn { flex: 1 1 auto; justify-content: center; }
+  #sqm-card #sqm-hint { flex: 1 1 100%; }
+  #sqm-card .sqm-head-copy h2 { font-size: 13px; }
+}
+
+/* Keep the SQM explanatory note neutral too (global .bl-note adds a blue rail). */
+#sqm-card .sqm-note {
+  border-left: 1px solid var(--border) !important;
+}
+
+/* ============================================================================
+   Logs — neutral solid surface, no tinted mixes
+   ========================================================================= */
+#view-logs .log-card {
+  background: var(--card) !important;
+  border-color: var(--border);
+}
+#view-logs .log-card > .log-head {
+  background: var(--card) !important;
+  justify-content: flex-start;
+  gap: 10px;
+  border-bottom: 0;
+  padding: 14px 16px;
+}
+#view-logs .log-ico {
+  display: grid; place-items: center; flex: none;
+  width: 30px; height: 30px; border-radius: 9px;
+  color: var(--accent);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+}
+#view-logs .log-ico svg {
+  width: 16px; height: 16px; display: block;
+  fill: none; stroke: currentColor; stroke-width: 1.7;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+#view-logs .log-head-copy {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+#view-logs .log-head-copy h2 {
+  padding-left: 0;
+  background: none;
+  -webkit-text-fill-color: currentColor;
+  color: var(--text);
+  font-size: 14px;
+}
+#view-logs .log-head-copy > .muted {
+  font-size: 11px;
+  line-height: 1.4;
+  letter-spacing: .02em;
+}
+#view-logs .log-live {
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
+  margin-left: auto; padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  color: var(--muted);
+  font-size: 9px; font-weight: 800;
+  letter-spacing: .07em; text-transform: uppercase;
+  white-space: nowrap;
+}
+#view-logs .log-live::before {
+  content: "";
+  width: 5px; height: 5px; border-radius: 50%;
+  background: currentColor;
+}
+#view-logs .log-live.is-live {
+  color: var(--green);
+  border-color: var(--green);
+}
+#view-logs .log-live.is-paused {
+  color: var(--red);
+  border-color: var(--red);
+}
+
+#view-logs .log-toolbar {
+  background: var(--bg-elev) !important;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 10px 16px;
+  gap: 10px;
+}
+#view-logs .log-ctl {
+  gap: 8px;
+  color: var(--muted);
+  font-size: 9.5px; font-weight: 700;
+  letter-spacing: .07em; text-transform: uppercase;
+}
+#view-logs .log-ctl select {
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 6px 9px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+#view-logs .log-ctl select:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+#view-logs .log-toolbar .btn {
+  padding: 6px 11px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--card);
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+#view-logs .log-toolbar .btn:hover {
+  background: var(--bg-elev);
+  border-color: var(--muted);
+}
+#view-logs .log-follow {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--card);
+  color: var(--muted);
+  font-size: 11px; font-weight: 600;
+  letter-spacing: 0; text-transform: none;
+  cursor: pointer;
+}
+#view-logs .log-follow input {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+#view-logs .log-view {
+  margin: 14px 16px;
+  min-height: clamp(240px, 52vh, 640px);
+  max-height: 68vh;
+  background: var(--bg) !important;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--muted);
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+#view-logs .log-view::-webkit-scrollbar { width: 9px; }
+#view-logs .log-view::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+#view-logs .log-meta {
+  margin: 0 16px 14px;
+  font-size: 11px;
+  letter-spacing: .02em;
+}
+
+@media (max-width: 760px) {
+  #view-logs .log-card > .log-head { padding: 12px 14px; }
+  #view-logs .log-toolbar { padding: 10px 12px; gap: 8px; }
+  #view-logs .log-ctl { flex: 1 1 auto; }
+  #view-logs .log-ctl:first-child { flex: 1 1 100%; }
+  #view-logs .log-ctl select { width: 100%; }
+  #view-logs .log-toolbar .btn { flex: 1 1 0; justify-content: center; }
+  #view-logs .log-follow { flex: 1 1 100%; justify-content: flex-start; }
+  #view-logs .log-view {
+    margin: 10px 12px;
+    padding: 12px;
+    font-size: 11px;
+    min-height: 46vh;
+    max-height: 62vh;
+  }
+  #view-logs .log-meta { margin: 0 12px 12px; }
+}
+
+@media (max-width: 760px) {
+  /* Keep Refresh and Copy on their own full-width row instead of squeezing. */
+  #view-logs .log-toolbar .btn { flex: 1 1 calc(50% - 4px); min-width: 0; }
+}

@@ -1,0 +1,11 @@
+type: trigger
+name: custom/custom-blocklist
+description: "Ban IPs present in the custom blocklist file"
+filter: evt.Meta.log_type == 'custom_blocklist'
+groupby: evt.Meta.source_ip
+distinct: evt.Meta.source_ip
+capacity: 0
+labels:
+  service: custom-blocklist
+  remediation: true
+  confidence: 1

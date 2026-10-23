@@ -1,0 +1,17 @@
+name: custom/custom-blocklist
+description: "Parse entries from the custom IP blocklist"
+onsuccess: next_stage
+pattern_syntax:
+  CUSTOM_IPV4: "(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)"
+  CUSTOM_IPV6: "[0-9a-fA-F:]+"
+  CUSTOM_CIDR: "%{CUSTOM_IPV4}/\\d{1,2}"
+  CUSTOM_ENTRY: "%{CUSTOM_IPV4}|%{CUSTOM_IPV6}|%{CUSTOM_CIDR}"
+nodes:
+  - grok:
+      pattern: "^%{CUSTOM_ENTRY:source_ip}$"
+      apply_on: message
+    statics:
+      - meta: log_type
+        value: custom_blocklist
+      - meta: source_ip
+        expression: evt.Parsed.source_ip

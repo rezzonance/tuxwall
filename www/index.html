@@ -6,14 +6,14 @@
   <title>TuxWall - Network Dashboard</title>
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
-  <link rel="stylesheet" href="/css/style.css?v=20261021a">
-  <link rel="stylesheet" href="/css/polish.css?v=20261021b">
-  <link rel="stylesheet" href="/css/firewall.css?v=20261021a">
-  <link rel="stylesheet" href="/css/bento.css?v=20261021t">
-  <link rel="stylesheet" href="/css/heroes.css?v=20261021a">
-  <link rel="stylesheet" href="/css/sidebar.css?v=20261020b">
-  <link rel="stylesheet" href="/css/action-icons.css?v=20261020b">
-  <link rel="stylesheet" href="/css/subtab-icons.css?v=20261020b">
+  <link rel="stylesheet" href="/css/style.css?v=202610212349">
+  <link rel="stylesheet" href="/css/polish.css?v=202610212349">
+  <link rel="stylesheet" href="/css/firewall.css?v=202610212349">
+  <link rel="stylesheet" href="/css/bento.css?v=20261022m">
+  <link rel="stylesheet" href="/css/heroes.css?v=202610212349">
+  <link rel="stylesheet" href="/css/sidebar.css?v=202610212349">
+  <link rel="stylesheet" href="/css/action-icons.css?v=202610212349">
+  <link rel="stylesheet" href="/css/subtab-icons.css?v=202610212349">
 </head>
 <body>
 <div id="login-gate" class="login-gate" hidden>
@@ -1552,10 +1552,17 @@
       </div>
 
       <div class="sec-full-cards">
-        <div class="card card-mt">
-          <div class="card-head"><h2>Top Countries</h2></div>
+        <div class="card card-mt sec-attack-card sec-countries-card">
+          <div class="card-head sec-attack-head">
+            <span class="sec-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3Z"/></svg></span>
+            <div class="sec-head-copy">
+              <h2>Top Countries</h2>
+              <span class="muted">Blocked sources by origin</span>
+            </div>
+            <span class="sec-chip" id="sec-countries-chip">—</span>
+          </div>
           <div class="table-wrap">
-            <table id="sec-countries-table">
+            <table id="sec-countries-table" data-tw-cap="10">
               <thead><tr><th>Country</th><th>Share</th><th>Hits</th><th>%</th></tr></thead>
               <tbody id="sec-countries-body"></tbody>
             </table>
@@ -1564,18 +1571,23 @@
             <button id="sec-countries-more" class="btn btn-ghost btn-sm" type="button">Show more</button>
           </div>
         </div>
-        <div class="card card-mt">
-          <div class="card-head">
-            <h2>Top Attackers</h2>
-            <div class="card-toolbar bl-toolbar">
-              <button id="sec-ban-all" class="btn btn-sm btn-danger btn-act" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M5.64 5.64 18.36 18.36"/></svg><span>Add Top 25</span></button>
-              <span class="toolbar-spacer"></span>
-              <span class="muted" id="sec-ban-status"></span>
-              <span class="muted" title="Ban/unban applies CrowdSec decisions on this router only - these bans are never reported to tuxwall.org (community reporting is deception-catch only)"><b>Local CrowdSec bans only</b></span>
+        <div class="card card-mt sec-attack-card sec-ips-card">
+          <div class="card-head sec-attack-head">
+            <span class="sec-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="2.4"/></svg></span>
+            <div class="sec-head-copy">
+              <h2>Top Attackers</h2>
+              <span class="muted">Sources ranked by hits</span>
             </div>
+            <span class="sec-chip" id="sec-ips-chip">—</span>
+          </div>
+          <div class="card-toolbar bl-toolbar sec-attack-toolbar">
+            <button id="sec-ban-all" class="btn btn-sm btn-danger btn-act" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M5.64 5.64 18.36 18.36"/></svg><span>Ban top 25</span></button>
+            <span class="muted" id="sec-ban-status"></span>
+            <span class="toolbar-spacer"></span>
+            <span class="muted sec-bans-note" title="Ban/unban applies CrowdSec decisions on this router only - these bans are never reported to tuxwall.org (community reporting is deception-catch only)"><b>Local CrowdSec bans only</b></span>
           </div>
           <div class="table-wrap">
-            <table id="sec-ips-table">
+            <table id="sec-ips-table" data-tw-cap="10">
               <thead><tr><th>Source IP</th><th>Threat</th><th>Location / ISP</th><th>Port</th><th>Hits</th><th>Last seen</th><th class="td-right">Actions</th></tr></thead>
               <tbody id="sec-ips-body"></tbody>
             </table>
@@ -1587,10 +1599,14 @@
 
       </div><!-- end sec-full-cards -->
 
-        <div class="card card-mt" id="sec-chart-card">
-          <div class="card-head">
-            <h2>Hits Over Time</h2>
-            <span class="muted">Last 10 minutes · 10s buckets · hover for detail</span>
+        <div class="card card-mt sec-attack-card sec-chart-card" id="sec-chart-card">
+          <div class="card-head sec-attack-head">
+            <span class="sec-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12h4l2.5-6 5 12 2.5-6h4"/></svg></span>
+            <div class="sec-head-copy">
+              <h2>Hits Over Time</h2>
+              <span class="muted">Last 10 minutes · 10s buckets · hover for detail</span>
+            </div>
+            <span class="sec-chip sec-chip-live">live</span>
           </div>
           <div class="bw-canvas-wrap"><canvas id="sec-chart" class="bw-canvas"></canvas></div>
         </div>
@@ -1968,7 +1984,8 @@
       <div class="fw-subtabs" id="cs-subtabs">
         <button class="fw-subtab active" type="button" data-cs-pane="decisions">Decisions &amp; Alerts</button>
         <button class="fw-subtab" type="button" data-cs-pane="bouncers">Bouncers</button>
-        <button class="fw-subtab" type="button" data-cs-pane="blocklist">Custom Blocklist</button>
+        <button class="fw-subtab" type="button" data-cs-pane="blocklist">Custom Banlist</button>
+        <button class="fw-subtab" type="button" data-cs-pane="community">Community Bans</button>
         <span class="fw-subtabs-fill"></span>
       </div>
 
@@ -2014,12 +2031,12 @@
       <div class="fw-pane" data-cs-pane="blocklist" hidden>
       <div class="card card-mt">
         <div class="card-head">
-          <h2>Custom Blocklist</h2>
+          <h2>Custom Banlist</h2>
           <span class="muted mono" id="cbl-file"></span>
         </div>
         <div class="card-toolbar">
           <input type="text" id="cbl-input" placeholder="IP or CIDR, e.g. 203.0.113.9 or 45.198.224.0/24" autocomplete="off" spellcheck="false">
-          <button id="cbl-add" class="btn btn-primary" type="button">Add to blocklist</button>
+          <button id="cbl-add" class="btn btn-primary" type="button">Add permanent (1y)</button>
           <span class="toolbar-spacer"></span>
           <span class="muted" id="cbl-status"></span>
         </div>
@@ -2028,15 +2045,89 @@
             <thead>
               <tr>
                 <th>Entry</th>
+                <th>Kind</th>
                 <th>Status</th>
-                <th>Ban Expires</th>
+                <th>Duration</th>
                 <th style="width:90px"></th>
               </tr>
             </thead>
             <tbody id="cbl-body"></tbody>
           </table>
         </div>
-        <div id="cbl-empty" class="empty" hidden>No custom entries. Add an IP or CIDR above to ban it permanently.</div>
+        <div id="cbl-empty" class="empty" hidden>No entries. Timed bans from Top Attackers land here too, with their duration and a delete button.</div>
+        <p class="muted bl-note">
+          <b>Permanent</b> — file-backed 1&#8209;year bans, re-applied automatically by CrowdSec.&nbsp;
+          <b>Timed</b> — local decisions (e.g. 90d) that expire on their own.&nbsp;
+          Bans here stay on this firewall only — nothing is reported to the tuxwall.org community list, which is built exclusively from canary/honeypot evidence.
+        </p>
+      </div>
+      </div>
+
+      <!-- ── Pane: Community Bans (tuxwall.org) ────────────────────────── -->
+      <div class="fw-pane" data-cs-pane="community" hidden>
+      <div class="card card-mt cban-card">
+        <div class="card-head cban-head">
+          <span class="cban-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3Z"/></svg></span>
+          <div class="cban-head-copy">
+            <h2>Community Bans <span class="muted">— tuxwall.org</span></h2>
+            <span class="muted">Deception-verified IPs from the community list</span>
+          </div>
+          <span class="cban-chip" id="cban-generated">—</span>
+        </div>
+        <div class="card-toolbar cban-toolbar">
+          <div class="cban-filters" role="group" aria-label="Filter community bans by severity">
+            <button class="btn btn-sm btn-primary" type="button" data-cban-sev="all">All</button>
+            <button class="btn btn-sm" type="button" data-cban-sev="high">High+</button>
+            <button class="btn btn-sm" type="button" data-cban-sev="medium">Medium+</button>
+          </div>
+          <span class="toolbar-spacer"></span>
+          <button class="btn btn-sm btn-primary" type="button" id="cban-ban-all">Ban all shown (90d)</button>
+          <span class="muted cban-status" id="cban-status"></span>
+        </div>
+        <div class="cban-controls">
+          <div class="cban-auto-panel">
+            <div class="cban-auto-copy">
+              <strong>Automatic mode</strong>
+              <span class="muted">Ban every community IP locally for 90 days — never reported back.</span>
+            </div>
+            <span class="cban-state-badge" id="cban-auto-badge" data-state="off" role="status" aria-live="polite">Inactive</span>
+            <label class="fw-switch cban-switch" title="Ban every listed community IP locally for 90 days">
+              <input type="checkbox" id="cban-auto">
+              <span class="fw-switch-slider"></span>
+            </label>
+            <span class="muted cban-auto-stats" id="cban-auto-stats">Auto: off — manual ban buttons</span>
+          </div>
+          <div class="cban-share-panel">
+            <span class="cban-state-badge" id="cban-share-badge" data-state="pending" role="status" aria-live="polite">Checking…</span>
+            <div class="cban-share-copy">
+              <strong>Community sharing</strong>
+              <span class="muted" id="cban-share-status">Sharing status…</span>
+            </div>
+            <button class="btn btn-sm" type="button" id="cban-share">Enable community sharing</button>
+          </div>
+        </div>
+        <div class="table-wrap cban-table-wrap">
+          <table id="cban-table">
+            <thead>
+              <tr>
+                <th>IP</th>
+                <th>Severity</th>
+                <th>Hits</th>
+                <th>Reporters</th>
+                <th>Location</th>
+                <th>ISP / AS</th>
+                <th>Last seen</th>
+                <th style="width:90px"></th>
+              </tr>
+            </thead>
+            <tbody id="cban-body"></tbody>
+          </table>
+        </div>
+        <p class="muted bl-note">
+          <b>Automatic mode (recommended)</b> — enabling it bans <b>all IP addresses in the community ban list</b>: every entry is deception-verified (a canary/honeypot catch on a real TuxWall), so automatic blocking carries near-zero false-positive risk. Bans are local 90&#8209;day decisions that expire on their own, refresh while the IP stays listed, and are never reported back. With automatic mode active, the manual bulk-ban button is removed — every listed IP is already covered.&nbsp;
+          <b>Manual mode</b> — leave it off to pick and choose with the per&#8209;row ban buttons and severity filters.&nbsp;
+          <b>Community sharing</b> — the key register (the key alone, nothing else) makes your trap catches count toward community severity after a 7&#8209;day trust window. Judgment-based bans never leave this box.
+        </p>
       </div>
       </div>
     </section>
@@ -2612,15 +2703,15 @@
       <div class="fw-pane" data-sys-pane="shaping" hidden>
       <div class="card-grid">
         <div class="card card-wide sys-sqm-card" id="sqm-card">
-          <div class="card-head">
-            <h2>Traffic Shaping (CAKE SQM)</h2>
-            <span class="card-head-note muted" id="sqm-status-note">Loading…</span>
-          </div>
-          <div class="cache-grid">
-            <div class="cache-item sys-cache-item">
-              <span>Status</span>
-              <b id="sqm-status">—</b>
+          <div class="card-head sqm-head">
+            <span class="sqm-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 17a8 8 0 1 1 16 0"/><path d="m12 13 4.2-4.2"/><circle cx="12" cy="13" r="1"/><path d="M4 20h16"/></svg></span>
+            <div class="sqm-head-copy">
+              <h2>Traffic Shaping <span class="muted">CAKE SQM</span></h2>
+              <span class="muted" id="sqm-status-note">Loading…</span>
             </div>
+            <span class="sqm-state"><span id="sqm-status">—</span></span>
+          </div>
+          <div class="sqm-stats cache-grid">
             <div class="cache-item sys-cache-item">
               <span>WAN</span>
               <b id="sqm-wan">—</b>
@@ -2921,30 +3012,36 @@
         </div>
         <img class="page-hero-art" src="/css/heroes/logs.webp" alt="" loading="lazy" decoding="async">
       </div>
-      <div class="card">
-        <div class="card-head">
-          <h2>Server Logs</h2>
-          <div class="card-toolbar">
-            <label class="log-ctl"><span>Source</span><select id="log-source"></select></label>
-            <label class="log-ctl"><span>Level</span>
-              <select id="log-priority">
-                <option value="">All</option>
-                <option value="notice">Notice+</option>
-                <option value="warning">Warnings+</option>
-                <option value="err">Errors+</option>
-              </select>
-            </label>
-            <label class="log-ctl"><span>Lines</span>
-              <select id="log-lines">
-                <option value="100">100</option>
-                <option value="200" selected>200</option>
-                <option value="500">500</option>
-                <option value="1000">1000</option>
-              </select>
-            </label>
-            <button class="btn btn-sm" id="log-refresh" type="button">Refresh</button>
-            <label class="log-ctl log-follow"><input type="checkbox" id="log-follow" checked> Auto-refresh</label>
+      <div class="card log-card">
+        <div class="card-head log-head">
+          <span class="log-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10M7 12h7M7 16h4"/></svg></span>
+          <div class="log-head-copy">
+            <h2>Server Logs</h2>
+            <span class="muted">journald · live tail</span>
           </div>
+          <span class="log-live" id="log-live" role="status" aria-live="polite">Live</span>
+        </div>
+        <div class="card-toolbar log-toolbar">
+          <label class="log-ctl"><span>Source</span><select id="log-source"></select></label>
+          <label class="log-ctl"><span>Level</span>
+            <select id="log-priority">
+              <option value="">All</option>
+              <option value="notice">Notice+</option>
+              <option value="warning">Warnings+</option>
+              <option value="err">Errors+</option>
+            </select>
+          </label>
+          <label class="log-ctl"><span>Lines</span>
+            <select id="log-lines">
+              <option value="100">100</option>
+              <option value="200" selected>200</option>
+              <option value="500">500</option>
+              <option value="1000">1000</option>
+            </select>
+          </label>
+          <button class="btn btn-sm" id="log-refresh" type="button">Refresh</button>
+          <button class="btn btn-sm" id="log-copy" type="button">Copy</button>
+          <label class="log-ctl log-follow"><input type="checkbox" id="log-follow" checked> Auto-refresh</label>
         </div>
         <pre class="log-view" id="log-view"></pre>
         <p class="muted log-meta" id="log-meta"></p>
@@ -3344,7 +3441,36 @@
   });
 })();
 </script>
-<script src="/scripts/dashboard.js?v=20261021m"></script>
+<!-- CrowdSec local ban modal (global: used by Top Attackers and Community Bans).
+     Must stay ABOVE the dashboard.js script tag: the els map resolves element
+     IDs while the script loads, so anything placed after the script is not
+     yet in the DOM and resolves to null. -->
+<div class="modal" id="cs-ban-modal" hidden>
+  <div class="modal-box">
+    <button class="modal-close" id="cs-ban-close">&times;</button>
+    <h3 id="cs-ban-title">Ban via CrowdSec</h3>
+    <p class="muted" style="margin:0 0 12px">Local decision on this firewall — never reported to the tuxwall.org community list.</p>
+    <div class="fw-field"><span>Target</span><div class="mono" id="cs-ban-target" style="padding:8px 0">—</div></div>
+    <label class="fw-field">
+      <span>Ban duration</span>
+      <select id="cs-ban-duration">
+        <option value="1h">1 hour</option>
+        <option value="4h">4 hours</option>
+        <option value="24h">24 hours</option>
+        <option value="7d">7 days</option>
+        <option value="30d">30 days</option>
+        <option value="90d" selected>90 days</option>
+        <option value="perm">1 year — permanent banlist entry</option>
+      </select>
+    </label>
+    <div class="wg-modal-actions">
+      <button class="btn" type="button" id="cs-ban-cancel">Cancel</button>
+      <button class="btn btn-primary" type="button" id="cs-ban-confirm">Ban</button>
+    </div>
+    <p class="muted" id="cs-ban-status" style="margin-top:10px"></p>
+  </div>
+</div>
+<script src="/scripts/dashboard.js?v=20261022e"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>
