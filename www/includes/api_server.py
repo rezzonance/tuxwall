@@ -1686,7 +1686,25 @@ def _parse_iso(ts):
         return None
 
 
-def build_crowdsec():
+_CROWDSEC_DEC_CACHE = {"at": 0.0, "data": None}
+_CROWDSEC_DEC_LOCK = threading.Lock()
+_CROWDSEC_DEC_TTL = 20.0
+
+
+def _invalidate_crowdsec_decisions_cache():
+    with _CROWDSEC_DEC_LOCK:
+        _CROWDSEC_DEC_CACHE["at"] = 0.0
+        _CROWDSEC_DEC_CACHE["data"] = None
+
+
+def _fetch_crowdsec_active_decisions():
+    """Fetch and normalise active decisions only.
+
+    Deliberately skips the bouncer and alert listings that build_crowdsec()
+    adds for the CrowdSec page. Top Attackers only needs the decision values
+    to decide between Ban and Remove ban, and those extra cscli calls were
+    the slow part of that probe.
+    """
     try:
         proc = subprocess.run(
             # --limit 0 is essential: cscli defaults to 100 alerts, and with
@@ -1733,7 +1751,28 @@ def build_crowdsec():
         })
 
     active.sort(key=lambda e: (e["until_ts"] or 0))
+    return {"ok": True, "decisions": active}
 
+
+def _crowdsec_active_decisions():
+    """Return active decisions, cached for 20s to avoid repeated 3s cscli runs."""
+    now = time.time()
+    with _CROWDSEC_DEC_LOCK:
+        cached = _CROWDSEC_DEC_CACHE["data"]
+        if cached is not None and now - _CROWDSEC_DEC_CACHE["at"] < _CROWDSEC_DEC_TTL:
+            return cached
+        result = _fetch_crowdsec_active_decisions()
+        if result.get("ok"):
+            _CROWDSEC_DEC_CACHE["data"] = result
+            _CROWDSEC_DEC_CACHE["at"] = time.time()
+        return result
+
+
+def build_crowdsec():
+    core = _crowdsec_active_decisions()
+    if not core.get("ok"):
+        return core
+    active = core["decisions"]
     return {
         "ok": True,
         "decisions": active,
@@ -1742,6 +1781,28 @@ def build_crowdsec():
         "bouncers": _cscli(["bouncers", "list", "-o", "json"], []) or [],
         "alerts": _cscli(["alerts", "list", "-o", "json"], []) or [],
     }
+
+
+def build_crowdsec_ban_state():
+    """Compact Ban/Unban state for Security ▸ Top Attackers.
+
+    One decisions query plus the local permanent blocklist file, returned as
+    a small list of IPs. This replaces fetching the full ~700 KB CrowdSec
+    payload and the full blocklist just to label the action buttons.
+    """
+    core = _crowdsec_active_decisions()
+    if not core.get("ok"):
+        return {"ok": False, "error": core.get("error") or "CrowdSec unavailable"}
+    banned = set()
+    try:
+        banned.update(_read_custom_blocklist())
+    except Exception:
+        pass
+    for d in core.get("decisions", []):
+        if d.get("ip") and d.get("type") != "unban":
+            banned.add(d["ip"])
+    ips = sorted(banned)
+    return {"ok": True, "ips": ips, "count": len(ips)}
 
 
 BAN_DURATION_RE = re.compile(r"^\d+[mhd]$")
@@ -1778,6 +1839,7 @@ def ban_crowdsec_ip(ip, duration="24h"):
         return {"ok": False, "error": str(exc)}
     if proc.returncode != 0:
         return {"ok": False, "error": (proc.stderr or proc.stdout or "cscli failed").strip()}
+    _invalidate_crowdsec_decisions_cache()
     return {
         "ok": True,
         "ip": ip,
@@ -1802,6 +1864,7 @@ def unban_crowdsec_ip(ip):
         return {"ok": False, "error": str(exc)}
     if proc.returncode != 0:
         return {"ok": False, "error": (proc.stderr or proc.stdout or "cscli failed").strip()}
+    _invalidate_crowdsec_decisions_cache()
     return {
         "ok": True,
         "ip": ip,
@@ -1915,7 +1978,7 @@ def build_custom_blocklist():
     entries = _read_custom_blocklist()
     active = {}
     timed = {}
-    cs = build_crowdsec()
+    cs = _crowdsec_active_decisions()
     if cs.get("ok"):
         for d in cs.get("decisions", []):
             if d.get("ip") and d.get("scenario") == CUSTOM_BLOCKLIST_REASON:
@@ -1970,6 +2033,7 @@ def _apply_blocklist_decision(parsed):
         return {"ok": False, "warning": str(exc)}
     if proc.returncode != 0:
         return {"ok": False, "warning": (proc.stderr or proc.stdout or "cscli failed").strip()}
+    _invalidate_crowdsec_decisions_cache()
     return {"ok": True}
 
 
@@ -2018,6 +2082,7 @@ def remove_custom_blocklist_entry(value):
         return data
     if not _drop_custom_blocklist_entry(value):
         return {"ok": False, "error": "Could not write %s." % CUSTOM_BLOCKLIST_FILE}
+    _invalidate_crowdsec_decisions_cache()
     parsed, _ = _parse_blocklist_entry(value)
     args = [CROWDSEC_BIN, "decisions", "delete"]
     if parsed and parsed["type"] == "range":
@@ -7570,6 +7635,7 @@ VIEWER_POST_PATHS = frozenset({
 ADMIN_GET_PREFIXES = (
     "/api/backups",
     "/api/agent",
+    "/api/alerts",
     "/api/system/kea-config",
     "/api/system/unbound-config",
     "/api/system/dhcp-form",
@@ -10836,6 +10902,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_crowdsec())
         elif path == "/api/crowdsec/blocklist":
             self._send(200, build_custom_blocklist())
+        elif path == "/api/crowdsec/ban-state":
+            self._send(200, build_crowdsec_ban_state())
+        elif path == "/api/incidents":
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            self._send(200, build_incidents((qs.get("limit") or ["120"])[0]))
+        elif path == "/api/alerts/config":
+            self._send(200, {"ok": True, "config": _load_alert_config()})
         elif path == "/api/crowdsec/community-bans":
             self._send(200, build_community_bans())
         elif path == "/api/crowdsec/reporting/status":
@@ -11536,6 +11609,24 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, unban_crowdsec_ip(body.get("ip")))
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/incidents/ack":
+            try:
+                self._send(200, _ack_incident(body.get("id"), identity.get("username", "")))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/incidents/ack-all":
+            self._send(200, _ack_incidents(all_active=True, user=identity.get("username", "")))
+
+        elif path == "/api/alerts/config":
+            try:
+                self._send(200, save_alert_config(body))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/alerts/test":
+            self._send(200, test_alert_config())
 
         elif path == "/api/crowdsec/blocklist/add":
             try:
@@ -13293,6 +13384,456 @@ def _vlan_netplan_sync(persist):
         f.write("\n".join(lines) + "\n")
 
 
+# ── Incidents & alerting ───────────────────────────────────────────────────
+INCIDENTS_FILE = "/etc/tuxwall/incidents.json"
+ALERT_CONFIG_FILE = "/etc/tuxwall/alerts.json"
+INCIDENT_MAX = 400
+INCIDENT_CHECK_INTERVAL = 30
+INCIDENT_SEVERITY_RANK = {"info": 1, "warning": 2, "critical": 3}
+_INCIDENT_LOCK = threading.Lock()
+
+
+def _incident_read_json(path, fallback):
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else fallback
+    except Exception:
+        return fallback
+
+
+def _incident_write_json(path, data):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    except Exception as exc:
+        print("[incidents] write %s failed: %s" % (path, exc), flush=True)
+
+
+def _load_incidents():
+    data = _incident_read_json(INCIDENTS_FILE, {"items": []})
+    items = data.get("items", [])
+    return items if isinstance(items, list) else []
+
+
+def _trim_incidents(items):
+    active = [i for i in items if i.get("status") == "active"]
+    resolved = [i for i in items if i.get("status") != "active"]
+    active.sort(key=lambda i: i.get("last_seen", 0), reverse=True)
+    resolved.sort(key=lambda i: i.get("last_seen", 0), reverse=True)
+    keep = active + resolved[:max(0, INCIDENT_MAX - len(active))]
+    keep.sort(key=lambda i: i.get("last_seen", 0), reverse=True)
+    return keep
+
+
+def build_incidents(limit=120):
+    try:
+        limit = max(1, min(500, int(limit)))
+    except (TypeError, ValueError):
+        limit = 120
+    with _INCIDENT_LOCK:
+        items = _load_incidents()
+    items.sort(key=lambda i: i.get("last_seen", 0), reverse=True)
+    active = [i for i in items if i.get("status") == "active"]
+    unack = [i for i in active if not i.get("acknowledged")]
+    return {
+        "ok": True,
+        "incidents": items[:limit],
+        "active": len(active),
+        "unacknowledged": len(unack),
+        "critical": len([i for i in active if i.get("severity") == "critical"]),
+        "warning": len([i for i in active if i.get("severity") == "warning"]),
+        "checked_at": int(time.time()),
+    }
+
+
+def _ack_incidents(incident_id=None, user="", all_active=False):
+    now = time.time()
+    with _INCIDENT_LOCK:
+        items = _load_incidents()
+        changed = 0
+        for inc in items:
+            if inc.get("status") != "active" or inc.get("acknowledged"):
+                continue
+            if all_active or (incident_id and inc.get("id") == incident_id):
+                inc["acknowledged"] = True
+                inc["acknowledged_at"] = now
+                inc["acknowledged_by"] = user or ""
+                changed += 1
+        if changed:
+            _incident_write_json(INCIDENTS_FILE, {"items": _trim_incidents(items)})
+    return {"ok": True, "acknowledged": changed}
+
+
+def _ack_incident(incident_id, user=""):
+    if not incident_id:
+        raise ValueError("id is required")
+    result = _ack_incidents(incident_id=incident_id, user=user)
+    if not result["acknowledged"]:
+        return {"ok": False, "error": "Incident not found or already acknowledged"}
+    return result
+
+
+def _alert_config_defaults():
+    return {
+        "enabled": True,
+        "webhook_url": "",
+        "ntfy_url": "",
+        "min_severity": "warning",
+        "notify_resolved": True,
+    }
+
+
+def _load_alert_config():
+    cfg = _alert_config_defaults()
+    raw = _incident_read_json(ALERT_CONFIG_FILE, {})
+    for key in cfg:
+        if key in raw:
+            cfg[key] = raw[key]
+    if cfg.get("min_severity") not in INCIDENT_SEVERITY_RANK:
+        cfg["min_severity"] = "warning"
+    cfg["enabled"] = bool(cfg.get("enabled", True))
+    cfg["notify_resolved"] = bool(cfg.get("notify_resolved", True))
+    return cfg
+
+
+def _clean_alert_url(value, allow_bare_ntfy=False):
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if len(value) > 2048:
+        raise ValueError("URL is too long")
+    if allow_bare_ntfy and "://" not in value:
+        value = "https://ntfy.sh/" + value.lstrip("/")
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("URL must start with http:// or https://")
+    return value
+
+
+def save_alert_config(body):
+    cfg = _load_alert_config()
+    cfg["enabled"] = bool(body.get("enabled", cfg["enabled"]))
+    cfg["notify_resolved"] = bool(body.get("notify_resolved", cfg["notify_resolved"]))
+    cfg["webhook_url"] = _clean_alert_url(body.get("webhook_url", cfg["webhook_url"]))
+    cfg["ntfy_url"] = _clean_alert_url(body.get("ntfy_url", cfg["ntfy_url"]), allow_bare_ntfy=True)
+    sev = (body.get("min_severity") or cfg["min_severity"]).strip().lower()
+    if sev not in INCIDENT_SEVERITY_RANK:
+        raise ValueError("min_severity must be info, warning or critical")
+    cfg["min_severity"] = sev
+    _incident_write_json(ALERT_CONFIG_FILE, cfg)
+    return {"ok": True, "config": cfg}
+
+
+def _dispatch_alert(cfg, incident, transition):
+    """Send one incident transition to the configured channels."""
+    errors = []
+    if not cfg.get("enabled"):
+        return errors
+    rank = INCIDENT_SEVERITY_RANK.get(incident.get("severity", "info"), 1)
+    if rank < INCIDENT_SEVERITY_RANK.get(cfg.get("min_severity", "warning"), 2):
+        return errors
+    if transition == "resolved" and not cfg.get("notify_resolved", True):
+        return errors
+
+    title = ("[%s] %s" % (incident.get("severity", "info").upper(), incident.get("title", "TuxWall incident")))
+    detail = incident.get("detail", "")
+    text = "%s\n%s\n%s" % (title, detail, time.strftime("%Y-%m-%d %H:%M:%S"))
+
+    ntfy_url = cfg.get("ntfy_url", "")
+    if ntfy_url:
+        try:
+            headers = {
+                "Title": title.encode("ascii", "ignore").decode("ascii") or "TuxWall incident",
+                "Priority": "urgent" if incident.get("severity") == "critical" else "high",
+                "Tags": "warning" if transition == "opened" else "white_check_mark",
+                "Content-Type": "text/plain; charset=utf-8",
+            }
+            req = urllib.request.Request(ntfy_url, data=text.encode("utf-8"), headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                resp.read(1024)
+        except Exception as exc:
+            errors.append("ntfy: %s" % exc)
+
+    webhook_url = cfg.get("webhook_url", "")
+    if webhook_url:
+        try:
+            payload = json.dumps({
+                "type": "tuxwall.incident",
+                "transition": transition,
+                "incident": incident,
+                "sent_at": int(time.time()),
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                webhook_url, data=payload, method="POST",
+                headers={"Content-Type": "application/json", "User-Agent": "tuxwall-alerts/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                resp.read(1024)
+        except Exception as exc:
+            errors.append("webhook: %s" % exc)
+    return errors
+
+
+def _notify_async(incident, transition):
+    cfg = _load_alert_config()
+    def run():
+        try:
+            errors = _dispatch_alert(cfg, incident, transition)
+            if errors:
+                print("[incidents] notify %s: %s" % (incident.get("id"), "; ".join(errors)), flush=True)
+        except Exception as exc:
+            print("[incidents] notify failed: %s" % exc, flush=True)
+    threading.Thread(target=run, daemon=True).start()
+
+
+def test_alert_config():
+    cfg = _load_alert_config()
+    fake = {
+        "id": "test-" + uuid4().hex[:6],
+        "severity": cfg.get("min_severity", "warning"),
+        "title": "TuxWall test alert",
+        "detail": "If you can read this, the notification channel is working.",
+        "status": "active",
+        "first_seen": int(time.time()),
+        "last_seen": int(time.time()),
+    }
+    if not cfg.get("enabled"):
+        return {"ok": False, "error": "External notifications are disabled"}
+    if not cfg.get("ntfy_url") and not cfg.get("webhook_url"):
+        return {"ok": False, "error": "No webhook or ntfy URL configured"}
+    errors = _dispatch_alert(cfg, fake, "test")
+    if errors:
+        return {"ok": False, "error": "; ".join(errors)}
+    return {"ok": True, "message": "Test notification sent"}
+
+
+def _iface_operstate(name):
+    try:
+        with open("/sys/class/net/%s/operstate" % name) as f:
+            return f.read().strip().lower()
+    except OSError:
+        return "missing"
+
+
+def _default_route_iface():
+    try:
+        proc = subprocess.run(["ip", "route", "show", "default"], capture_output=True,
+                              text=True, timeout=4)
+        for line in proc.stdout.splitlines():
+            parts = line.split()
+            if "dev" in parts:
+                i = parts.index("dev")
+                if i + 1 < len(parts):
+                    return parts[i + 1]
+    except Exception:
+        pass
+    return ""
+
+
+def _incident_bytes(n):
+    try:
+        return "%.1f GB" % (n / (1024 ** 3))
+    except Exception:
+        return "?"
+
+
+def _incident_conditions():
+    now = time.time()
+    desired = {}
+
+    def add(key, severity, title, detail):
+        desired[key] = (severity, title, detail)
+
+    wan = _default_route_iface()
+    if not wan:
+        add("wan:route", "critical", "WAN has no default route",
+            "The router has no default route; all internet access is down.")
+    elif _iface_operstate(wan) != "up":
+        add("wan:link", "critical", "WAN link is down",
+            "%s reports %s." % (wan, _iface_operstate(wan)))
+
+    for name, label in (("enp6s0", "LAN"),):
+        state = _iface_operstate(name)
+        if state == "missing":
+            add("lan:%s" % name, "critical", "%s interface is missing" % label,
+                "%s does not exist." % name)
+        elif state != "up":
+            add("lan:%s" % name, "warning", "%s link is down" % label,
+                "%s reports %s." % (name, state))
+
+    try:
+        persist = _load_vlan_persist()
+        for iface, meta in persist.items():
+            if iface.startswith("__"):
+                continue
+            state = _iface_operstate(iface)
+            label = (meta or {}).get("label") or iface
+            if state == "missing":
+                add("vlan:%s" % iface, "warning", "VLAN %s is missing" % label,
+                    "%s does not exist." % iface)
+            elif state != "up":
+                add("vlan:%s" % iface, "warning", "VLAN %s link is down" % label,
+                    "%s reports %s." % (iface, state))
+    except Exception:
+        pass
+
+    services = (
+        ("unbound.service", "Unbound DNS", "critical"),
+        ("kea-dhcp4-server.service", "Kea DHCP", "critical"),
+        ("crowdsec.service", "CrowdSec", "warning"),
+        ("crowdsec-firewall-bouncer.service", "CrowdSec firewall bouncer", "warning"),
+    )
+    for unit, label, severity in services:
+        try:
+            proc = subprocess.run(["systemctl", "is-active", "--quiet", unit],
+                                  capture_output=True, timeout=5)
+            if proc.returncode != 0:
+                add("service:%s" % unit, severity, "%s is not running" % label,
+                    "%s is not active. Check the service on System ▸ Maintenance." % unit)
+        except Exception:
+            pass
+
+    try:
+        usage = shutil.disk_usage("/")
+        pct = usage.used * 100.0 / usage.total if usage.total else 0
+        if pct >= 92:
+            add("disk:root", "critical", "Root filesystem is almost full",
+                "%.1f%% used (%s free)." % (pct, _incident_bytes(usage.free)))
+        elif pct >= 88:
+            add("disk:root", "warning", "Root filesystem is filling up",
+                "%.1f%% used (%s free)." % (pct, _incident_bytes(usage.free)))
+    except Exception:
+        pass
+
+    try:
+        mem_total = mem_avail = 0
+        with open("/proc/meminfo") as f:
+            for line in f:
+                parts = line.split()
+                if parts and parts[0] == "MemTotal:":
+                    mem_total = int(parts[1]) * 1024
+                elif parts and parts[0] == "MemAvailable:":
+                    mem_avail = int(parts[1]) * 1024
+        if mem_total:
+            pct = (mem_total - mem_avail) * 100.0 / mem_total
+            if pct >= 97:
+                add("memory:root", "critical", "Memory is critically low",
+                    "%.1f%% used; the router is at risk of OOM." % pct)
+            elif pct >= 92:
+                add("memory:root", "warning", "Memory usage is high",
+                    "%.1f%% used." % pct)
+    except Exception:
+        pass
+
+    try:
+        for zone in sorted(os.listdir("/sys/class/thermal")):
+            if not zone.startswith("thermal_zone"):
+                continue
+            base = "/sys/class/thermal/" + zone
+            with open(base + "/type") as f:
+                kind = f.read().strip()
+            if kind not in ("x86_pkg_temp", "acpitz"):
+                continue
+            with open(base + "/temp") as f:
+                temp = float(f.read().strip()) / 1000.0
+            if temp >= 92:
+                add("temp:cpu", "critical", "CPU temperature is critical",
+                    "%s reports %.0f°C." % (kind, temp))
+            elif temp >= 85:
+                add("temp:cpu", "warning", "CPU temperature is high",
+                    "%s reports %.0f°C." % (kind, temp))
+            break
+    except Exception:
+        pass
+
+    return desired
+
+
+def _reconcile_incidents(desired):
+    now = time.time()
+    opened, resolved = [], []
+    with _INCIDENT_LOCK:
+        items = _load_incidents()
+        active = {i.get("key"): i for i in items if i.get("status") == "active"}
+        changed = False
+        for key, (severity, title, detail) in desired.items():
+            inc = active.get(key)
+            if inc:
+                if (inc.get("severity") != severity or inc.get("title") != title
+                        or inc.get("detail") != detail or now - inc.get("last_seen", 0) > 300):
+                    inc["severity"] = severity
+                    inc["title"] = title
+                    inc["detail"] = detail
+                    inc["last_seen"] = now
+                    changed = True
+            else:
+                inc = {
+                    "id": uuid4().hex[:12],
+                    "key": key,
+                    "severity": severity,
+                    "title": title,
+                    "detail": detail,
+                    "status": "active",
+                    "first_seen": now,
+                    "last_seen": now,
+                    "acknowledged": False,
+                }
+                items.insert(0, inc)
+                opened.append(dict(inc))
+                changed = True
+        for key, inc in active.items():
+            if key not in desired:
+                inc["status"] = "resolved"
+                inc["resolved_at"] = now
+                inc["last_seen"] = now
+                resolved.append(dict(inc))
+                changed = True
+        if changed:
+            _incident_write_json(INCIDENTS_FILE, {"items": _trim_incidents(items)})
+    for inc in opened:
+        _notify_async(inc, "opened")
+    for inc in resolved:
+        _notify_async(inc, "resolved")
+    return opened, resolved
+
+
+def run_incident_check():
+    desired = _incident_conditions()
+    return _reconcile_incidents(desired)
+
+
+class IncidentMonitor(threading.Thread):
+    def __init__(self):
+        super().__init__(name="incident-monitor", daemon=True)
+        self.running = True
+
+    def run(self):
+        time.sleep(4)
+        while self.running:
+            try:
+                run_incident_check()
+            except Exception as exc:
+                print("[incidents] check failed: %s" % exc, flush=True)
+            time.sleep(INCIDENT_CHECK_INTERVAL)
+
+
+_INCIDENT_MONITOR = None
+_INCIDENT_MONITOR_LOCK = threading.Lock()
+
+
+def start_incident_monitor():
+    global _INCIDENT_MONITOR
+    with _INCIDENT_MONITOR_LOCK:
+        if _INCIDENT_MONITOR is None:
+            _INCIDENT_MONITOR = IncidentMonitor()
+            _INCIDENT_MONITOR.start()
+        return _INCIDENT_MONITOR
+
+
 def _self_restart(signum, frame):
     """SIGUSR1 handler: re-exec the API process in-place to pick up code changes."""
     print("tuxwall API self-restarting...", flush=True)
@@ -13308,6 +13849,7 @@ def main():
     get_security_monitor()
     get_system_monitor()
     get_latency_monitor()
+    start_incident_monitor()
     get_community_auto_worker()   # community auto-ban sync (no-op until enabled)
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     server.daemon_threads = True

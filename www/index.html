@@ -6,14 +6,14 @@
   <title>TuxWall - Network Dashboard</title>
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
-  <link rel="stylesheet" href="/css/style.css?v=202610212349">
-  <link rel="stylesheet" href="/css/polish.css?v=202610212349">
-  <link rel="stylesheet" href="/css/firewall.css?v=202610212349">
-  <link rel="stylesheet" href="/css/bento.css?v=20261022m">
-  <link rel="stylesheet" href="/css/heroes.css?v=202610212349">
-  <link rel="stylesheet" href="/css/sidebar.css?v=202610212349">
-  <link rel="stylesheet" href="/css/action-icons.css?v=202610212349">
-  <link rel="stylesheet" href="/css/subtab-icons.css?v=202610212349">
+  <link rel="stylesheet" href="/css/style.css?v=202610230024">
+  <link rel="stylesheet" href="/css/polish.css?v=202610230024">
+  <link rel="stylesheet" href="/css/firewall.css?v=202610230024">
+  <link rel="stylesheet" href="/css/bento.css?v=202610230032">
+  <link rel="stylesheet" href="/css/heroes.css?v=202610230024">
+  <link rel="stylesheet" href="/css/sidebar.css?v=202610230024">
+  <link rel="stylesheet" href="/css/action-icons.css?v=202610230024">
+  <link rel="stylesheet" href="/css/subtab-icons.css?v=202610230024">
 </head>
 <body>
 <div id="login-gate" class="login-gate" hidden>
@@ -90,6 +90,26 @@
     <header class="topbar">
       <h1 id="page-title">DHCP Clients</h1>
       <div class="topbar-actions">
+        <div class="incident-wrap" id="incident-wrap" hidden>
+          <button class="incident-bell" id="incident-bell" type="button" aria-label="Incidents" aria-haspopup="dialog" aria-expanded="false" title="Incidents">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg>
+            <span class="incident-badge" id="incident-badge" hidden>0</span>
+          </button>
+          <div class="incident-panel" id="incident-panel" hidden role="dialog" aria-label="Incident timeline">
+            <div class="incident-panel-head">
+              <div class="incident-head-copy">
+                <b>Incidents</b>
+                <span class="muted" id="incident-summary">All clear</span>
+              </div>
+              <button class="incident-settings-btn" id="incident-settings" type="button">Alert settings</button>
+            </div>
+            <div class="incident-list" id="incident-list"></div>
+            <div class="incident-panel-foot">
+              <button class="incident-ack-all" id="incident-ack-all" type="button" hidden>Acknowledge all</button>
+              <span class="muted" id="incident-updated"></span>
+            </div>
+          </div>
+        </div>
         <div class="user-menu" id="user-menu" hidden>
           <button class="user-menu-btn" id="user-menu-btn" type="button" aria-haspopup="menu" aria-expanded="false" title="Account menu">
             <span class="user-avatar" id="user-avatar">
@@ -2643,42 +2663,35 @@
           <div class="ff-wrap">
             <div class="sys-logo-tile">
               <div class="ff-logo-svg" title="Ubuntu">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Ubuntu orbital emblem">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" role="img" aria-label="Animated futuristic Ubuntu logo">
                   <defs>
-                    <linearGradient id="ubx-metal" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#e8eef9"/><stop offset=".2" stop-color="#505d74"/><stop offset=".55" stop-color="#121c30"/><stop offset=".82" stop-color="#8994a7"/><stop offset="1" stop-color="#151c2b"/></linearGradient>
-                    <linearGradient id="ubx-fire" x1="0" y1="0" x2=".7" y2="1"><stop stop-color="#ffe475"/><stop offset=".25" stop-color="#ffac17"/><stop offset=".6" stop-color="#ff5408"/><stop offset="1" stop-color="#9e1708"/></linearGradient>
-                    <radialGradient id="ubx-node" cx=".32" cy=".2" r=".85"><stop stop-color="#fff4bd"/><stop offset=".25" stop-color="#ffc347"/><stop offset=".65" stop-color="#ff660c"/><stop offset="1" stop-color="#a81d0b"/></radialGradient>
-                    <filter id="ubx-glow" x="-70%" y="-70%" width="240%" height="240%"><feGaussianBlur stdDeviation="7"/></filter>
-                    <filter id="ubx-sglow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="3"/></filter>
+                    <linearGradient id="ubn-metal" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fff0c7"/><stop offset=".18" stop-color="#ffb74a"/><stop offset=".55" stop-color="#e95420"/><stop offset="1" stop-color="#7e1e11"/></linearGradient>
+                    <filter id="ubn-glow" x="-70%" y="-70%" width="240%" height="240%"><feGaussianBlur stdDeviation="5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+                    <pattern id="ubn-hex" width="14" height="12" patternUnits="userSpaceOnUse"><path d="M3.5 0H10.5L14 6L10.5 12H3.5L0 6Z" fill="none" stroke="#ffb052" stroke-opacity=".23" stroke-width=".8"/></pattern>
+                    <style>
+                      .ubn-spin{transform-origin:200px 200px;animation:ubn-spin-kf 24s linear infinite}
+                      .ubn-counter{transform-origin:200px 200px;animation:ubn-spin-kf 14s linear infinite reverse}
+                      .ubn-breathe{animation:ubn-pulse-kf 3.2s ease-in-out infinite}
+                      .ubn-dash{animation:ubn-dash-kf 4s linear infinite}
+                      .ubn-node{animation:ubn-pulse-kf 2.4s ease-in-out infinite}
+                      .ubn-node:nth-of-type(2){animation-delay:.8s}
+                      .ubn-node:nth-of-type(3){animation-delay:1.6s}
+                      @keyframes ubn-spin-kf{to{transform:rotate(360deg)}}
+                      @keyframes ubn-pulse-kf{50%{opacity:.65;filter:brightness(1.5)}}
+                      @keyframes ubn-dash-kf{to{stroke-dashoffset:-180}}
+                      @media(prefers-reduced-motion:reduce){.ubn-spin,.ubn-counter,.ubn-breathe,.ubn-dash,.ubn-node{animation:none!important}}
+                    </style>
                   </defs>
-                  <style>
-                    .ubx-orbit{transform-origin:256px 256px;animation:ubx-spin 16s linear infinite}
-                    .ubx-orbit.ubx-back{animation-duration:23s;animation-direction:reverse}
-                    .ubx-core{transform-origin:256px 256px;animation:ubx-breathe 4.5s ease-in-out infinite}
-                    .ubx-halo{animation:ubx-pulse 3.4s ease-in-out infinite}
-                    .ubx-spark{transform-origin:256px 256px;animation:ubx-spin 11s linear infinite reverse}
-                    @keyframes ubx-spin{to{transform:rotate(360deg)}}
-                    @keyframes ubx-breathe{50%{transform:scale(1.025)}}
-                    @keyframes ubx-pulse{50%{opacity:.4}}
-                    @media(prefers-reduced-motion:reduce){.ubx-orbit,.ubx-core,.ubx-halo,.ubx-spark{animation:none!important}}
-                  </style>
-                  <g id="ubx-orbit-back" class="ubx-orbit ubx-back" fill="none" transform="rotate(-23 256 256)"><ellipse cx="256" cy="256" rx="222" ry="99" stroke="#ff620e" stroke-width="13" opacity=".25" filter="url(#ubx-glow)"/><ellipse cx="256" cy="256" rx="222" ry="99" stroke="url(#ubx-fire)" stroke-width="3" stroke-dasharray="260 24 80 35"/></g>
-                  <g id="ubx-core" class="ubx-core">
-                    <circle cx="256" cy="256" r="149" fill="#090e1b" stroke="url(#ubx-metal)" stroke-width="17"/>
-                    <circle cx="256" cy="256" r="126" fill="none" stroke="#ff5d06" stroke-width="24" opacity=".55" filter="url(#ubx-glow)"/>
-                    <g id="ubx-arms" stroke-linejoin="round">
-                      <path id="ubx-arm-one" d="M220 128 A132 132 0 0 1 384 215 L315 238 A64 64 0 0 0 237 196 Z" fill="url(#ubx-fire)" stroke="#ffd16a" stroke-width="3"/>
-                      <path id="ubx-arm-two" d="M383 292 A132 132 0 0 1 223 384 L238 313 A64 64 0 0 0 313 274 Z" fill="url(#ubx-fire)" stroke="#ffd16a" stroke-width="3"/>
-                      <path id="ubx-arm-three" d="M154 338 A132 132 0 0 1 134 176 L196 224 A64 64 0 0 0 215 299 Z" fill="url(#ubx-metal)" stroke="#ff9b3a" stroke-width="3"/>
-                    </g>
-                    <circle cx="256" cy="256" r="61" fill="#080d17"/>
-                    <g id="ubx-node-top"><circle cx="324" cy="109" r="44" fill="#080e1b" stroke="url(#ubx-metal)" stroke-width="11"/><circle cx="324" cy="109" r="35" fill="url(#ubx-node)" stroke="#ffd267" stroke-width="2"/><ellipse cx="312" cy="92" rx="13" ry="5" transform="rotate(-35 312 92)" fill="#fff7d8" opacity=".85"/></g>
-                    <g id="ubx-node-left"><circle cx="110" cy="244" r="44" fill="#080e1b" stroke="url(#ubx-metal)" stroke-width="11"/><circle cx="110" cy="244" r="35" fill="url(#ubx-node)" stroke="#ffd267" stroke-width="2"/><ellipse cx="97" cy="228" rx="13" ry="5" transform="rotate(-35 97 228)" fill="#fff7d8" opacity=".85"/></g>
-                    <g id="ubx-node-bottom"><circle cx="348" cy="391" r="44" fill="#080e1b" stroke="url(#ubx-metal)" stroke-width="11"/><circle cx="348" cy="391" r="35" fill="url(#ubx-node)" stroke="#ffd267" stroke-width="2"/><ellipse cx="335" cy="374" rx="13" ry="5" transform="rotate(-35 335 374)" fill="#fff7d8" opacity=".85"/></g>
+                  <g class="ubn-spin" fill="none"><ellipse cx="200" cy="200" rx="174" ry="100" transform="rotate(-28 200 200)" stroke="#e95420" stroke-width="2" opacity=".48" filter="url(#ubn-glow)"/><ellipse cx="200" cy="200" rx="174" ry="100" transform="rotate(48 200 200)" stroke="#ffad32" stroke-width="1.5" opacity=".35"/></g>
+                  <g class="ubn-counter" fill="none"><circle cx="200" cy="200" r="171" stroke="#ff9c34" stroke-opacity=".4" stroke-width="2" stroke-dasharray="2 15"/><circle cx="200" cy="200" r="155" stroke="#ffae46" stroke-width="2" stroke-dasharray="40 110" class="ubn-dash" filter="url(#ubn-glow)"/></g>
+                  <g class="ubn-breathe" filter="url(#ubn-glow)"><circle cx="200" cy="200" r="112" fill="none" stroke="#e95420" stroke-opacity=".28" stroke-width="23"/></g>
+                  <g fill="none" stroke="url(#ubn-metal)" stroke-width="42" stroke-linecap="butt">
+                    <circle cx="200" cy="200" r="104" stroke-dasharray="155 63 155 63 155 63" transform="rotate(-100 200 200)"/>
                   </g>
-                  <g id="ubx-orbit-front" class="ubx-orbit" fill="none" transform="rotate(25 256 256)"><ellipse cx="256" cy="256" rx="230" ry="111" stroke="#ff6a09" stroke-width="12" opacity=".65" filter="url(#ubx-glow)"/><ellipse cx="256" cy="256" rx="230" ry="111" stroke="url(#ubx-fire)" stroke-width="4" stroke-dasharray="410 32 135 35"/></g>
-                  <g id="ubx-halo" class="ubx-halo" fill="none"><circle cx="256" cy="256" r="181" stroke="#ff5d0a" stroke-width="3" opacity=".15" filter="url(#ubx-sglow)"/></g>
-                  <g id="ubx-particles" class="ubx-spark" fill="#ffb42b"><rect x="256" y="15" width="5" height="5"/><rect x="458" y="170" width="4" height="4"/><rect x="69" y="360" width="6" height="6"/><rect x="332" y="482" width="4" height="4"/></g>
+                  <g fill="none" stroke="url(#ubn-hex)" stroke-width="35"><circle cx="200" cy="200" r="104" stroke-dasharray="155 63 155 63 155 63" transform="rotate(-100 200 200)"/></g>
+                  <g fill="none" stroke="#ffd080" stroke-opacity=".72" stroke-width="2"><circle cx="200" cy="200" r="123" stroke-dasharray="155 63 155 63 155 63" transform="rotate(-100 200 200)"/><circle cx="200" cy="200" r="85" stroke-dasharray="155 63 155 63 155 63" transform="rotate(-100 200 200)"/></g>
+                  <g fill="url(#ubn-metal)" stroke="#ffd898" stroke-width="3" filter="url(#ubn-glow)"><circle class="ubn-node" cx="200" cy="67" r="25"/><circle class="ubn-node" cx="85" cy="266" r="25"/><circle class="ubn-node" cx="315" cy="266" r="25"/></g>
+                  <g fill="#fff2be" opacity=".7"><circle cx="193" cy="58" r="7"/><circle cx="78" cy="257" r="7"/><circle cx="308" cy="257" r="7"/></g>
                 </svg>
               </div>
               <span class="sys-logo-cap">Ubuntu</span>
@@ -3065,6 +3078,7 @@
         <button class="fw-subtab" type="button" data-settings-pane="map">Map</button>
         <button class="fw-subtab" type="button" data-settings-pane="users">Users</button>
         <button class="fw-subtab" type="button" data-settings-pane="security">Security</button>
+        <button class="fw-subtab" type="button" data-settings-pane="alerts">Alerts</button>
         <span class="fw-subtabs-fill"></span>
       </div>
 
@@ -3197,6 +3211,60 @@
         <p class="login-error" id="totp-msg" hidden></p>
       </div>
 
+      </div>
+
+      <!-- ── Pane: Alerts ─────────────────────────────────────────── -->
+      <div class="fw-pane" data-settings-pane="alerts" hidden>
+      <div class="card">
+        <div class="card-head">
+          <h2>Alerts &amp; Notifications</h2>
+          <span class="muted" id="alerts-hint">In-app timeline is always on</span>
+        </div>
+        <div class="alerts-grid">
+          <label class="alerts-check alerts-wide"><input type="checkbox" id="alerts-enabled"> Send external notifications</label>
+          <label class="fw-field alerts-wide">
+            <span>Webhook URL</span>
+            <input type="text" id="alerts-webhook" placeholder="https://example.com/tuxwall-hook" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="fw-field alerts-wide">
+            <span>ntfy URL or topic</span>
+            <input type="text" id="alerts-ntfy" placeholder="https://ntfy.sh/your-topic" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="fw-field">
+            <span>Minimum severity</span>
+            <select id="alerts-severity">
+              <option value="info">Info</option>
+              <option value="warning" selected>Warning</option>
+              <option value="critical">Critical</option>
+            </select>
+          </label>
+          <label class="alerts-check">
+            <input type="checkbox" id="alerts-resolved" checked>
+            Notify when an incident resolves
+          </label>
+        </div>
+        <div class="card-toolbar alerts-actions">
+          <button class="btn btn-primary" id="alerts-save" type="button">Save alerts</button>
+          <button class="btn" id="alerts-test" type="button">Send test</button>
+          <span class="muted" id="alerts-msg" role="status" aria-live="polite"></span>
+        </div>
+        <p class="muted alerts-note">Incidents are always recorded in the bell timeline. External notifications are optional and only sent for incidents at or above the selected severity. Webhooks receive JSON; ntfy receives a plain-text message.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Monitored checks</h2><span class="muted">Every 30 seconds</span></div>
+        <div class="alerts-checks">
+          <span>WAN default route / link</span>
+          <span>LAN link</span>
+          <span>Configured VLAN links</span>
+          <span>Unbound DNS service</span>
+          <span>Kea DHCP service</span>
+          <span>CrowdSec + firewall bouncer</span>
+          <span>Root filesystem usage</span>
+          <span>Memory usage</span>
+          <span>CPU temperature</span>
+        </div>
+      </div>
       </div>
 
       <div class="modal" id="user-modal" hidden>
@@ -3470,7 +3538,7 @@
     <p class="muted" id="cs-ban-status" style="margin-top:10px"></p>
   </div>
 </div>
-<script src="/scripts/dashboard.js?v=20261022e"></script>
+<script src="/scripts/dashboard.js?v=202610230035"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>

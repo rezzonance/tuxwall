@@ -43,6 +43,8 @@
     canManageUsers: false,
     users: [],
     themeBootstrapped: false,
+    incidents: null,
+    incidentTimer: null,
   };
 
   const els = {
@@ -418,6 +420,24 @@
     userMenuPop: document.getElementById("user-menu-pop"),
     userMenuName: document.getElementById("user-menu-name"),
     userMenuRole: document.getElementById("user-menu-role"),
+    incidentWrap: document.getElementById("incident-wrap"),
+    incidentBell: document.getElementById("incident-bell"),
+    incidentBadge: document.getElementById("incident-badge"),
+    incidentPanel: document.getElementById("incident-panel"),
+    incidentList: document.getElementById("incident-list"),
+    incidentSummary: document.getElementById("incident-summary"),
+    incidentUpdated: document.getElementById("incident-updated"),
+    incidentAckAll: document.getElementById("incident-ack-all"),
+    incidentSettings: document.getElementById("incident-settings"),
+    alertsEnabled: document.getElementById("alerts-enabled"),
+    alertsWebhook: document.getElementById("alerts-webhook"),
+    alertsNtfy: document.getElementById("alerts-ntfy"),
+    alertsSeverity: document.getElementById("alerts-severity"),
+    alertsResolved: document.getElementById("alerts-resolved"),
+    alertsSave: document.getElementById("alerts-save"),
+    alertsTest: document.getElementById("alerts-test"),
+    alertsMsg: document.getElementById("alerts-msg"),
+    alertsHint: document.getElementById("alerts-hint"),
     userAvatarImg: document.getElementById("user-avatar-img"),
     userAvatarInitials: document.getElementById("user-avatar-initials"),
     avatarFile: document.getElementById("avatar-file"),
@@ -3246,7 +3266,10 @@
 
     const byIp = d.by_ip || [];
     const ipMax = byIp[0] ? byIp[0].count : 1;
-    const csUp = state.secCrowdsecUp;
+    // While the first availability probe is in flight, render the ban buttons
+    // anyway. They used to stay empty until the 15s security poll ran, which
+    // made Top Attackers look like it had no actions for several seconds.
+    const csUp = state.secCrowdsecUp !== false;
     const iChip = document.getElementById("sec-ips-chip");
     if (iChip) iChip.textContent = `${formatNumber(byIp.length)} sources`;
 
@@ -4189,33 +4212,53 @@
 
 
 
-  async function updateSecBanAvailability() {
-    // CrowdSec availability + banned-IP set: gates the local Ban/Unban
-    // buttons in Top Attackers. Bans are LOCAL CrowdSec decisions only -
-    // nothing here reports to tuxwall.org (community reporting is
-    // deception-only by design).
-    // parallel, not sequential: halves the view-switch latency
-    const [cs, bl] = await Promise.allSettled([
-      fetchJSON("/api/crowdsec"),
-      fetchJSON("/api/crowdsec/blocklist"),
-    ]);
-    state.secCrowdsecUp = cs.status === "fulfilled" && !!cs.value.ok;
-    // Banned = permanent banlist entries AND any active local decision,
-    // so timed bans (custom/local-ban) also flip the button to "remove".
-    const banned = new Set();
-    if (bl.status === "fulfilled") {
-      (bl.value.entries || []).forEach((e) => banned.add(e.value));
-    }
-    if (cs.status === "fulfilled" && cs.value.ok) {
-      (cs.value.decisions || []).forEach((d) => {
-        if (d.ip && d.type !== "unban") banned.add(d.ip);
-      });
-    }
-    state.secBannedIps = banned;
-    const up = state.secCrowdsecUp;
-    els.secBanAll.disabled = !up;
-    if (!up) setSecBanStatus("CrowdSec unavailable");
-    if (els.secIpsBody.rows.length) refreshSecurity();
+  let _secBanAvailInFlight = null;
+
+  function updateSecBanAvailability() {
+    // Coalesce overlapping probes from view switches and the 15s poll.
+    if (_secBanAvailInFlight) return _secBanAvailInFlight;
+    _secBanAvailInFlight = (async () => {
+      // One compact call is enough for the inline Ban/Unban state. Fall back
+      // to the two full endpoints only when the compact route is not there yet
+      // (rolling restart / older backend).
+      let compact = null;
+      try {
+        compact = await fetchJSON("/api/crowdsec/ban-state");
+      } catch (_) {
+        compact = null;
+      }
+
+      let up = false;
+      const banned = new Set();
+      if (compact && typeof compact.ok === "boolean") {
+        up = !!compact.ok;
+        (compact.ips || []).forEach((ip) => banned.add(ip));
+      } else {
+        const [cs, bl] = await Promise.allSettled([
+          fetchJSON("/api/crowdsec"),
+          fetchJSON("/api/crowdsec/blocklist"),
+        ]);
+        up = cs.status === "fulfilled" && !!cs.value.ok;
+        // Banned = permanent banlist entries AND any active local decision,
+        // so timed bans (custom/local-ban) also flip the button to "remove".
+        if (bl.status === "fulfilled") {
+          (bl.value.entries || []).forEach((e) => banned.add(e.value));
+        }
+        if (cs.status === "fulfilled" && cs.value.ok) {
+          (cs.value.decisions || []).forEach((d) => {
+            if (d.ip && d.type !== "unban") banned.add(d.ip);
+          });
+        }
+      }
+      state.secCrowdsecUp = up;
+      state.secBannedIps = banned;
+      els.secBanAll.disabled = !up;
+      if (!up) setSecBanStatus("CrowdSec unavailable");
+      if (els.secIpsBody.rows.length) refreshSecurity();
+    })().finally(() => {
+      _secBanAvailInFlight = null;
+    });
+    return _secBanAvailInFlight;
   }
 
   function setSecBanStatus(text) {
@@ -9897,6 +9940,7 @@
     document.querySelectorAll("#view-settings .fw-pane[data-settings-pane]").forEach((p) => {
       p.hidden = p.dataset.settingsPane !== pane;
     });
+    if (pane === "alerts") loadAlertConfig();
   }
   document.querySelectorAll("#settings-subtabs .fw-subtab").forEach((btn) => {
     btn.addEventListener("click", () => setSettingsTab(btn.dataset.settingsPane));
@@ -9904,6 +9948,7 @@
 
   function bindSettings() {
     bindAvatarSettings();
+    bindAlertSettings();
     els.themeFormatSample.textContent = JSON.stringify({
       name: "My Theme",
       dark: false,
@@ -10086,7 +10131,8 @@
     map: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.8 2.6 15.2 0 18M12 3c-2.6 2.8-2.6 15.2 0 18"/>',
     users: '<circle cx="12" cy="8" r="3.5"/><path d="M5.2 20a6.8 6.8 0 0 1 13.6 0"/>',
     avatar: '<circle cx="11" cy="9" r="3.4"/><path d="M4.8 20a6.2 6.2 0 0 1 12.4 0"/><path d="M19 3.5v5M16.5 6h5"/>',
-    security: '<rect x="4" y="10" width="16" height="11" rx="2.2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 15v2.5"/>'
+    security: '<rect x="4" y="10" width="16" height="11" rx="2.2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 15v2.5"/>',
+    alerts: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/>'
   };
 
   function subtabIconKey(tab) {
@@ -10178,6 +10224,7 @@
       if (view === "security") {
         initSecurityMap();
         refreshSecurity();
+        updateSecBanAvailability();
         refreshSuricata();
         refreshZeek();
         refreshZeekQuic();
@@ -11866,6 +11913,8 @@
     if (els.userMenuBtn) {
       els.userMenuBtn.setAttribute("aria-label", "Account menu for " + (state.username || "user"));
     }
+    startIncidentPolling();
+    if (els.incidentSettings) els.incidentSettings.hidden = !isAdmin;
     refreshAvatarUI();
     if (!isAdmin && (state.activeView === "settings" || state.activeView === "ai")) {
       switchView("overview");
@@ -12132,11 +12181,225 @@
     if (els.userMenu) els.userMenu.hidden = true;
     if (els.userMenuPop) els.userMenuPop.hidden = true;
     if (els.userMenuBtn) els.userMenuBtn.setAttribute("aria-expanded", "false");
+    stopIncidentPolling();
     els.userMenuName.textContent = "";
     els.userMenuRole.textContent = "";
     els.loginPass.value = "";
     showLoginGate(false, "Session expired. Sign in again.");
     updateTotpCard();
+  }
+
+  const INCIDENT_SEV_LABEL = { critical: "Critical", warning: "Warning", info: "Info" };
+
+  function isAdminUser() {
+    return state.role === "admin" || state.isOwner;
+  }
+
+  function setIncidentPanel(open) {
+    if (!els.incidentPanel || !els.incidentBell) return;
+    els.incidentPanel.hidden = !open;
+    els.incidentBell.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  function incidentItemHtml(inc) {
+    const sev = (inc.severity || "info").toLowerCase();
+    const resolved = inc.status !== "active";
+    const ackBtn = !resolved && !inc.acknowledged && isAdminUser()
+      ? `<button class="incident-ack" type="button" data-id="${esc(inc.id)}">Ack</button>`
+      : "";
+    const meta = resolved
+      ? `Resolved ${formatRelative(inc.resolved_at || inc.last_seen)}`
+      : `${INCIDENT_SEV_LABEL[sev] || "Info"} · ${formatRelative(inc.last_seen)}${inc.acknowledged ? " · acknowledged" : ""}`;
+    return `<div class="incident-item${resolved ? " is-resolved" : ""}" data-sev="${esc(sev)}" data-id="${esc(inc.id)}">
+      <span class="incident-dot" aria-hidden="true"></span>
+      <div class="incident-item-copy">
+        <div class="incident-item-title">${esc(inc.title || "Incident")}</div>
+        <div class="incident-item-detail">${esc(inc.detail || "")}</div>
+        <div class="incident-item-meta">${esc(meta)}</div>
+      </div>
+      ${ackBtn}
+    </div>`;
+  }
+
+  function renderIncidents(d) {
+    state.incidents = d;
+    const items = d.incidents || [];
+    const active = items.filter((i) => i.status === "active");
+    const resolved = items.filter((i) => i.status !== "active").slice(0, 12);
+    const unack = d.unacknowledged || 0;
+
+    if (els.incidentBadge) {
+      els.incidentBadge.textContent = unack > 99 ? "99+" : String(unack);
+      els.incidentBadge.hidden = unack === 0;
+    }
+    if (els.incidentSummary) {
+      els.incidentSummary.textContent = active.length
+        ? `${active.length} active${d.critical ? ` · ${d.critical} critical` : ""}`
+        : "All clear";
+    }
+    if (els.incidentAckAll) {
+      els.incidentAckAll.hidden = !isAdminUser() || unack === 0;
+    }
+    if (els.incidentUpdated) {
+      els.incidentUpdated.textContent = "Updated " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    }
+
+    if (!els.incidentList) return;
+    if (!active.length && !resolved.length) {
+      els.incidentList.innerHTML = '<div class="incident-empty"><b>All clear</b><br>No active incidents or recent history.</div>';
+      return;
+    }
+    let html = "";
+    html += active.length
+      ? active.map(incidentItemHtml).join("")
+      : '<div class="incident-empty">No active incidents.</div>';
+    if (resolved.length) {
+      html += '<div class="incident-history-label">Recent history</div>';
+      html += resolved.map(incidentItemHtml).join("");
+    }
+    els.incidentList.innerHTML = html;
+  }
+
+  async function refreshIncidents() {
+    if (!state.authed) return;
+    try {
+      const d = await fetchJSON("/api/incidents?limit=120");
+      renderIncidents(d);
+    } catch (err) {
+      /* Keep the last timeline visible if the poll fails. */
+    }
+  }
+
+  function startIncidentPolling() {
+    if (!state.authed) return;
+    if (els.incidentWrap) els.incidentWrap.hidden = false;
+    if (state.incidentTimer) clearInterval(state.incidentTimer);
+    refreshIncidents();
+    state.incidentTimer = setInterval(refreshIncidents, 20000);
+  }
+
+  function stopIncidentPolling() {
+    if (state.incidentTimer) {
+      clearInterval(state.incidentTimer);
+      state.incidentTimer = null;
+    }
+    if (els.incidentWrap) els.incidentWrap.hidden = true;
+    setIncidentPanel(false);
+    state.incidents = null;
+  }
+
+  function bindIncidents() {
+    if (!els.incidentBell || !els.incidentPanel) return;
+    els.incidentBell.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = els.incidentPanel.hidden;
+      setIncidentPanel(open);
+      if (open) refreshIncidents();
+    });
+    document.addEventListener("click", (e) => {
+      if (els.incidentWrap && !els.incidentWrap.contains(e.target)) setIncidentPanel(false);
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") setIncidentPanel(false);
+    });
+    if (els.incidentAckAll) {
+      els.incidentAckAll.addEventListener("click", async () => {
+        try {
+          await postJSON("/api/incidents/ack-all", {});
+          await refreshIncidents();
+        } catch (err) {
+          if (els.incidentSummary) els.incidentSummary.textContent = err.message;
+        }
+      });
+    }
+    if (els.incidentList) {
+      els.incidentList.addEventListener("click", async (e) => {
+        const btn = e.target.closest(".incident-ack");
+        if (!btn) return;
+        btn.disabled = true;
+        try {
+          await postJSON("/api/incidents/ack", { id: btn.dataset.id });
+          await refreshIncidents();
+        } catch (err) {
+          btn.disabled = false;
+          if (els.incidentSummary) els.incidentSummary.textContent = err.message;
+        }
+      });
+    }
+    if (els.incidentSettings) {
+      els.incidentSettings.addEventListener("click", () => {
+        setIncidentPanel(false);
+        switchView("settings");
+        setSettingsTab("alerts");
+        loadAlertConfig();
+      });
+    }
+  }
+
+  async function loadAlertConfig() {
+    if (!els.alertsSave) return;
+    try {
+      const d = await fetchJSON("/api/alerts/config");
+      const c = d.config || {};
+      els.alertsEnabled.checked = !!c.enabled;
+      els.alertsWebhook.value = c.webhook_url || "";
+      els.alertsNtfy.value = c.ntfy_url || "";
+      els.alertsSeverity.value = c.min_severity || "warning";
+      els.alertsResolved.checked = c.notify_resolved !== false;
+      if (els.alertsHint) {
+        els.alertsHint.textContent = (c.webhook_url || c.ntfy_url)
+          ? "External notifications configured"
+          : "No external channel configured — in-app timeline is on";
+      }
+      if (els.alertsMsg) els.alertsMsg.textContent = "";
+    } catch (err) {
+      if (els.alertsMsg) els.alertsMsg.textContent = err.message;
+    }
+  }
+
+  async function saveAlertConfig() {
+    if (!els.alertsSave) return;
+    els.alertsSave.disabled = true;
+    if (els.alertsMsg) els.alertsMsg.textContent = "Saving…";
+    try {
+      const d = await postJSON("/api/alerts/config", {
+        enabled: !!els.alertsEnabled.checked,
+        webhook_url: els.alertsWebhook.value.trim(),
+        ntfy_url: els.alertsNtfy.value.trim(),
+        min_severity: els.alertsSeverity.value,
+        notify_resolved: !!els.alertsResolved.checked,
+      });
+      if (!d.ok) throw new Error(d.error || "Save failed");
+      if (els.alertsHint) {
+        els.alertsHint.textContent = (d.config.webhook_url || d.config.ntfy_url)
+          ? "External notifications configured"
+          : "No external channel configured — in-app timeline is on";
+      }
+      if (els.alertsMsg) els.alertsMsg.textContent = "Saved.";
+    } catch (err) {
+      if (els.alertsMsg) els.alertsMsg.textContent = err.message;
+    } finally {
+      els.alertsSave.disabled = false;
+    }
+  }
+
+  async function testAlertConfig() {
+    if (!els.alertsTest) return;
+    els.alertsTest.disabled = true;
+    if (els.alertsMsg) els.alertsMsg.textContent = "Sending test…";
+    try {
+      const d = await postJSON("/api/alerts/test", {});
+      if (els.alertsMsg) els.alertsMsg.textContent = d.ok ? (d.message || "Test sent.") : (d.error || "Test failed.");
+    } catch (err) {
+      if (els.alertsMsg) els.alertsMsg.textContent = err.message;
+    } finally {
+      els.alertsTest.disabled = false;
+    }
+  }
+
+  function bindAlertSettings() {
+    if (els.alertsSave) els.alertsSave.addEventListener("click", saveAlertConfig);
+    if (els.alertsTest) els.alertsTest.addEventListener("click", testAlertConfig);
   }
 
   function bindUserMenu() {
@@ -12166,6 +12429,7 @@
 
   function bindAuthActions() {
     bindUserMenu();
+    bindIncidents();
 
     els.loginForm.addEventListener("submit", async (ev) => {
       ev.preventDefault();

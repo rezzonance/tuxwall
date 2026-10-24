@@ -2952,3 +2952,484 @@ body.light-theme .card-topglow::before { opacity: .26; }
   /* Keep Refresh and Copy on their own full-width row instead of squeezing. */
   #view-logs .log-toolbar .btn { flex: 1 1 calc(50% - 4px); min-width: 0; }
 }
+
+/* ============================================================================
+   Stat cards — each glow is one hue, sliding dark → light → dark
+   instead of the multi-colour rainbow used by full cards.
+   ========================================================================= */
+.stat-card.stat-c-amber  { --stat-glow-dark: #7a5200; --stat-glow-light: #f5d06f; }
+.stat-card.stat-c-blue   { --stat-glow-dark: #1b4bb8; --stat-glow-light: #a8c8ff; }
+.stat-card.stat-c-green  { --stat-glow-dark: #17692a; --stat-glow-light: #8fe39a; }
+.stat-card.stat-c-purple { --stat-glow-dark: #6d3bc4; --stat-glow-light: #e2ccff; }
+.stat-card.stat-c-teal   { --stat-glow-dark: #0f6f78; --stat-glow-light: #a0edf2; }
+.stat-card.stat-c-red    { --stat-glow-dark: #a61b16; --stat-glow-light: #ff9d98; }
+.stat-card.stat-c-orange { --stat-glow-dark: #a9530c; --stat-glow-light: #ffd0a4; }
+.stat-card.stat-c-pink   { --stat-glow-dark: #8c2a5f; --stat-glow-light: #f7b3d5; }
+
+.stat-card > .card-topglow {
+  background: linear-gradient(90deg,
+    var(--stat-glow-dark, var(--stat-c, var(--accent))),
+    var(--stat-glow-light, var(--stat-c, var(--accent))),
+    var(--stat-glow-dark, var(--stat-c, var(--accent))));
+  background-size: 200% 100%;
+  animation: hue-topglow-slide 9s linear infinite;
+}
+.stat-card > .card-topglow::before {
+  background: inherit;
+  background-size: 200% 100%;
+  animation: inherit;
+}
+@keyframes hue-topglow-slide {
+  from { background-position: 0% 50%; }
+  to   { background-position: 200% 50%; }
+}
+
+/* DHCP Dynamic + Static cards — use the teal of the DHCP menu item
+   (#39c5cf) instead of the multi-colour card glow. */
+#view-clients .card > .card-topglow {
+  --dhcp-glow-dark: #0f6f78;
+  --dhcp-glow-light: #a0edf2;
+  background: linear-gradient(90deg,
+    var(--dhcp-glow-dark),
+    var(--dhcp-glow-light),
+    var(--dhcp-glow-dark));
+  background-size: 200% 100%;
+  animation: hue-topglow-slide 9s linear infinite;
+}
+#view-clients .card > .card-topglow::before {
+  background: inherit;
+  background-size: 200% 100%;
+  animation: inherit;
+}
+
+/* ============================================================================
+   DNS — green accent to match the DNS sidebar item (#3fb950)
+   ========================================================================= */
+#view-dns .fw-subtabs-ind {
+  border-color: rgba(63, 185, 80, 0.42);
+  background: linear-gradient(135deg,
+    rgba(63, 185, 80, 0.25),
+    rgba(63, 185, 80, 0.09));
+  box-shadow:
+    inset 0 1px 0 rgba(63, 185, 80, 0.28),
+    0 2px 12px rgba(63, 185, 80, 0.16);
+}
+#view-dns .fw-subtabs.has-ind .fw-subtab.active {
+  color: #3fb950;
+}
+#view-dns .fw-subtab.active {
+  color: #3fb950;
+  border-color: rgba(63, 185, 80, 0.38);
+  background: linear-gradient(135deg,
+    rgba(63, 185, 80, 0.22),
+    rgba(63, 185, 80, 0.09));
+  box-shadow: inset 0 1px 0 rgba(63, 185, 80, 0.22);
+}
+
+#view-dns .card > .card-topglow {
+  --dns-glow-dark: #17692a;
+  --dns-glow-light: #8fe39a;
+  background: linear-gradient(90deg,
+    var(--dns-glow-dark),
+    var(--dns-glow-light),
+    var(--dns-glow-dark));
+  background-size: 200% 100%;
+  animation: hue-topglow-slide 9s linear infinite;
+}
+#view-dns .card > .card-topglow::before {
+  background: inherit;
+  background-size: 200% 100%;
+  animation: inherit;
+}
+
+/* Domains — purple card glow to match the Domains sidebar item (#bc8cff). */
+#view-domains .card > .card-topglow {
+  --domains-glow-dark: #6d3bc4;
+  --domains-glow-light: #e2ccff;
+  background: linear-gradient(90deg,
+    var(--domains-glow-dark),
+    var(--domains-glow-light),
+    var(--domains-glow-dark));
+  background-size: 200% 100%;
+  animation: hue-topglow-slide 9s linear infinite;
+}
+#view-domains .card > .card-topglow::before {
+  background: inherit;
+  background-size: 200% 100%;
+  animation: inherit;
+}
+
+/* ============================================================================
+   Blocklists — red accent to match the Blocklists sidebar item (#f85149)
+   ========================================================================= */
+#view-blocklists .fw-subtabs-ind {
+  border-color: rgba(248, 81, 73, 0.42);
+  background: linear-gradient(135deg,
+    rgba(248, 81, 73, 0.25),
+    rgba(248, 81, 73, 0.09));
+  box-shadow:
+    inset 0 1px 0 rgba(248, 81, 73, 0.28),
+    0 2px 12px rgba(248, 81, 73, 0.16);
+}
+#view-blocklists .fw-subtabs.has-ind .fw-subtab.active {
+  color: #f85149;
+}
+#view-blocklists .fw-subtab.active {
+  color: #f85149;
+  border-color: rgba(248, 81, 73, 0.38);
+  background: linear-gradient(135deg,
+    rgba(248, 81, 73, 0.22),
+    rgba(248, 81, 73, 0.09));
+  box-shadow: inset 0 1px 0 rgba(248, 81, 73, 0.22);
+}
+
+#view-blocklists .card > .card-topglow {
+  --bl-glow-dark: #a61b16;
+  --bl-glow-light: #ff9d98;
+  background: linear-gradient(90deg,
+    var(--bl-glow-dark),
+    var(--bl-glow-light),
+    var(--bl-glow-dark));
+  background-size: 200% 100%;
+  animation: hue-topglow-slide 9s linear infinite;
+}
+#view-blocklists .card > .card-topglow::before {
+  background: inherit;
+  background-size: 200% 100%;
+  animation: inherit;
+}
+
+/* ============================================================================
+   Remaining pages — per-page card glow (dark → light of the sidebar accent)
+   ========================================================================= */
+#view-overview  { --page-glow-dark: #1b4bb8; --page-glow-light: #a8c8ff; }
+#view-firewall  { --page-glow-dark: #a9530c; --page-glow-light: #ffd0a4; }
+#view-vlans     { --page-glow-dark: #1b4bb8; --page-glow-light: #a8c8ff; }
+#view-security  { --page-glow-dark: #b3211c; --page-glow-light: #ffb3b0; }
+#view-wireguard { --page-glow-dark: #5b3fb5; --page-glow-light: #d8c9ff; }
+#view-crowdsec  { --page-glow-dark: #1d4ed8; --page-glow-light: #b3d2ff; }
+#view-bandwidth { --page-glow-dark: #0f7a56; --page-glow-light: #9df0cf; }
+#view-system    { --page-glow-dark: #4b5a6b; --page-glow-light: #d0d9e3; }
+#view-backups   { --page-glow-dark: #7a5200; --page-glow-light: #f5d06f; }
+#view-logs      { --page-glow-dark: #4b5560; --page-glow-light: #cfd6dd; }
+#view-settings  { --page-glow-dark: #4b5a6b; --page-glow-light: #d0d9e3; }
+#view-ai        { --page-glow-dark: #a32b6b; --page-glow-light: #ffc2df; }
+
+:is(#view-overview, #view-firewall, #view-vlans, #view-security,
+    #view-wireguard, #view-crowdsec, #view-bandwidth, #view-system,
+    #view-backups, #view-logs, #view-settings, #view-ai)
+  :is(.card, .ov-mon) > .card-topglow {
+  background: linear-gradient(90deg,
+    var(--page-glow-dark),
+    var(--page-glow-light),
+    var(--page-glow-dark));
+  background-size: 200% 100%;
+  animation: hue-topglow-slide 9s linear infinite;
+}
+:is(#view-overview, #view-firewall, #view-vlans, #view-security,
+    #view-wireguard, #view-crowdsec, #view-bandwidth, #view-system,
+    #view-backups, #view-logs, #view-settings, #view-ai)
+  :is(.card, .ov-mon) > .card-topglow::before {
+  background: inherit;
+  background-size: 200% 100%;
+  animation: inherit;
+}
+
+/* Firewall's fw-cards keep their own accents, using the same dark→light
+   palette as the stat cards. Regular .cards on the page use Firewall orange. */
+#view-firewall .fw-card[data-accent="orange"] { --fw-glow-dark: #a9530c; --fw-glow-light: #ffd0a4; }
+#view-firewall .fw-card[data-accent="amber"]  { --fw-glow-dark: #7a5200; --fw-glow-light: #f5d06f; }
+#view-firewall .fw-card[data-accent="blue"]   { --fw-glow-dark: #1b4bb8; --fw-glow-light: #a8c8ff; }
+#view-firewall .fw-card[data-accent="purple"] { --fw-glow-dark: #6d3bc4; --fw-glow-light: #e2ccff; }
+#view-firewall .fw-card[data-accent="red"]    { --fw-glow-dark: #a61b16; --fw-glow-light: #ff9d98; }
+#view-firewall .fw-card[data-accent="green"]  { --fw-glow-dark: #17692a; --fw-glow-light: #8fe39a; }
+#view-firewall .fw-card[data-accent="teal"]   { --fw-glow-dark: #0f6f78; --fw-glow-light: #a0edf2; }
+#view-firewall .fw-card[data-accent="pink"]   { --fw-glow-dark: #8c2a5f; --fw-glow-light: #f7b3d5; }
+#view-firewall .fw-card > .card-topglow {
+  background: linear-gradient(90deg,
+    var(--fw-glow-dark, var(--page-glow-dark)),
+    var(--fw-glow-light, var(--page-glow-light)),
+    var(--fw-glow-dark, var(--page-glow-dark)));
+  background-size: 200% 100%;
+  animation: hue-topglow-slide 9s linear infinite;
+}
+#view-firewall .fw-card > .card-topglow::before {
+  background: inherit;
+  background-size: 200% 100%;
+  animation: inherit;
+}
+
+/* Sub-tabs follow the page accent on the remaining tabbed views. */
+#view-clients    { --page-tab: #39c5cf; --page-tab-rgb: 57, 197, 207; }
+#view-firewall   { --page-tab: #ffa657; --page-tab-rgb: 255, 166, 87; }
+#view-security   { --page-tab: #ff5c5c; --page-tab-rgb: 255, 92, 92; }
+#view-crowdsec   { --page-tab: #60a5fa; --page-tab-rgb: 96, 165, 250; }
+#view-bandwidth  { --page-tab: #34d399; --page-tab-rgb: 52, 211, 153; }
+#view-system     { --page-tab: #94a3b8; --page-tab-rgb: 148, 163, 184; }
+#view-settings   { --page-tab: #94a3b8; --page-tab-rgb: 148, 163, 184; }
+
+:is(#view-clients, #view-firewall, #view-security, #view-crowdsec,
+    #view-bandwidth, #view-system, #view-settings) .fw-subtabs-ind {
+  border-color: rgba(var(--page-tab-rgb), 0.42);
+  background: linear-gradient(135deg,
+    rgba(var(--page-tab-rgb), 0.25),
+    rgba(var(--page-tab-rgb), 0.09));
+  box-shadow:
+    inset 0 1px 0 rgba(var(--page-tab-rgb), 0.28),
+    0 2px 12px rgba(var(--page-tab-rgb), 0.16);
+}
+:is(#view-clients, #view-firewall, #view-security, #view-crowdsec,
+    #view-bandwidth, #view-system, #view-settings)
+  .fw-subtabs.has-ind .fw-subtab.active {
+  color: var(--page-tab);
+}
+:is(#view-clients, #view-firewall, #view-security, #view-crowdsec,
+    #view-bandwidth, #view-system, #view-settings) .fw-subtab.active {
+  color: var(--page-tab);
+  border-color: rgba(var(--page-tab-rgb), 0.38);
+  background: linear-gradient(135deg,
+    rgba(var(--page-tab-rgb), 0.22),
+    rgba(var(--page-tab-rgb), 0.09));
+  box-shadow: inset 0 1px 0 rgba(var(--page-tab-rgb), 0.22);
+}
+
+/* Overview monitor grid — four fixed accent glows (purple, blue, green, red).
+   Match the tile's internal accent too, so the glow and kicker/dot agree. */
+#view-overview .ov-mon-grid > .ov-mon:nth-child(1) {
+  --c: #bc8cff; --ov-glow-dark: #6d3bc4; --ov-glow-light: #e2ccff;
+}
+#view-overview .ov-mon-grid > .ov-mon:nth-child(2) {
+  --ov-glow-dark: #1b4bb8; --ov-glow-light: #a8c8ff;
+}
+#view-overview .ov-mon-grid > .ov-mon:nth-child(3) {
+  --c: #3fb950; --ov-glow-dark: #17692a; --ov-glow-light: #8fe39a;
+}
+#view-overview .ov-mon-grid > .ov-mon:nth-child(4) {
+  --ov-glow-dark: #a61b16; --ov-glow-light: #ff9d98;
+}
+#view-overview .ov-mon-grid > .ov-mon > .card-topglow {
+  background: linear-gradient(90deg,
+    var(--ov-glow-dark),
+    var(--ov-glow-light),
+    var(--ov-glow-dark));
+  background-size: 200% 100%;
+  animation: hue-topglow-slide 9s linear infinite;
+}
+#view-overview .ov-mon-grid > .ov-mon > .card-topglow::before {
+  background: inherit;
+  background-size: 200% 100%;
+  animation: inherit;
+}
+
+/* ============================================================================
+   Incidents — header bell, timeline panel, alert settings
+   ========================================================================= */
+.incident-wrap { position: relative; display: flex; align-items: center; flex: none; }
+.incident-bell {
+  position: relative;
+  width: 36px; height: 36px; padding: 0;
+  display: grid; place-items: center;
+  border-radius: 50%; cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--muted);
+  transition: color .18s ease, border-color .18s ease, background .18s ease;
+}
+.incident-bell:hover {
+  color: var(--text);
+  border-color: var(--muted);
+  background: var(--card);
+}
+.incident-bell svg {
+  width: 17px; height: 17px;
+  fill: none; stroke: currentColor; stroke-width: 1.8;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.incident-bell:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.incident-badge {
+  position: absolute; top: -4px; right: -4px;
+  min-width: 17px; height: 17px; padding: 0 4px;
+  display: grid; place-items: center;
+  border-radius: 999px;
+  background: var(--red); color: #fff;
+  font-size: 9px; font-weight: 800; line-height: 1;
+  border: 2px solid var(--card);
+}
+.incident-badge[hidden] { display: none; }
+
+.incident-panel {
+  position: absolute; right: 0; top: calc(100% + 10px);
+  z-index: 340;
+  width: min(390px, calc(100vw - 28px));
+  max-height: min(560px, calc(100vh - 92px));
+  display: flex; flex-direction: column;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  box-shadow: 0 20px 44px rgba(0, 0, 0, .45);
+  overflow: hidden;
+}
+.incident-panel[hidden] { display: none; }
+.incident-panel-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+.incident-head-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.incident-head-copy b { font-size: 13px; color: var(--text); }
+.incident-head-copy span { font-size: 10.5px; line-height: 1.4; }
+.incident-settings-btn {
+  flex: none; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--card); color: var(--muted);
+  font: inherit; font-size: 10px; font-weight: 700;
+  letter-spacing: .04em; text-transform: uppercase;
+  padding: 5px 8px; cursor: pointer;
+}
+.incident-settings-btn:hover { color: var(--text); border-color: var(--muted); }
+
+.incident-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.incident-list::-webkit-scrollbar { width: 8px; }
+.incident-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.incident-empty {
+  padding: 28px 18px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.incident-history-label {
+  margin: 10px 8px 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 9px; font-weight: 700;
+  letter-spacing: .1em; text-transform: uppercase;
+}
+.incident-item {
+  display: flex; gap: 9px;
+  padding: 10px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+}
+.incident-item:hover { background: var(--bg-elev); }
+.incident-dot {
+  flex: none;
+  width: 7px; height: 7px; margin-top: 5px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.incident-item[data-sev="critical"] .incident-dot { background: var(--red); }
+.incident-item[data-sev="warning"] .incident-dot { background: var(--amber); }
+.incident-item[data-sev="info"] .incident-dot { background: var(--accent); }
+.incident-item.is-resolved { opacity: .68; }
+.incident-item.is-resolved .incident-dot { background: var(--green); }
+.incident-item-copy { flex: 1 1 auto; min-width: 0; }
+.incident-item-title {
+  color: var(--text);
+  font-size: 12.5px; font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.incident-item-detail {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px; line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.incident-item-meta {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 9.5px;
+  letter-spacing: .02em;
+}
+.incident-ack {
+  flex: none; align-self: flex-start;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--card); color: var(--muted);
+  font: inherit; font-size: 9.5px; font-weight: 700;
+  letter-spacing: .04em; text-transform: uppercase;
+  padding: 4px 6px; cursor: pointer;
+}
+.incident-ack:hover { color: var(--text); border-color: var(--muted); }
+.incident-panel-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 9px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+  font-size: 10px;
+}
+.incident-ack-all {
+  border: 1px solid var(--border); border-radius: 7px;
+  background: var(--card); color: var(--text);
+  font: inherit; font-size: 10px; font-weight: 600;
+  padding: 5px 8px; cursor: pointer;
+}
+.incident-ack-all:hover { border-color: var(--muted); }
+.incident-ack-all[hidden] { display: none; }
+
+/* Alert settings pane */
+.alerts-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 2px 16px 4px;
+}
+.alerts-wide { grid-column: 1 / -1; }
+.alerts-grid .fw-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.alerts-grid .fw-field > span {
+  color: var(--muted);
+  font-size: 9.5px; font-weight: 700;
+  letter-spacing: .07em; text-transform: uppercase;
+}
+.alerts-grid input[type="text"],
+.alerts-grid select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--text);
+  font: inherit; font-size: 12px;
+}
+.alerts-grid input[type="text"]:focus,
+.alerts-grid select:focus { outline: none; border-color: var(--accent); }
+.alerts-check {
+  display: flex; align-items: center; gap: 8px;
+  color: var(--text);
+  font-size: 12px;
+  min-height: 30px;
+}
+.alerts-check input { accent-color: var(--accent); margin: 0; }
+.alerts-actions { padding: 14px 16px 8px; }
+.alerts-note { margin: 0 16px 16px; font-size: 11.5px; line-height: 1.55; }
+.alerts-checks {
+  display: flex; flex-wrap: wrap; gap: 7px;
+  padding: 14px 16px 16px;
+}
+.alerts-checks span {
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+@media (max-width: 700px) {
+  .incident-panel {
+    position: fixed;
+    top: 62px; left: 10px; right: 10px;
+    width: auto;
+    max-height: calc(100vh - 76px);
+  }
+  .alerts-grid { grid-template-columns: 1fr; }
+  .alerts-wide { grid-column: 1; }
+  .alerts-actions { flex-wrap: wrap; }
+}
