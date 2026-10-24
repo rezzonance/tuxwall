@@ -7336,8 +7336,12 @@
 
     els.bwCharts.innerHTML = ifaces.map((i) => `
       <div class="card bw-card">
-        <div class="bw-head">
-          <h2 class="mono">${esc(i.name)}</h2>
+        <div class="bw-head card-head card-head-ico">
+          <span class="card-head-ico" aria-hidden="true">${cardIconSvg("Network Interfaces")}</span>
+          <div class="card-head-copy">
+            <h2 class="mono">${esc(i.name)}</h2>
+            <span class="muted">Interface throughput</span>
+          </div>
           <div class="bw-rates">
             <div class="bw-dn"><span>Down</span><b>${formatBits(i.rx_bps)}</b></div>
             <div class="bw-up"><span>Up</span><b>${formatBits(i.tx_bps)}</b></div>
@@ -10197,12 +10201,168 @@
   });
   window.addEventListener("resize", syncSubtabState);
 
+  // ── Uniform card headers: icon + title + subtitle ──────────────────
+  const CARD_ICONS = {
+    shield: '<path d="M12 2 20 5v6c0 5.2-3.4 8.7-8 11-4.6-2.3-8-5.8-8-11V5z"/>',
+    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c-5 5-5 13 0 18M12 3c5 5 5 13 0 18"/>',
+    activity: '<path d="M3 12h4l2.5-6 5 12 2.5-6h4"/>',
+    server: '<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h6M12 17.5h6"/>',
+    network: '<circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="m8.3 10.8 7.4-4.4M8.3 13.2l7.4 4.4"/>',
+    database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>',
+    terminal: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/>',
+    archive: '<ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v11c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M9 12h6"/>',
+    users: '<circle cx="9" cy="8" r="3.2"/><path d="M2.6 20a6.4 6.4 0 0 1 12.8 0M15.6 5.3a3.2 3.2 0 0 1 0 5.4M18.9 20a6.4 6.4 0 0 0-2.8-5.3"/>',
+    lock: '<rect x="4" y="10" width="16" height="11" rx="2.2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 15v2.5"/>',
+    refresh: '<path d="M20 11a8 8 0 0 0-14-5L4 8"/><path d="M4 3v5h5"/><path d="M4 13a8 8 0 0 0 14 5l2-2"/><path d="M20 21v-5h-5"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-2.82 1.18V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10.6 3V3a2 2 0 0 1 4 0v.09A1.65 1.65 0 0 0 15.09 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09A1.65 1.65 0 0 0 21 10.6h.09a2 2 0 0 1 0 4H21a1.65 1.65 0 0 0-1.6 1z"/>',
+    wifi: '<path d="M2.5 8.5a15 15 0 0 1 19 0M5.5 12a10 10 0 0 1 13 0M8.8 15.5a5 5 0 0 1 6.4 0"/><circle cx="12" cy="19" r="1"/>',
+    list: '<path d="M8 6h13M8 12h13M8 18h13M3.6 6h.01M3.6 12h.01M3.6 18h.01"/>',
+    zap: '<path d="M13 2 4 14h6l-1 8 9-12h-6z"/>',
+    cpu: '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    file: '<path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10l-7-7Z"/><path d="M13 3v7h7"/>',
+    chart: '<path d="M4 20v-8M9.3 20V5M14.7 20v-6M20 20V9"/><path d="M3 20h18"/>',
+    power: '<path d="M12 2v10"/><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>',
+    bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/>',
+    map: '<path d="M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.6"/>',
+    palette: '<path d="M12 3a9 9 0 0 0 0 18c1 0 1.7-.8 1.7-1.7 0-.5-.2-.9-.5-1.2-.3-.3-.4-.7-.4-1.1 0-1 .8-1.7 1.7-1.7H16a5 5 0 0 0 5-5c0-4.1-4-7.3-9-7.3z"/><circle cx="7.6" cy="11" r="1.15"/><circle cx="10" cy="7.6" r="1.15"/><circle cx="14.4" cy="7.6" r="1.15"/><circle cx="17" cy="11" r="1.15"/>',
+    upload: '<path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
+    check: '<circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/>',
+    route: '<path d="M16 3l4 4-4 4M20 7H4M8 21l-4-4 4-4M4 17h16"/>',
+    search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
+    download: '<path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 21h16"/>',
+    target: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>',
+    rss: '<path d="M5 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4ZM5 11a8 8 0 0 1 8 8M5 5a14 14 0 0 1 14 14"/>',
+    ban: '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
+    pin: '<path d="M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.6"/>',
+    layers: '<path d="M12 3 3 7.5 12 12l9-4.5z"/><path d="m3 12 9 4.5 9-4.5M3 16.5 12 21l9-4.5"/>'
+  };
+  const CARD_ICON_TITLES = {
+    "System Health": "activity", "WAN": "globe", "LAN & DHCP": "network",
+    "Services": "server", "Live Performance": "activity", "Attack Map": "target",
+    "Top Talkers": "activity", "Suricata Alerts": "shield", "DNS": "globe",
+    "Attacks by Country": "globe", "Memory": "cpu", "Traffic & Firewall": "activity",
+    "Static IP Reservations": "pin", "Query Types": "chart", "Response Codes": "list",
+    "Cache": "database", "Upstream DNS": "globe", "Update Log": "refresh",
+    "RPZ Policies": "shield", "RPZ Feeds": "rss", "RPZ Activity": "activity",
+    "Whitelist": "check", "Filter Rules": "shield", "Live View": "activity",
+    "Port Forwarding": "route", "DMZ Clients": "shield", "Firewall Settings": "settings",
+    "VLAN Interfaces": "network", "Inter-VLAN Routing Policies": "route",
+    "Top Countries": "globe", "Top Attackers": "target", "Hits Over Time": "activity",
+    "Zeek Notices": "file", "LAN Device Activity": "users", "QUIC Connections": "activity",
+    "File Integrity (AIDE)": "shield", "Traffic Monitor": "activity",
+    "Diagnose Blocked Traffic": "search", "WireGuard VPN": "lock", "Clients": "users",
+    "Active Decisions": "shield", "Bouncers (Remediation Components)": "server",
+    "Recent Alerts": "bell", "Custom Banlist": "ban", "Top Downloaders": "download",
+    "System Info": "cpu", "Network Interfaces": "network", "DHCP Pools per Interface": "server",
+    "System Services": "server", "Reboot": "power", "System Configuration Backup": "archive",
+    "Theme": "palette", "Install a custom theme": "upload", "Your avatar": "users",
+    "Router location": "map", "Attack map appearance": "map", "User Manager": "users",
+    "Two-Factor Authentication": "lock", "Alerts & Notifications": "bell",
+    "Monitored checks": "check", "Dynamic Leases": "users", "Local DNS Records": "globe",
+    "Blocklist Sources": "list"
+  };
+  const CARD_SUBTITLES = {
+    "Response Codes": "DNS response distribution",
+    "Cache": "Resolver cache entries and mix",
+    "Update Log": "Recent blocklist refresh results",
+    "RPZ Policies": "Response Policy Zone rules",
+    "RPZ Feeds": "Subscribed RPZ sources",
+    "Whitelist": "Domains exempt from blocking",
+    "Live View": "Live firewall packet activity",
+    "Firewall Settings": "Logging and default policy",
+    "VLAN Interfaces": "Tagged interfaces and addresses",
+    "Inter-VLAN Routing Policies": "Allow or deny traffic between VLANs",
+    "Suricata Alerts": "IDS detections in the last 24h",
+    "File Integrity (AIDE)": "Baseline file change detection",
+    "Traffic Monitor": "Live per-client traffic",
+    "Diagnose Blocked Traffic": "Trace why a destination is blocked",
+    "WireGuard VPN": "Tunnel status and peer handshakes",
+    "Active Decisions": "Current CrowdSec bans",
+    "Bouncers (Remediation Components)": "Remediation components connected to CrowdSec",
+    "Recent Alerts": "Latest CrowdSec detections",
+    "Network Interfaces": "Link state, MAC and addresses",
+    "System Services": "Core router services and state",
+    "Reboot": "Restart the gateway",
+    "System Configuration Backup": "Snapshots and restore points",
+    "Install a custom theme": "Add a JSON theme to the picker",
+    "Two-Factor Authentication": "TOTP sign-in protection",
+    "Dynamic Leases": "Active DHCP clients and lease status",
+    "Local DNS Records": "Custom names served by Unbound",
+    "Blocklist Sources": "Merged into Unbound as always-NXDOMAIN zones"
+  };
+
+  function cardIconFor(title) {
+    if (CARD_ICON_TITLES[title]) return CARD_ICON_TITLES[title];
+    const t = title.toLowerCase();
+    if (/backup|archive/.test(t)) return "archive";
+    if (/log|terminal/.test(t)) return "terminal";
+    if (/ban/.test(t)) return "ban";
+    if (/rule|policy|filter|firewall|dmz|integrity|whitelist|decision/.test(t)) return "shield";
+    if (/dns|country|wan|globe/.test(t)) return "globe";
+    if (/interface|vlan|network|routing/.test(t)) return "network";
+    if (/user|client|device|avatar/.test(t)) return "users";
+    if (/cache/.test(t)) return "database";
+    if (/cpu|memory|system info/.test(t)) return "cpu";
+    if (/alert|notification/.test(t)) return "bell";
+    if (/download/.test(t)) return "download";
+    if (/upload|install/.test(t)) return "upload";
+    if (/theme/.test(t)) return "palette";
+    if (/traffic|activity|monitor|performance|hits/.test(t)) return "activity";
+    if (/wireguard|vpn|two-factor|lock/.test(t)) return "lock";
+    if (/update|refresh/.test(t)) return "refresh";
+    return "layers";
+  }
+
+  function cardIconSvg(title) {
+    const body = CARD_ICONS[cardIconFor(title)] || CARD_ICONS.layers;
+    return `<svg viewBox="0 0 24 24" aria-hidden="true">${body}</svg>`;
+  }
+
+  function enhanceCardHeads() {
+    document.querySelectorAll(".view:not(#view-overview):not(#view-ai) .card > .card-head").forEach((head) => {
+      if (head.dataset.headEnhanced) return;
+      if (head.querySelector(":scope > .card-head-ico, :scope > .sec-ico, :scope > .log-ico, :scope > .sqm-ico, :scope > .dec-ico, :scope > .cban-ico, :scope > .upd-ico")) {
+        head.dataset.headEnhanced = "1";
+        return;
+      }
+      const h2 = head.querySelector(":scope > h2");
+      if (!h2) return;
+      const title = (h2.textContent || "").trim();
+      if (!title) return;
+
+      const ico = document.createElement("span");
+      ico.className = "card-head-ico";
+      ico.setAttribute("aria-hidden", "true");
+      ico.innerHTML = cardIconSvg(title);
+
+      const copy = document.createElement("div");
+      copy.className = "card-head-copy";
+      copy.appendChild(h2);
+
+      const sub = head.querySelector(":scope > .muted, :scope > .card-head-note");
+      if (sub) {
+        copy.appendChild(sub);
+      } else if (CARD_SUBTITLES[title]) {
+        const s = document.createElement("span");
+        s.className = "muted";
+        s.textContent = CARD_SUBTITLES[title];
+        copy.appendChild(s);
+      }
+
+      head.insertBefore(ico, head.firstChild);
+      head.insertBefore(copy, ico.nextSibling);
+      head.classList.add("card-head-ico");
+      head.dataset.headEnhanced = "1";
+    });
+  }
+
   function switchView(view) {
     document.querySelectorAll(".nav-item").forEach((i) => {
       i.classList.toggle("active", i.dataset.view === view);
     });
     els.title.textContent = VIEW_TITLES[view] || "Dashboard";
-    setTimeout(() => { initSubtabs(); syncSubtabState(); }, 0);
+    setTimeout(() => { initSubtabs(); syncSubtabState(); enhanceCardHeads(); }, 0);
     state.activeView = view;
     const implemented = view === "overview" || view === "clients" || view === "dns" || view === "domains" || view === "firewall" || view === "vlans" || view === "security" || view === "wireguard" || view === "crowdsec" || view === "bandwidth" || view === "blocklists" || view === "system" || view === "backups" || view === "logs" || view === "settings" || view === "ai";
     document.querySelectorAll(".view").forEach((v) => { v.hidden = true; });
@@ -10589,7 +10749,7 @@
       else if (input.url) detail = input.url;
       if (!detail && st.title) detail = st.title;
       const pretty = {
-        bash: "Bash", read: "Read", edit: "Edit", write: "Write", glob: "Glob",
+        bash: "Bash", shell: "Bash", read: "Read", edit: "Edit", write: "Write", glob: "Glob",
         grep: "Grep", list: "List", webfetch: "Web Fetch", websearch: "Web Search",
         todowrite: "Todo", "todo-write": "Todo", "todo-read": "Todo", task: "Task",
         ask: "Ask", multiedit: "Multi Edit", question: "Question",
@@ -10599,9 +10759,70 @@
 
     // live tool rows keyed by part id — like the TUI's └─ tool lines
     const ocToolEls = new Map();
+    const ocToolGroups = new Map();
+
+    function ocUpdateToolGroup(group) {
+      if (!group) return;
+      const entries = group.entries;
+      const counts = new Map();
+      let running = false, error = false;
+      entries.forEach((entry) => {
+        const nm = entry.pretty || "Tool";
+        counts.set(nm, (counts.get(nm) || 0) + 1);
+        if (["running", "streaming", "pending"].includes(entry.status)) running = true;
+        if (entry.status === "error") error = true;
+      });
+      const n = entries.length;
+      const state = running ? "running" : (error ? "error" : "done");
+      group.countEl.textContent = `${n} tool call${n === 1 ? "" : "s"}`;
+      const names = [...counts.entries()]
+        .map(([name, count]) => count > 1 ? `${name} ×${count}` : name);
+      const shown = names.slice(0, 4);
+      group.namesEl.textContent = shown.join(", ") + (names.length > 4 ? ` +${names.length - 4}` : "");
+      group.stateEl.textContent = state;
+      group.stateEl.className = "oc-tools-state " + (state === "running" ? "oc-running" : state === "error" ? "oc-error" : "oc-done");
+      group.head.setAttribute("aria-label", `${n} tool call${n === 1 ? "" : "s"}, ${state}`);
+    }
+
+    function ocToolGroupFor(beforeEl) {
+      let group = ocToolGroups.get(beforeEl);
+      if (group) return group;
+      const el = document.createElement("div");
+      el.className = "oc-tools";
+      const head = document.createElement("button");
+      head.type = "button";
+      head.className = "oc-tools-head";
+      head.setAttribute("aria-expanded", "false");
+      head.innerHTML = `<span class="oc-tools-caret" aria-hidden="true">▸</span><span class="oc-tools-count"></span><span class="oc-tools-names"></span><span class="oc-tools-state"></span>`;
+      const body = document.createElement("div");
+      body.className = "oc-tools-body";
+      body.hidden = true;
+      head.addEventListener("click", () => {
+        body.hidden = !body.hidden;
+        head.setAttribute("aria-expanded", body.hidden ? "false" : "true");
+        const caret = head.querySelector(".oc-tools-caret");
+        if (caret) caret.textContent = body.hidden ? "▸" : "▾";
+        ocScroll();
+      });
+      el.appendChild(head);
+      el.appendChild(body);
+      if (elOcScreen) elOcScreen.insertBefore(el, beforeEl);
+      group = {
+        el, head, body, entries: [],
+        countEl: head.querySelector(".oc-tools-count"),
+        namesEl: head.querySelector(".oc-tools-names"),
+        stateEl: head.querySelector(".oc-tools-state"),
+      };
+      ocToolGroups.set(beforeEl, group);
+      return group;
+    }
 
     function ocToolRow(part, afterEl, beforeEl) {
-      const key = part.id || (part.type + ":" + JSON.stringify(part.input || {}).slice(0, 60));
+      // Key stability matters: one row per TOOL CALL, updated in place
+      // across its lifecycle phases. Without part.id, include the name
+      // (stable across phases) in the fallback key, or each lifecycle
+      // event renders as a fresh stacked row.
+      const key = part.id || (part.type + ":" + (part.name || "") + ":" + JSON.stringify(part.input || {}).slice(0, 60));
       let entry = ocToolEls.get(key);
       if (!entry) {
         const info = ocToolInfo(part);
@@ -10616,14 +10837,22 @@
         row.addEventListener("click", () => { out.hidden = !out.hidden; ocScroll(); });
         wrap.appendChild(row);
         wrap.appendChild(out);
+        entry = { wrap, row, out, key, pretty: info.pretty, status: "pending", group: null };
         if (elOcScreen) {
-          // beforeEl: keep tool rows ABOVE the assistant message so the
-          // summary always renders last (bottom), like the opencode TUI
-          if (beforeEl && beforeEl.parentNode === elOcScreen) elOcScreen.insertBefore(wrap, beforeEl);
-          else if (afterEl && afterEl.parentNode === elOcScreen) elOcScreen.insertBefore(wrap, afterEl.nextSibling);
-          else elOcScreen.appendChild(wrap);
+          // beforeEl: keep the collapsed tool group ABOVE the assistant
+          // message so the summary always renders last (bottom), like the
+          // opencode TUI.
+          if (beforeEl && beforeEl.parentNode === elOcScreen) {
+            const group = ocToolGroupFor(beforeEl);
+            group.body.appendChild(wrap);
+            group.entries.push(entry);
+            entry.group = group;
+          } else if (afterEl && afterEl.parentNode === elOcScreen) {
+            elOcScreen.insertBefore(wrap, afterEl.nextSibling);
+          } else {
+            elOcScreen.appendChild(wrap);
+          }
         }
-        entry = { wrap, row, out, key };
         ocToolEls.set(key, entry);
       }
       ocToolUpdate(entry, part);
@@ -10639,7 +10868,9 @@
       nameEl.textContent = info.pretty;
       detailEl.textContent = info.detail ? info.detail.slice(0, 120) : "";
       const status = (info.st.status || "pending").toLowerCase();
-      if (status === "running") {
+      entry.pretty = info.pretty;
+      entry.status = status;
+      if (status === "running" || status === "streaming") {
         stateEl.className = "oc-tool-state oc-running";
         stateEl.innerHTML = `<span class="oc-spinner">⠋</span> running`;
       } else if (status === "completed" || status === "done") {
@@ -10662,7 +10893,7 @@
         String(diff).split("\n").forEach((ln) => {
           const span = document.createElement("span");
           if (/^\+/.test(ln) && !/^\+\+\+/.test(ln)) span.className = "oc-add";
-          else if (/^-/.test(ln) && !/^---/.test(ln)) span.className = "oc-del";
+          else if (/^-/.test(ln) && !(/^---/.test(ln))) span.className = "oc-del";
           else if (/^@@/.test(ln)) span.className = "oc-hunk";
           span.textContent = ln || " ";
           entry.out.appendChild(span);
@@ -10675,8 +10906,12 @@
       } else if (output) {
         entry.out.classList.remove("oc-diff");
         entry.out.textContent = String(output).slice(0, 8000);
-        entry.out.hidden = false;
+        // Keep successful tool output collapsed so a long agent turn stays a
+        // compact list of calls; click the row to expand it.
+        entry.out.hidden = true;
+        entry.row.title = "Click to show tool output";
       }
+      ocUpdateToolGroup(entry.group);
     }
 
     // ── permission cards (TUI style: y / a / n) ─────────────────────
@@ -10687,6 +10922,14 @@
         const card = btn.closest(".oc-perm");
         if (card) ocPermResolve(card, response === "reject" ? "denied" : "approved");
       } catch (err) {
+        // The request was already resolved server-side (duplicate card from
+        // a re-render, or auto-allowed by an earlier "always"): settle the
+        // card instead of erroring so the turn can move on.
+        if (/not found|already/i.test(err.message || "")) {
+          const card = btn.closest(".oc-perm");
+          if (card) ocPermResolve(card, "already answered");
+          return;
+        }
         btn.disabled = false;
         btn.textContent = "Error: " + err.message;
       }
@@ -11103,7 +11346,7 @@
             break;
           case "/new":
           case "/clear":
-            ocToolEls.clear();
+            ocToolEls.clear(); ocToolGroups.clear();
             ocBootScreen(false);
             ocLine("new session — type a prompt to begin", "oc-info");
             break;
@@ -11266,7 +11509,7 @@
     }
 
     async function ocLoadSession(sid) {
-      ocToolEls.clear();
+      ocToolEls.clear(); ocToolGroups.clear();
       if (elOcScreen) elOcScreen.innerHTML = "";
       agent.sessionID = sid;
       try {
@@ -11568,6 +11811,10 @@
               bumpWatchdog();
             } else if (pt === "tool" || pt.startsWith("tool")) {
               bumpWatchdog();
+              // Make the assistant message early so the collapsed tool
+              // summary has a stable anchor even when the model emits tools
+              // before its first text delta.
+              ensureMsg();
               ocToolRow(part, null, msgEl);
             }
           } else if (type === "message.part.delta") {
@@ -11613,7 +11860,7 @@
     // ── terminal event bindings ─────────────────────────────────────
     if (elAgentNewSess) {
       elAgentNewSess.addEventListener("click", () => {
-        ocToolEls.clear();
+        ocToolEls.clear(); ocToolGroups.clear();
         ocBootScreen(false);
         ocLine("new session — type a prompt to begin", "oc-info");
         if (elOcInput) elOcInput.focus();

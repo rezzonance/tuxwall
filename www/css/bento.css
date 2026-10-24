@@ -3433,3 +3433,108 @@ body.light-theme .card-topglow::before { opacity: .26; }
   .alerts-wide { grid-column: 1; }
   .alerts-actions { flex-wrap: wrap; }
 }
+
+/* ============================================================================
+   AI terminal — one collapsed summary per assistant turn's tool calls
+   ========================================================================= */
+.oc-tools {
+  margin: 4px 0 4px 14px;
+  border-left: 1px solid var(--oc-border-subtle);
+}
+.oc-tools-head {
+  display: flex; align-items: center; gap: 7px;
+  width: 100%; padding: 2px 0;
+  border: 0; background: transparent;
+  color: var(--oc-muted);
+  font: inherit; font-size: 11.5px; text-align: left;
+  cursor: pointer;
+}
+.oc-tools-head:hover { color: var(--oc-text); }
+.oc-tools-head:focus-visible { outline: 1px solid var(--oc-primary); outline-offset: 2px; }
+.oc-tools-caret {
+  flex: none; width: 10px;
+  color: var(--oc-border);
+  text-align: center;
+}
+.oc-tools-count {
+  flex: none;
+  color: var(--oc-text);
+  font-weight: 700;
+}
+.oc-tools-names {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--oc-muted);
+}
+.oc-tools-state { flex: none; font-size: 11px; }
+.oc-tools-state.oc-running { color: var(--oc-primary); }
+.oc-tools-state.oc-done { color: var(--oc-ok); }
+.oc-tools-state.oc-error { color: var(--oc-error); }
+.oc-tools-body { margin-left: 14px; }
+.oc-tools-body[hidden] { display: none; }
+.oc-tools-body .oc-tool { margin-left: 0; border-left: 0; }
+.oc-tools-body .oc-tool-row::before { content: "├─"; }
+.oc-tools-body .oc-tool:last-child .oc-tool-row::before { content: "└─"; }
+
+/* ============================================================================
+   Uniform card headers — icon + stacked title/subtitle
+   ========================================================================= */
+#view-dns        { --page-tab: #3fb950; }
+#view-domains    { --page-tab: #bc8cff; }
+#view-blocklists { --page-tab: #f85149; }
+#view-wireguard  { --page-tab: #a78bfa; }
+#view-vlans      { --page-tab: #4f8cff; }
+#view-backups    { --page-tab: #d29922; }
+#view-logs       { --page-tab: #8b949e; }
+#view-ai         { --page-tab: #f472b6; }
+
+.card-head.card-head-ico {
+  justify-content: flex-start;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.card-head.card-head-ico .card-head-ico {
+  display: grid; place-items: center; flex: none;
+  width: 30px; height: 30px;
+  border-radius: 9px;
+  color: var(--page-tab, var(--accent));
+  background: color-mix(in srgb, var(--page-tab, var(--accent)) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--page-tab, var(--accent)) 30%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 10%, transparent);
+}
+.card-head.card-head-ico .card-head-ico svg {
+  width: 16px; height: 16px; display: block;
+  fill: none; stroke: currentColor; stroke-width: 1.7;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.card-head.card-head-ico .card-head-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.card-head.card-head-ico .card-head-copy h2 {
+  padding-left: 0;
+  background: none;
+  -webkit-text-fill-color: currentColor;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.25;
+}
+.card-head.card-head-ico .card-head-copy .muted,
+.card-head.card-head-ico .card-head-copy .card-head-note {
+  font-size: 11px;
+  line-height: 1.4;
+  letter-spacing: .01em;
+  color: var(--muted);
+}
+.card-head.card-head-ico .card-toolbar { margin-left: auto; }
+.card-head.card-head-ico .bw-rates { margin-left: auto; }
+
+@media (max-width: 700px) {
+  .card-head.card-head-ico { gap: 8px; }
+  .card-head.card-head-ico .card-head-ico { width: 28px; height: 28px; }
+  .card-head.card-head-ico .card-toolbar { margin-left: 0; flex: 1 1 100%; }
+}

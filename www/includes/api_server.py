@@ -10595,16 +10595,48 @@ class Handler(BaseHTTPRequestHandler):
         import sys as _sys
         print("[agent] {} {}".format(time.strftime("%Y-%m-%d %H:%M:%S"), msg), file=_sys.stderr, flush=True)
 
-    def _agent_call(self, method, path, payload=None, timeout=30):
-        """Forward a request to the local opencode server (HTTP basic auth).
+    # --- opencode dual-protocol (V1 + V2) ------------------------------
+    # The bundled opencode agent is 1.18.x (V1 server API: /session,
+    # /event, ...) today and 2.x (V2 server API: /api/session, /api/event,
+    # ...) after an agent upgrade. The dashboard speaks V1 exclusively;
+    # this layer detects the agent generation once per service lifetime
+    # and translates requests/responses/events so both work unchanged.
+    _AGENT_V2 = None
+    _AGENT_V2_LOCK = threading.Lock()
+    _AGENT_V2_TOOL_META = {}   # tool id -> {name, input} (lifecycle row stability)
 
-        Returns parsed JSON. On failure raises AgentError carrying the
-        upstream status code and response body so callers can log and
-        display the real cause.
-        """
+    def _agent_is_v2(self):
+        """True when the agent speaks the V2 API. Probed once, cached;
+        re-probed after connection-level failures so an agent upgrade
+        mid-service-life is picked up."""
+        with self._AGENT_V2_LOCK:
+            if self._AGENT_V2 is not None:
+                return self._AGENT_V2
+            try:
+                self._agent_call_raw("GET", "/api/info", timeout=5)
+                self._AGENT_V2 = True
+            except AgentError as exc:
+                if exc.status == 404:
+                    self._AGENT_V2 = False   # V1: no /api/* namespace
+                elif exc.status in (401, 403):
+                    self._AGENT_V2 = True    # auth differs, routing proves V2
+                elif exc.status == 0:
+                    raise                    # agent down: callers handle this
+                else:
+                    self._AGENT_V2 = False
+            return self._AGENT_V2
+
+    def _agent_call_raw(self, method, path, payload=None, timeout=30,
+                        sse=False):
+        """HTTP call to the agent, verbatim (no translation). Raises
+        AgentError with upstream status/body on failure."""
         url = self.AGENT_BASE + path
         data = json.dumps(payload).encode() if payload is not None else None
         headers = {"Content-Type": "application/json"}
+        if not sse:
+            headers["Accept"] = "application/json"
+        else:
+            headers = {"Accept": "text/event-stream"}
         if self.AGENT_PASSWORD:
             import base64
             tok = base64.b64encode(
@@ -10641,6 +10673,8 @@ class Handler(BaseHTTPRequestHandler):
                 status=0, body="timeout")
         self._agent_log("HTTP {} {} -> {} len={}".format(
             method, path, status, len(body or "")))
+        if sse:
+            return body
         try:
             return json.loads(body or "{}")
         except ValueError as exc:
@@ -10648,6 +10682,454 @@ class Handler(BaseHTTPRequestHandler):
                 method, path, body[:500]))
             raise AgentError("opencode returned invalid JSON ({}): {}".format(
                 exc, body[:500]), status=status, body=body[:2000])
+
+    def _agent_v2_pending_permissions(self):
+        """All pending permission requests across sessions.
+
+        V2 keeps permission requests SESSION-scoped: the global
+        /api/permission/request returns an empty list even while requests
+        are pending (verified against a live 2.1.4 - the shell permission
+        flow died on this). Returns [(sessionID, request), ...].
+
+        Sessions are collected from BOTH the active list and the full
+        session list: a session mid-turn can be absent from /api/session/
+        active (observed live - its pending ask then became permanently
+        unanswerable), so the union is required for correctness."""
+        sids = []
+        seen = set()
+        try:
+            active = self._agent_call_raw("GET", "/api/session/active", timeout=10)
+            data = active.get("data") if isinstance(active, dict) else None
+            if isinstance(data, dict):
+                sids = [k for k in data.keys() if k.startswith("ses")]
+            elif isinstance(data, list):
+                sids = [s.get("id") for s in data
+                        if isinstance(s, dict) and s.get("id")]
+        except AgentError:
+            pass
+        for s in sids:
+            seen.add(s)
+        try:
+            data = self._agent_call_raw("GET", "/api/session", timeout=10)
+            for s in (data.get("data") or []):
+                sid = s.get("id") if isinstance(s, dict) else None
+                if sid and sid not in seen:
+                    sids.append(sid)
+                    seen.add(sid)
+        except AgentError:
+            pass
+        out = []
+        for sid in sids[:20]:
+            try:
+                data = self._agent_call_raw(
+                    "GET",
+                    "/api/session/" + urllib.parse.quote(sid) + "/permission",
+                    timeout=10)
+                for r in (data.get("data") or []):
+                    out.append((sid, r))
+            except AgentError:
+                continue
+        return out
+
+    def _agent_v2_find_session_id(self, request_id):
+        """Locate the session a pending permission request belongs to
+        (V2 replies are session-scoped)."""
+        for sid, r in self._agent_v2_pending_permissions():
+            if r.get("id") == request_id:
+                return sid
+        return None
+
+    def _agent_v2_last_message_id(self, session_id):
+        """Latest message id in a session (V2 revert staging requires an
+        explicit messageID; the V1 'revert last' semantics pick the most
+        recent message)."""
+        try:
+            data = self._agent_call_raw(
+                "GET", "/api/session/" + urllib.parse.quote(session_id) + "/message",
+                timeout=15)
+            items = data.get("data") or []
+            if items:
+                return items[-1].get("id")
+        except AgentError:
+            pass
+        return None
+
+    @staticmethod
+    def _agent_v2_perm_to_v1(r):
+        """V2 Permission.Request -> the V1 request shape the dashboard's
+        permission cards read (id / permission / tool / patterns /
+        metadata)."""
+        if not isinstance(r, dict):
+            return r
+        meta = r.get("metadata") or {}
+        out = dict(r)
+        action = r.get("action") or "tool"
+        out.setdefault("permission", action)
+        out.setdefault("tool", action)
+        out.setdefault("patterns", r.get("resources") or [])
+        if r.get("message") and not meta.get("description"):
+            meta = dict(meta)
+            meta.setdefault("description", r.get("message"))
+            out["metadata"] = meta
+        return out
+
+    @staticmethod
+    def _agent_v2_form_questions(form):
+        """V2 form fields -> V1 'questions' objects for the dashboard's
+        question cards."""
+        questions = []
+        for f in (form.get("fields") or []):
+            if not isinstance(f, dict):
+                continue
+            ftype = f.get("type") or ""
+            opts = []
+            for o in (f.get("options") or []):
+                if isinstance(o, dict):
+                    opts.append({"label": str(o.get("label") or o.get("value") or ""),
+                                 "description": str(o.get("description") or "")})
+                else:
+                    opts.append({"label": str(o), "description": ""})
+            questions.append({
+                "header": f.get("header") or f.get("label") or "",
+                "question": f.get("question") or f.get("label") or f.get("title")
+                            or (form.get("title") if len(form.get("fields") or []) == 1 else ""),
+                "options": opts,
+                "multi": ftype == "multiselect" or bool(f.get("multi")),
+            })
+        return questions
+
+    def _agent_v2_translate(self, method, path, payload):
+        """Map a V1-style agent call onto the V2 API.
+
+        Returns (method, v2_path, v2_payload, needs_post_processing).
+        Post-processing (multi-step flows) is handled in _agent_v2_finish.
+        """
+        p = path
+        q = ""
+        if "?" in p:
+            p, q = p.split("?", 1)
+        sid = lambda s: urllib.parse.quote(s or "")
+        if p == "/global/health":
+            return ("GET", "/api/info", None)
+        if p == "/config":
+            return ("GET", "/api/config", None)
+        if p == "/config/providers":
+            # Merged in _agent_v2_finish (needs /api/provider + /api/model)
+            return ("GET", "/api/provider", None)
+        if p == "/session":
+            if method == "POST":
+                return ("POST", "/api/session", payload or {})
+            return ("GET", "/api/session", None)
+        if p == "/permission":
+            return ("GET", "/api/permission/request", None)
+        if p == "/question":
+            return ("GET", "/api/form", None)
+        if p == "/path":
+            return ("GET", "/api/location", None)
+        if p == "/vcs":
+            return ("GET", "/api/vcs", None)
+        if p == "/find/file":
+            params = urllib.parse.parse_qs(q)
+            v2q = (params.get("query") or [""])[0]
+            return ("GET", "/api/fs/find?" + urllib.parse.urlencode(
+                {"query": v2q}), None)
+        if p.startswith("/session/"):
+            rest = p[len("/session/"):]
+            parts = rest.split("/")
+            if len(parts) == 1:
+                s = parts[0]
+                if method == "DELETE":
+                    return ("DELETE", "/api/session/" + sid(s), None)
+                if method == "PATCH":
+                    return ("PATCH", "/api/session/" + sid(s), payload or {})
+                return ("GET", "/api/session/" + sid(s), None)
+            s, action = parts[0], parts[1]
+            base = "/api/session/" + sid(s)
+            if action == "message":
+                return ("GET", base + "/message", None)
+            if action == "prompt_async":
+                # V1 payload: {parts: [{type:"text", text}], model?}
+                text = "\n".join((pp.get("text") or "") for pp in
+                                 ((payload or {}).get("parts") or [])
+                                 if isinstance(pp, dict) and pp.get("type") == "text")
+                v2p = {"text": text}
+                model = (payload or {}).get("model") or {}
+                if isinstance(model, dict) and model.get("providerID"):
+                    v2p["model"] = {"id": model.get("modelID") or "",
+                                    "providerID": model.get("providerID")}
+                return ("POST", base + "/prompt", v2p)
+            if action == "shell":
+                v2p = {"command": (payload or {}).get("command") or ""}
+                return ("POST", base + "/shell", v2p)
+            if action == "command":
+                pl = payload or {}
+                v2p = {"name": pl.get("command") or ""}
+                if pl.get("arguments"):
+                    v2p["text"] = " ".join(str(a) for a in pl["arguments"])
+                model = pl.get("model") or {}
+                if isinstance(model, dict) and model.get("providerID"):
+                    v2p["model"] = {"id": model.get("modelID") or "",
+                                     "providerID": model.get("providerID")}
+                return ("POST", base + "/command", v2p)
+            if action == "abort":
+                return ("POST", base + "/interrupt", None)
+            if action == "summarize":
+                return ("POST", base + "/compact", None)
+            if action == "revert":
+                return ("POST", base + "/revert/stage", None)  # messageID added in finish
+            if action == "unrevert":
+                raise AgentError(
+                    "redo (unrevert) is not supported by the opencode v2 agent API",
+                    status=501, body="unrevert has no V2 equivalent")
+            if action in ("share",):
+                raise AgentError(
+                    "session sharing is not supported by the opencode v2 agent API",
+                    status=501, body="share has no V2 equivalent")
+            if action == "init":
+                return ("POST", "/api/vcs/init", None)
+        if p.startswith("/permission/") and p.endswith("/reply"):
+            request_id = p[len("/permission/"):-len("/reply")]
+            # session-scoped in V2; resolved in _agent_v2_finish
+            return ("POST", "/api/permission/" + sid(request_id) + "/reply",
+                    payload or {})
+        if p.startswith("/question/"):
+            request_id = parts_id = p[len("/question/"):].split("/")[0]
+            tail = p[len("/question/"):][len(request_id):]
+            if tail == "/reply":
+                return ("POST", "/api/form/" + sid(request_id) + "/reply",
+                        payload or {})
+            if tail == "/reject":
+                return ("DELETE", "/api/form/" + sid(request_id), None)
+        # Unmapped path: surface clearly rather than silently 404ing.
+        raise AgentError("opencode v2 mapping missing for {} {}".format(method, path),
+                         status=501, body="dual-protocol translator gap")
+
+    def _agent_v2_finish(self, v1_method, v1_path, v2_path, v2_payload, result):
+        """Post-process a V2 response into the V1 shape the dashboard
+        expects (unwrap {data}, merge multi-call flows, normalize)."""
+        p = v1_path.split("?")[0]
+        def d(x):
+            return x.get("data") if isinstance(x, dict) and "data" in x else x
+
+        if p == "/config/providers":
+            # Build the V1 providers view from /api/model (models exist even
+            # when /api/provider lists nothing - providers only appear
+            # there once activated/credentialed). Provider names are
+            # enriched from /api/provider when available.
+            raw = d(result)
+            prov_list = (raw.get("data") if isinstance(raw, dict) and "data" in raw else raw) or []
+            names = {}
+            for prov in (prov_list or []):
+                if isinstance(prov, dict) and prov.get("id"):
+                    names[prov["id"]] = prov.get("name") or prov["id"]
+            providers = []
+            seen = {}
+            try:
+                models = self._agent_call_raw("GET", "/api/model", timeout=10)
+                mlist = (models.get("data") or []) if isinstance(models, dict) else []
+            except AgentError:
+                mlist = []
+            for m in mlist:
+                if not isinstance(m, dict):
+                    continue
+                pid = m.get("providerID") or "model"
+                mid = m.get("modelID") or m.get("id") or "?"
+                seen.setdefault(pid, {})[mid] = {"name": m.get("name") or mid}
+            for pid in sorted(seen):
+                providers.append({
+                    "id": pid,
+                    "name": names.get(pid, pid),
+                    "models": seen[pid],
+                })
+            default = {}
+            try:
+                default = self._agent_call_raw("GET", "/api/model/default", timeout=5)
+                default = d(default) or {}
+                if isinstance(default, dict) and default.get("providerID"):
+                    default = dict(default)
+                    default.setdefault("model",
+                                       default.get("modelID") or default.get("id") or "")
+            except AgentError:
+                pass
+            return {"ok": True, "providers": providers, "default": default}
+        if p == "/config":
+            # V2 /api/config returns a list of layered entries; merge the
+            # document entries' info into one object (V1 callers expect a
+            # single config dict) and normalize the V2 model ref into the
+            # V1 "provider/model" string.
+            raw = d(result)
+            merged = {}
+            entries = raw if isinstance(raw, list) else [raw]
+            for e in entries:
+                if isinstance(e, dict) and isinstance(e.get("info"), dict):
+                    merged.update(e["info"])
+                elif isinstance(e, dict) and e.get("type") != "directory":
+                    merged.update({k: v for k, v in e.items()
+                                   if k not in ("type", "path")})
+            model = merged.get("model")
+            if isinstance(model, dict) and model.get("providerID"):
+                merged["model"] = "{}/{}".format(
+                    model.get("providerID"),
+                    model.get("model") or model.get("modelID") or "")
+            return merged
+        if p == "/session" and v1_method == "POST":
+            return d(result)
+        if p == "/session":
+            return d(result)
+        if p.startswith("/session/") and p.endswith("/message"):
+            return d(result)
+        if p == "/permission":
+            # V2: aggregate across active sessions (the global endpoint
+            # lists nothing) and normalize each into the V1 card shape.
+            requests = self._agent_v2_pending_permissions()
+            return [self._agent_v2_perm_to_v1(r) for _sid, r in requests]
+        if p == "/question":
+            raw = d(result)
+            forms = (raw.get("data") if isinstance(raw, dict) else raw) or []
+            # The dashboard's question poll reads `d.requests` and renders
+            # each entry as a question card: {requestID, sessionID,
+            # questions}. Map V2 forms into that shape.
+            requests = []
+            for form in forms:
+                if not isinstance(form, dict):
+                    continue
+                requests.append({
+                    "requestID": form.get("id") or "",
+                    "sessionID": form.get("sessionID") or "",
+                    "questions": self._agent_v2_form_questions(form),
+                })
+            return {"ok": True, "requests": requests}
+        if p == "/path":
+            raw = d(result)
+            return {"directory": (raw or {}).get("directory") or ""}
+        if p == "/vcs":
+            return d(result)
+        if p == "/find/file":
+            raw = d(result)
+            return raw.get("data") if isinstance(raw, dict) else raw
+        # Permission reply: resolve the session, then send the real reply.
+        if p.startswith("/permission/") and p.endswith("/reply"):
+            request_id = p[len("/permission/"):-len("/reply")]
+            session_id = self._agent_v2_find_session_id(request_id)
+            if not session_id:
+                raise AgentError("pending permission {} not found".format(request_id),
+                                 status=404, body="permission request missing")
+            reply = (v2_payload or {}).get("reply") or "once"
+            real = self._agent_call_raw(
+                "POST",
+                "/api/session/" + urllib.parse.quote(session_id) +
+                "/permission/" + urllib.parse.quote(request_id) + "/reply",
+                {"decision": reply}, timeout=15)
+            return real
+        # Question reply/reject: resolve the form's session, act on the form.
+        if p.startswith("/question/"):
+            request_id = p[len("/question/"):].split("/")[0]
+            form = None
+            try:
+                data = self._agent_call_raw("GET", "/api/form", timeout=10)
+                for f in (data.get("data") or []):
+                    if f.get("id") == request_id:
+                        form = f
+                        break
+            except AgentError:
+                pass
+            if not form or not form.get("sessionID"):
+                raise AgentError("pending question {} not found".format(request_id),
+                                 status=404, body="form missing")
+            fbase = ("/api/session/" + urllib.parse.quote(form["sessionID"]) +
+                     "/form/" + urllib.parse.quote(request_id))
+            if p.endswith("/reply"):
+                answers = (v2_payload or {}).get("answers") or []
+                answer = answers[0] if len(answers) == 1 else answers
+                return self._agent_call_raw("POST", fbase + "/reply",
+                                            {"answer": answer}, timeout=15)
+            return self._agent_call_raw("DELETE", fbase, timeout=15)
+        # Revert: V2 is staged (messageID) then committed.
+        if p.startswith("/session/") and p.endswith("/revert"):
+            session_id = p[len("/session/"):].split("/")[0]
+            message_id = self._agent_v2_last_message_id(session_id)
+            if not message_id:
+                raise AgentError("no messages to revert", status=400, body="empty session")
+            base = "/api/session/" + urllib.parse.quote(session_id)
+            self._agent_call_raw("POST", base + "/revert/stage",
+                                 {"messageID": message_id}, timeout=30)
+            return self._agent_call_raw("POST", base + "/revert/commit",
+                                       None, timeout=60)
+        # Shell: V2 runs the command through the session asynchronously.
+        # Poll the message list until the shell message completes, then
+        # build the V1 {parts:[...]} shape the dashboard's !-command flow
+        # parses (tool part with state.output / state.error).
+        if p.startswith("/session/") and p.endswith("/shell"):
+            session_id = p[len("/session/"):].split("/")[0]
+            command = (v2_payload or {}).get("command") or ""
+            deadline = time.time() + 280
+            base = "/api/session/" + urllib.parse.quote(session_id)
+            while time.time() < deadline:
+                time.sleep(0.6)
+                try:
+                    data = self._agent_call_raw("GET", base + "/message", timeout=15)
+                except AgentError:
+                    break
+                shell_msgs = [m for m in (data.get("data") or [])
+                              if isinstance(m, dict) and m.get("type") == "shell"]
+                if not shell_msgs:
+                    continue
+                last = shell_msgs[-1]
+                if last.get("command") != command:
+                    continue
+                status = last.get("status") or "running"
+                if status == "running":
+                    continue
+                out = (last.get("output") or {}).get("output") or ""
+                exit_code = last.get("exit")
+                state = {"status": "completed" if status == "exited" else "error",
+                         "output": out}
+                if status != "exited" or (exit_code not in (None, 0)):
+                    state["error"] = "exit {}".format(exit_code if exit_code is not None else status)
+                return {"parts": [{"type": "tool", "name": "shell", "state": state}]}
+            raise AgentError("shell command did not finish in time",
+                             status=504, body="shell poll timeout")
+        # Default: unwrap {data} envelopes so V1 callers see plain payloads.
+        return d(result)
+
+    def _agent_call(self, method, path, payload=None, timeout=30):
+        """Forward a request to the local opencode server (HTTP basic auth).
+
+        Speaks the V1 wire protocol to callers and translates to/from the
+        V2 API automatically when the agent is opencode 2.x.
+
+        Returns parsed JSON in the V1 shape. On failure raises AgentError
+        carrying the upstream status code and response body so callers can
+        log and display the real cause.
+        """
+        if self._agent_is_v2():
+            m2, p2, payload2 = self._agent_v2_translate(method, path, payload)
+            p1 = path.split("?")[0]
+            # Multi-step flows (session-scoped replies, staged reverts,
+            # cross-session permission aggregation) are fully orchestrated
+            # inside _agent_v2_finish; the stub paths returned by the
+            # translator must not be called directly.
+            deferred = (
+                p1 == "/permission"
+                or (p1.startswith("/permission/") and p1.endswith("/reply"))
+                or p1.startswith("/question/")
+                or (p1.startswith("/session/") and p1.endswith("/revert"))
+            )
+            if deferred:
+                result = self._agent_v2_finish(method, path, p2, payload2, None)
+            else:
+                result = self._agent_call_raw(m2, p2, payload2, timeout=timeout)
+                result = self._agent_v2_finish(method, path, p2, payload2, result)
+            # V2 success responses are frequently bare ({} on 200, or a
+            # {data:...} envelope with no verdict field). The V1 routes the
+            # dashboard posts to REQUIRE ok:true - a {} passthrough renders
+            # as "HTTP 200" on the client. Errors raise AgentError before
+            # this point, so a dict result here is always a success.
+            if isinstance(result, dict) and "ok" not in result:
+                result = dict(result)
+                result["ok"] = True
+            return result
+        return self._agent_call_raw(method, path, payload, timeout=timeout)
 
     def _agent_error(self, exc):
         """Build a structured error payload from an AgentError (or any exception)."""
@@ -10665,10 +11147,176 @@ class Handler(BaseHTTPRequestHandler):
             "hint": "see: journalctl -u tuxwall.service -t -n 50 | grep agent",
         }
 
+    def _agent_v2_event_to_v1(self, frame):
+        """Translate one V2 /api/event frame into the V1 event objects the
+        dashboard's SSE handler consumes (type + properties). Returns a
+        list of V1 events (usually 0-2); unknown events are dropped.
+
+        V2 wire format (verified against a live 2.1.4 server):
+            data: {"id", "created"?, "type": <name>, "location"?,
+                  "data": {...}, "durable"?}
+        - the event name is the frame-level "type"
+        - "data" is a plain JSON object (the spec's V2EventEncoded
+          string form is also tolerated)
+        - ": heartbeat" comment frames are skipped by the reader."""
+        if not isinstance(frame, dict):
+            return []
+        ev_type = frame.get("type") or frame.get("event") or ""
+        data = frame.get("data")
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except ValueError:
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+        sid = data.get("sessionID") or ""
+
+        def emit(type_name, properties):
+            return {"type": type_name, "properties": properties}
+
+        def tool_output(data):
+            content = data.get("content")
+            if isinstance(content, list):
+                chunks = []
+                for c in content:
+                    if isinstance(c, dict) and c.get("type") == "text":
+                        chunks.append(c.get("text") or "")
+                    elif isinstance(c, str):
+                        chunks.append(c)
+                if chunks:
+                    return "".join(chunks)
+            if isinstance(data.get("output"), str):
+                return data["output"]
+            return ""
+
+        def tool_part(data, state):
+            # Stable identity across the V2 tool lifecycle
+            # (input.started -> called -> success/failed): every phase must
+            # resolve to the SAME dashboard row key (part.id, else
+            # type+name), or each phase renders as a new stacked row - the
+            # "30 tool calls" pileup. Remember names and inputs seen in
+            # earlier phases because success/failed only carry metadata.
+            tid = data.get("callID") or data.get("id") or ""
+            name = data.get("tool") or data.get("name") or ""
+            meta = self._AGENT_V2_TOOL_META
+            entry = meta.get(tid) or {}
+            if tid and name:
+                entry["name"] = name
+            elif tid and entry.get("name"):
+                name = entry["name"]
+            incoming = data.get("input")
+            if tid and incoming not in (None, ""):
+                entry["input"] = incoming
+            if tid:
+                meta[tid] = entry
+            cached_input = entry.get("input")
+            part = {"messageID": data.get("assistantMessageID") or "",
+                    "type": "tool", "id": tid, "name": name,
+                    "tool": name}
+            # V1 consumers read state.input for the command/path detail.
+            if state.get("input") in (None, "") and cached_input not in (None, ""):
+                state["input"] = cached_input
+            md = data.get("metadata")
+            if md:
+                state["meta"] = md
+                state["metadata"] = md
+            part["state"] = state
+            return emit("message.part.updated", {"sessionID": sid, "part": part})
+
+        if ev_type == "permission.asked":
+            req = self._agent_v2_perm_to_v1(data)
+            return [emit("permission.asked", req)]
+        if ev_type == "form.created":
+            form = data.get("form") or data
+            props = {
+                "requestID": form.get("id") or "",
+                "sessionID": form.get("sessionID") or "",
+                "questions": self._agent_v2_form_questions(form),
+            }
+            return [emit("question.v2.asked", props)]
+        if ev_type == "form.replied":
+            return [emit("question.replied",
+                         {"requestID": (data.get("form") or data).get("id") or ""})]
+        if ev_type == "form.cancelled":
+            return [emit("question.rejected",
+                         {"requestID": (data.get("form") or data).get("id") or ""})]
+        if ev_type == "session.text.delta":
+            return [emit("message.part.delta", {
+                "sessionID": sid,
+                "messageID": data.get("assistantMessageID") or "",
+                "field": "text", "delta": data.get("delta") or ""})]
+        if ev_type == "session.text.ended":
+            return [emit("message.part.updated", {
+                "sessionID": sid,
+                "part": {"messageID": data.get("assistantMessageID") or "",
+                         "type": "text", "text": data.get("text") or ""}})]
+        if ev_type in ("session.reasoning.delta", "session.reasoning.ended",
+                       "session.text.started", "session.reasoning.started"):
+            return [emit("message.part.updated", {
+                "sessionID": sid,
+                "part": {"messageID": data.get("assistantMessageID") or "",
+                         "type": "reasoning", "text": data.get("text") or ""}})]
+        if ev_type == "session.tool.input.started":
+            return [tool_part(data, {"status": "streaming", "input": ""})]
+        if ev_type == "session.tool.called":
+            return [tool_part(data, {"status": "running",
+                                     "input": data.get("input") or ""})]
+        if ev_type == "session.tool.progress":
+            state = {"status": "running", "output": tool_output(data)}
+            return [tool_part(data, state)]
+        if ev_type == "session.tool.success":
+            state = {"status": "completed"}
+            out = tool_output(data)
+            if out:
+                state["output"] = out
+            md = data.get("metadata") or frame.get("metadata")
+            if md:
+                state["meta"] = md
+            return [tool_part(data, state)]
+        if ev_type == "session.tool.failed":
+            err = data.get("error") or "tool failed"
+            if isinstance(err, dict):
+                err = err.get("message") or json.dumps(err)
+            return [tool_part(data, {"status": "error", "error": str(err)})]
+        if ev_type == "session.usage.updated":
+            # info.id MUST be the assistant message id when present, else
+            # omitted entirely: the dashboard stores it as assistantMsgID
+            # and drops every part/delta whose messageID differs. A
+            # fabricated id (e.g. the session id) suppresses the whole
+            # response text - that exact bug shipped in the first pass.
+            info = {"role": "assistant", "tokens": data.get("tokens") or {},
+                    "cost": data.get("cost") or 0}
+            if data.get("assistantMessageID"):
+                info["id"] = data["assistantMessageID"]
+            return [emit("message.updated", {"sessionID": sid, "info": info})]
+        if ev_type == "session.execution.failed":
+            err = data.get("error") or {}
+            return [
+                emit("message.updated", {
+                    "sessionID": sid,
+                    "info": {"role": "assistant",
+                             "error": {"message": (err.get("message") if isinstance(err, dict)
+                                                   else str(err)) or "execution failed"}}}),
+                emit("session.idle", {"sessionID": sid}),
+            ]
+        if ev_type in ("session.execution.succeeded", "session.execution.interrupted"):
+            return [emit("session.idle", {"sessionID": sid})]
+        return []
+
     def _agent_events_sse(self):
-        """Proxy opencode's /event SSE stream to the browser, live."""
+        """Proxy opencode's SSE event stream to the browser, live.
+
+        V1 agent: verbatim passthrough (the browser already speaks V1).
+        V2 agent: frames are translated into the V1 event shapes the
+        dashboard consumes, one SSE data line per emitted event."""
         import base64
-        url = self.AGENT_BASE + "/event"
+        v2 = False
+        try:
+            v2 = self._agent_is_v2()
+        except AgentError:
+            pass
+        url = self.AGENT_BASE + ("/api/event" if v2 else "/event")
         headers = {"Accept": "text/event-stream"}
         if self.AGENT_PASSWORD:
             tok = base64.b64encode(
@@ -10685,10 +11333,37 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
+
+        def emit_v1(obj):
+            body = json.dumps(obj).encode()
+            self.wfile.write(b"data: " + body + b"\n\n")
+            self.wfile.flush()
+
         try:
-            for raw in upstream:
-                self.wfile.write(raw if isinstance(raw, bytes) else raw.encode())
-                self.wfile.flush()
+            if not v2:
+                for raw in upstream:
+                    self.wfile.write(raw if isinstance(raw, bytes) else raw.encode())
+                    self.wfile.flush()
+            else:
+                # Parse V2 SSE frames: "data: {json}" lines; each frame is
+                # {"id"?, "event", "data"(<json string>)}.
+                buf = b""
+                while True:
+                    chunk = upstream.readline()
+                    if not chunk:
+                        break
+                    line = chunk.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    try:
+                        frame = json.loads(data_str)
+                    except ValueError:
+                        continue
+                    if not isinstance(frame, dict):
+                        continue
+                    for ev in self._agent_v2_event_to_v1(frame):
+                        emit_v1(ev)
         except (BrokenPipeError, ConnectionResetError):
             pass  # browser closed the stream
         finally:
@@ -10846,6 +11521,15 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/agent/permission":
             try:
                 data = self._agent_call("GET", "/permission")
+                self._send(200, data)
+            except Exception as exc:
+                self._send(500, self._agent_error(exc))
+        elif path == "/api/agent/question":
+            # The dashboard POLLS this with GET (its only route lived in
+            # do_POST, so the poll 404'd forever and question recovery
+            # silently never worked - cards rendered from SSE alone).
+            try:
+                data = self._agent_call("GET", "/question")
                 self._send(200, data)
             except Exception as exc:
                 self._send(500, self._agent_error(exc))

@@ -6,14 +6,14 @@
   <title>TuxWall - Network Dashboard</title>
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
-  <link rel="stylesheet" href="/css/style.css?v=202610230024">
-  <link rel="stylesheet" href="/css/polish.css?v=202610230024">
-  <link rel="stylesheet" href="/css/firewall.css?v=202610230024">
-  <link rel="stylesheet" href="/css/bento.css?v=202610230032">
-  <link rel="stylesheet" href="/css/heroes.css?v=202610230024">
-  <link rel="stylesheet" href="/css/sidebar.css?v=202610230024">
-  <link rel="stylesheet" href="/css/action-icons.css?v=202610230024">
-  <link rel="stylesheet" href="/css/subtab-icons.css?v=202610230024">
+  <link rel="stylesheet" href="/css/style.css?v=202610241021">
+  <link rel="stylesheet" href="/css/polish.css?v=202610241021">
+  <link rel="stylesheet" href="/css/firewall.css?v=202610241021">
+  <link rel="stylesheet" href="/css/bento.css?v=202610241700">
+  <link rel="stylesheet" href="/css/heroes.css?v=202610241021">
+  <link rel="stylesheet" href="/css/sidebar.css?v=202610241021">
+  <link rel="stylesheet" href="/css/action-icons.css?v=202610241021">
+  <link rel="stylesheet" href="/css/subtab-icons.css?v=202610241021">
 </head>
 <body>
 <div id="login-gate" class="login-gate" hidden>
@@ -514,6 +514,10 @@
       <!-- ── Pane: Dynamic leases ─────────────────────────────────────── -->
       <div class="fw-pane" data-dhcp-pane="dynamic">
       <div class="card">
+        <div class="card-head">
+          <h2>Dynamic Leases</h2>
+          <span class="muted">Active DHCP clients and lease status</span>
+        </div>
         <div class="card-toolbar">
           <input type="search" id="search" placeholder="Filter by hostname, IP or MAC..." autocomplete="off">
           <span class="muted" id="result-count"></span>
@@ -773,6 +777,10 @@
       </div>
 
       <div class="card">
+        <div class="card-head">
+          <h2>Local DNS Records</h2>
+          <span class="muted">Custom names served by Unbound</span>
+        </div>
         <div class="card-toolbar bl-toolbar fw-form">
           <input type="text" id="dm-domain" placeholder="domain, e.g. plex.housenetwork.site" autocomplete="off" spellcheck="false">
           <input type="text" id="dm-ip" value="192.168.1.12" placeholder="IP address" autocomplete="off" spellcheck="false">
@@ -843,6 +851,10 @@
       <!-- ── Pane: Sources ────────────────────────────────────────────── -->
       <div class="fw-pane" data-bl-pane="sources">
       <div class="card">
+        <div class="card-head">
+          <h2>Blocklist Sources</h2>
+          <span class="muted">Merged into Unbound as always-NXDOMAIN zones</span>
+        </div>
         <div class="card-toolbar bl-toolbar">
           <input type="text" id="bl-url" placeholder="Add a hosts or domain-list URL, e.g. https://example.com/hosts" autocomplete="off" spellcheck="false">
           <button id="bl-add" class="btn" type="button">Add list</button>
@@ -3538,7 +3550,7 @@
     <p class="muted" id="cs-ban-status" style="margin-top:10px"></p>
   </div>
 </div>
-<script src="/scripts/dashboard.js?v=202610230035"></script>
+<script src="/scripts/dashboard.js?v=202610241700"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>
