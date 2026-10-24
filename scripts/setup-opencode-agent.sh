@@ -39,9 +39,9 @@ fi
 # ── 2. opencode binary (official installer, per-user) ───────────────────────
 if [[ ! -x "$AGENT_BIN" ]]; then
     echo "[+] installing opencode for $AGENT_USER (needs internet)..."
-    if ! su -l "$AGENT_USER" -c 'curl -fsSL https://opencode.ai/install | bash'; then
+    if ! su -l "$AGENT_USER" -c 'curl -fsSL https://opencode.ai/v2/install | bash'; then
         echo "[!] opencode installer failed — install it manually for $AGENT_USER"
-        echo "    see https://opencode.ai/docs — then re-run this script"
+        echo "    see https://opencode.ai/v2/docs — then re-run this script"
         exit 1
     fi
 else
