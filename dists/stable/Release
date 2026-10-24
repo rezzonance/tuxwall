@@ -1,0 +1,32 @@
+Architectures: all amd64
+Codename: stable
+Components: main
+Date: Sat, 24 Oct 2026 14:19:30 +0000
+Description: TuxWall network firewall dashboard
+Label: TuxWall APT Repository
+Origin: TuxWall
+Suite: stable
+MD5Sum:
+ 9691bec1a0c9e29887cfb62bbd24ef2d              205 Release
+ a635e91b65c3517bfc9f2965738768bd            40211 main/binary-all/Packages
+ 037c7f56d60e5db270eb7ad018d69a86            16996 main/binary-all/Packages.gz
+ a635e91b65c3517bfc9f2965738768bd            40211 main/binary-amd64/Packages
+ 037c7f56d60e5db270eb7ad018d69a86            16996 main/binary-amd64/Packages.gz
+SHA1:
+ df5e98a5aeec432f6ee5e4c7b9e5977ee5091b29              205 Release
+ 904b09a44e050f8e4211014540eb01a133bd12a4            40211 main/binary-all/Packages
+ 888569cb536a9cc3de8dbd69fe0a77dd76ce2f3b            16996 main/binary-all/Packages.gz
+ 904b09a44e050f8e4211014540eb01a133bd12a4            40211 main/binary-amd64/Packages
+ 888569cb536a9cc3de8dbd69fe0a77dd76ce2f3b            16996 main/binary-amd64/Packages.gz
+SHA256:
+ 642d1e99ddc9e7108b91569785f4a8337ec86da057f5e9873354443857d04042              205 Release
+ 27fe82f48db5d1c380f0f1363a8d2fe60d1c5c7405c97f2397f3dc73a0f4c9e2            40211 main/binary-all/Packages
+ 69b3c8a892b1bc35bf2591a2cdf9ec50724a8fccc523848cfb4729d7694c4ab7            16996 main/binary-all/Packages.gz
+ 27fe82f48db5d1c380f0f1363a8d2fe60d1c5c7405c97f2397f3dc73a0f4c9e2            40211 main/binary-amd64/Packages
+ 69b3c8a892b1bc35bf2591a2cdf9ec50724a8fccc523848cfb4729d7694c4ab7            16996 main/binary-amd64/Packages.gz
+SHA512:
+ 769a6d74b4b558c9f617287d63be35a87b50968c06a61164471a10a2b1160e5791b95bb36fe052a0079260a3454ff2f4cb06059118187d31a11baca12f323f07              205 Release
+ d591f41bb94dfa5eb20b0b38e378848c5b29365556eb03f61a45eba626729826becc870743375663015f82435973eef265a14fd231cebc24255e08499165a30d            40211 main/binary-all/Packages
+ d474c4f23378349e5b8698ef6f89b7a67c37f26c268378107057f023ed06b131717c095b2267ce34a79440a5365ccd1c5d4c8e8c17388bf17427a2af2abbcc3a            16996 main/binary-all/Packages.gz
+ d591f41bb94dfa5eb20b0b38e378848c5b29365556eb03f61a45eba626729826becc870743375663015f82435973eef265a14fd231cebc24255e08499165a30d            40211 main/binary-amd64/Packages
+ d474c4f23378349e5b8698ef6f89b7a67c37f26c268378107057f023ed06b131717c095b2267ce34a79440a5365ccd1c5d4c8e8c17388bf17427a2af2abbcc3a            16996 main/binary-amd64/Packages.gz
