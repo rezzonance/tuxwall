@@ -1,0 +1,32 @@
+Architectures: all amd64
+Codename: stable
+Components: main
+Date: Sun, 25 Oct 2026 08:50:28 +0000
+Description: TuxWall network firewall dashboard
+Label: TuxWall APT Repository
+Origin: TuxWall
+Suite: stable
+MD5Sum:
+ 00f8af588d948160a1f114cc7dbb2f23              205 Release
+ e9c387391abf47c5e3581d8dc944ca23            40211 main/binary-all/Packages
+ 49002dcafbfa39baccf838ee55bb7bb2            16994 main/binary-all/Packages.gz
+ e9c387391abf47c5e3581d8dc944ca23            40211 main/binary-amd64/Packages
+ 49002dcafbfa39baccf838ee55bb7bb2            16994 main/binary-amd64/Packages.gz
+SHA1:
+ c7908dbb2ff99ea70247c8e58fe4758f91d08744              205 Release
+ 0cffd53af60136ba35fba30b4b93bbeeba14b386            40211 main/binary-all/Packages
+ 14a1992f62e8b6ab052aa5140537b4967af0d573            16994 main/binary-all/Packages.gz
+ 0cffd53af60136ba35fba30b4b93bbeeba14b386            40211 main/binary-amd64/Packages
+ 14a1992f62e8b6ab052aa5140537b4967af0d573            16994 main/binary-amd64/Packages.gz
+SHA256:
+ ef5818d84041544a577343d061e21f354bf4c08451437202e938042c192eb030              205 Release
+ 93d5fb206b4bbe2a7fb52d7e5ca92ef02466d4ceb205bb7ed1f737ef35930030            40211 main/binary-all/Packages
+ fc16735540521c3ae111aac559518d03cf77246af9be8da77bd422067451d6ec            16994 main/binary-all/Packages.gz
+ 93d5fb206b4bbe2a7fb52d7e5ca92ef02466d4ceb205bb7ed1f737ef35930030            40211 main/binary-amd64/Packages
+ fc16735540521c3ae111aac559518d03cf77246af9be8da77bd422067451d6ec            16994 main/binary-amd64/Packages.gz
+SHA512:
+ 0eaaeeb16df7c96518dac9b3cd1c37f49aca66b1fe7384d7d5ee1762e524ed4d09c170353b2a7d19aa5432b4c85d38d44b8d524b606615dc2b4c27c4a161aaeb              205 Release
+ 0a22f997588ffb0cec0866c72e854b4580567333349c167746108bbb46aa6e1fba09a9eb404c685d67eac9ec51c827b769976f445ad9d86216f851e7c3beab10            40211 main/binary-all/Packages
+ 22104bd8b5fa6db3975da71230d9c7e950d4ffaeb226421cf4edb7dc99786c0797fbab3acfee39592f38d6051afdd1b54693f96dd34e41ffa5b43d3fcfe35e21            16994 main/binary-all/Packages.gz
+ 0a22f997588ffb0cec0866c72e854b4580567333349c167746108bbb46aa6e1fba09a9eb404c685d67eac9ec51c827b769976f445ad9d86216f851e7c3beab10            40211 main/binary-amd64/Packages
+ 22104bd8b5fa6db3975da71230d9c7e950d4ffaeb226421cf4edb7dc99786c0797fbab3acfee39592f38d6051afdd1b54693f96dd34e41ffa5b43d3fcfe35e21            16994 main/binary-amd64/Packages.gz
