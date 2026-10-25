@@ -1,7 +1,19 @@
 {
   "ok": true,
-  "generated": 1792918541,
+  "generated": 1792922537,
   "plugins": [
+    {
+      "id": "cert-watch",
+      "name": "Certificate Watch",
+      "version": "0.1.0",
+      "description": "TLS certificate expiry monitoring: scans the certificates your services actually present, raises incidents as they age, and includes renewal guidance.",
+      "nav": {
+        "label": "Certs",
+        "icon": "globe",
+        "order": 81
+      },
+      "url": "https://github.com/rezzonance/tuxwall/tree/main/plugins/cert-watch-plugin"
+    },
     {
       "id": "unifi",
       "name": "UniFi Access Points",
