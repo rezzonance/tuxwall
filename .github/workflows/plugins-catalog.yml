@@ -35,9 +35,17 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin gh-pages
           git checkout --force gh-pages
+          git reset --hard origin/gh-pages
           mkdir -p plugins
           cp /tmp/catalog.json plugins/catalog.json
           git add plugins/catalog.json
           git diff --cached --quiet && echo "catalog unchanged" && exit 0
           git commit -m "plugins: refresh catalog"
-          git push origin gh-pages
+          # the apt workflow pushes to gh-pages concurrently (same release
+          # tag): retry with rebase when we lose that race
+          for i in 1 2 3; do
+            if git push origin gh-pages; then break; fi
+            echo "push failed (attempt $i) - rebasing onto remote"
+            git fetch origin gh-pages
+            git rebase origin/gh-pages
+          done
