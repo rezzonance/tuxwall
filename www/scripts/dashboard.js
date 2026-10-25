@@ -5929,6 +5929,7 @@
     document.querySelectorAll("#view-system .fw-pane[data-sys-pane]").forEach((p) => {
       p.hidden = p.dataset.sysPane !== pane;
     });
+    if (pane === "plugins") loadPluginsView();
   }
   document.querySelectorAll("#sys-subtabs .fw-subtab").forEach((btn) => {
     btn.addEventListener("click", () => setSysTab(btn.dataset.sysPane));
@@ -10357,14 +10358,230 @@
     });
   }
 
+  // ── Isolated plugin host ───────────────────────────────────────────
+  const PLUGIN_NAV_ICONS = {
+    wifi: '<path d="M2.5 8.5a15 15 0 0 1 19 0M5.5 12a10 10 0 0 1 13 0M8.8 15.5a5 5 0 0 1 6.4 0"/><circle cx="12" cy="19" r="1"/>',
+    plug: '<path d="M9 3v3M15 3v3M7 6h10a2 2 0 0 1 2 2v4a7 7 0 0 1-14 0V8a2 2 0 0 1 2-2Z"/><path d="M12 18v3"/>',
+    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c-5 5-5 13 0 18M12 3c5 5 5 13 0 18"/>',
+    server: '<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h6M12 17.5h6"/>'
+  };
+  const pluginHost = {
+    list: [], meta: new Map(), registry: new Map(),
+    mounted: new Set(), loaded: new Set()
+  };
+
+  function pluginNavSvg(name) {
+    const body = PLUGIN_NAV_ICONS[name] || PLUGIN_NAV_ICONS.plug;
+    return `<svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
+  }
+
+  function pluginApi(id) {
+    return {
+      id,
+      api: (action, payload) => postJSON(`/api/plugins/${encodeURIComponent(id)}/action`, { action, payload: payload || {} }),
+      getConfig: () => fetchJSON(`/api/plugins/${encodeURIComponent(id)}/config`),
+      saveConfig: (config) => postJSON(`/api/plugins/${encodeURIComponent(id)}/config`, { config }),
+      esc,
+      formatRelative,
+      formatNumber
+    };
+  }
+
+  function mountPlugin(id) {
+    const root = document.getElementById("plugin-root-" + id);
+    const def = pluginHost.registry.get(id);
+    if (!root) return;
+    if (!def) {
+      root.innerHTML = '<div class="plugin-loading muted">Loading plugin…</div>';
+      return;
+    }
+    if (!pluginHost.mounted.has(id)) {
+      pluginHost.mounted.add(id);
+      if (typeof def.mount === "function") def.mount(root, pluginApi(id));
+    } else if (typeof def.refresh === "function") {
+      def.refresh(pluginApi(id));
+    }
+  }
+
+  function loadPluginAssets(plugin) {
+    if (pluginHost.loaded.has(plugin.id)) return;
+    pluginHost.loaded.add(plugin.id);
+    const base = `/api/plugins/${encodeURIComponent(plugin.id)}/asset/`;
+    const css = document.createElement("link");
+    css.rel = "stylesheet";
+    css.href = base + "plugin.css";
+    document.head.appendChild(css);
+    const js = document.createElement("script");
+    js.src = base + "plugin.js";
+    js.defer = true;
+    document.head.appendChild(js);
+  }
+
+  function clearPluginHost() {
+    document.querySelectorAll("[data-plugin-nav]").forEach((el) => el.remove());
+    document.querySelectorAll("[data-plugin-view]").forEach((el) => el.remove());
+    pluginHost.meta.clear();
+    pluginHost.mounted.clear();
+  }
+
+  async function loadPluginHost() {
+    if (!isAdminUser()) return;
+    let data = null;
+    try { data = await fetchJSON("/api/plugins"); } catch (_) { return; }
+    pluginHost.list = data.plugins || [];
+    clearPluginHost();
+    const settingsNav = document.querySelector('#main-nav [data-view="settings"]');
+    const main = document.querySelector("main");
+    pluginHost.list.filter((p) => p.enabled && p.nav && p.nav.label).forEach((p) => {
+      pluginHost.meta.set(p.id, p);
+      const viewName = "plugin:" + p.id;
+      const nav = document.createElement("a");
+      nav.className = "nav-item plugin-nav";
+      nav.dataset.view = viewName;
+      nav.dataset.pluginNav = p.id;
+      nav.href = "#" + viewName;
+      nav.innerHTML = `${pluginNavSvg(p.nav.icon)}<span>${esc(p.nav.label)}</span>`;
+      nav.addEventListener("click", (e) => {
+        e.preventDefault();
+        switchView(viewName);
+        if (history.replaceState) history.replaceState(null, "", "#" + viewName);
+      });
+      if (settingsNav && settingsNav.parentNode) settingsNav.parentNode.insertBefore(nav, settingsNav);
+      else document.getElementById("main-nav").appendChild(nav);
+
+      const view = document.createElement("section");
+      view.className = "view plugin-view";
+      view.id = "view-plugin-" + p.id;
+      view.dataset.pluginView = p.id;
+      view.hidden = true;
+      view.innerHTML = `<div class="plugin-root" id="plugin-root-${esc(p.id)}"></div>`;
+      if (main) main.insertBefore(view, document.getElementById("soon-card"));
+      loadPluginAssets(p);
+    });
+    if (state.activeView && state.activeView.startsWith("plugin:")) {
+      const id = state.activeView.slice(7);
+      if (pluginHost.meta.has(id)) mountPlugin(id);
+    }
+  }
+
+  async function loadPluginsView() {
+    const listEl = document.getElementById("plugins-list");
+    if (!listEl) return;
+    let data = null;
+    try { data = await fetchJSON("/api/plugins"); }
+    catch (err) { listEl.innerHTML = `<div class="plugin-empty muted">${esc(err.message)}</div>`; return; }
+    pluginHost.list = data.plugins || [];
+    if (!pluginHost.list.length) {
+      listEl.innerHTML = '<div class="plugin-empty muted">No plugins installed. Add one under <code>/etc/tuxwall/plugins</code>.</div>';
+      return;
+    }
+    listEl.innerHTML = pluginHost.list.map((p) => {
+      const canOpen = !!(p.enabled && p.nav && p.nav.label);
+      return `<div class="plugin-item${p.error ? " is-error" : ""}">
+        <div class="plugin-item-main">
+          <div class="plugin-item-title">${esc(p.name || p.id)} <span class="plugin-version">${esc(p.version || "")}</span></div>
+          <div class="plugin-item-desc">${esc(p.error || p.description || "No description.")}</div>
+          <div class="plugin-item-meta"><code>${esc(p.id)}</code> · ${p.enabled ? "enabled" : "disabled"}${p.web ? " · web view" : ""}</div>
+        </div>
+        <div class="plugin-item-actions">
+          ${canOpen ? `<button class="btn btn-sm" data-plugin-open="${esc(p.id)}" type="button">Open</button>` : ""}
+          <button class="btn btn-sm ${p.enabled ? "btn-ghost" : ""}" data-plugin-toggle="${esc(p.id)}" data-enabled="${p.enabled ? "1" : "0"}" type="button"${p.error ? " disabled" : ""}>${p.enabled ? "Disable" : "Enable"}</button>
+        </div>
+      </div>`;
+    }).join("");
+    listEl.querySelectorAll("[data-plugin-toggle]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          await postJSON(`/api/plugins/${encodeURIComponent(btn.dataset.pluginToggle)}/enable`,
+                         { enabled: btn.dataset.enabled !== "1" });
+          await loadPluginsView();
+          await loadPluginHost();
+        } catch (err) {
+          btn.disabled = false;
+        }
+      });
+    });
+    listEl.querySelectorAll("[data-plugin-open]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const viewName = "plugin:" + btn.dataset.pluginOpen;
+        switchView(viewName);
+        if (history.replaceState) history.replaceState(null, "", "#" + viewName);
+      });
+    });
+  }
+
+  function bindPluginInstall() {
+    const open = document.getElementById("plugin-install-open");
+    const modal = document.getElementById("plugin-install-modal");
+    const url = document.getElementById("plugin-install-url");
+    const run = document.getElementById("plugin-install-run");
+    const msg = document.getElementById("plugin-install-msg");
+    if (!open || !modal || !url || !run || !msg) return;
+    const close = () => { modal.hidden = true; };
+    const showError = (text) => {
+      msg.textContent = text || "";
+      msg.hidden = !text;
+    };
+    open.addEventListener("click", () => {
+      showError("");
+      modal.hidden = false;
+      setTimeout(() => url.focus(), 30);
+    });
+    document.getElementById("plugin-install-close").addEventListener("click", close);
+    document.getElementById("plugin-install-cancel").addEventListener("click", close);
+    modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !modal.hidden) close();
+    });
+    run.addEventListener("click", async () => {
+      const value = url.value.trim();
+      if (!value) { showError("Paste a GitHub folder URL."); return; }
+      run.disabled = true;
+      showError("");
+      try {
+        const d = await postJSON("/api/plugins/install", { url: value });
+        if (!d.ok) throw new Error(d.error || "Install failed");
+        url.value = "";
+        close();
+        await loadPluginsView();
+        await loadPluginHost();
+      } catch (err) {
+        showError(err.message);
+      } finally {
+        run.disabled = false;
+      }
+    });
+  }
+
+  window.TuxWallPlugins = {
+    register(id, def) {
+      if (!id || !def) return;
+      pluginHost.registry.set(id, def);
+      if (state.activeView === "plugin:" + id) mountPlugin(id);
+    },
+    api: pluginApi
+  };
+
   function switchView(view) {
+    if (view === "plugins") {
+      switchView("system");
+      setSysTab("plugins");
+      if (history.replaceState) history.replaceState(null, "", "#system");
+      return;
+    }
     document.querySelectorAll(".nav-item").forEach((i) => {
       i.classList.toggle("active", i.dataset.view === view);
     });
-    els.title.textContent = VIEW_TITLES[view] || "Dashboard";
+    const pluginId = view.startsWith("plugin:") ? view.slice(7) : "";
+    const pluginView = pluginId ? document.getElementById("view-plugin-" + pluginId) : null;
+    const pluginMeta = pluginId ? pluginHost.meta.get(pluginId) : null;
+    els.title.textContent = pluginId
+      ? ((pluginMeta && pluginMeta.name) || "Plugin")
+      : (VIEW_TITLES[view] || "Dashboard");
     setTimeout(() => { initSubtabs(); syncSubtabState(); enhanceCardHeads(); }, 0);
     state.activeView = view;
-    const implemented = view === "overview" || view === "clients" || view === "dns" || view === "domains" || view === "firewall" || view === "vlans" || view === "security" || view === "wireguard" || view === "crowdsec" || view === "bandwidth" || view === "blocklists" || view === "system" || view === "backups" || view === "logs" || view === "settings" || view === "ai";
+    const implemented = view === "overview" || view === "clients" || view === "dns" || view === "domains" || view === "firewall" || view === "vlans" || view === "security" || view === "wireguard" || view === "crowdsec" || view === "bandwidth" || view === "blocklists" || view === "system" || view === "backups" || view === "logs" || view === "settings" || view === "ai" || !!pluginView;
     document.querySelectorAll(".view").forEach((v) => { v.hidden = true; });
     document.querySelectorAll(".pie-canvas").forEach((c) => {
       const st = donutStates.get(c);
@@ -10372,7 +10589,8 @@
     });
     hidePieTip();
     if (implemented) {
-      document.getElementById("view-" + view).hidden = false;
+      const viewEl = pluginId ? pluginView : document.getElementById("view-" + view);
+      if (viewEl) viewEl.hidden = false;
       if (view === "overview") {
         initOverviewMap();
         refreshOverview({ force: true });
@@ -10404,6 +10622,7 @@
       if (view === "system") {
         refreshSystem();
         refreshUpdates();
+        if (document.querySelector('#sys-subtabs [data-sys-pane="plugins"].active')) loadPluginsView();
       }
       if (view === "logs") {
         loadLogSources();
@@ -10421,6 +10640,7 @@
         populateRouterLocation();
         if (state.canManageUsers) loadUsers();
       }
+      if (pluginId) mountPlugin(pluginId);
       els.soon.hidden = true;
       if (view === "ai" && window.__tuxwallAgentEnable) {
         window.__tuxwallAgentEnable();
@@ -12151,6 +12371,9 @@
     // rather than leaving a panel that only returns 403.
     document.querySelectorAll('.nav-item[data-view="settings"], .nav-item[data-view="ai"]')
       .forEach((el) => { el.hidden = !isAdmin; });
+    const pluginTab = document.querySelector('#sys-subtabs [data-sys-pane="plugins"]');
+    if (pluginTab) pluginTab.hidden = !isAdmin;
+    if (!isAdmin && pluginTab && pluginTab.classList.contains("active")) setSysTab("status");
     els.usersCard.hidden = false;
     updateTotpCard();
     els.usersAdmin.hidden = !state.canManageUsers;
@@ -12162,8 +12385,10 @@
     }
     startIncidentPolling();
     if (els.incidentSettings) els.incidentSettings.hidden = !isAdmin;
+    if (isAdmin) loadPluginHost(); else clearPluginHost();
     refreshAvatarUI();
-    if (!isAdmin && (state.activeView === "settings" || state.activeView === "ai")) {
+    if (!isAdmin && (state.activeView === "settings" || state.activeView === "ai" ||
+                     (state.activeView || "").startsWith("plugin:"))) {
       switchView("overview");
     }
     if (state.data) render();
@@ -12451,9 +12676,14 @@
   function incidentItemHtml(inc) {
     const sev = (inc.severity || "info").toLowerCase();
     const resolved = inc.status !== "active";
-    const ackBtn = !resolved && !inc.acknowledged && isAdminUser()
-      ? `<button class="incident-ack" type="button" data-id="${esc(inc.id)}">Ack</button>`
-      : "";
+    let ackBtn = "";
+    if (isAdminUser()) {
+      if (resolved) {
+        ackBtn = `<button class="incident-ack incident-dismiss" type="button" data-id="${esc(inc.id)}" data-dismiss="1" title="Dismiss from history" aria-label="Dismiss incident from history">&times;</button>`;
+      } else if (!inc.acknowledged) {
+        ackBtn = `<button class="incident-ack incident-dismiss" type="button" data-id="${esc(inc.id)}" title="Confirm incident" aria-label="Confirm incident">&times;</button>`;
+      }
+    }
     const meta = resolved
       ? `Resolved ${formatRelative(inc.resolved_at || inc.last_seen)}`
       : `${INCIDENT_SEV_LABEL[sev] || "Info"} · ${formatRelative(inc.last_seen)}${inc.acknowledged ? " · acknowledged" : ""}`;
@@ -12565,7 +12795,8 @@
         if (!btn) return;
         btn.disabled = true;
         try {
-          await postJSON("/api/incidents/ack", { id: btn.dataset.id });
+          const endpoint = btn.dataset.dismiss ? "/api/incidents/dismiss" : "/api/incidents/ack";
+          await postJSON(endpoint, { id: btn.dataset.id });
           await refreshIncidents();
         } catch (err) {
           btn.disabled = false;
@@ -12677,6 +12908,7 @@
   function bindAuthActions() {
     bindUserMenu();
     bindIncidents();
+    bindPluginInstall();
 
     els.loginForm.addEventListener("submit", async (ev) => {
       ev.preventDefault();

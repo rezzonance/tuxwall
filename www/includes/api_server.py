@@ -7,7 +7,9 @@ import copy
 import io
 import ipaddress
 import json
+import mimetypes
 import os
+import pwd
 import re
 import secrets
 import shutil
@@ -22,6 +24,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from collections import deque
 from datetime import datetime
 from uuid import uuid4
@@ -7636,6 +7639,7 @@ ADMIN_GET_PREFIXES = (
     "/api/backups",
     "/api/agent",
     "/api/alerts",
+    "/api/plugins",
     "/api/system/kea-config",
     "/api/system/unbound-config",
     "/api/system/dhcp-form",
@@ -11382,6 +11386,21 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_asset(self, path):
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError as exc:
+            self._send(404, {"ok": False, "error": str(exc)})
+            return
+        ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
     def _send_file(self, path, download_name):
         with open(path, "rb") as f:
             data = f.read()
@@ -11588,6 +11607,26 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_custom_blocklist())
         elif path == "/api/crowdsec/ban-state":
             self._send(200, build_crowdsec_ban_state())
+        elif path == "/api/plugins":
+            self._send(200, list_plugins())
+        elif path.startswith("/api/plugins/"):
+            rest = path[len("/api/plugins/"):]
+            parts = rest.split("/")
+            pid = parts[0]
+            try:
+                if len(parts) >= 3 and parts[1] == "asset":
+                    rel = urllib.parse.unquote("/".join(parts[2:]))
+                    self._send_asset(plugin_asset_path(pid, rel))
+                elif len(parts) == 2 and parts[1] == "config":
+                    self._send(200, _plugin_config_public(pid))
+                else:
+                    self._send(404, {"ok": False, "error": "plugin route not found"})
+            except FileNotFoundError:
+                self._send(404, {"ok": False, "error": "plugin asset not found"})
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
         elif path == "/api/incidents":
             qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             self._send(200, build_incidents((qs.get("limit") or ["120"])[0]))
@@ -12294,6 +12333,33 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
 
+        elif path == "/api/plugins/install":
+            try:
+                self._send(200, install_plugin_from_github(body))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path.startswith("/api/plugins/"):
+            m = re.match(r"^/api/plugins/([a-z][a-z0-9-]{1,31})/(enable|config|action)$", path)
+            if not m:
+                self._send(404, {"ok": False, "error": "plugin route not found"})
+                return
+            pid, action = m.group(1), m.group(2)
+            try:
+                if action == "enable":
+                    self._send(200, _plugin_save_config(pid, {"enabled": bool(body.get("enabled"))}))
+                elif action == "config":
+                    self._send(200, _plugin_save_config(pid, body))
+                else:
+                    result = plugin_action(pid, body.get("action") or "", body.get("payload") or {})
+                    self._send(200, result)
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
         elif path == "/api/incidents/ack":
             try:
                 self._send(200, _ack_incident(body.get("id"), identity.get("username", "")))
@@ -12302,6 +12368,12 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/api/incidents/ack-all":
             self._send(200, _ack_incidents(all_active=True, user=identity.get("username", "")))
+
+        elif path == "/api/incidents/dismiss":
+            try:
+                self._send(200, _dismiss_incident(body.get("id")))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
 
         elif path == "/api/alerts/config":
             try:
@@ -14068,6 +14140,338 @@ def _vlan_netplan_sync(persist):
         f.write("\n".join(lines) + "\n")
 
 
+# ── Isolated plugin host ───────────────────────────────────────────────────
+PLUGINS_DIR = "/etc/tuxwall/plugins"
+PLUGIN_API = 1
+PLUGIN_WORKER_CODE = r"""
+import sys, json, os, importlib.util
+pdir = sys.argv[1]
+sys.path.insert(0, pdir)
+try:
+    spec = importlib.util.spec_from_file_location("tuxwall_plugin_main", os.path.join(pdir, "main.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    req = json.load(sys.stdin)
+    fn = getattr(mod, "handle", None)
+    if not callable(fn):
+        raise RuntimeError("plugin main.py does not define handle(request)")
+    out = fn(req)
+    if not isinstance(out, dict):
+        out = {"ok": True, "data": out}
+    json.dump(out, sys.stdout)
+except Exception as exc:
+    json.dump({"ok": False, "error": str(exc)}, sys.stdout)
+"""
+
+
+PLUGIN_MAX_BYTES = 50 * 1024 * 1024
+_PLUGIN_INSTALL_LOCK = threading.Lock()
+
+
+def _plugin_github_parts(url):
+    from urllib.parse import urlsplit, unquote
+    parsed = urlsplit((url or "").strip())
+    if parsed.scheme not in ("http", "https") or parsed.netloc.lower() not in ("github.com", "www.github.com"):
+        raise ValueError("Use a public https://github.com/... folder URL")
+    parts = [unquote(p) for p in parsed.path.split("/") if p]
+    if len(parts) < 2:
+        raise ValueError("GitHub URL must include owner and repository")
+    owner, repo = parts[0], parts[1]
+    branch = ""
+    subpath = ""
+    if len(parts) > 2:
+        if parts[2] != "tree" or len(parts) < 4:
+            raise ValueError("Use the folder URL (github.com/owner/repo/tree/branch/folder)")
+        branch = parts[3]
+        subpath = "/".join(parts[4:])
+    return owner, repo, branch, subpath
+
+
+def _plugin_safe_extract(zip_file, dest):
+    root = os.path.realpath(dest)
+    total = 0
+    for info in zip_file.infolist():
+        total += int(info.file_size or 0)
+        if total > 100 * 1024 * 1024:
+            raise ValueError("Plugin archive expands to more than 100 MB")
+        name = info.filename.replace("\\", "/")
+        if not name or name.startswith("/") or ".." in name.split("/"):
+            continue
+        target = os.path.realpath(os.path.join(root, name))
+        if target != root and not target.startswith(root + os.sep):
+            continue
+        if info.is_dir():
+            os.makedirs(target, exist_ok=True)
+            continue
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with zip_file.open(info) as src, open(target, "wb") as out:
+            shutil.copyfileobj(src, out)
+
+
+def _plugin_write_perms(root):
+    for base, dirs, files in os.walk(root):
+        os.chmod(base, 0o755)
+        for name in files:
+            try:
+                os.chmod(os.path.join(base, name), 0o644)
+            except OSError:
+                pass
+
+
+def install_plugin_from_github(body):
+    url = (body.get("url") or "").strip()
+    owner, repo, branch, subpath = _plugin_github_parts(url)
+    with _PLUGIN_INSTALL_LOCK:
+        import urllib.request
+        if not branch:
+            api = "https://api.github.com/repos/%s/%s" % (
+                urllib.parse.quote(owner), urllib.parse.quote(repo))
+            req = urllib.request.Request(api, headers={
+                "User-Agent": "tuxwall-plugin-installer/1.0",
+                "Accept": "application/vnd.github+json",
+            })
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                info = json.loads(resp.read().decode("utf-8", "replace"))
+            branch = info.get("default_branch") or "main"
+        archive_url = "https://codeload.github.com/%s/%s/zip/refs/heads/%s" % (
+            urllib.parse.quote(owner), urllib.parse.quote(repo),
+            urllib.parse.quote(branch, safe="/"))
+        req = urllib.request.Request(archive_url, headers={
+            "User-Agent": "tuxwall-plugin-installer/1.0",
+        })
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read(PLUGIN_MAX_BYTES + 1)
+        if len(data) > PLUGIN_MAX_BYTES:
+            raise ValueError("Plugin archive is larger than 50 MB")
+
+        with tempfile.TemporaryDirectory(prefix="tuxwall-plugin-") as tmp:
+            try:
+                with zipfile.ZipFile(io.BytesIO(data)) as z:
+                    _plugin_safe_extract(z, tmp)
+            except zipfile.BadZipFile:
+                raise ValueError("GitHub returned an invalid archive")
+            candidates = []
+            wanted = subpath.strip("/")
+            for base, dirs, files in os.walk(tmp):
+                if "plugin.json" not in files:
+                    continue
+                rel = os.path.relpath(base, tmp).replace("\\", "/")
+                if wanted:
+                    if rel == wanted or rel.endswith("/" + wanted):
+                        candidates.append(base)
+                else:
+                    candidates.append(base)
+            if not candidates:
+                raise ValueError("No plugin.json found at that GitHub folder")
+            if len(candidates) > 1:
+                raise ValueError("Multiple plugin.json files found; use a more specific folder URL")
+            src = candidates[0]
+            with open(os.path.join(src, "plugin.json"), "r") as f:
+                manifest = json.load(f)
+            pid = str(manifest.get("id") or "").strip()
+            if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", pid):
+                raise ValueError("plugin.json has an invalid id")
+            if manifest.get("api") != PLUGIN_API:
+                raise ValueError("Plugin API %r is not supported" % manifest.get("api"))
+            if not os.path.isfile(os.path.join(src, "main.py")):
+                raise ValueError("Plugin package is missing main.py")
+            dest = os.path.join(PLUGINS_DIR, pid)
+            if os.path.exists(dest):
+                raise ValueError("Plugin %r is already installed" % pid)
+            os.makedirs(PLUGINS_DIR, exist_ok=True)
+            shutil.copytree(src, dest, ignore=shutil.ignore_patterns(
+                ".git", "__pycache__", "*.pyc", "config.json"))
+            _plugin_write_perms(dest)
+            return {"ok": True, "plugin": {
+                "id": pid,
+                "name": manifest.get("name") or pid,
+                "version": manifest.get("version") or "",
+            }}
+
+
+def _plugin_ids():
+    try:
+        return sorted(d for d in os.listdir(PLUGINS_DIR)
+                      if os.path.isdir(os.path.join(PLUGINS_DIR, d)))
+    except OSError:
+        return []
+
+
+def _plugin_load_manifest(pid):
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", pid or ""):
+        raise ValueError("invalid plugin id")
+    path = os.path.join(PLUGINS_DIR, pid, "plugin.json")
+    with open(path, "r") as f:
+        m = json.load(f)
+    if not isinstance(m, dict):
+        raise ValueError("plugin.json must be an object")
+    if m.get("api") != PLUGIN_API:
+        raise ValueError("plugin API %r is not supported (need %s)" % (m.get("api"), PLUGIN_API))
+    if not m.get("name"):
+        raise ValueError("plugin.json is missing name")
+    if not os.path.isfile(os.path.join(PLUGINS_DIR, pid, "main.py")):
+        raise ValueError("plugin has no main.py")
+    return m
+
+
+def _plugin_config_path(pid):
+    return os.path.join(PLUGINS_DIR, pid, "config.json")
+
+
+def _plugin_load_config(pid, manifest=None):
+    cfg = {}
+    try:
+        with open(_plugin_config_path(pid), "r") as f:
+            raw = json.load(f)
+            if isinstance(raw, dict):
+                cfg.update(raw)
+    except Exception:
+        pass
+    manifest = manifest or _plugin_load_manifest(pid)
+    settings = manifest.get("settings") or []
+    for fld in settings:
+        key = fld.get("key")
+        if key and key not in cfg and "default" in fld:
+            cfg[key] = fld["default"]
+    if "enabled" not in cfg:
+        cfg["enabled"] = bool(manifest.get("enabled", True))
+    return cfg
+
+
+def _plugin_config_public(pid, manifest=None):
+    cfg = _plugin_load_config(pid, manifest)
+    manifest = manifest or _plugin_load_manifest(pid)
+    out = dict(cfg)
+    configured = {}
+    for fld in manifest.get("settings") or []:
+        key = fld.get("key")
+        if not key:
+            continue
+        if fld.get("secret"):
+            configured[key] = bool(cfg.get(key))
+            out[key] = ""
+    return {"ok": True, "config": out, "secret_configured": configured}
+
+
+def _plugin_save_config(pid, body):
+    manifest = _plugin_load_manifest(pid)
+    cfg = _plugin_load_config(pid, manifest)
+    incoming = body.get("config") if isinstance(body.get("config"), dict) else body
+    allowed = {f.get("key"): f for f in (manifest.get("settings") or []) if f.get("key")}
+    for key, fld in allowed.items():
+        if key not in incoming:
+            continue
+        value = incoming.get(key)
+        if fld.get("secret"):
+            if value in (None, ""):
+                continue
+            cfg[key] = str(value)
+        elif fld.get("type") == "bool":
+            cfg[key] = bool(value)
+        else:
+            cfg[key] = value
+    if "enabled" in incoming:
+        cfg["enabled"] = bool(incoming.get("enabled"))
+    os.makedirs(os.path.dirname(_plugin_config_path(pid)), exist_ok=True)
+    tmp = _plugin_config_path(pid) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(cfg, f, indent=2)
+    os.replace(tmp, _plugin_config_path(pid))
+    try:
+        os.chmod(_plugin_config_path(pid), 0o640)
+    except OSError:
+        pass
+    return {"ok": True, "config": _plugin_config_public(pid, manifest)["config"]}
+
+
+def list_plugins(include_config=False):
+    out = []
+    for pid in _plugin_ids():
+        try:
+            manifest = _plugin_load_manifest(pid)
+            cfg = _plugin_load_config(pid, manifest)
+            entry = {
+                "id": pid,
+                "name": manifest.get("name") or pid,
+                "version": manifest.get("version") or "",
+                "description": manifest.get("description") or "",
+                "api": manifest.get("api"),
+                "nav": manifest.get("nav") or {},
+                "settings": manifest.get("settings") or [],
+                "enabled": bool(cfg.get("enabled", True)),
+                "web": os.path.isdir(os.path.join(PLUGINS_DIR, pid, "web")),
+                "error": "",
+            }
+            if include_config:
+                entry["config"] = _plugin_config_public(pid, manifest)
+            out.append(entry)
+        except Exception as exc:
+            out.append({"id": pid, "name": pid, "enabled": False, "error": str(exc)})
+    return {"ok": True, "plugins": out}
+
+
+def _plugin_worker_identity():
+    for name in ("tuxwall-plugin", "nobody"):
+        try:
+            p = pwd.getpwnam(name)
+            return p.pw_uid, p.pw_gid
+        except KeyError:
+            continue
+    return 65534, 65534
+
+
+def plugin_action(pid, action, payload):
+    manifest = _plugin_load_manifest(pid)
+    cfg = _plugin_load_config(pid, manifest)
+    if not cfg.get("enabled", True):
+        raise ValueError("plugin is disabled")
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", pid or ""):
+        raise ValueError("invalid plugin id")
+    pdir = os.path.join(PLUGINS_DIR, pid)
+    req = {
+        "action": action or "",
+        "payload": payload if isinstance(payload, dict) else {},
+        "config": cfg,
+        "manifest": manifest,
+    }
+    uid, gid = _plugin_worker_identity()
+    def demote():
+        os.setgroups([])
+        os.setgid(gid)
+        os.setuid(uid)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", PLUGIN_WORKER_CODE, pdir],
+            input=json.dumps(req), capture_output=True, text=True,
+            timeout=20, cwd=pdir, preexec_fn=demote,
+            env={"PATH": "/usr/bin:/bin", "HOME": "/tmp", "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "plugin action timed out"}
+    except Exception as exc:
+        return {"ok": False, "error": "plugin worker failed: %s" % exc}
+    if proc.returncode != 0:
+        return {"ok": False, "error": (proc.stderr or "plugin worker exited %s" % proc.returncode).strip()[:2000]}
+    try:
+        out = json.loads(proc.stdout or "{}")
+    except ValueError:
+        return {"ok": False, "error": "plugin returned invalid JSON", "detail": proc.stdout[:2000]}
+    if not isinstance(out, dict):
+        out = {"ok": True, "data": out}
+    return out
+
+
+def plugin_asset_path(pid, rel):
+    manifest = _plugin_load_manifest(pid)
+    web = os.path.realpath(os.path.join(PLUGINS_DIR, pid, "web"))
+    target = os.path.realpath(os.path.join(web, rel))
+    if target != web and not target.startswith(web + os.sep):
+        raise ValueError("invalid asset path")
+    if not os.path.isfile(target):
+        raise FileNotFoundError(target)
+    return target
+
+
 # ── Incidents & alerting ───────────────────────────────────────────────────
 INCIDENTS_FILE = "/etc/tuxwall/incidents.json"
 ALERT_CONFIG_FILE = "/etc/tuxwall/alerts.json"
@@ -14159,6 +14563,22 @@ def _ack_incident(incident_id, user=""):
     if not result["acknowledged"]:
         return {"ok": False, "error": "Incident not found or already acknowledged"}
     return result
+
+
+def _dismiss_incident(incident_id):
+    """Remove one resolved incident from the visible history."""
+    if not incident_id:
+        raise ValueError("id is required")
+    with _INCIDENT_LOCK:
+        items = _load_incidents()
+        target = next((i for i in items if i.get("id") == incident_id), None)
+        if target is None:
+            return {"ok": False, "error": "Incident not found"}
+        if target.get("status") == "active":
+            return {"ok": False, "error": "Acknowledge active incidents instead"}
+        kept = [i for i in items if i.get("id") != incident_id]
+        _incident_write_json(INCIDENTS_FILE, {"items": _trim_incidents(kept)})
+    return {"ok": True, "dismissed": 1}
 
 
 def _alert_config_defaults():
@@ -14325,6 +14745,59 @@ def _incident_bytes(n):
         return "?"
 
 
+_PLUGIN_INCIDENTS_CACHE = {}
+_PLUGIN_INCIDENTS_LOCK = threading.Lock()
+_PLUGIN_INCIDENTS_TTL = 300
+
+
+def _plugin_incident_conditions():
+    """Collect optional incident checks contributed by enabled plugins."""
+    now = time.time()
+    out = {}
+    with _PLUGIN_INCIDENTS_LOCK:
+        for pid in _plugin_ids():
+            try:
+                manifest = _plugin_load_manifest(pid)
+                if not manifest.get("alerts"):
+                    continue
+                cfg = _plugin_load_config(pid, manifest)
+                if not cfg.get("enabled", True):
+                    continue
+                cached = _PLUGIN_INCIDENTS_CACHE.get(pid)
+                if cached and now - cached.get("at", 0) < _PLUGIN_INCIDENTS_TTL:
+                    items = cached.get("items") or []
+                else:
+                    result = plugin_action(pid, "incidents", {})
+                    items = []
+                    if result.get("ok"):
+                        for inc in result.get("incidents") or []:
+                            if not isinstance(inc, dict) or not inc.get("key"):
+                                continue
+                            sev = str(inc.get("severity") or "warning").lower()
+                            if sev not in INCIDENT_SEVERITY_RANK:
+                                sev = "warning"
+                            items.append({
+                                "key": str(inc["key"])[:80],
+                                "severity": sev,
+                                "title": str(inc.get("title") or "Plugin incident")[:160],
+                                "detail": str(inc.get("detail") or "")[:600],
+                            })
+                    else:
+                        items.append({
+                            "key": "check-error",
+                            "severity": "warning",
+                            "title": "%s check failed" % (manifest.get("name") or pid),
+                            "detail": str(result.get("error") or "Plugin check failed")[:600],
+                        })
+                    _PLUGIN_INCIDENTS_CACHE[pid] = {"at": now, "items": items}
+                for inc in items:
+                    key = "plugin:%s:%s" % (pid, inc["key"])
+                    out[key] = (inc["severity"], inc["title"], inc["detail"])
+            except Exception:
+                continue
+    return out
+
+
 def _incident_conditions():
     now = time.time()
     desired = {}
@@ -14431,6 +14904,12 @@ def _incident_conditions():
                 add("temp:cpu", "warning", "CPU temperature is high",
                     "%s reports %.0f°C." % (kind, temp))
             break
+    except Exception:
+        pass
+
+    try:
+        for key, (severity, title, detail) in _plugin_incident_conditions().items():
+            desired[key] = (severity, title, detail)
     except Exception:
         pass
 

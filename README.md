@@ -26,6 +26,7 @@ A Linux network dashboard providing a web UI for managing DHCP leases, DNS, fire
 - [Service Configuration](#service-configuration)
 - [SQM / Traffic Shaping](#sqm--traffic-shaping)
 - [Nginx Configuration](#nginx-configuration)
+- [Plugins](#plugins)
 - [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
 - [License](#license)
@@ -428,6 +429,37 @@ The `scripts/tuxwall-sqm.sh` script applies CAKE qdisc to your WAN interface for
 3. Set `DOWN_RATE` to ~92% of your provisioned download speed
 
 Using a slightly lower percentage than your rated speed prevents your modem's queue from filling up, which is what causes bufferbloat.
+
+---
+
+## Plugins
+
+The dashboard supports optional plugins — isolated extensions that add a view
+and backend worker without touching the core. Each plugin backend runs in a
+separate unprivileged worker process (`main.py` exposing `handle(request)`),
+and credentials stay on the router in `/etc/tuxwall/plugins/<id>/config.json`
+(never committed). Plugin UI assets are served read-only via
+`/api/plugins/<id>/asset/...`.
+
+To install a plugin, open **Settings → Plugins → Install from GitHub** and
+paste the plugin's folder URL. Example (the bundled UniFi WiFi plugin):
+
+```
+https://github.com/rezzonance/tuxwall/tree/main/plugins/wifi-unifi-plugin
+```
+
+A plugin folder needs:
+
+- `plugin.json` — manifest (`id`, `name`, `version`, `api: 1`, optional
+  `nav` entry and `settings` schema)
+- `main.py` — backend worker entry point with `handle(request)`
+- `web/` — optional UI assets (`plugin.js`, `plugin.css`, images)
+
+### Bundled plugins
+
+| Plugin | Description |
+| --- | --- |
+| [wifi-unifi-plugin](plugins/wifi-unifi-plugin) | Read-only UniFi controller view: access points, clients, signal and roaming context. Supports classic Network Application, UniFi OS (UDM / Cloud Key), local login or API key. |
 
 ---
 

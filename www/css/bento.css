@@ -3538,3 +3538,55 @@ body.light-theme .card-topglow::before { opacity: .26; }
   .card-head.card-head-ico .card-head-ico { width: 28px; height: 28px; }
   .card-head.card-head-ico .card-toolbar { margin-left: 0; flex: 1 1 100%; }
 }
+
+/* ============================================================================
+   Plugins — manager page, dynamic nav and plugin view shell
+   ========================================================================= */
+.ni-plugins { --ni-color: #38bdf8; }
+.plugins-manager { margin-top: 4px; }
+.plugins-intro {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.plugins-intro p { margin: 0; font-size: 11.5px; max-width: 760px; line-height: 1.5; }
+.plugins-intro code { font-size: 11px; color: var(--muted); }
+.plugins-list { display: flex; flex-direction: column; }
+.plugin-item {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+  padding: 15px 16px; border-bottom: 1px solid var(--border);
+}
+.plugin-item:last-child { border-bottom: 0; }
+.plugin-item.is-error { border-left: 3px solid var(--red); }
+.plugin-item-main { min-width: 0; flex: 1 1 auto; }
+.plugin-item-title { color: var(--text); font-size: 13.5px; font-weight: 700; }
+.plugin-version { color: var(--muted); font-size: 10px; font-weight: 500; margin-left: 5px; }
+.plugin-item-desc { margin-top: 4px; color: var(--muted); font-size: 11.5px; line-height: 1.5; max-width: 840px; }
+.plugin-item-meta { margin-top: 6px; color: var(--muted); font-size: 10px; }
+.plugin-item-meta code { color: var(--text); }
+.plugin-item-actions { display: flex; gap: 7px; flex: none; align-items: center; }
+.plugin-empty { padding: 28px 16px; text-align: center; font-size: 12px; }
+.plugin-empty code { color: var(--text); }
+.plugin-root { min-width: 0; }
+.plugin-view { padding-bottom: 24px; }
+.plugin-loading { padding: 24px 16px; }
+@media (max-width: 640px) {
+  .plugin-item { flex-direction: column; gap: 10px; }
+  .plugin-item-actions { width: 100%; }
+  .plugin-item-actions .btn { flex: 1 1 auto; }
+  .plugins-intro { align-items: flex-start; flex-direction: column; gap: 6px; }
+}
+
+/* Compact confirm/dismiss control on incident rows */
+.incident-dismiss {
+  width: 22px; height: 22px;
+  display: grid; place-items: center;
+  padding: 0; border-radius: 6px;
+  font-size: 15px; line-height: 1;
+  letter-spacing: 0; text-transform: none;
+}
+.incident-dismiss:hover {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 45%, var(--border));
+  background: color-mix(in srgb, var(--red) 9%, var(--card));
+}

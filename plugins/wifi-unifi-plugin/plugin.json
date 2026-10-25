@@ -1,0 +1,28 @@
+{
+  "id": "unifi",
+  "name": "UniFi Access Points",
+  "version": "0.11.1",
+  "api": 1,
+  "description": "Read-only UniFi controller view: access points, clients, signal and roaming context.",
+  "enabled": true,
+  "alerts": true,
+  "nav": { "label": "WiFi", "icon": "wifi", "order": 80 },
+  "settings": [
+    { "key": "url", "label": "Controller URL", "type": "url", "placeholder": "https://192.168.1.1:8443", "default": "" },
+    { "key": "controller_type", "label": "Controller type", "type": "select", "default": "classic",
+      "options": [
+        { "value": "classic", "label": "Classic Network Application" },
+        { "value": "unifi_os", "label": "UniFi OS (UDM / Cloud Gateway / Cloud Key)" }
+      ] },
+    { "key": "auth_mode", "label": "Authentication", "type": "select", "default": "local",
+      "options": [
+        { "value": "local", "label": "Local username + password" },
+        { "value": "api_key", "label": "API key (UniFi OS only)" }
+      ] },
+    { "key": "username", "label": "Username", "type": "text", "placeholder": "dedicated UniFi account" },
+    { "key": "password", "label": "Password", "type": "password", "secret": true },
+    { "key": "api_key", "label": "API key", "type": "password", "secret": true, "placeholder": "UniFi OS API key" },
+    { "key": "site", "label": "Site", "type": "text", "default": "default", "placeholder": "default" },
+    { "key": "verify_tls", "label": "Verify TLS certificate", "type": "bool", "default": true }
+  ]
+}

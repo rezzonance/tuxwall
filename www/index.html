@@ -6,14 +6,14 @@
   <title>TuxWall - Network Dashboard</title>
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
-  <link rel="stylesheet" href="/css/style.css?v=202610241021">
-  <link rel="stylesheet" href="/css/polish.css?v=202610241021">
-  <link rel="stylesheet" href="/css/firewall.css?v=202610241021">
-  <link rel="stylesheet" href="/css/bento.css?v=202610241700">
-  <link rel="stylesheet" href="/css/heroes.css?v=202610241021">
-  <link rel="stylesheet" href="/css/sidebar.css?v=202610241021">
-  <link rel="stylesheet" href="/css/action-icons.css?v=202610241021">
-  <link rel="stylesheet" href="/css/subtab-icons.css?v=202610241021">
+  <link rel="stylesheet" href="/css/style.css?v=202610241659">
+  <link rel="stylesheet" href="/css/polish.css?v=202610241659">
+  <link rel="stylesheet" href="/css/firewall.css?v=202610241659">
+  <link rel="stylesheet" href="/css/bento.css?v=202610250425">
+  <link rel="stylesheet" href="/css/heroes.css?v=202610241659">
+  <link rel="stylesheet" href="/css/sidebar.css?v=202610241659">
+  <link rel="stylesheet" href="/css/action-icons.css?v=202610241659">
+  <link rel="stylesheet" href="/css/subtab-icons.css?v=202610241659">
 </head>
 <body>
 <div id="login-gate" class="login-gate" hidden>
@@ -2661,6 +2661,7 @@
         <button class="fw-subtab" type="button" data-sys-pane="shaping">Traffic Shaping</button>
         <button class="fw-subtab" type="button" data-sys-pane="dhcp">DHCP Pools</button>
         <button class="fw-subtab" type="button" data-sys-pane="maintenance">Maintenance</button>
+        <button class="fw-subtab" type="button" data-sys-pane="plugins">Plugins</button>
         <span class="fw-subtabs-fill"></span>
       </div>
 
@@ -2874,7 +2875,43 @@
       </div>
       </div>
 
+      <!-- ── Pane: Plugins ─────────────────────────────────────────────── -->
+      <div class="fw-pane" data-sys-pane="plugins" hidden>
+      <div class="card plugins-manager" id="plugins-card">
+        <div class="card-head">
+          <h2>Installed Plugins</h2>
+          <span class="muted">Isolated extension workers · admin only</span>
+          <button class="btn btn-sm" id="plugin-install-open" type="button">Install from GitHub</button>
+        </div>
+        <div class="plugins-intro">
+          <p class="muted">Plugins add optional features without changing the core dashboard. Each backend runs in a separate unprivileged worker; credentials stay on the router.</p>
+          <code class="mono">/etc/tuxwall/plugins</code>
+        </div>
+        <div id="plugins-list" class="plugins-list"></div>
+      </div>
+      </div>
+
     </section>
+
+    <div class="modal" id="plugin-install-modal" hidden>
+      <div class="modal-box">
+        <button type="button" class="modal-close" id="plugin-install-close">&times;</button>
+        <h3>Install plugin from GitHub</h3>
+        <p class="muted">Paste the folder URL of a public GitHub plugin, for example <code>https://github.com/owner/repo/tree/main/plugins/my-plugin</code>. The plugin must contain <code>plugin.json</code> and <code>main.py</code>.</p>
+        <div class="fw-modal-grid">
+          <label class="fw-field">
+            <span>GitHub folder URL</span>
+            <input type="url" id="plugin-install-url" placeholder="https://github.com/owner/repo/tree/main/plugins/my-plugin" autocomplete="off" spellcheck="false">
+          </label>
+        </div>
+        <p class="muted" id="plugin-install-note">Plugins run as isolated unprivileged workers. Only install code you trust.</p>
+        <p class="login-error" id="plugin-install-msg" hidden></p>
+        <div class="wg-modal-actions">
+          <button class="btn btn-primary" id="plugin-install-run" type="button">Install plugin</button>
+          <button class="btn btn-ghost" id="plugin-install-cancel" type="button">Cancel</button>
+        </div>
+      </div>
+    </div>
 
     <div id="bl-browse-modal" class="modal" hidden>
       <div class="modal-box modal-box-wide">
@@ -3550,7 +3587,7 @@
     <p class="muted" id="cs-ban-status" style="margin-top:10px"></p>
   </div>
 </div>
-<script src="/scripts/dashboard.js?v=202610241700"></script>
+<script src="/scripts/dashboard.js?v=202610250425"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>
