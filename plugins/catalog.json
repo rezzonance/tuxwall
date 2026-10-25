@@ -1,0 +1,18 @@
+{
+  "ok": true,
+  "generated": 1792918541,
+  "plugins": [
+    {
+      "id": "unifi",
+      "name": "UniFi Access Points",
+      "version": "0.11.1",
+      "description": "Read-only UniFi controller view: access points, clients, signal and roaming context.",
+      "nav": {
+        "label": "WiFi",
+        "icon": "wifi",
+        "order": 80
+      },
+      "url": "https://github.com/rezzonance/tuxwall/tree/main/plugins/wifi-unifi-plugin"
+    }
+  ]
+}
