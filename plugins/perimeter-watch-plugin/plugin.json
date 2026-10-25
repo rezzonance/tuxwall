@@ -1,0 +1,21 @@
+{
+  "id": "perimeter-watch",
+  "name": "Perimeter Watch",
+  "version": "0.1.0",
+  "api": 1,
+  "description": "External security audit of your WAN: what Shodan observes open on your IP (compared against what you intend, including honeypot and canary traps), plus CrowdSec CTI reputation. Keyless.",
+  "enabled": true,
+  "alerts": true,
+  "nav": { "label": "Perimeter", "icon": "globe", "order": 82 },
+  "settings": [
+    { "key": "expected_ports", "label": "Expected (intentionally open) ports", "type": "text",
+      "default": "22, 23, 161, 443, 445, 1433, 2323, 3389, 5555, 5900, 6379",
+      "help": "Everything you open ON PURPOSE: your services AND your deception ports. The default is the stock TuxWall set - honeypot (23, 445, 2323, 3389, 5555), canary (22, 5900, 1433, 6379, 161), and the dashboard (443). Anything Shodan observes outside this list raises a critical incident." },
+    { "key": "extra_ips", "label": "Additional IPs to check", "type": "text",
+      "placeholder": "leave empty for WAN only",
+      "default": "",
+      "help": "Optional comma-separated list (e.g. a VPS you own)." },
+    { "key": "check_cti", "label": "Check CrowdSec reputation (CTI)", "type": "bool", "default": true,
+      "help": "Reports whether your IP is listed as an attacker in CrowdSec threat intel. Keyless; shows as unreachable if your DNS blocks cti.crowdsec.net." }
+  ]
+}
