@@ -1,0 +1,416 @@
+/* ============================================================================
+   TuxWall — Firewall page (bento redesign)
+   ----------------------------------------------------------------------------
+   Loaded after style.css + polish.css. Scoped to #view-firewall except the
+   glass sub-tab strip, which is intentionally shared by every tabbed view.
+   All colour comes from live theme tokens via color-mix(), so it adapts to
+   every theme. Revert = remove the <link> in index.html.
+   ========================================================================= */
+
+/* ----------------------------------------------------------------------------
+   0. Page shell — subtle dot grid + smooth section scrolling
+   ------------------------------------------------------------------------- */
+.fw-view { position: relative; scroll-behavior: smooth; }
+.fw-view::before {
+  content: "";
+  position: absolute; inset: -4px 0 0 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image: radial-gradient(color-mix(in srgb, var(--text) 9%, transparent) 1px, transparent 1.4px);
+  background-size: 24px 24px;
+  -webkit-mask-image: radial-gradient(120% 60% at 50% 0%, #000 0%, transparent 72%);
+          mask-image: radial-gradient(120% 60% at 50% 0%, #000 0%, transparent 72%);
+  opacity: .55;
+}
+.fw-view > * { position: relative; z-index: 1; }
+
+/* ----------------------------------------------------------------------------
+   1. Card base — quiet depth, colored accent rail, no heavy glow
+   ------------------------------------------------------------------------- */
+.fw-card {
+  --c: var(--accent);
+  position: relative;
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--c) 6%, var(--card)) 0%,
+      color-mix(in srgb, var(--card) 97%, var(--bg)) 42%);
+  border: 1px solid color-mix(in srgb, var(--border) 80%, var(--text) 5%);
+  border-radius: 16px;
+  padding: 16px 18px;
+  overflow: hidden;
+  box-shadow: var(--shadow-1);
+  transition: transform .22s var(--ease-out), box-shadow .22s var(--ease-out),
+              border-color .22s var(--ease-out);
+}
+.fw-card:hover {
+  transform: translateY(-3px);
+  border-color: color-mix(in srgb, var(--c) 42%, var(--border));
+  box-shadow: var(--shadow-2);
+}
+/* top hairline sheen */
+.fw-card::after {
+  content: "";
+  position: absolute; inset: 0 0 auto 0; height: 1px;
+  background: linear-gradient(90deg, transparent,
+    color-mix(in srgb, var(--c) 45%, transparent) 30%,
+    color-mix(in srgb, var(--text) 12%, transparent) 50%,
+    color-mix(in srgb, var(--c) 45%, transparent) 70%, transparent);
+  opacity: .6;
+}
+
+/* accent palette helpers */
+.fw-card[data-accent="orange"] { --c: #ffa657; }
+.fw-card[data-accent="amber"]  { --c: #d29922; }
+.fw-card[data-accent="blue"]   { --c: #4f8cff; }
+.fw-card[data-accent="purple"] { --c: #bc8cff; }
+.fw-card[data-accent="red"]    { --c: #f85149; }
+.fw-card[data-accent="green"]  { --c: #3fb950; }
+.fw-card[data-accent="teal"]   { --c: #39c5cf; }
+.fw-card[data-accent="pink"]   { --c: #db61a2; }
+
+/* small uppercase category label */
+.fw-kicker {
+  display: block;
+  font-size: 11px; font-weight: 700;
+  letter-spacing: .14em; text-transform: uppercase;
+  color: color-mix(in srgb, var(--c) 88%, var(--text));
+}
+
+/* ----------------------------------------------------------------------------
+   2. Top bento — hero + KPI cards with pihole top colour border
+   ------------------------------------------------------------------------- */
+.fw-bento {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-auto-rows: minmax(96px, auto);
+  gap: 14px;
+  margin-bottom: 6px;
+}
+.fw-hero {
+  grid-column: span 2;
+  grid-row: span 2;
+  padding: 0;
+  min-height: 210px;
+  display: flex;
+}
+
+/* Hero: dark plate + dragon art bleeding in from the right */
+.fw-hero-plate {
+  position: relative;
+  flex: 1;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  background:
+    radial-gradient(120% 120% at 100% 50%, color-mix(in srgb, var(--c) 16%, transparent), transparent 60%);
+}
+.fw-hero-art {
+  position: absolute;
+  right: -8%; bottom: -8%;
+  height: 100%;
+  width: auto;
+  opacity: .98;
+  pointer-events: none;
+  filter: drop-shadow(0 12px 28px rgba(0,0,0,.5));
+  animation: fw-float-b 7s ease-in-out infinite;
+}
+.fw-hero-art img { height: 100%; width: auto; display: block; }
+@keyframes fw-float-b {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-8px); }
+}
+.fw-hero-head { position: relative; display: flex; align-items: center; justify-content: space-between; }
+.fw-hero-value {
+  position: relative;
+  font-size: clamp(30px, 3.4vw, 44px);
+  font-weight: 800; line-height: 1.02; letter-spacing: -.02em;
+  color: var(--text);
+  text-shadow: 0 2px 24px color-mix(in srgb, var(--c) 30%, transparent);
+}
+.fw-hero-value .fw-state-dot {
+  display: inline-block; width: 11px; height: 11px; margin-right: 12px;
+  border-radius: 50%; background: var(--c);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 70%, transparent);
+  animation: fw-pulse 2.4s ease-out infinite;
+  vertical-align: middle;
+}
+@keyframes fw-pulse {
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 55%, transparent); }
+  70%  { box-shadow: 0 0 0 12px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+.fw-hero-sub { margin-top: 8px; color: var(--muted); font-size: 12.5px; }
+.fw-hero-figs {
+  position: relative; display: flex; gap: 22px; margin-top: 14px;
+}
+.fw-fig { display: flex; flex-direction: column; }
+.fw-fig b { font-size: 20px; font-weight: 800; color: var(--text); font-variant-numeric: tabular-nums; }
+.fw-fig small { color: var(--muted); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; margin-top: 2px; }
+
+/* KPI card — compact, pihole coloured top border, big value */
+.fw-kpi {
+  padding: 14px 15px 15px;
+  display: flex; flex-direction: column; justify-content: space-between;
+  min-height: 96px;
+  border-top: 3px solid var(--c);
+  border-top-left-radius: 4px; border-top-right-radius: 16px;
+}
+.fw-kpi .fw-num {
+  font-size: clamp(22px, 2.1vw, 30px);
+  font-weight: 800; line-height: 1; letter-spacing: -.02em;
+  color: var(--text); font-variant-numeric: tabular-nums;
+  margin: 6px 0 2px;
+  transition: color .2s var(--ease-out);
+}
+.fw-kpi:hover .fw-num { color: color-mix(in srgb, var(--c) 72%, var(--text)); }
+.fw-kpi .fw-sub { color: var(--muted); font-size: 11.5px; }
+
+/* "Defense layers" filler card — spans the remaining 3 cols of row 2 */
+.fw-layers { grid-column: span 3; }
+.fw-layers ul { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 7px; }
+.fw-layers li {
+  display: flex; align-items: center; gap: 9px;
+  font-size: 12.5px; color: var(--text);
+}
+.fw-layers li .dot { flex: none; }
+.fw-layers li span.tag { margin-left: auto; color: var(--muted); font-size: 11px; }
+
+/* ----------------------------------------------------------------------------
+   3. Glass sub-tabs — shared by every tabbed view
+   ------------------------------------------------------------------------- */
+.fw-subtabs {
+  margin: 18px 0 0;
+  display: flex; align-items: center; gap: 4px;
+  padding: 5px;
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-elev) 55%, transparent);
+  -webkit-backdrop-filter: blur(14px) saturate(150%);
+          backdrop-filter: blur(14px) saturate(150%);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 7%, transparent),
+              var(--shadow-1);
+  overflow-x: auto;
+}
+.fw-subtab {
+  border-radius: 10px;
+  padding: 8px 16px;
+  border: 1px solid transparent;
+  color: var(--muted);
+  font-weight: 600;
+  transition: color .18s ease, background .18s ease, box-shadow .18s ease,
+              transform .18s ease;
+}
+.fw-subtab:hover { color: var(--text); background: color-mix(in srgb, var(--text) 6%, transparent); }
+.fw-subtab.active {
+  color: var(--text);
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--accent) 22%, transparent),
+    color-mix(in srgb, var(--accent) 9%, transparent));
+  border-color: color-mix(in srgb, var(--accent) 38%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.fw-subtabs-fill { flex: 1; }
+.fw-log-state { padding-right: 10px; font-size: 12px; }
+
+/* ----------------------------------------------------------------------------
+   4. Panes — inner cards that fill the space
+   ------------------------------------------------------------------------- */
+.fw-grid { display: grid; gap: 14px; margin-top: 14px; }
+.fw-grid-3 { grid-template-columns: 1.1fr 1fr 1fr; }
+.fw-span-full { grid-column: 1 / -1; }
+
+/* traffic cards are flex columns so short content (donut) centres vertically */
+.fw-grid-3 > .fw-card { display: flex; flex-direction: column; }
+.fw-grid-3 > .fw-card .table-wrap { flex: 1; }
+
+/* chart-ish card bodies */
+.fw-chart { display: flex; align-items: center; gap: 18px; margin-top: 12px; flex: 1; }
+
+/* donut */
+.fw-donut { position: relative; width: 132px; height: 132px; flex: none; }
+.fw-donut svg { transform: rotate(-90deg); }
+.fw-donut .ring-bg { stroke: color-mix(in srgb, var(--text) 9%, transparent); }
+.fw-donut .ring-val {
+  stroke: var(--c);
+  stroke-linecap: round;
+  transition: stroke-dashoffset .9s var(--ease-out);
+}
+.fw-donut .fw-donut-mid {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+}
+.fw-donut .fw-donut-mid b { font-size: 24px; font-weight: 800; color: var(--text); font-variant-numeric: tabular-nums; }
+.fw-donut .fw-donut-mid small { color: var(--muted); font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; }
+
+/* legend */
+.fw-legend { display: grid; gap: 9px; font-size: 12.5px; }
+.fw-legend .row { display: flex; align-items: center; gap: 8px; }
+.fw-legend .sw { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.fw-legend .row b { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--text); }
+
+/* animated bars used inside the existing traffic tables */
+.fw-view .bar { height: 8px; border-radius: 6px; background: color-mix(in srgb, var(--text) 8%, transparent); overflow: hidden; }
+.fw-view .bar-fill {
+  border-radius: 6px;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--bar-c, var(--c, var(--accent))) 55%, transparent),
+    var(--bar-c, var(--c, var(--accent))));
+  transition: width .8s var(--ease-out);
+}
+.fw-view .bar-fill-err { --bar-c: #f85149; }
+
+/* ----------------------------------------------------------------------------
+   5. Polish the reused controls inside the firewall view
+   ------------------------------------------------------------------------- */
+.fw-view .card {
+  border-radius: 16px;
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--card) 98%, var(--bg)) 0%,
+    color-mix(in srgb, var(--card) 94%, var(--bg)) 100%);
+}
+.fw-view .card-head { padding: 14px 16px; }
+.fw-view .card-head h2 { font-size: 13.5px; }
+
+/* interface chips — translucent, colour-coded glass to match the sub-tabs */
+.fw-view .fw-chip-row { gap: 8px; margin: 12px 16px 14px; }
+#view-firewall .fw-chip {
+  border-radius: 10px;
+  padding: 6px 14px;
+  background:
+    linear-gradient(135deg,
+      color-mix(in srgb, var(--fw-color, var(--accent)) 12%, transparent),
+      color-mix(in srgb, var(--fw-color, var(--accent)) 4%, transparent)),
+    color-mix(in srgb, var(--bg-elev) 55%, transparent);
+  border: 1px solid color-mix(in srgb, var(--fw-color, var(--accent)) 30%, var(--glass-border));
+  -webkit-backdrop-filter: blur(14px) saturate(150%);
+          backdrop-filter: blur(14px) saturate(150%);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 7%, transparent);
+}
+#view-firewall .fw-chip:hover {
+  color: var(--text);
+  background:
+    linear-gradient(135deg,
+      color-mix(in srgb, var(--fw-color, var(--accent)) 18%, transparent),
+      color-mix(in srgb, var(--fw-color, var(--accent)) 7%, transparent)),
+    color-mix(in srgb, var(--bg-elev) 48%, transparent);
+  border-color: color-mix(in srgb, var(--fw-color, var(--accent)) 52%, var(--glass-border));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 9%, transparent),
+              0 2px 12px color-mix(in srgb, var(--fw-color, var(--accent)) 18%, transparent);
+}
+#view-firewall .fw-chip.active {
+  color: var(--text);
+  background:
+    linear-gradient(135deg,
+      color-mix(in srgb, var(--fw-color, var(--accent)) 30%, transparent),
+      color-mix(in srgb, var(--fw-color, var(--accent)) 12%, transparent)),
+    color-mix(in srgb, var(--bg-elev) 42%, transparent);
+  border-color: color-mix(in srgb, var(--fw-color, var(--accent)) 58%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 16%, transparent),
+              0 0 0 1px color-mix(in srgb, var(--fw-color, var(--accent)) 18%, transparent),
+              0 2px 14px color-mix(in srgb, var(--fw-color, var(--accent)) 24%, transparent);
+}
+
+/* settings tiles -> bento feel */
+.fw-view .fw-settings-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px; padding: 14px 16px;
+}
+.fw-view .fw-setting {
+  border: 1px solid var(--border); border-radius: 12px;
+  padding: 14px 16px; background: color-mix(in srgb, var(--bg-elev) 60%, transparent);
+  transition: border-color .2s ease, transform .2s ease;
+}
+.fw-view .fw-setting:hover { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); transform: translateY(-2px); }
+.fw-view .fw-setting:last-child { border-bottom: 1px solid var(--border); }
+
+/* NAT/DMZ cards: stacked by default so each table gets the full card width.
+   Side-by-side only on very wide screens where both tables actually fit
+   (DMZ needs ~760px; halving a 1440px content area cut its columns off). */
+.fw-nat-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; margin-top: 14px; }
+.fw-nat-grid .card { margin-top: 0; }
+@media (min-width: 1960px) {
+  .fw-nat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* DMZ clients table: keep every column visible as the card narrows. */
+@media (max-width: 1100px) {
+  #dmz-table th:nth-child(3),
+  #dmz-table td:nth-child(3) { display: none; }          /* MAC (secondary) */
+  #dmz-table td:first-child { white-space: normal; overflow-wrap: anywhere; }
+}
+@media (max-width: 1000px) {
+  #dmz-table thead th,
+  #dmz-table tbody td { padding-left: 8px; padding-right: 8px; }
+}
+@media (max-width: 700px) {
+  /* Phones: the online dot is the least important column — drop it rather
+     than making the DMZ controls scroll off-screen. */
+  #dmz-table th:nth-child(4),
+  #dmz-table td:nth-child(4) { display: none; }
+}
+@media (max-width: 480px) {
+  /* Give hostnames room on phones: the reservation state is already called
+     out by the warning box above the table. */
+  #dmz-table th:nth-child(5),
+  #dmz-table td:nth-child(5) { display: none; }
+}
+
+/* ----------------------------------------------------------------------------
+   6. Entrance animation
+   ------------------------------------------------------------------------- */
+.fw-view .fw-card { animation: fw-rise .5s var(--ease-out) both; }
+.fw-bento .fw-card:nth-child(1) { animation-delay: .02s; }
+.fw-bento .fw-card:nth-child(2) { animation-delay: .06s; }
+.fw-bento .fw-card:nth-child(3) { animation-delay: .10s; }
+.fw-bento .fw-card:nth-child(4) { animation-delay: .14s; }
+.fw-bento .fw-card:nth-child(5) { animation-delay: .18s; }
+.fw-bento .fw-card:nth-child(6) { animation-delay: .22s; }
+.fw-bento .fw-card:nth-child(7) { animation-delay: .26s; }
+.fw-bento .fw-card:nth-child(8) { animation-delay: .30s; }
+@keyframes fw-rise {
+  from { opacity: 0; transform: translateY(14px) scale(.985); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fw-view .fw-card { animation: none; }
+  .fw-hero-art { animation: none; }
+  .fw-subtab, .fw-card, .fw-view .bar-fill { transition: none; }
+}
+
+/* ----------------------------------------------------------------------------
+   7. Light theme adjustments
+   ------------------------------------------------------------------------- */
+body.light-theme .fw-hero-plate {
+  background: radial-gradient(120% 120% at 100% 50%, color-mix(in srgb, var(--c) 12%, transparent), transparent 60%);
+}
+body.light-theme .fw-hero-value { text-shadow: none; }
+body.light-theme .fw-hero-art { filter: drop-shadow(0 10px 30px rgba(0,0,0,.18)); }
+body.light-theme .fw-view::before { opacity: .5; }
+
+/* ----------------------------------------------------------------------------
+   8. Responsive
+   ------------------------------------------------------------------------- */
+@media (max-width: 1180px) {
+  .fw-bento { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .fw-hero { grid-column: span 4; grid-row: auto; min-height: 200px; }
+  .fw-grid-3 { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 820px) {
+  .fw-bento { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .fw-hero { grid-column: span 2; }
+  .fw-grid-3, .fw-nat-grid { grid-template-columns: 1fr; }
+  .fw-view .fw-settings-grid { grid-template-columns: 1fr; }
+  /* Keep the mascot, but reserve room so it never covers the status copy */
+  .fw-hero-plate { padding-right: 38%; }
+  .fw-hero-art { width: 54%; opacity: .92; right: -4%; }
+  .fw-hero-sub { max-width: 100%; }
+}
+@media (max-width: 560px) {
+  .fw-bento { grid-template-columns: 1fr; }
+  .fw-hero, .fw-layers { grid-column: span 1; }
+  /* Mascot overlaps the status text at phone width — drop it */
+  .fw-hero-art { display: none; }
+  .fw-hero { min-height: 168px; }
+}

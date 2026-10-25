@@ -1,0 +1,137 @@
+/* ============================================================================
+   TuxWall — Action icons (edit / power / delete)
+   ----------------------------------------------------------------------------
+   Line icons supplied in /home/jeff/tuxwall-action-icons. Stroke-based, so the
+   legacy `fill: currentColor` rules are neutralised here.
+   ========================================================================= */
+
+.act-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  flex: none;
+  vertical-align: middle;
+  border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, var(--text) 8%);
+  background: color-mix(in srgb, var(--bg-elev) 65%, transparent);
+  color: color-mix(in srgb, var(--muted) 82%, var(--text));
+  cursor: pointer;
+  transition: color .15s ease, border-color .15s ease, background .15s ease,
+              box-shadow .15s ease, transform .1s ease;
+}
+.act-btn svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.act-btn:hover {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.act-btn:active { transform: scale(.94); }
+.act-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.act-btn:disabled { opacity: .4; cursor: not-allowed; transform: none; box-shadow: none; }
+.act-btn + .act-btn { margin-left: 6px; }
+
+/* Intent colours */
+.act-power:hover {
+  color: var(--amber, #d29922);
+  border-color: color-mix(in srgb, var(--amber, #d29922) 55%, var(--border));
+  background: color-mix(in srgb, var(--amber, #d29922) 12%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--amber, #d29922) 20%, transparent);
+}
+.act-danger:hover,
+.act-delete:hover {
+  color: var(--red, #f85149);
+  border-color: color-mix(in srgb, var(--red, #f85149) 55%, var(--border));
+  background: color-mix(in srgb, var(--red, #f85149) 12%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--red, #f85149) 20%, transparent);
+}
+
+/* Table action cells: consistent spacing */
+td .act-btn { margin-left: 0; }
+td .act-btn + .act-btn { margin-left: 6px; }
+
+/* Inline page-card edit buttons (hostname, Kea config) use the same line icon */
+.host-edit svg.ic-stroke,
+.card-edit svg.ic-stroke {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Theme-card corner delete: keep the compact positioning, swap the glyph */
+.theme-del { display: inline-flex; align-items: center; justify-content: center; }
+.theme-del svg {
+  width: 15px; height: 15px;
+  fill: none; stroke: currentColor;
+  stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+}
+
+@media (max-width: 760px) {
+  .act-btn { width: 36px; height: 36px; }
+  .act-btn svg { width: 18px; height: 18px; }
+}
+
+/* Round 10 intents: ban / active / enable / disable / config / import /
+   backup / updates / exposed / lock / download / export. */
+.act-ban:hover,
+.act-exposed:hover {
+  color: var(--red, #f85149);
+  border-color: color-mix(in srgb, var(--red, #f85149) 55%, var(--border));
+  background: color-mix(in srgb, var(--red, #f85149) 12%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--red, #f85149) 20%, transparent);
+}
+.act-active:hover,
+.act-enable:hover,
+.act-import:hover {
+  color: var(--green, #3fb950);
+  border-color: color-mix(in srgb, var(--green, #3fb950) 55%, var(--border));
+  background: color-mix(in srgb, var(--green, #3fb950) 12%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--green, #3fb950) 20%, transparent);
+}
+.act-disable:hover,
+.act-lock:hover,
+.act-backup:hover,
+.act-updates:hover {
+  color: var(--amber, #d29922);
+  border-color: color-mix(in srgb, var(--amber, #d29922) 55%, var(--border));
+  background: color-mix(in srgb, var(--amber, #d29922) 12%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--amber, #d29922) 20%, transparent);
+}
+
+/* Text page-buttons that carry a leading line icon */
+.btn-act {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+.btn-act svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.btn-act.btn-sm svg { width: 14px; height: 14px; }
+@media (max-width: 460px) {
+  .btn-act { gap: 6px; }
+}

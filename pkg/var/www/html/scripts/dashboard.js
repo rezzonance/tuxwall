@@ -1,0 +1,13500 @@
+(() => {
+  "use strict";
+
+  const REFRESH_MS = 30000;
+  const BANDWIDTH_POLL_MS = 3000; // 60s made the page look frozen; backend samples every 2s
+  const SECURITY_POLL_MS = 15000;
+  const WG_POLL_MS = 5000;
+  const OV_POLL_MS = 5000;
+  const SYSTEM_WINDOW = 600;
+
+  const state = {
+    leases: [],
+    lastOk: Date.now(),
+    idleWarn: false,
+    sortKey: "ip",
+    sortDir: 1,
+    filter: "",
+    lastUpdate: null,
+    timer: null,
+    svcTab: "active",
+    svcData: null,
+    activeView: null,
+    bwData: null,
+    wgData: null,
+    secCrowdsecUp: null,
+    secBannedIps: new Set(),
+    domains: [],
+    domEditId: null,
+    domEditSource: null,
+    ovData: null,
+    suricataSev: "HIGH",
+    sysHostname: "",
+    editingHost: false,
+    cfgTarget: null,
+    updTimer: null,
+    logTimer: null,
+    allThemes: [],
+    activeTheme: "dark",
+    authed: false,
+    username: "",
+    role: "viewer",
+    isOwner: false,
+    canManageUsers: false,
+    users: [],
+    themeBootstrapped: false,
+    incidents: null,
+    incidentTimer: null,
+  };
+
+  const els = {
+    body: document.getElementById("leases-body"),
+    count: document.getElementById("result-count"),
+    search: document.getElementById("search"),
+    total: document.getElementById("stat-total"),
+    dynamic: document.getElementById("stat-dynamic"),
+    reserved: document.getElementById("stat-reserved"),
+    statStatic: document.getElementById("stat-static"),
+    updated: document.getElementById("last-updated"),
+    banner: document.getElementById("banner"),
+    refresh: document.getElementById("refresh-btn"),
+    auto: document.getElementById("auto-refresh"),
+    empty: document.getElementById("empty-state"),
+    soon: document.getElementById("soon-card"),
+    title: document.getElementById("page-title"),
+    dnsQueries: document.getElementById("dns-queries"),
+    dnsHitrate: document.getElementById("dns-hitrate"),
+    dnsMisses: document.getElementById("dns-misses"),
+    dnsRecur: document.getElementById("dns-recur"),
+    dnsTcp: document.getElementById("dns-tcp"),
+    dnsUdp: document.getElementById("dns-udp"),
+    dnsUnwanted: document.getElementById("dns-unwanted"),
+    dnsUptime: document.getElementById("dns-uptime"),
+    dnsVersion: document.getElementById("dns-version"),
+    dnsQtypesBody: document.querySelector("#dns-qtypes tbody"),
+    dnsRcodesBody: document.querySelector("#dns-rcodes tbody"),
+    dnsRrsetCount: document.getElementById("dns-rrset-count"),
+    dnsRrsetSize: document.getElementById("dns-rrset-size"),
+    dnsMsgCount: document.getElementById("dns-msg-count"),
+    dnsMsgSize: document.getElementById("dns-msg-size"),
+    dnsKeyCount: document.getElementById("dns-key-count"),
+    fwStatus: document.getElementById("fw-status"),
+    fwIncoming: document.getElementById("fw-incoming"),
+    fwOutgoing: document.getElementById("fw-outgoing"),
+    fwRules: document.getElementById("fw-rules"),
+    fwBlocks: document.getElementById("fw-blocks"),
+    fwAllows: document.getElementById("fw-allows"),
+    fwLogging: document.getElementById("fw-logging-state"),
+    fwSearch: document.getElementById("fw-search"),
+    fwRulesBody: document.querySelector("#fw-rules-table tbody"),
+    fwRule: document.getElementById("fw-rule"),
+    fwAdd: document.getElementById("fw-add"),
+    fwAddCustom: document.getElementById("fw-add-custom"),
+    fwBaseline: document.getElementById("fw-baseline"),
+    fwReset: document.getElementById("fw-reset"),
+    fwHint: document.getElementById("fw-hint"),
+    fwAction: document.getElementById("fw-action"),
+    fwDirection: document.getElementById("fw-direction"),
+    fwIface: document.getElementById("fw-iface"),
+    fwFamily: document.getElementById("fw-family"),
+    fwFrom: document.getElementById("fw-from"),
+    fwProto: document.getElementById("fw-proto"),
+    fwPort: document.getElementById("fw-port"),
+    fwSourcesBody: document.querySelector("#fw-sources tbody"),
+    fwPortsBody: document.querySelector("#fw-ports tbody"),
+    fwEventsBody: document.querySelector("#fw-events tbody"),
+    csActive: document.getElementById("cs-active"),
+    csBans: document.getElementById("cs-bans"),
+    csBouncers: document.getElementById("cs-bouncers"),
+    csExpiring: document.getElementById("cs-expiring"),
+    csDecisionsBody: document.querySelector("#cs-decisions-table tbody"),
+    csBouncersBody: document.querySelector("#cs-bouncers-table tbody"),
+    csAlertsBody: document.querySelector("#cs-alerts-table tbody"),
+    cblInput: document.getElementById("cbl-input"),
+    cblAdd: document.getElementById("cbl-add"),
+    cblStatus: document.getElementById("cbl-status"),
+    cblFile: document.getElementById("cbl-file"),
+    cblBody: document.querySelector("#cbl-body"),
+    cblEmpty: document.getElementById("cbl-empty"),
+    cbanBody: document.querySelector("#cban-body"),
+    cbanGenerated: document.getElementById("cban-generated"),
+    cbanStatus: document.getElementById("cban-status"),
+    cbanShare: document.getElementById("cban-share"),
+    cbanShareStatus: document.getElementById("cban-share-status"),
+    cbanShareBadge: document.getElementById("cban-share-badge"),
+    cbanAuto: document.getElementById("cban-auto"),
+    cbanAutoBadge: document.getElementById("cban-auto-badge"),
+    cbanAutoStats: document.getElementById("cban-auto-stats"),
+    cbanBanAll: document.getElementById("cban-ban-all"),
+    csBanModal: document.getElementById("cs-ban-modal"),
+    csBanTitle: document.getElementById("cs-ban-title"),
+    csBanTarget: document.getElementById("cs-ban-target"),
+    csBanDuration: document.getElementById("cs-ban-duration"),
+    csBanConfirm: document.getElementById("cs-ban-confirm"),
+    csBanCancel: document.getElementById("cs-ban-cancel"),
+    csBanClose: document.getElementById("cs-ban-close"),
+    csBanStatus: document.getElementById("cs-ban-status"),
+    bwDown: document.getElementById("bw-down"),
+    bwUp: document.getElementById("bw-up"),
+    bwWindow: document.getElementById("bw-window"),
+    bwSamples: document.getElementById("bw-samples"),
+    bwCharts: document.getElementById("bw-charts"),
+    bwClientsBody: document.querySelector("#bw-clients-body"),
+    bwClientsEmpty: document.getElementById("bw-clients-empty"),
+    secHits: document.getElementById("sec-hits"),
+    secIps: document.getElementById("sec-ips"),
+    secCountries: document.getElementById("sec-countries"),
+    secRate: document.getElementById("sec-rate"),
+    secGeoHint: document.getElementById("sec-geo-hint"),
+    secCountriesBody: document.querySelector("#sec-countries-body"),
+    secIpsBody: document.querySelector("#sec-ips-body"),
+    secBanAll: document.getElementById("sec-ban-all"),
+    secBanStatus: document.getElementById("sec-ban-status"),
+    secEventsBody: null,
+    secEventCount: null,
+    secSuricataBody: document.querySelector("#sec-suricata-body"),
+    secSuricataHint: document.getElementById("sec-suricata-hint"),
+    secSuricataTabs: document.getElementById("sec-suricata-tabs"),
+    secZeekBody: document.querySelector("#sec-zeek-body"),
+    secZeekHint: document.getElementById("sec-zeek-hint"),
+    secAideHint: document.getElementById("sec-aide-hint"),
+    secAideSummary: document.getElementById("sec-aide-summary"),
+    secAideRun: document.getElementById("sec-aide-run"),
+    secAideUpdate: document.getElementById("sec-aide-update"),
+    secAideBody: document.getElementById("sec-aide-body"),
+    secHoneyHint: document.getElementById("sec-honey-hint"),
+    secHoneySummary: document.getElementById("sec-honey-summary"),
+    secHoneyToggle: document.getElementById("sec-honey-toggle"),
+    secHoneyPorts: document.getElementById("sec-honey-ports"),
+    secHoneyAutoban: document.getElementById("sec-honey-autoban"),
+    secHoneyThreshold: document.getElementById("sec-honey-threshold"),
+    secHoneyApply: document.getElementById("sec-honey-apply"),
+    secHoneyBody: document.getElementById("sec-honey-body"),
+    secCanaryHint: document.getElementById("sec-canary-hint"),
+    secCanaryToggle: document.getElementById("sec-canary-toggle"),
+    secCanaryEvents: document.getElementById("sec-canary-events"),
+    secCanarySources: document.getElementById("sec-canary-sources"),
+    secCanaryCreds: document.getElementById("sec-canary-creds"),
+    secCanaryBans: document.getElementById("sec-canary-bans"),
+    secCanarySummary: document.getElementById("sec-canary-summary"),
+    secCanaryBody: document.getElementById("sec-canary-body"),
+    secZeekDevBody: document.querySelector("#sec-zeek-dev-body"),
+    secZeekDevHint: document.getElementById("sec-zeek-dev-hint"),
+    secQuicBody: document.querySelector("#sec-quic-body"),
+    secQuicHint: document.getElementById("sec-quic-hint"),
+    secChart: document.getElementById("sec-chart"),
+    dmDomain: document.getElementById("dm-domain"),
+    dmIp: document.getElementById("dm-ip"),
+    dmPort: document.getElementById("dm-port"),
+    dmNote: document.getElementById("dm-note"),
+    dmAdd: document.getElementById("dm-add"),
+    dmCancel: document.getElementById("dm-cancel"),
+    dmHint: document.getElementById("dm-hint"),
+    dmBody: document.querySelector("#dm-body"),
+    dmCount: document.getElementById("dm-count"),
+    dmPorts: document.getElementById("dm-ports"),
+    dmStatus: document.getElementById("dm-status"),
+    dmImportAll: document.getElementById("dm-import-all"),
+    wgUnconfigured: document.getElementById("wg-unconfigured"),
+    wgConfigured: document.getElementById("wg-configured"),
+    wgSetupForm: document.getElementById("wg-setup-form"),
+    wgSetupBtn: document.getElementById("wg-setup-btn"),
+    wgSetupError: document.getElementById("wg-setup-error"),
+    wgSetupAddress: document.getElementById("wg-setup-address"),
+    wgSetupPort: document.getElementById("wg-setup-port"),
+    wgSetupDns: document.getElementById("wg-setup-dns"),
+    wgSetupAllowed: document.getElementById("wg-setup-allowed"),
+    wgSetupEndpoint: document.getElementById("wg-setup-endpoint"),
+    wgSetupKeepalive: document.getElementById("wg-setup-keepalive"),
+    wgState: document.getElementById("wg-state"),
+    wgEndpoint: document.getElementById("wg-endpoint"),
+    wgPeers: document.getElementById("wg-peers"),
+    wgTransfer: document.getElementById("wg-transfer"),
+    wgHint: document.getElementById("wg-hint"),
+    wgAddPeer: document.getElementById("wg-add-peer"),
+    wgPeersBody: document.querySelector("#wg-peers-body"),
+    wgPeerNote: document.getElementById("wg-peer-note"),
+    wgModal: document.getElementById("wg-modal"),
+    wgModalTitle: document.getElementById("wg-modal-title"),
+    wgQr: document.getElementById("wg-qr"),
+    wgModalText: document.getElementById("wg-modal-text"),
+    wgModalDownload: document.getElementById("wg-modal-download"),
+    wgModalCopy: document.getElementById("wg-modal-copy"),
+    wgModalClose: document.getElementById("wg-modal-close"),
+    wgModalClose2: document.getElementById("wg-modal-close2"),
+    blDomains: document.getElementById("bl-domains"),
+    blSources: document.getElementById("bl-sources"),
+    blStatus: document.getElementById("bl-status"),
+    blUpdated: document.getElementById("bl-updated"),
+    blQueries: document.getElementById("bl-queries"),
+    blBlocked: document.getElementById("bl-blocked"),
+    blUrl: document.getElementById("bl-url"),
+    blAdd: document.getElementById("bl-add"),
+    blUpdate: document.getElementById("bl-update"),
+    blBody: document.getElementById("bl-body"),
+    blEmpty: document.getElementById("bl-empty"),
+    blLog: document.getElementById("bl-log"),
+    blHint: document.getElementById("bl-hint"),
+    wlDomain: document.getElementById("wl-domain"),
+    wlAdd: document.getElementById("wl-add"),
+    wlBody: document.getElementById("wl-body"),
+    wlEmpty: document.getElementById("wl-empty"),
+    rpzDomain: document.getElementById("rpz-domain"),
+    rpzMatch: document.getElementById("rpz-match"),
+    rpzAction: document.getElementById("rpz-action"),
+    rpzTarget: document.getElementById("rpz-target"),
+    rpzAdd: document.getElementById("rpz-add"),
+    rpzApply: document.getElementById("rpz-apply"),
+    rpzBody: document.getElementById("rpz-body"),
+    rpzEmpty: document.getElementById("rpz-empty"),
+    rpzHint: document.getElementById("rpz-hint"),
+    rpzBulk: document.getElementById("rpz-bulk"),
+    rpzBulkRow: document.getElementById("rpz-bulk-row"),
+    rpzBulkText: document.getElementById("rpz-bulk-text"),
+    rpzBulkGo: document.getElementById("rpz-bulk-go"),
+    rpzfUrl: document.getElementById("rpzf-url"),
+    rpzfName: document.getElementById("rpzf-name"),
+    rpzfAdd: document.getElementById("rpzf-add"),
+    rpzfRefresh: document.getElementById("rpzf-refresh"),
+    rpzfBody: document.getElementById("rpzf-body"),
+    rpzfEmpty: document.getElementById("rpzf-empty"),
+    rpzaStats: document.getElementById("rpza-stats"),
+    rpzaBody: document.getElementById("rpza-body"),
+    rpzaEmpty: document.getElementById("rpza-empty"),
+    sysHost: document.getElementById("sys-host"),
+    sysHostEdit: document.getElementById("sys-host-edit"),
+    sysEditKea: document.getElementById("sys-edit-kea"),
+    cfgModal: document.getElementById("cfg-modal"),
+    cfgModalTitle: document.getElementById("cfg-modal-title"),
+    cfgModalText: document.getElementById("cfg-modal-text"),
+    cfgModalHint: document.getElementById("cfg-modal-hint"),
+    cfgModalSave: document.getElementById("cfg-modal-save"),
+    cfgModalClose: document.getElementById("cfg-modal-close"),
+    cfgModalCancel: document.getElementById("cfg-modal-cancel"),
+    sysUpdDistro: document.getElementById("sys-upd-distro"),
+    sysUpdKernel: document.getElementById("sys-upd-kernel"),
+    sysUpdChecked: document.getElementById("sys-upd-checked"),
+    sysUpdLast: document.getElementById("sys-upd-last"),
+    sysUpdCount: document.getElementById("sys-upd-count"),
+    sysUpdCard: document.getElementById("sys-updates-card"),
+    sysUpdChip: document.getElementById("sys-upd-chip"),
+    sysUpdCheck: document.getElementById("sys-upd-check"),
+    sysUpdApply: document.getElementById("sys-upd-apply"),
+    sysUpdNote: document.getElementById("sys-upd-note"),
+    sysUpdProgress: document.getElementById("sys-upd-progress"),
+    sysUpdBar: document.getElementById("sys-upd-bar"),
+    sysUpdStatus: document.getElementById("sys-upd-status"),
+    sysUpdLog: document.getElementById("sys-upd-log"),
+    sysReboot: document.getElementById("sys-reboot"),
+    logSource: document.getElementById("log-source"),
+    logPriority: document.getElementById("log-priority"),
+    logLines: document.getElementById("log-lines"),
+    logRefresh: document.getElementById("log-refresh"),
+    logFollow: document.getElementById("log-follow"),
+    logCopy: document.getElementById("log-copy"),
+    logLive: document.getElementById("log-live"),
+    logView: document.getElementById("log-view"),
+    logMeta: document.getElementById("log-meta"),
+    bkSysCreate: document.getElementById("bk-sys-create"),
+    bkSysBody: document.getElementById("bk-sys-body"),
+    bkSysMsg: document.getElementById("bk-sys-msg"),
+    bkSysProgress: document.getElementById("bk-sys-progress"),
+    bkSysBar: document.getElementById("bk-sys-bar"),
+    bkSysStatus: document.getElementById("bk-sys-status"),
+    bkSysItems: document.getElementById("bk-sys-items"),
+    bkSysAll: document.getElementById("bk-sys-all"),
+    bkSysNone: document.getElementById("bk-sys-none"),
+    bkSysContents: document.getElementById("bk-sys-contents"),
+    bkSysFile: document.getElementById("bk-sys-file"),
+    bkSysUpload: document.getElementById("bk-sys-upload"),
+    bkSysContentsTitle: document.getElementById("bk-sys-contents-title"),
+    bkSysFiles: document.getElementById("bk-sys-files"),
+    bkSysSel: document.getElementById("bk-sys-sel"),
+    bkSysCount: document.getElementById("bk-sys-count"),
+    bkSysFilesSearch: document.getElementById("bk-sys-files-search"),
+    bkSysFilesCount: document.getElementById("bk-sys-files-count"),
+    bkSysFilesEmpty: document.getElementById("bk-sys-files-empty"),
+    bkSysDrop: document.getElementById("bk-sys-drop"),
+    bkSysFileHint: document.getElementById("bk-sys-file-hint"),
+    sysCpu: document.getElementById("sys-cpu"),
+    sysMem: document.getElementById("sys-mem"),
+    sysUptime: document.getElementById("sys-uptime"),
+    sysLoad: document.getElementById("sys-load"),
+    sysDisk: document.getElementById("sys-disk"),
+    sysSwap: document.getElementById("sys-swap"),
+    sysOs: document.getElementById("sys-os"),
+    sysRebootUptime: document.getElementById("sys-reboot-uptime"),
+    sysRebootBoot: document.getElementById("sys-reboot-boot"),
+    sysRebootChip: document.getElementById("sys-reboot-chip"),
+    sysServicesCard: document.getElementById("sys-services-card"),
+    sysSvcChip: document.getElementById("sys-svc-chip"),
+    sqmStatus: document.getElementById("sqm-status"),
+    sqmStatusNote: document.getElementById("sqm-status-note"),
+    sqmWan: document.getElementById("sqm-wan"),
+    sqmDown: document.getElementById("sqm-down"),
+    sqmUp: document.getElementById("sqm-up"),
+    sqmDrops: document.getElementById("sqm-drops"),
+    sqmDownIn: document.getElementById("sqm-down-in"),
+    sqmUpIn: document.getElementById("sqm-up-in"),
+    sqmApply: document.getElementById("sqm-apply"),
+    sqmTest: document.getElementById("sqm-test"),
+    sqmHint: document.getElementById("sqm-hint"),
+    sqmTestBox: document.getElementById("sqm-test-box"),
+    sqmTestStage: document.getElementById("sqm-test-stage"),
+    sqmTestResult: document.getElementById("sqm-test-result"),
+    sysInterfacesBody: document.querySelector("#sys-interfaces tbody"),
+    sysServicesBody: document.querySelector("#sys-services tbody"),
+    sysSvcRefresh: document.getElementById("sys-svc-refresh"),
+    svcTabs: document.getElementById("svc-tabs"),
+    sysPoolsBody: document.querySelector("#sys-pools tbody"),
+    sysPoolsNote: document.getElementById("sys-pools-note"),
+    sysPoolAdd: document.getElementById("sys-pool-add"),
+    sysFfInfo: document.getElementById("sys-ff-info"),
+    sysDetail: document.getElementById("sys-detail"),
+    ovCpu: document.getElementById("ov-cpu"),
+    ovMem: document.getElementById("ov-mem"),
+    ovDisk: document.getElementById("ov-disk"),
+    ovUptime: document.getElementById("ov-uptime"),
+    ovClients: document.getElementById("ov-clients"),
+    ovDnsBlocked: document.getElementById("ov-dns-blocked"),
+    ovFwBlocks: document.getElementById("ov-fw-blocks"),
+    ovAttacks: document.getElementById("ov-attacks"),
+    ovLatNow: document.getElementById("ov-lat-now"),
+    ovLatPeak: document.getElementById("ov-lat-peak"),
+    ovLatLoss: document.getElementById("ov-lat-loss"),
+    ovLatJitter: document.getElementById("ov-lat-jitter"),
+    ovWanIp: document.getElementById("ov-wan-ip"),
+    ovWgPeers: document.getElementById("ov-wg-peers"),
+    ovWgToggle: document.getElementById("ov-wg-toggle"),
+    ovWgToggleLabel: document.getElementById("ov-wg-toggle-label"),
+    ovWgState: document.getElementById("ov-wg-state"),
+    ovWgUnit: document.getElementById("ov-wg-unit"),
+    ovWgFoot: document.getElementById("ov-wg-foot"),
+    ovWanGrid: document.getElementById("ov-wan-grid"),
+    ovResHint: document.getElementById("ov-res-hint"),
+    ovBwHint: document.getElementById("ov-bw-hint"),
+    ovLatHint: document.getElementById("ov-lat-hint"),
+    ovJitHint: document.getElementById("ov-jit-hint"),
+    ovJitChart: document.getElementById("ov-jit-chart"),
+    ovResChart: document.getElementById("ov-res-chart"),
+    ovBwChart: document.getElementById("ov-bw-chart"),
+    ovResCpu: document.getElementById("ov-res-cpu"),
+    ovResMem: document.getElementById("ov-res-mem"),
+    ovBwDown: document.getElementById("ov-bw-down"),
+    ovBwUp: document.getElementById("ov-bw-up"),
+    ovLatChart: document.getElementById("ov-lat-chart"),
+    ovLatAvg: document.getElementById("ov-lat-avg"),
+    ovLatMax: document.getElementById("ov-lat-max"),
+    ovJitMdev: document.getElementById("ov-jit-mdev"),
+    ovPieSinkhole: document.getElementById("ov-pie-sinkhole"),
+    ovPieQtypes: document.getElementById("ov-pie-qtypes"),
+    ovPieIpv: document.getElementById("ov-pie-ipv"),
+    ovPieMem: document.getElementById("ov-pie-mem"),
+    ovPieFw: document.getElementById("ov-pie-fw"),
+    ovPieCountries: document.getElementById("ov-pie-countries"),
+    ovPieBw: document.getElementById("ov-pie-bw"),
+    ovPieCache: document.getElementById("ov-pie-cache"),
+    ovGeoHint: document.getElementById("ov-geo-hint"),
+    ovTalkersBody: document.querySelector("#ov-talkers-body"),
+    ovSuricataBody: document.querySelector("#ov-suricata-body"),
+    ovSuricataHint: document.getElementById("ov-suricata-hint"),
+    themeGrid: document.getElementById("theme-grid"),
+    themeActiveHint: document.getElementById("theme-active-hint"),
+    themeFile: document.getElementById("theme-file"),
+    themeUploadBtn: document.getElementById("theme-upload-btn"),
+    themeUploadMsg: document.getElementById("theme-upload-msg"),
+    themeFormatSample: document.getElementById("theme-format-sample"),
+    loginGate: document.getElementById("login-gate"),
+    loginForm: document.getElementById("login-form"),
+    loginUser: document.getElementById("login-user"),
+    loginPass: document.getElementById("login-pass"),
+    loginError: document.getElementById("login-error"),
+    loginBtn: document.getElementById("login-btn"),
+    loginHeading: document.getElementById("login-heading"),
+    loginSub: document.getElementById("login-sub"),
+    loginTotpLabel: document.getElementById("login-totp-label"),
+    loginTotp: document.getElementById("login-totp"),
+    logoutBtn: document.getElementById("logout-btn"),
+    userMenu: document.getElementById("user-menu"),
+    userMenuBtn: document.getElementById("user-menu-btn"),
+    userMenuPop: document.getElementById("user-menu-pop"),
+    userMenuName: document.getElementById("user-menu-name"),
+    userMenuRole: document.getElementById("user-menu-role"),
+    incidentWrap: document.getElementById("incident-wrap"),
+    incidentBell: document.getElementById("incident-bell"),
+    incidentBadge: document.getElementById("incident-badge"),
+    incidentPanel: document.getElementById("incident-panel"),
+    incidentList: document.getElementById("incident-list"),
+    incidentSummary: document.getElementById("incident-summary"),
+    incidentUpdated: document.getElementById("incident-updated"),
+    incidentAckAll: document.getElementById("incident-ack-all"),
+    incidentSettings: document.getElementById("incident-settings"),
+    alertsEnabled: document.getElementById("alerts-enabled"),
+    alertsWebhook: document.getElementById("alerts-webhook"),
+    alertsNtfy: document.getElementById("alerts-ntfy"),
+    alertsSeverity: document.getElementById("alerts-severity"),
+    alertsResolved: document.getElementById("alerts-resolved"),
+    alertsSave: document.getElementById("alerts-save"),
+    alertsTest: document.getElementById("alerts-test"),
+    alertsMsg: document.getElementById("alerts-msg"),
+    alertsHint: document.getElementById("alerts-hint"),
+    userAvatarImg: document.getElementById("user-avatar-img"),
+    userAvatarInitials: document.getElementById("user-avatar-initials"),
+    avatarFile: document.getElementById("avatar-file"),
+    avatarSave: document.getElementById("avatar-save"),
+    avatarRemove: document.getElementById("avatar-remove"),
+    avatarPreviewImg: document.getElementById("avatar-preview-img"),
+    avatarPreviewInitials: document.getElementById("avatar-preview-initials"),
+    avatarMsg: document.getElementById("avatar-msg"),
+    acctHint: document.getElementById("acct-hint"),
+    pwOpen: document.getElementById("pw-open"),
+    umCurrent: document.getElementById("um-current"),
+    umCurrentField: document.getElementById("um-current-field"),
+    usersCard: document.getElementById("users-card"),
+    usersAdmin: document.getElementById("users-admin"),
+    usersSearch: document.getElementById("users-search"),
+    usersCount: document.getElementById("users-count"),
+    usersTbody: document.getElementById("users-tbody"),
+    nuOpen: document.getElementById("nu-open"),
+    usersMsg: document.getElementById("users-msg"),
+    totpCard: document.getElementById("totp-card"),
+    totpBadge: document.getElementById("totp-badge"),
+    totpStartBtn: document.getElementById("totp-start-btn"),
+    totpEnroll: document.getElementById("totp-enroll"),
+    totpQr: document.getElementById("totp-qr"),
+    totpSecret: document.getElementById("totp-secret"),
+    totpCode: document.getElementById("totp-code"),
+    totpConfirmBtn: document.getElementById("totp-confirm-btn"),
+    totpCancelBtn: document.getElementById("totp-cancel-btn"),
+    totpDisableRow: document.getElementById("totp-disable-row"),
+    totpDisablePass: document.getElementById("totp-disable-pass"),
+    totpDisableCode: document.getElementById("totp-disable-code"),
+    totpDisableBtn: document.getElementById("totp-disable-btn"),
+    totpMsg: document.getElementById("totp-msg"),
+    userModal: document.getElementById("user-modal"),
+    userModalTitle: document.getElementById("user-modal-title"),
+    userModalClose: document.getElementById("user-modal-close"),
+    umName: document.getElementById("um-name"),
+    umFullname: document.getElementById("um-fullname"),
+    umPass: document.getElementById("um-pass"),
+    umPass2: document.getElementById("um-pass2"),
+    umPassField: document.getElementById("um-pass-field"),
+    umPass2Field: document.getElementById("um-pass2-field"),
+    umPassLabel: document.getElementById("um-pass-label"),
+    umRole: document.getElementById("um-role"),
+    umRoleField: document.getElementById("um-role-field"),
+    umEnabled: document.getElementById("um-enabled"),
+    umEnabledField: document.getElementById("um-enabled-field"),
+    umMsg: document.getElementById("um-msg"),
+    umSave: document.getElementById("um-save"),
+    umCancel: document.getElementById("um-cancel"),
+    routerLat: document.getElementById("router-lat"),
+    routerLon: document.getElementById("router-lon"),
+    routerLocSave: document.getElementById("router-loc-save"),
+    routerLocMsg: document.getElementById("router-loc-msg"),
+  };
+
+  const TYPE_LABEL = { 0: "Dynamic", 1: "Reserved", 2: "Reserved-Declined" };
+  const OS_ICONS = {
+    windows: {
+      label: "Windows",
+      svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801" fill="currentColor"/>
+      </svg>`,
+      color: "#0078d4",
+    },
+    mac: {
+      label: "macOS",
+      svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="currentColor">
+        <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11"/>
+      </svg>`,
+      color: "#aaaaaa",
+    },
+    apple: {
+      label: "iOS / iPadOS",
+      svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="currentColor">
+        <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11"/>
+      </svg>`,
+      color: "#6e6e73",
+    },
+    android: {
+      label: "Android",
+      svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="currentColor">
+        <path d="M6 18c0 .55.45 1 1 1h1v3.5c0 .83.67 1.5 1.5 1.5S11 23.33 11 22.5V19h2v3.5c0 .83.67 1.5 1.5 1.5s1.5-.67 1.5-1.5V19h1c.55 0 1-.45 1-1V8H6v10zm-2.5-2C2.67 16 2 15.33 2 14.5v-5C2 8.67 2.67 8 3.5 8S5 8.67 5 9.5v5c0 .83-.67 1.5-1.5 1.5zm17 0c-.83 0-1.5-.67-1.5-1.5v-5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5v5c0 .83-.67 1.5-1.5 1.5zM15.53 2.16l1.3-1.3c.2-.2.2-.51 0-.71-.2-.2-.51-.2-.71 0l-1.48 1.48A5.84 5.84 0 0 0 12 1c-.96 0-1.86.23-2.66.63L7.85.15c-.2-.2-.51-.2-.71 0-.2.2-.2.51 0 .71l1.31 1.31C7.14 3.45 6 5.17 6 7h12c0-1.83-1.14-3.55-2.47-4.84zM10 5H9V4h1v1zm5 0h-1V4h1v1z"/>
+      </svg>`,
+      color: "#3ddc84",
+    },
+    chromebook: {
+      label: "ChromeOS",
+      svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="12" cy="12" r="3.5" fill="#4285f4"/>
+        <path d="M12 2a10 10 0 0 1 8.66 5H12a5 5 0 0 0-4.33 2.5L5.1 5.68A9.97 9.97 0 0 1 12 2z" fill="#ea4335"/>
+        <path d="M2 12a10 10 0 0 1 3.1-7.32l3.57 6.18A5 5 0 0 0 12 17v5A10 10 0 0 1 2 12z" fill="#34a853"/>
+        <path d="M12 17a5 5 0 0 0 4.33-2.5l3.57 6.18A10 10 0 0 1 12 22v-5z" fill="#fbbc05"/>
+        <path d="M12 22v-5a5 5 0 0 0 4.33-2.5l3.57-6.18C21.27 9.8 22 10.85 22 12A10 10 0 0 1 12 22z" fill="#fbbc05"/>
+      </svg>`,
+      color: "#4285f4",
+    },
+    linux: {
+      label: "Linux",
+      svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="currentColor">
+        <path d="M20.581 19.049c-.55-.446-.76-1.22-.809-1.843-.053-.69.009-1.304-.5-1.966-.35-.451-.648-.655-.74-1.278-.08-.54.04-1.104.055-1.644.022-.726-.317-1.273-.861-1.67-.88-.635-.843-1.044-.843-1.044S17.482 2.831 12 2.831 6.118 9.604 6.118 9.604s.037.409-.843 1.044c-.544.397-.883.944-.861 1.67.015.54.135 1.104.055 1.644-.092.623-.39.827-.74 1.278-.509.662-.447 1.276-.5 1.966-.049.623-.259 1.397-.809 1.843-.55.446-.717 1.268.034 1.49.751.222 1.893.151 2.451-.518.557-.669.469-1.492.469-1.492.304.085.711.152 1.255.152.544 0 .951-.067 1.255-.152 0 0-.088.823.469 1.492.558.669 1.7.74 2.451.518.751-.222.584-1.044.034-1.49zM12 4.062c.737 0 .992.459.992.459L12 5.5l-.992-.979s.255-.459.992-.459zm-2.5 7.438c-.552 0-1-.675-1-1.5s.448-1.5 1-1.5 1 .675 1 1.5-.448 1.5-1 1.5zm5 0c-.552 0-1-.675-1-1.5s.448-1.5 1-1.5 1 .675 1 1.5-.448 1.5-1 1.5z"/>
+      </svg>`,
+      color: "#f5a623",
+    },
+    other: {
+      label: "Network Device",
+      svg: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="currentColor">
+        <path d="M1 9l2 2c4.97-4.97 13.03-4.97 18 0l2-2C16.93 2.93 7.08 2.93 1 9zm8 8l3 3 3-3a4.237 4.237 0 0 0-6 0zm-4-4 2 2a7.074 7.074 0 0 1 10 0l2-2C15.14 9.14 8.87 9.14 5 13z"/>
+      </svg>`,
+      color: "#8b949e",
+    },
+  };
+  const VIEW_TITLES = {
+    overview: "Overview",
+    clients: "DHCP Clients",
+    dns: "DNS (Unbound)",
+    domains: "Local Domains",
+    blocklists: "Blocklists",
+    firewall: "Firewall (UFW)",
+    vlans: "VLANs",
+    security: "Security",
+    wireguard: "WireGuard",
+    crowdsec: "CrowdSec",
+    bandwidth: "Bandwidth",
+    system: "System",
+    backups: "Backups",
+    logs: "Logs",
+    settings: "Settings",
+    ai: "AI Assistant",
+  };
+
+  const esc = (s) =>
+    String(s).replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+
+  // tuxwall.org community ban lookup state. Lives at module scope so it
+  // survives the per-refresh render calls — otherwise every redraw would
+  // clear the cache and refetch every top-attacker IP.
+  const COMMUNITY_TTL = 5 * 60 * 1000;
+  const communityCache = new Map();
+  const communityInFlight = new Set();
+
+  function formatDuration(sec) {
+    if (sec === null || sec === undefined || isNaN(sec)) return "—";
+    sec = Math.floor(sec);
+    if (sec <= 0) return "Expired";
+    const d = Math.floor(sec / 86400);
+    const h = Math.floor((sec % 86400) / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m`;
+    return `${sec}s`;
+  }
+
+  function formatRelative(ts) {
+    if (!ts) return "—";
+    const diff = Math.floor(Date.now() / 1000 - ts);
+    if (diff < 60) return "just now";
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    return `${Math.floor(diff / 86400)}d ago`;
+  }
+
+  function formatDateTime(ts) {
+    if (!ts) return "";
+    return new Date(ts * 1000).toLocaleString();
+  }
+
+  function formatTime(ts) {
+    if (!ts) return "—";
+    return new Date(ts * 1000).toLocaleTimeString();
+  }
+
+  function flagEmoji(iso) {
+    if (!iso || iso.length !== 2 || iso === "??") return "🌐";
+    return String.fromCodePoint(
+      ...iso.toUpperCase().split("").map((c) => 0x1f1a5 + c.charCodeAt(0))
+    );
+  }
+
+  function formatNumber(n) {
+    return new Intl.NumberFormat().format(Math.round(n || 0));
+  }
+
+  function formatBytes(n) {
+    n = n || 0;
+    if (n < 1024) return `${n} B`;
+    if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1073741824) return `${(n / 1048576).toFixed(1)} MB`;
+    if (n < 1099511627776) return `${(n / 1073741824).toFixed(2)} GB`;
+    return `${(n / 1099511627776).toFixed(2)} TB`;
+  }
+
+  function formatBits(bps) {
+    if (bps >= 1e9) return (bps / 1e9).toFixed(2) + " Gbps";
+    if (bps >= 1e6) return (bps / 1e6).toFixed(2) + " Mbps";
+    if (bps >= 1e3) return (bps / 1e3).toFixed(1) + " kbps";
+    return Math.round(bps) + " bps";
+  }
+
+  function formatMBs(bytesPerSec) {
+    const b = bytesPerSec || 0;
+    if (b >= 1048576) return (b / 1048576).toFixed(2) + " MB/s";
+    if (b >= 1024) return (b / 1024).toFixed(1) + " KB/s";
+    return b.toFixed(1) + " B/s";
+  }
+
+  function formatUptime(sec) {
+    sec = Math.floor(sec || 0);
+    const d = Math.floor(sec / 86400);
+    const h = Math.floor((sec % 86400) / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m`;
+    return `${sec}s`;
+  }
+
+  function compareIp(a, b) {
+    const pa = (a || "").split(".").map(Number);
+    const pb = (b || "").split(".").map(Number);
+    for (let i = 0; i < 4; i++) {
+      const x = pa[i] || 0, y = pb[i] || 0;
+      if (x !== y) return x - y;
+    }
+    return 0;
+  }
+
+  function sortLeases(leases) {
+    const { sortKey: key, sortDir: dir } = state;
+    const sorted = [...leases];
+    sorted.sort((x, y) => {
+      if (key === "ip") return compareIp(x.ip, y.ip) * dir;
+      if (key === "remaining") return ((x.remaining ?? -1) - (y.remaining ?? -1)) * dir;
+      const a = String(x[key] ?? "").toLowerCase();
+      const b = String(y[key] ?? "").toLowerCase();
+      return a.localeCompare(b) * dir;
+    });
+    return sorted;
+  }
+
+  function filterLeases(leases) {
+    const q = state.filter.trim().toLowerCase();
+    if (!q) return leases;
+    return leases.filter((l) =>
+      [l.hostname, l.ip, l.mac, l.vendor].some((v) => String(v).toLowerCase().includes(q))
+    );
+  }
+
+  function render() {
+    const active = state.leases.filter((l) => (l.state || 0) !== 2);
+    const rows = filterLeases(sortLeases(active));
+
+    els.total.textContent = active.length;
+    els.dynamic.textContent = active.filter((l) => (l.type || 0) === 0 && !l.static).length;
+    els.reserved.textContent = active.filter((l) => (l.type || 0) === 1).length;
+    els.statStatic.textContent = active.filter((l) => l.static).length;
+    els.count.textContent = rows.length ? `${rows.length} of ${active.length} shown` : "";
+
+    els.body.innerHTML = rows.map((l) => {
+      const dotClass = l.static && l.online === false
+        ? "dot-off"
+        : (l.state || 0) === 1 ? "dot-warn" : "dot-ok";
+      const osInfo = OS_ICONS[l.os];
+      const osIcon = osInfo
+        ? `<span class="os-badge os-badge-${esc(l.os)}" title="${esc([osInfo.label, l.os_detail, l.vendor].filter(Boolean).join(" · "))}" style="--os-color:${esc(osInfo.color)}">${osInfo.svg}</span>`
+        : `<span class="os-badge os-badge-unknown" style="--os-color:#8b949e">${OS_ICONS.other.svg}</span>`;
+      const vendor = l.vendor ? `<div class="client-vendor">${esc(l.vendor)}</div>` : "";
+      const typeBadge = l.static
+        ? `<span class="badge badge-static">Static</span>`
+        : `<span class="badge">${esc(TYPE_LABEL[l.type] || "Unknown")}</span>`;
+      let actions;
+      if (l.static) {
+        actions = `<span class="badge badge-static">${l.online === false ? "Offline" : "Static"}</span>`;
+      } else if (state.role !== "admin") {
+        actions = `<span class="badge ${l.banned ? "badge-err" : "badge-ok"}">${l.banned ? "Banned" : "Active"}</span>`;
+      } else {
+        actions = `<span class="badge ${l.banned ? "badge-err" : "badge-ok"}">${l.banned ? "Banned" : "Active"}</span>
+           ${l.banned
+             ? actBtn("active", `Unban ${l.hostname || l.ip}`, `data-ip="${esc(l.ip)}" data-hostname="${esc(l.hostname || "")}" data-mac="${esc(l.mac || "")}"`, "unban-btn")
+             : actBtn("ban", `Ban ${l.hostname || l.ip}`, `data-ip="${esc(l.ip)}" data-hostname="${esc(l.hostname || "")}" data-mac="${esc(l.mac || "")}"`, "ban-btn act-danger")}`;
+      }
+      const rem = Number(l.remaining);
+      let leaseCls = "";
+      if (!l.static && Number.isFinite(rem)) {
+        if (rem <= 0) leaseCls = " lease-expired";
+        else if (rem < 120) leaseCls = " lease-critical";
+        else if (rem < 900) leaseCls = " lease-soon";
+      }
+      return `<tr class="client-row${l.banned ? " client-banned" : ""}${l.online === false && l.static ? " client-offline" : ""}">
+        <td>
+          <div class="client-host-cell">
+            <span class="dot ${dotClass}"></span>
+            ${osIcon}
+            <div class="client-host-info">
+              <span class="client-hostname">${esc(l.hostname || "(no hostname)")}</span>
+              ${vendor}
+            </div>
+          </div>
+        </td>
+        <td class="mono">${esc(l.ip)}</td>
+        <td class="mono">${esc(l.mac || "—")}</td>
+        <td>${typeBadge}</td>
+        <td class="lease-cell${leaseCls}" title="${l.static ? "Static reservation" : esc(formatDateTime(l.expires))}">${l.static ? "Static" : formatDuration(l.remaining)}</td>
+        <td title="${l.static && l.online === false ? "No current lease" : esc(formatDateTime(l.last_seen))}">${l.static && l.online === false ? "Offline" : formatRelative(l.last_seen)}</td>
+        <td>${actions}</td>
+      </tr>`;
+    }).join("");
+
+    els.empty.hidden = rows.length > 0;
+    updateSortIndicators();
+  }
+
+  function updateSortIndicators() {
+    document.querySelectorAll("th.sortable").forEach((th) => {
+      th.classList.remove("sorting-asc", "sorting-desc");
+      if (th.dataset.sort === state.sortKey) {
+        th.classList.add(state.sortDir === 1 ? "sorting-asc" : "sorting-desc");
+      }
+    });
+  }
+
+  async function fetchJSON(url, opts = {}) {
+    const res = await fetch(url, { cache: "no-store", ...opts });
+    if (res.status === 401) handleSessionExpired();
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    state.lastOk = Date.now();
+    return res.json();
+  }
+
+  // ---- Session idle nudge (matches SESSION_IDLE_TIMEOUT server-side) ----
+  const SESSION_IDLE_MS = 2 * 3600 * 1000;
+  const SESSION_WARN_MS = 15 * 60 * 1000;
+  function checkSessionIdle() {
+    if (!state.authed || state.idleWarn || document.hidden) return;
+    if (Date.now() - (state.lastOk || Date.now()) < SESSION_IDLE_MS - SESSION_WARN_MS) return;
+    state.idleWarn = true;
+    els.banner.textContent = "Session idle — expiring soon. Click anywhere to stay signed in.";
+    els.banner.hidden = false;
+  }
+  async function pokeSession() {
+    if (!state.idleWarn) return;
+    try {
+      const r = await fetch("/api/auth/session", { cache: "no-store" });
+      if (r.ok) {
+        state.lastOk = Date.now();
+        state.idleWarn = false;
+        els.banner.hidden = true;
+      }
+    } catch (e) { /* next poll shows login gate if truly expired */ }
+  }
+  ["pointerdown", "keydown"].forEach((ev) => document.addEventListener(ev, pokeSession, { passive: true }));
+  setInterval(checkSessionIdle, 60000);
+
+  function showBanner(show, msg) {
+    els.banner.hidden = !show;
+    if (show) {
+      els.banner.textContent = "Dashboard API error: " + (msg || "unknown error");
+    }
+  }
+
+  // ---- Core service health banner -----------------------------------------
+  // Polls the systemd service list (same endpoint as System → Services)
+  // and raises a red banner whenever any core gateway service is not
+  // active, so a dead unbound/crowdsec/nginx is visible from any view
+  // instead of requiring manual systemctl guesswork.
+  const CORE_SERVICES = [
+    ["nginx.service", "nginx"],
+    ["unbound.service", "unbound (DNS)"],
+    ["kea-dhcp4-server.service", "DHCP (kea)"],
+    ["suricata.service", "suricata (IDS)"],
+    ["crowdsec.service", "crowdsec"],
+    ["crowdsec-firewall-bouncer.service", "firewall bouncer"],
+    ["tuxwall.service", "dashboard API"],
+    ["tuxwall-collector.service", "ban collector"],
+    ["php8.5-fpm.service", "php-fpm"],
+    ["wg-quick@wg0.service", "wireguard"],
+    ["ufw.service", "ufw firewall"],
+  ];
+  const svcBannerEl = document.getElementById("svc-banner");
+  let lastSvcDown = null;
+  async function checkCoreServices() {
+    if (!state.authed || document.hidden) return;
+    try {
+      const d = await fetchJSON("/api/system/services");
+      const byUnit = new Map((d.services || []).map(s => [s.unit, s]));
+      const down = CORE_SERVICES.filter(([unit]) => {
+        const s = byUnit.get(unit);
+        return !s || s.active !== "active";
+      });
+      const names = down.map(([, label]) => label).join(", ");
+      if (down.length) {
+        svcBannerEl.hidden = false;
+        svcBannerEl.textContent =
+          "CORE SERVICE DOWN: " + names + " — check System → Services";
+        if (names !== lastSvcDown) console.warn("core services down:", names);
+      } else {
+        svcBannerEl.hidden = true;
+      }
+      lastSvcDown = names;
+    } catch (_) {
+      // The generic dashboard-API banner already surfaces fetch failures.
+    }
+  }
+  setInterval(checkCoreServices, 30000);
+  checkCoreServices();
+
+  async function refresh() {
+    try {
+      const data = await fetchJSON("/api/leases");
+      if (!data.ok) throw new Error(data.error || "Kea returned an error");
+      state.leases = data.leases || [];
+      state.lastUpdate = new Date();
+      showBanner(false);
+    } catch (err) {
+      showBanner(true, err.message);
+    }
+    render();
+    if (els.updated) {
+      els.updated.textContent = state.lastUpdate
+        ? `Updated ${state.lastUpdate.toLocaleTimeString()}`
+        : "";
+    }
+    // Also refresh reservations table if it's visible
+    if (document.getElementById("reservations-card") &&
+        !document.getElementById("reservations-card").closest(".view[hidden]")) {
+      refreshReservations();
+    }
+  }
+
+  // ── DHCP Reservations module ───────────────────────────────────────────────
+
+  async function refreshReservations() {
+    try {
+      const data = await fetchJSON("/api/reservations");
+      if (!data.ok) throw new Error(data.error);
+      renderReservations(data.reservations || []);
+    } catch (err) {
+      document.getElementById("res-body").innerHTML =
+        `<tr><td colspan="6" class="muted" style="text-align:center;padding:1.5rem">Error: ${esc(err.message)}</td></tr>`;
+    }
+  }
+
+  function renderReservations(reservations) {
+    const tbody = document.getElementById("res-body");
+    if (!reservations.length) {
+      tbody.innerHTML = `<tr><td colspan="6" class="muted" style="text-align:center;padding:1.5rem">No static reservations configured</td></tr>`;
+      return;
+    }
+
+    // Sort by IP numerically
+    reservations.sort((a, b) => {
+      const toNum = ip => ip.split(".").reduce((acc, o) => (acc << 8) + parseInt(o), 0);
+      return toNum(a.ip) - toNum(b.ip);
+    });
+
+    tbody.innerHTML = reservations.map(r => {
+      const onlineDot = r.online
+        ? `<span class="dmz-dot dmz-dot-green" title="Online"></span>`
+        : `<span class="dmz-dot dmz-dot-grey"  title="Offline / no ARP"></span>`;
+      return `<tr>
+        <td>${r.hostname ? `<span class="client-hostname">${esc(r.hostname)}</span>` : '<span class="muted">—</span>'}</td>
+        <td class="mono">${esc(r.ip)}</td>
+        <td class="mono">${esc(r.mac)}</td>
+        <td class="muted" style="font-size:0.8rem">${esc(r.subnet)}</td>
+        <td style="text-align:center">${onlineDot}</td>
+        <td>
+          ${actBtn("edit", "Edit reservation", `data-id="${esc(r.id)}" data-ip="${esc(r.ip)}" data-mac="${esc(r.mac)}" data-hostname="${esc(r.hostname)}"`, "res-edit-btn")}
+          ${actBtn("delete", "Delete reservation", `data-id="${esc(r.id)}" data-ip="${esc(r.ip)}"`, "res-del-btn")}
+        </td>
+      </tr>`;
+    }).join("");
+
+    // Edit buttons
+    document.querySelectorAll(".res-edit-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        document.getElementById("res-edit-id").value       = btn.dataset.id;
+        document.getElementById("res-edit-ip").value       = btn.dataset.ip;
+        document.getElementById("res-edit-mac").value      = btn.dataset.mac;
+        document.getElementById("res-edit-hostname").value = btn.dataset.hostname;
+        document.getElementById("res-edit-title").textContent = `Edit — ${btn.dataset.ip}`;
+        document.getElementById("res-edit-hint").textContent  = "";
+        document.getElementById("res-edit-modal").hidden = false;
+      });
+    });
+
+    // Delete buttons
+    document.querySelectorAll(".res-del-btn").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        if (!confirm(`Delete reservation for ${btn.dataset.ip}?\nThe device will fall back to a dynamic lease.`)) return;
+        btn.disabled = true;
+        try {
+          const r = await fetchJSON("/api/reservations/delete", {
+            method: "POST", body: JSON.stringify({ id: btn.dataset.id })
+          });
+          if (!r.ok) throw new Error(r.error || "Failed");
+          renderReservations(r.reservations || []);
+        } catch (err) {
+          alert("Error: " + err.message);
+          btn.disabled = false;
+        }
+      });
+    });
+  }
+
+  // ── OPNsense-style sub-tabs ─────────────────────────────────────────
+  function setDhcpTab(pane) {
+    document.querySelectorAll("#dhcp-subtabs .fw-subtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.dhcpPane === pane));
+    document.querySelectorAll("#view-clients .fw-pane[data-dhcp-pane]").forEach((p) => {
+      p.hidden = p.dataset.dhcpPane !== pane;
+    });
+  }
+  document.querySelectorAll("#dhcp-subtabs .fw-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => setDhcpTab(btn.dataset.dhcpPane));
+  });
+
+  // Add reservation
+  document.getElementById("res-add-btn").addEventListener("click", async () => {
+    const btn      = document.getElementById("res-add-btn");
+    const hint     = document.getElementById("res-hint");
+    const mac      = document.getElementById("res-mac").value.trim();
+    const ip       = document.getElementById("res-ip").value.trim();
+    const hostname = document.getElementById("res-hostname").value.trim();
+
+    hint.textContent = "";
+    if (!mac || !ip) { hint.textContent = "MAC and IP are required."; return; }
+
+    btn.disabled = true;
+    hint.textContent = "Adding…";
+    try {
+      const r = await fetchJSON("/api/reservations/add", {
+        method: "POST", body: JSON.stringify({ mac, ip, hostname })
+      });
+      if (!r.ok) throw new Error(r.error || "Failed");
+      document.getElementById("res-mac").value      = "";
+      document.getElementById("res-ip").value       = "";
+      document.getElementById("res-hostname").value = "";
+      hint.textContent = `✓ Reserved ${ip}`;
+      renderReservations(r.reservations || []);
+      render(); // refresh leases table to reflect static badge
+    } catch (err) {
+      hint.textContent = "Error: " + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // Edit modal save / close
+  document.getElementById("res-edit-save").addEventListener("click", async () => {
+    const btn      = document.getElementById("res-edit-save");
+    const hint     = document.getElementById("res-edit-hint");
+    const id       = document.getElementById("res-edit-id").value;
+    const mac      = document.getElementById("res-edit-mac").value.trim();
+    const hostname = document.getElementById("res-edit-hostname").value.trim();
+
+    hint.textContent = "";
+    btn.disabled = true;
+    hint.textContent = "Saving…";
+    try {
+      const r = await fetchJSON("/api/reservations/edit", {
+        method: "POST", body: JSON.stringify({ id, mac, hostname })
+      });
+      if (!r.ok) throw new Error(r.error || "Failed");
+      document.getElementById("res-edit-modal").hidden = true;
+      renderReservations(r.reservations || []);
+    } catch (err) {
+      hint.textContent = "Error: " + err.message;
+      btn.disabled = false;
+    }
+  });
+
+  ["res-edit-close", "res-edit-cancel"].forEach(id => {
+    document.getElementById(id).addEventListener("click", () => {
+      document.getElementById("res-edit-modal").hidden = true;
+    });
+  });
+
+  // Auto-fill MAC from leases table when a client row is clicked
+  document.getElementById("leases-body").addEventListener("click", e => {
+    const row = e.target.closest("tr.client-row");
+    if (!row) return;
+    const ip  = row.querySelector("td:nth-child(2)")?.textContent?.trim() || "";
+    const mac = row.querySelector("td:nth-child(3)")?.textContent?.trim() || "";
+    if (!ip || !mac || mac === "—") return;
+    const macIn = document.getElementById("res-mac");
+    const ipIn  = document.getElementById("res-ip");
+    // Only fill if fields are empty
+    if (!macIn.value && !ipIn.value) {
+      macIn.value = mac;
+      ipIn.value  = ip;
+      setDhcpTab("static");
+      document.getElementById("reservations-card").scrollIntoView({ behavior: "smooth", block: "start" });
+      macIn.focus();
+    }
+  });
+
+  // Load reservations when clients view is first shown
+  refreshReservations();
+
+  // ── end DHCP Reservations module ───────────────────────────────────────────
+
+  function renderDns(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "DNS stats unavailable");
+      return;
+    }
+    const t = d.totals || {};
+    els.dnsQueries.textContent = formatNumber(t.queries);
+    els.dnsHitrate.textContent = ((t.hitrate || 0) * 100).toFixed(1) + "%";
+    els.dnsMisses.textContent = formatNumber(t.cachemiss);
+    els.dnsRecur.textContent = (t.avg_recursion_ms || 0) + " ms";
+    els.dnsTcp.textContent = formatNumber(t.tcp);
+    els.dnsUdp.textContent = formatNumber(t.udp);
+    els.dnsUnwanted.textContent = formatNumber(t.unwanted);
+    els.dnsUptime.textContent = formatUptime(d.uptime);
+    els.dnsVersion.textContent = d.version ? "Unbound " + d.version : "";
+
+    const qTotal = (d.qtypes || []).reduce((sum, q) => sum + (q.count || 0), 0) || 1;
+    const share = (n, total) => {
+      const pct = (n / total) * 100;
+      return pct >= 10 ? pct.toFixed(0) : pct >= 1 ? pct.toFixed(1) : pct > 0 ? "<1" : "0";
+    };
+    const shareCell = (n, cls, total) =>
+      `<td><div class="dns-share"><div class="bar"><div class="bar-fill ${cls || ""}" style="width:${Math.min(100, (n / total) * 100).toFixed(2)}%"></div></div>` +
+      `<span class="dns-share-pct">${share(n, total)}%</span></div></td>`;
+
+    els.dnsQtypesBody.innerHTML = (d.qtypes || []).map((q) => `
+      <tr>
+        <td><b>${esc(q.label)}</b></td>
+        <td>${formatNumber(q.count)}</td>
+        ${shareCell(q.count, "", qTotal)}
+      </tr>`).join("");
+
+    const RCODE_CLS = { NOERROR: "rc-ok", NXDOMAIN: "rc-nx", SERVFAIL: "rc-err", FORMERR: "rc-err", NOTIMPL: "rc-err", REFUSED: "rc-err" };
+    const rTotal = (d.rcodes || []).reduce((sum, r) => sum + (r.count || 0), 0) || 1;
+    els.dnsRcodesBody.innerHTML = (d.rcodes || []).map((r) => `
+      <tr>
+        <td>${esc(r.label)}</td>
+        <td>${formatNumber(r.count)}</td>
+        ${shareCell(r.count, RCODE_CLS[r.label] || "", rTotal)}
+      </tr>`).join("");
+
+    const c = d.caches || {};
+    els.dnsRrsetCount.textContent = formatNumber(c.rrset_count);
+    els.dnsMsgCount.textContent = formatNumber(c.msg_count);
+    els.dnsKeyCount.textContent = formatNumber(c.key_count);
+    // Unbound only reports cache byte sizes with extended stats; show a dash
+    // instead of a misleading "0 B" when it isn't available.
+    const cacheSize = (el, bytes) => {
+      if (!el) return;
+      el.textContent = bytes > 0 ? formatBytes(bytes) : "—";
+      el.title = bytes > 0 ? "" : "Not reported by this Unbound build";
+    };
+    cacheSize(els.dnsRrsetSize, c.rrset_size);
+    cacheSize(els.dnsMsgSize, c.msg_size);
+
+    // Cache composition (entry counts, not bytes) keeps the Cache card balanced
+    // and shows at a glance which cache dominates.
+    const mix = document.getElementById("dns-mix-bar");
+    const mixLegend = document.getElementById("dns-mix-legend");
+    const mixTotal = document.getElementById("dns-mix-total");
+    if (mix) {
+      const parts = [
+        { k: "rrset", label: "RRset", n: c.rrset_count || 0 },
+        { k: "msg", label: "Messages", n: c.msg_count || 0 },
+        { k: "key", label: "Keys", n: c.key_count || 0 },
+      ];
+      const total = parts.reduce((sum, p) => sum + p.n, 0);
+      mix.querySelectorAll("i").forEach((seg) => {
+        const p = parts.find((x) => x.k === seg.dataset.k);
+        seg.style.width = total ? `${(p.n / total) * 100}%` : "0%";
+        seg.title = `${p.label}: ${formatNumber(p.n)} entr${p.n === 1 ? "y" : "ies"}`;
+      });
+      if (mixTotal) mixTotal.textContent = `${formatNumber(total)} entries`;
+      if (mixLegend) {
+        mixLegend.innerHTML = parts.map((p) =>
+          `<span class="dns-mix-key" data-k="${p.k}"><i></i>${p.label} <b>${formatNumber(p.n)}</b></span>`).join("");
+      }
+    }
+  }
+
+  async function refreshDns() {
+    try {
+      const data = await fetchJSON("/api/dns");
+      renderDns(data);
+    } catch (err) {
+      showBanner(true, "DNS stats error: " + err.message);
+    }
+  }
+
+  function resetDomainForm() {
+    state.domEditId = null;
+    state.domEditSource = null;
+    els.dmDomain.value = "";
+    els.dmIp.value = "192.168.1.12";
+    els.dmPort.value = "";
+    els.dmNote.value = "";
+    els.dmAdd.textContent = "Add Domain";
+    els.dmCancel.hidden = true;
+    els.dmHint.textContent = "";
+  }
+
+  function renderDomains(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "Domains data unavailable");
+      return;
+    }
+    const domains = d.domains || [];
+    state.domains = domains;
+    els.dmCount.textContent = formatNumber(domains.length);
+    els.dmPorts.textContent = formatNumber(domains.filter((x) => x.port).length);
+    els.dmStatus.textContent = "OK";
+
+    els.dmBody.innerHTML = domains.map((x) => {
+      const target = "http://" + x.domain + (x.port ? ":" + x.port : "");
+      const managed = x.managed !== false;
+      const srcName = (x.source_file || "").split("/").pop();
+      const srcIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10l-7-7Z"/><path d="M13 3v7h7"/></svg>`;
+      const srcChip = `<span class="dm-src${managed ? " dm-src-managed" : ""}" title="${esc(x.source_file ? (managed ? "Managed by TuxWall · defined in " : "Defined in ") + x.source_file + (managed ? "" : " — import to manage it here") : "Built-in record")}">${srcIcon}<span class="dm-src-name">${esc(srcName || "built-in")}</span></span>`;
+      const actions = managed
+        ? `<a class="btn btn-sm" href="${esc(target)}" target="_blank" rel="noopener">Open</a>
+           ${srcChip}
+           ${actBtn("edit", "Edit deception response", `data-id="${esc(x.id)}"`, "dm-edit")}
+           ${actBtn("delete", "Delete deception response", `data-id="${esc(x.id)}" data-domain="${esc(x.domain)}" data-managed="1"`, "dm-delete")}`
+        : `${srcChip}
+           ${actBtn("import", "Import this deception response", `data-id="${esc(x.id)}"`, "dm-import")}
+           ${actBtn("delete", "Delete deception response", `data-id="${esc(x.id)}" data-domain="${esc(x.domain)}" data-managed="0"`, "dm-delete")}`;
+      return `
+      <tr>
+        <td><b${x.note || x.port ? ` title="${esc([x.note, x.port ? "port " + x.port : ""].filter(Boolean).join(" · "))}"` : ""}>${esc(x.domain)}</b><span class="dm-ip-inline mono">${esc(x.ip)}</span></td>
+        <td class="mono">${esc(x.ip)}</td>
+        <td class="mono">${x.port ? `<span class="dm-port">:${esc(x.port)}</span>` : `<span class="muted">—</span>`}</td>
+        <td class="muted">${esc(x.note || "")}</td>
+        <td><div class="wg-actions">${actions}</div></td>
+      </tr>`;
+    }).join("") || '<tr><td colspan="5" class="empty">No local domains yet. Add one above.</td></tr>';
+
+    els.dmImportAll.hidden = !domains.some((x) => x.managed === false);
+  }
+
+  async function refreshDomains() {
+    try {
+      const data = await fetchJSON("/api/domains");
+      renderDomains(data);
+    } catch (err) {
+      showBanner(true, "Domains error: " + err.message);
+    }
+  }
+
+  function bindDomainActions() {
+    els.dmAdd.addEventListener("click", async () => {
+      const importing = !!state.domEditSource;
+      const payload = {
+        domain: els.dmDomain.value.trim(),
+        ip: els.dmIp.value.trim(),
+        port: els.dmPort.value.trim(),
+        note: els.dmNote.value.trim(),
+      };
+      if (state.domEditId && !importing) payload.id = state.domEditId;
+      if (!payload.domain || !payload.ip) {
+        els.dmHint.textContent = "Enter a domain and an IP address.";
+        return;
+      }
+      els.dmAdd.disabled = true;
+      try {
+        const data = await postJSON(
+          importing ? "/api/domains/import"
+            : (state.domEditId ? "/api/domains/update" : "/api/domains/add"),
+          payload
+        );
+        resetDomainForm();
+        renderDomains(data);
+      } catch (err) {
+        els.dmHint.textContent = "Error: " + err.message;
+      } finally {
+        els.dmAdd.disabled = false;
+      }
+    });
+
+    [els.dmDomain, els.dmIp, els.dmPort, els.dmNote].forEach((input) => {
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") els.dmAdd.click();
+      });
+    });
+
+    els.dmCancel.addEventListener("click", resetDomainForm);
+
+    els.dmImportAll.addEventListener("click", async () => {
+      if (!window.confirm("Import all existing records into the tuxwall-managed list?")) return;
+      els.dmImportAll.disabled = true;
+      try {
+        const data = await postJSON("/api/domains/import-all", {});
+        renderDomains(data);
+      } catch (err) {
+        showBanner(true, "Import all: " + err.message);
+      } finally {
+        els.dmImportAll.disabled = false;
+      }
+    });
+
+    els.dmBody.addEventListener("click", async (e) => {
+      const edit = e.target.closest(".dm-edit");
+      const imp = e.target.closest(".dm-import");
+      const del = e.target.closest(".dm-delete");
+      if (edit) {
+        const entry = state.domains.find((x) => x.id === edit.dataset.id);
+        if (!entry) return;
+        state.domEditId = entry.id;
+        state.domEditSource = null;
+        els.dmDomain.value = entry.domain;
+        els.dmIp.value = entry.ip;
+        els.dmPort.value = entry.port || "";
+        els.dmNote.value = entry.note || "";
+        els.dmAdd.textContent = "Save Changes";
+        els.dmCancel.hidden = false;
+        els.dmHint.textContent = "";
+        els.dmDomain.focus();
+        return;
+      }
+      if (imp) {
+        const entry = state.domains.find((x) => x.id === imp.dataset.id);
+        if (!entry) return;
+        state.domEditSource = entry;
+        state.domEditId = null;
+        els.dmDomain.value = entry.domain;
+        els.dmIp.value = entry.ip;
+        els.dmPort.value = entry.port || "";
+        els.dmNote.value = entry.note || "";
+        els.dmAdd.textContent = "Import Domain";
+        els.dmCancel.hidden = false;
+        els.dmHint.textContent = "This record will move into the tuxwall-managed list so you can edit it later.";
+        els.dmDomain.focus();
+        return;
+      }
+      if (del) {
+        const managed = del.dataset.managed === "1";
+        const msg = managed
+          ? `Delete local domain "${del.dataset.domain}"? It will stop resolving on your LAN.`
+          : `Delete local domain "${del.dataset.domain}"? It will be removed from your unbound config file.`;
+        if (!window.confirm(msg)) return;
+        del.disabled = true;
+        try {
+          const data = await postJSON("/api/domains/delete", { id: del.dataset.id });
+          if (state.domEditId === del.dataset.id || (state.domEditSource && state.domEditSource.id === del.dataset.id)) resetDomainForm();
+          renderDomains(data);
+        } catch (err) {
+          showBanner(true, "Delete domain: " + err.message);
+        }
+      }
+    });
+  }
+
+  let _fwData = null;
+  let _fwFilterText = "";
+  let _fwFilterIface = "";   // "" = all, "__none__" = rules without iface
+
+  function fwActionMeta(verb) {
+    switch ((verb || "").toUpperCase()) {
+      case "ALLOW":  return { cls: "fw-act-pass",   label: "Pass" };
+      case "DENY":   return { cls: "fw-act-block",  label: "Block" };
+      case "REJECT": return { cls: "fw-act-reject", label: "Reject" };
+      case "LIMIT":  return { cls: "fw-act-limit",  label: "Limit" };
+      default:       return { cls: "fw-act-pass",   label: verb || "?" };
+    }
+  }
+
+  function fwRuleDirection(r) {
+    if (r.direction) return r.direction;
+    return (r.action || "").includes("OUT") ? "OUT" : "IN";
+  }
+
+  function renderFwRules() {
+    if (!_fwData) return;
+    const rules = _fwData.rules || [];
+    const q = _fwFilterText.trim().toLowerCase();
+    const rows = rules.filter((r) => {
+      if (_fwFilterIface === "__none__" && r.iface) return false;
+      if (_fwFilterIface && _fwFilterIface !== "__none__" && (r.iface || "") !== _fwFilterIface) return false;
+      if (!q) return true;
+      const hay = [r.number, r.to, r.from, r.action, r.iface, r.proto,
+                   r.port, r.src, r.dst].join(" ").toLowerCase();
+      return hay.includes(q);
+    });
+    if (!rows.length) {
+      els.fwRulesBody.innerHTML = `<tr><td colspan="9" class="muted" style="text-align:center;padding:1.5rem">${rules.length ? "No rules match the current filter." : "No firewall rules configured."}</td></tr>`;
+      return;
+    }
+    els.fwRulesBody.innerHTML = rows.map((r) => {
+      const a = fwActionMeta(r.verb || (r.action || "").split(" ")[0]);
+      const dir = fwRuleDirection(r);
+      return `
+      <tr>
+        <td class="mono muted">${r.number != null ? r.number : "—"}</td>
+        <td><span class="fw-act ${a.cls}">${a.label}</span></td>
+        <td><span class="fw-dir fw-dir-${dir.toLowerCase()}">${dir}</span></td>
+        <td>${r.iface ? `<span class="fw-iface mono">${esc(r.iface)}</span>` : `<span class="muted">any</span>`}</td>
+        <td class="mono">${esc(r.src || r.from || "")}</td>
+        <td class="mono">${esc(r.dst || r.to || "")}</td>
+        <td class="mono">${r.port ? esc(r.port) : `<span class="muted">any</span>`}</td>
+        <td>${r.proto ? `<span class="fw-proto-badge">${esc(r.proto)}</span>` : `<span class="muted">any</span>`}${r.v6 ? `<span class="fw-v6-badge">v6</span>` : ""}</td>
+        <td>${r.number ? `
+          ${actBtn("up", "Move rule up", `data-num="${r.number}" data-dir="up"`, "fw-move")}
+          ${actBtn("down", "Move rule down", `data-num="${r.number}" data-dir="down"`, "fw-move")}
+          ${actBtn("delete", "Remove rule", `data-num="${r.number}"`, "fw-remove")}` : ""}</td>
+      </tr>`;
+    }).join("");
+  }
+
+  function renderFwIfaceChips() {
+    if (!_fwData) return;
+    const counts = {};
+    let anyCount = 0;
+    (_fwData.rules || []).forEach((r) => {
+      if (r.iface) counts[r.iface] = (counts[r.iface] || 0) + 1;
+      else anyCount++;
+    });
+    const ifaces = Object.keys(counts).sort();
+    const box = document.getElementById("fw-iface-chips");
+    const chipColors = { "": "var(--accent)", "__none__": "#a371f7" };
+    const chipColor = (i) => chipColors[i] || ({ enp5s0: "var(--green)", enp6s0: "var(--amber)", wg0: "#39c5cf" }[i] || "#39c5cf");
+    const chip = (label, val, count) =>
+      `<button class="fw-chip${_fwFilterIface === val ? " active" : ""}" type="button" style="--fw-color:${chipColor(val)}" data-fw-iface="${esc(val)}">${esc(label)}${count ? ` <span class="fw-chip-n">${count}</span>` : ""}</button>`;
+    box.innerHTML = chip("All", "", "") + chip("any iface", "__none__", anyCount) +
+      ifaces.map((i) => chip(i, i, counts[i])).join("");
+  }
+
+  function fwLogLevel(d) {
+    const lm = (d.logging || "").match(/\((low|medium|high|full)\)/i);
+    if (lm) return lm[1].toLowerCase();
+    return (d.logging || "").toLowerCase().startsWith("on") ? "low" : "off";
+  }
+
+  function renderFwSettings(d) {
+    document.getElementById("fw-enabled-toggle").checked =
+      (d.status || "").toLowerCase() === "active";
+    document.getElementById("fw-def-incoming").value =
+      (d.defaults.incoming || "deny").toLowerCase();
+    document.getElementById("fw-def-outgoing").value =
+      (d.defaults.outgoing || "allow").toLowerCase();
+    document.getElementById("fw-log-level").value = fwLogLevel(d);
+  }
+
+  function renderFwTraffic(d) {
+    const srcMax = (d.traffic.top_sources && d.traffic.top_sources[0])
+      ? d.traffic.top_sources[0].count : 1;
+    els.fwSourcesBody.innerHTML = (d.traffic.top_sources || []).map((s) => `
+      <tr>
+        <td class="mono">${esc(s.ip)}</td>
+        <td>${formatNumber(s.count)}</td>
+        <td><div class="bar"><div class="bar-fill bar-fill-err" style="width:${Math.round(s.count / srcMax * 100)}%"></div></div></td>
+        <td>${actBtn("ban", "Block this source with a deny rule", `data-ip="${esc(s.ip)}"`, "fw-block-src")}</td>
+      </tr>`).join("") || `<tr><td colspan="4" class="muted" style="text-align:center;padding:1.5rem">No blocked sources in the recent log window</td></tr>`;
+
+    const portMax = (d.traffic.top_ports && d.traffic.top_ports[0])
+      ? d.traffic.top_ports[0].count : 1;
+    els.fwPortsBody.innerHTML = (d.traffic.top_ports || []).map((p) => `
+      <tr>
+        <td class="mono">${esc(p.port)}</td>
+        <td>${formatNumber(p.count)}</td>
+        <td><div class="bar"><div class="bar-fill bar-fill-err" style="width:${Math.round(p.count / portMax * 100)}%"></div></div></td>
+      </tr>`).join("") || `<tr><td colspan="3" class="muted" style="text-align:center;padding:1.5rem">No blocked ports in the recent log window</td></tr>`;
+
+    els.fwEventsBody.innerHTML = (d.traffic.recent || []).map((e) => `
+      <tr>
+        <td class="mono">${esc(e.ts.split("T")[1]?.slice(0, 8) || e.ts)}</td>
+        <td><span class="badge ${e.action === "BLOCK" ? "badge-err" : "badge-ok"}">${esc(e.action)}</span></td>
+        <td class="mono">${esc(e.in || e.out || "—")}</td>
+        <td class="mono">${esc(e.src)}</td>
+        <td class="mono">${esc(e.dst)}</td>
+        <td class="mono">${esc(e.dpt ? e.dpt + "/" + e.proto : e.proto || "—")}</td>
+        <td>${e.action === "BLOCK" && e.src ? actBtn("ban", "Block this source with a deny rule", `data-ip="${esc(e.src)}"`, "fw-block-src") : ""}</td>
+      </tr>`).join("") || `<tr><td colspan="7" class="muted" style="text-align:center;padding:1.5rem">No recent events</td></tr>`;
+  }
+
+  function renderFirewall(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "Firewall stats unavailable");
+      return;
+    }
+    _fwData = d;
+    els.fwStatus.textContent = d.status ? d.status[0].toUpperCase() + d.status.slice(1) : "—";
+    els.fwIncoming.textContent = d.defaults.incoming || "—";
+    els.fwOutgoing.textContent = d.defaults.outgoing || "—";
+    els.fwRules.textContent = formatNumber(d.rules.length);
+    els.fwBlocks.textContent = formatNumber(d.traffic.block);
+    els.fwAllows.textContent = formatNumber(d.traffic.allow);
+    els.fwLogging.textContent = "Logging: " + fwLogLevel(d);
+    renderFwRules();
+    renderFwIfaceChips();
+    renderFwTraffic(d);
+    renderFwSettings(d);
+    if (window.FirewallBento) window.FirewallBento.render(d);
+  }
+
+  // ── VLAN module ────────────────────────────────────────────────────────────
+
+  let _vlanData = { vlans: [], parents: [], policies: [] };
+
+  async function refreshVlans() {
+    try {
+      const data = await fetchJSON("/api/vlans");
+      _vlanData = data;
+
+      // Stat cards
+      const up = data.vlans.filter(v => v.state === "UP").length;
+      const parentSet = new Set(data.vlans.map(v => v.parent).filter(Boolean));
+      document.getElementById("vlan-count").textContent    = data.vlans.length;
+      document.getElementById("vlan-parents").textContent  = parentSet.size;
+      document.getElementById("vlan-policies").textContent = data.policies.length;
+      document.getElementById("vlan-up").textContent       = up;
+
+      // Populate parent selects
+      const parentSel = document.getElementById("vlan-parent-sel");
+      const polSrc    = document.getElementById("pol-src");
+      const polDst    = document.getElementById("pol-dst");
+      parentSel.innerHTML = data.parents.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join("");
+
+      // Policy source/destination options: VLAN interfaces plus the
+      // physical parents (WAN/LAN) - inter-VLAN rules often need a physical
+      // destination ("deny in on <vlan> out on <lan>", "allow ... out on
+      // <wan>" for internet), which the VLAN-only list could not express.
+      const vlanIfaceOpts = `<option value="">Source interface</option>` +
+        data.vlans.map(v => `<option value="${esc(v.iface)}">${esc(v.iface)} (VLAN ${esc(v.vlan_id)})</option>`).join("") +
+        data.parents
+          .filter(p => !data.vlans.some(v => v.iface === p))
+          .map(p => `<option value="${esc(p)}">${esc(p)} (physical)</option>`).join("");
+      polSrc.innerHTML = vlanIfaceOpts.replace("Source interface", "Source interface");
+      polDst.innerHTML = vlanIfaceOpts.replace("Source interface", "Destination interface");
+
+      // VLAN table
+      const vtbody = document.querySelector("#vlan-table tbody");
+      if (!data.vlans.length) {
+        vtbody.innerHTML = `<tr><td colspan="8" class="muted" style="text-align:center;padding:1.5rem">No VLAN interfaces configured — add one above.</td></tr>`;
+      } else {
+        vtbody.innerHTML = data.vlans.map(v => {
+          const stateClass = v.state === "UP" ? "badge-green" : "badge-red";
+          const addrs = v.addresses.length ? esc(v.addresses.join(", ")) : `<span class="muted">—</span>`;
+          return `<tr data-iface="${esc(v.iface)}">
+            <td class="mono">${esc(v.iface)}</td>
+            <td><span class="vlan-vid-badge">${esc(v.vlan_id)}</span></td>
+            <td class="mono">${esc(v.parent)}</td>
+            <td class="mono">${addrs}</td>
+            <td>${v.label ? esc(v.label) : `<span class="muted">—</span>`}</td>
+            <td><span class="vlan-state ${stateClass}">${esc(v.state)}</span></td>
+            <td class="muted">${esc(v.mtu)}</td>
+            <td>
+              ${actBtn("edit", "Edit VLAN", `data-iface="${esc(v.iface)}" data-addr="${esc((v.addresses[0] || ""))}" data-label="${esc(v.label)}"`, "vlan-edit-btn")}
+              ${actBtn("delete", "Delete VLAN", `data-iface="${esc(v.iface)}"`, "vlan-del-btn")}
+            </td>
+          </tr>`;
+        }).join("");
+      }
+
+      // Policy table
+      const ptbody = document.querySelector("#pol-table tbody");
+      if (!data.policies.length) {
+        ptbody.innerHTML = `<tr><td colspan="7" class="muted" style="text-align:center;padding:1.5rem">No inter-VLAN policies configured — add one above.</td></tr>`;
+      } else {
+        ptbody.innerHTML = data.policies.map(p => {
+          const pClass = p.policy === "allow" ? "badge-green" : "badge-red";
+          return `<tr>
+            <td class="mono">${esc(p.src)}</td>
+            <td class="mono">${esc(p.dst)}</td>
+            <td><span class="vlan-state ${pClass}">${esc(p.policy.toUpperCase())}</span></td>
+            <td class="muted">${esc(p.proto)}</td>
+            <td class="muted">${p.port || "—"}</td>
+            <td class="mono muted" style="font-size:0.75rem">${esc(p.rule)}</td>
+            <td>${actBtn("delete", "Delete pool", `data-id="${esc(p.id)}"`, "pol-del-btn")}</td>
+          </tr>`;
+        }).join("");
+      }
+
+      _bindVlanEvents();
+    } catch (err) {
+      console.error("VLAN refresh error:", err);
+    }
+  }
+
+  function _bindVlanEvents() {
+    // Edit buttons
+    document.querySelectorAll(".vlan-edit-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const iface = btn.dataset.iface;
+        document.getElementById("vlan-edit-iface").value  = iface;
+        document.getElementById("vlan-edit-addr").value   = btn.dataset.addr || "";
+        document.getElementById("vlan-edit-label").value  = btn.dataset.label || "";
+        document.getElementById("vlan-edit-title").textContent = `Edit ${iface}`;
+        document.getElementById("vlan-edit-hint").textContent  = "";
+        document.getElementById("vlan-edit-modal").hidden = false;
+      });
+    });
+
+    // Delete VLAN buttons
+    document.querySelectorAll(".vlan-del-btn").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const iface = btn.dataset.iface;
+        if (!confirm(`Delete VLAN interface ${iface}? The interface will be removed immediately.`)) return;
+        btn.disabled = true;
+        try {
+          const r = await fetchJSON("/api/vlans/delete", { method: "POST", body: JSON.stringify({ iface }) });
+          if (!r.ok) throw new Error(r.error || "Failed");
+          refreshVlans();
+        } catch (err) {
+          alert("Error: " + err.message);
+          btn.disabled = false;
+        }
+      });
+    });
+
+    // Delete policy buttons
+    document.querySelectorAll(".pol-del-btn").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("Remove this routing policy?")) return;
+        btn.disabled = true;
+        try {
+          const r = await fetchJSON("/api/vlans/policy/delete", { method: "POST", body: JSON.stringify({ id: btn.dataset.id }) });
+          if (!r.ok) throw new Error(r.error || "Failed");
+          refreshVlans();
+        } catch (err) {
+          alert("Error: " + err.message);
+          btn.disabled = false;
+        }
+      });
+    });
+  }
+
+  // Add VLAN
+  document.getElementById("vlan-add-btn").addEventListener("click", async () => {
+    const btn     = document.getElementById("vlan-add-btn");
+    const hint    = document.getElementById("vlan-add-hint");
+    const parent  = document.getElementById("vlan-parent-sel").value.trim();
+    const vid     = document.getElementById("vlan-vid-in").value.trim();
+    const address = document.getElementById("vlan-addr-in").value.trim();
+    const label   = document.getElementById("vlan-label-in").value.trim();
+
+    hint.textContent = "";
+    if (!parent || !vid) { hint.textContent = "Parent interface and VLAN ID are required."; return; }
+
+    btn.disabled = true;
+    hint.textContent = "Adding…";
+    try {
+      const r = await fetchJSON("/api/vlans/add", {
+        method: "POST",
+        body: JSON.stringify({ parent, vlan_id: Number(vid), address, label })
+      });
+      if (!r.ok) throw new Error(r.error || "Failed");
+      document.getElementById("vlan-vid-in").value   = "";
+      document.getElementById("vlan-addr-in").value  = "";
+      document.getElementById("vlan-label-in").value = "";
+      hint.textContent = `✓ ${r.iface} created`;
+      refreshVlans();
+    } catch (err) {
+      hint.textContent = "Error: " + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // Edit modal save / cancel / close
+  document.getElementById("vlan-edit-save").addEventListener("click", async () => {
+    const btn   = document.getElementById("vlan-edit-save");
+    const hint  = document.getElementById("vlan-edit-hint");
+    const iface = document.getElementById("vlan-edit-iface").value;
+    const addr  = document.getElementById("vlan-edit-addr").value.trim();
+    const label = document.getElementById("vlan-edit-label").value.trim();
+
+    hint.textContent = "";
+    btn.disabled = true;
+    hint.textContent = "Saving…";
+    try {
+      const r = await fetchJSON("/api/vlans/edit", {
+        method: "POST",
+        body: JSON.stringify({ iface, address: addr, label })
+      });
+      if (!r.ok) throw new Error(r.error || "Failed");
+      document.getElementById("vlan-edit-modal").hidden = true;
+      refreshVlans();
+    } catch (err) {
+      hint.textContent = "Error: " + err.message;
+      btn.disabled = false;
+    }
+  });
+
+  ["vlan-edit-close", "vlan-edit-cancel"].forEach(id => {
+    document.getElementById(id).addEventListener("click", () => {
+      document.getElementById("vlan-edit-modal").hidden = true;
+    });
+  });
+
+  // Add routing policy
+  document.getElementById("pol-add-btn").addEventListener("click", async () => {
+    const btn   = document.getElementById("pol-add-btn");
+    const hint  = document.getElementById("pol-hint");
+    const src   = document.getElementById("pol-src").value;
+    const dst   = document.getElementById("pol-dst").value;
+    const policy = document.getElementById("pol-policy").value;
+    const proto  = document.getElementById("pol-proto").value;
+    const port   = document.getElementById("pol-port").value.trim();
+
+    hint.textContent = "";
+    if (!src || !dst) { hint.textContent = "Select source and destination interfaces."; return; }
+    if (src === dst)  { hint.textContent = "Source and destination must differ."; return; }
+
+    btn.disabled = true;
+    hint.textContent = "Adding…";
+    try {
+      const r = await fetchJSON("/api/vlans/policy/add", {
+        method: "POST",
+        body: JSON.stringify({ src, dst, policy, proto, port })
+      });
+      if (!r.ok) throw new Error(r.error || "Failed");
+      document.getElementById("pol-port").value = "";
+      hint.textContent = "✓ Policy added";
+      refreshVlans();
+    } catch (err) {
+      hint.textContent = "Error: " + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // ── end VLAN module ────────────────────────────────────────────────────────
+
+  // ── Port Forwarding module ─────────────────────────────────────────────────
+
+  async function refreshPortForward() {
+    try {
+      const [pfData, leaseData] = await Promise.all([
+        fetchJSON("/api/portforward"),
+        fetchJSON("/api/leases"),
+      ]);
+
+      // Populate internal IP dropdown with known hosts
+      const ipSel = document.getElementById("pf-int-ip");
+      const leases = (leaseData.leases || []).slice()
+        .sort((a, b) => a.ip.localeCompare(b.ip, undefined, { numeric: true }));
+      ipSel.innerHTML = leases.map(l => {
+        const label = l.hostname ? `${esc(l.ip)} — ${esc(l.hostname)}` : esc(l.ip);
+        return `<option value="${esc(l.ip)}">${label}</option>`;
+      }).join("");
+
+      // Render table
+      const tbody = document.querySelector("#pf-table tbody");
+      const rules = pfData.rules || [];
+      if (!rules.length) {
+        tbody.innerHTML = `<tr><td colspan="8" class="muted" style="text-align:center;padding:1.5rem">No port forwarding rules configured</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = rules.map(r => {
+        const statusClass = r.active ? "pf-status-active" : "pf-status-inactive";
+        const statusText  = r.active ? "Active" : "Inactive";
+        const toggleLabel = r.enabled ? "Disable" : "Enable";
+        const protoLabel  = r.proto === "both" ? "TCP+UDP" : r.proto.toUpperCase();
+        return `<tr>
+          <td>${r.label ? esc(r.label) : '<span class="muted">—</span>'}</td>
+          <td><span class="pf-proto-badge">${esc(protoLabel)}</span></td>
+          <td class="mono">${esc(r.ext_port)}</td>
+          <td class="muted" style="font-size:1.1rem;text-align:center">→</td>
+          <td class="mono">${esc(r.int_ip)}</td>
+          <td class="mono">${esc(r.int_port)}</td>
+          <td><span class="pf-status ${statusClass}">${statusText}</span></td>
+          <td>
+            ${actBtn("power", toggleLabel + " port forwarding", `data-id="${esc(r.id)}" data-enabled="${r.enabled}"`, "pf-toggle-btn" + (r.enabled ? " act-danger" : ""))}
+            ${actBtn("delete", "Delete port forward", `data-id="${esc(r.id)}"`, "pf-del-btn")}
+          </td>
+        </tr>`;
+      }).join("");
+
+      // Bind table buttons
+      document.querySelectorAll(".pf-toggle-btn").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          try {
+            const r = await fetchJSON("/api/portforward/toggle", {
+              method: "POST", body: JSON.stringify({ id: btn.dataset.id })
+            });
+            if (!r.ok) throw new Error(r.error || "Failed");
+            refreshPortForward();
+          } catch (err) { alert("Error: " + err.message); btn.disabled = false; }
+        });
+      });
+
+      document.querySelectorAll(".pf-del-btn").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          if (!confirm("Delete this port forward rule?")) return;
+          btn.disabled = true;
+          try {
+            const r = await fetchJSON("/api/portforward/delete", {
+              method: "POST", body: JSON.stringify({ id: btn.dataset.id })
+            });
+            if (!r.ok) throw new Error(r.error || "Failed");
+            refreshPortForward();
+          } catch (err) { alert("Error: " + err.message); btn.disabled = false; }
+        });
+      });
+
+    } catch (err) {
+      console.error("Port forward refresh error:", err);
+    }
+  }
+
+  document.getElementById("pf-add-btn").addEventListener("click", async () => {
+    const btn     = document.getElementById("pf-add-btn");
+    const hint    = document.getElementById("pf-hint");
+    const extPort = document.getElementById("pf-ext-port").value.trim();
+    const proto   = document.getElementById("pf-proto").value;
+    const intIp   = document.getElementById("pf-int-ip").value;
+    const intPort = document.getElementById("pf-int-port").value.trim() || extPort;
+    const label   = document.getElementById("pf-label").value.trim();
+
+    hint.textContent = "";
+    if (!extPort || !intIp) { hint.textContent = "External port and internal host are required."; return; }
+
+    btn.disabled = true;
+    hint.textContent = "Adding…";
+    try {
+      const r = await fetchJSON("/api/portforward/add", {
+        method: "POST",
+        body: JSON.stringify({ ext_port: Number(extPort), proto, int_ip: intIp, int_port: Number(intPort), label })
+      });
+      if (!r.ok) throw new Error(r.error || "Failed");
+      document.getElementById("pf-ext-port").value = "";
+      document.getElementById("pf-int-port").value = "";
+      document.getElementById("pf-label").value    = "";
+      hint.textContent = "✓ Rule added";
+      refreshPortForward();
+    } catch (err) {
+      hint.textContent = "Error: " + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // ── DMZ module ─────────────────────────────────────────────────────────────
+
+  async function refreshDmz() {
+    try {
+      const data = await fetchJSON("/api/dmz");
+      const clients = data.clients || [];
+      const tbody = document.querySelector("#dmz-table tbody");
+
+      if (!clients.length) {
+        tbody.innerHTML = `<tr><td colspan="7" class="muted" style="text-align:center;padding:1.5rem">No DHCP clients found</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = clients.map(c => {
+        const onlineDot = c.online
+          ? `<span class="dmz-dot dmz-dot-green" title="Online"></span>`
+          : `<span class="dmz-dot dmz-dot-grey" title="Offline"></span>`;
+
+        const staticBadge = c.has_reservation
+          ? `<span class="dmz-badge dmz-badge-green">Static</span>`
+          : `<span class="dmz-badge dmz-badge-amber" title="Add a DHCP reservation for reliable port forwarding">Dynamic</span>`;
+
+        const dmzBadge = c.dmz_enabled
+          ? `<span class="dmz-badge dmz-badge-red">DMZ ON</span>`
+          : `<span class="dmz-badge dmz-badge-grey">Off</span>`;
+
+        const btnClass = c.dmz_enabled ? "btn-danger" : "btn";
+        const btnLabel = c.dmz_enabled ? "Disable DMZ" : "Enable DMZ";
+        const btnTitle = c.dmz_enabled
+          ? "Remove iptables isolation rules for this client"
+          : c.has_reservation
+            ? "Apply iptables FORWARD DROP rules — blocks this client from reaching other LAN hosts"
+            : "⚠ No static reservation — enable anyway (IP may change on lease renewal)";
+
+        return `<tr class="${c.dmz_enabled ? "dmz-row-active" : ""}">
+          <td>${c.hostname ? esc(c.hostname) : '<span class="muted">—</span>'}</td>
+          <td class="mono">${esc(c.ip)}</td>
+          <td class="mono muted" style="font-size:0.78rem">${esc(c.mac)}</td>
+          <td style="text-align:center">${onlineDot}</td>
+          <td>${staticBadge}</td>
+          <td>${dmzBadge}</td>
+          <td>
+            ${actBtn("power", btnTitle, `data-ip="${esc(c.ip)}" data-enabled="${c.dmz_enabled}"`, "dmz-toggle-btn" + (c.dmz_enabled ? " act-danger" : ""))}
+          </td>
+        </tr>`;
+      }).join("");
+
+      // Bind toggle buttons
+      document.querySelectorAll(".dmz-toggle-btn").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          const ip      = btn.dataset.ip;
+          const enabled = btn.dataset.enabled === "true";
+          const action  = enabled ? "disable" : "enable";
+
+          if (!enabled) {
+            const confirmed = confirm(
+              `Enable DMZ isolation for ${ip}?\n\n` +
+              `This will:\n` +
+              `  • Block ${ip} from reaching other LAN hosts\n` +
+              `  • Allow ${ip} to reach the gateway and internet\n` +
+              `  • Allow inbound connections from the internet (via port forwards)\n\n` +
+              `The rest of your network will NOT be able to initiate connections to ${ip}.`
+            );
+            if (!confirmed) return;
+          } else {
+            if (!confirm(`Disable DMZ isolation for ${ip}? The client will regain full LAN access.`)) return;
+          }
+
+          btn.disabled = true;
+          try {
+            const r = await fetchJSON(`/api/dmz/${action}`, {
+              method: "POST", body: JSON.stringify({ ip })
+            });
+            if (!r.ok) throw new Error(r.error || "Failed");
+            refreshDmz();
+          } catch (err) {
+            alert("Error: " + err.message);
+            btn.disabled = false;
+          }
+        });
+      });
+
+    } catch (err) {
+      console.error("DMZ refresh error:", err);
+    }
+  }
+
+  // ── end Port Forwarding / DMZ module ──────────────────────────────────────
+
+  async function refreshFirewall() {
+    try {
+      const data = await fetchJSON("/api/firewall");
+      renderFirewall(data);
+    } catch (err) {
+      showBanner(true, "Firewall stats error: " + err.message);
+    }
+  }
+
+  function bindFirewallActions() {
+    // ── OPNsense-style sub-tabs ─────────────────────────────────────────
+    document.querySelectorAll("#fw-subtabs .fw-subtab").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll("#fw-subtabs .fw-subtab").forEach((b) =>
+          b.classList.toggle("active", b === btn));
+        document.querySelectorAll("#view-firewall .fw-pane").forEach((p) => {
+          p.hidden = p.dataset.fwPane !== btn.dataset.fwPane;
+        });
+      });
+    });
+
+    // ── Add-rule modal ──────────────────────────────────────────────────
+    const fwModal = document.getElementById("fw-add-modal");
+    const fwModalHint = document.getElementById("fw-hint-modal");
+    const fwCloseModal = () => { fwModal.hidden = true; };
+    document.getElementById("fw-add-open").addEventListener("click", () => {
+      fwModalHint.textContent = "";
+      fwModal.hidden = false;
+      els.fwPort.focus();
+    });
+    document.getElementById("fw-add-modal-close").addEventListener("click", fwCloseModal);
+    document.getElementById("fw-add-cancel").addEventListener("click", fwCloseModal);
+    fwModal.addEventListener("click", (e) => { if (e.target === fwModal) fwCloseModal(); });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !fwModal.hidden) fwCloseModal();
+    });
+
+    async function refreshInterfaces() {
+      try {
+        const data = await fetchJSON("/api/firewall/interfaces");
+        if (!data.ok) return;
+        const sel = els.fwIface;
+        const current = sel.value;
+        sel.innerHTML = '<option value="">any interface</option>' + (data.interfaces || []).map((i) =>
+          `<option value="${esc(i.name)}">${esc(i.name)}${i.up ? "" : " (down)"}</option>`
+        ).join("");
+        if (current) sel.value = current;
+      } catch (err) {
+        /* leave the empty option */
+      }
+    }
+    function buildRuleFromForm() {
+      const action = els.fwAction.value;
+      const direction = els.fwDirection.value;
+      const iface = els.fwIface.value;
+      const from = els.fwFrom.value.trim();
+      const family = els.fwFamily.value;
+      const proto = els.fwProto.value;
+      const port = els.fwPort.value.trim();
+
+      const parts = [action, direction];
+      if (iface) parts.push("on", iface);
+      let source = from;
+      if (!source) {
+        if (family === "v4") source = "0.0.0.0/0";
+        else if (family === "v6") source = "::/0";
+        else source = "any";
+      }
+      parts.push("from", source);
+      if (port) {
+        parts.push("to", "any", "port", port);
+        if (proto === "tcp" || proto === "udp") parts.push("proto", proto);
+      } else if (!iface && !from) {
+        throw new Error("Enter an interface, source, or port");
+      }
+      return parts.join(" ");
+    }
+
+    async function addRule(rule) {
+      els.fwHint.textContent = "";
+      fwModalHint.textContent = "";
+      try {
+        await postJSON("/api/firewall/allow", { rule });
+        els.fwHint.textContent = "Rule added: " + rule;
+        els.fwPort.value = "";
+        els.fwFrom.value = "";
+        fwModalHint.textContent = "";
+        fwCloseModal();
+        await refreshFirewall();
+      } catch (err) {
+        fwModalHint.textContent = "Error: " + err.message;
+        els.fwHint.textContent = "Error: " + err.message;
+        throw err;
+      }
+    }
+
+    els.fwAdd.addEventListener("click", async () => {
+      let rule;
+      try {
+        rule = buildRuleFromForm();
+      } catch (err) {
+        els.fwHint.textContent = err.message;
+        return;
+      }
+      els.fwAdd.disabled = true;
+      try {
+        await addRule(rule);
+      } finally {
+        els.fwAdd.disabled = false;
+      }
+    });
+
+    els.fwPort.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") els.fwAdd.click();
+    });
+
+    els.fwAddCustom.addEventListener("click", async () => {
+      const rule = els.fwRule.value.trim();
+      if (!rule) return;
+      els.fwAddCustom.disabled = true;
+      try {
+        await addRule(rule);
+        els.fwRule.value = "";
+      } finally {
+        els.fwAddCustom.disabled = false;
+      }
+    });
+
+    els.fwRule.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") els.fwAddCustom.click();
+    });
+
+    els.fwRulesBody.addEventListener("click", async (e) => {
+      const moveBtn = e.target.closest(".fw-move");
+      if (moveBtn) {
+        // ufw evaluates top-down, so reordering past a rule with a
+        // different action (allow vs deny) changes what traffic matches.
+        if (!window.confirm(
+          `Move rule ${moveBtn.dataset.num} ${moveBtn.dataset.dir === "up" ? "above" : "below"} its neighbour? ` +
+          "Rules are evaluated top-down — if the two rules overlap with different actions, the effective outcome changes.")) return;
+        moveBtn.disabled = true;
+        try {
+          const res = await postJSON("/api/firewall/move",
+            { number: moveBtn.dataset.num, direction: moveBtn.dataset.dir });
+          els.fwHint.textContent = res.move?.note
+            ? "Rule moved" + res.move.note : "Rule moved.";
+          await refreshFirewall();
+        } catch (err) {
+          els.fwHint.textContent = "Error: " + err.message;
+          moveBtn.disabled = false;
+        }
+        return;
+      }
+      const btn = e.target.closest(".fw-remove");
+      if (!btn) return;
+      if (!window.confirm("Remove this firewall rule?")) return;
+      btn.disabled = true;
+      try {
+        await postJSON("/api/firewall/delete", { number: btn.dataset.num });
+        els.fwHint.textContent = "Rule removed.";
+        await refreshFirewall();
+      } catch (err) {
+        els.fwHint.textContent = "Error: " + err.message;
+        btn.disabled = false;
+      }
+    });
+
+    async function firewallOp(payload) {
+      els.fwHint.textContent = "Working…";
+      const res = await postJSON("/api/firewall/reset", payload);
+      if (!res.ok) throw new Error(res.error || "request failed");
+      els.fwHint.textContent = "baseline restored" +
+        (res.verified ? "" : " — live rules differ from baseline, verify manually");
+      await refreshFirewall();
+      return res;
+    }
+
+    // ── Rules filtering: search + interface chips ───────────────────────
+    els.fwSearch.addEventListener("input", () => {
+      _fwFilterText = els.fwSearch.value;
+      renderFwRules();
+    });
+    document.getElementById("fw-iface-chips").addEventListener("click", (e) => {
+      const chip = e.target.closest(".fw-chip");
+      if (!chip) return;
+      _fwFilterIface = chip.dataset.fwIface || "";
+      renderFwIfaceChips();
+      renderFwRules();
+    });
+
+    // ── One-click block on traffic views ────────────────────────────────
+    async function blockSource(ip) {
+      if (!window.confirm(`Add a firewall rule blocking all traffic from ${ip}?`)) return;
+      try {
+        await postJSON("/api/firewall/allow", { rule: `deny from ${ip}` });
+        els.fwHint.textContent = "Blocked source: " + ip;
+        await refreshFirewall();
+      } catch (err) {
+        els.fwHint.textContent = "Error: " + err.message;
+      }
+    }
+    [els.fwSourcesBody, els.fwEventsBody].forEach((tbody) => {
+      if (!tbody) return;
+      tbody.addEventListener("click", (e) => {
+        const btn = e.target.closest(".fw-block-src");
+        if (btn) blockSource(btn.dataset.ip);
+      });
+    });
+
+    // ── Live view auto-refresh ──────────────────────────────────────────
+    setInterval(() => {
+      if (state.activeView !== "firewall") return;
+      const active = document.querySelector("#fw-subtabs .fw-subtab.active");
+      const live = document.getElementById("fw-live-toggle");
+      if (active && active.dataset.fwPane === "traffic" && live && live.checked) {
+        refreshFirewall();
+      }
+    }, 5000);
+
+    // ── Settings pane ───────────────────────────────────────────────────
+    document.getElementById("fw-settings-apply").addEventListener("click", async () => {
+      const btn = document.getElementById("fw-settings-apply");
+      const hint = document.getElementById("fw-settings-hint");
+      if (!_fwData) return;
+      const wantEnabled = document.getElementById("fw-enabled-toggle").checked;
+      const wasEnabled = (_fwData.status || "").toLowerCase() === "active";
+      const di = document.getElementById("fw-def-incoming").value;
+      const dot = document.getElementById("fw-def-outgoing").value;
+      const lv = document.getElementById("fw-log-level").value;
+      hint.textContent = "";
+      if (!wantEnabled && wasEnabled &&
+          !window.confirm("Disable the firewall?\n\nThis turns off ALL packet filtering until re-enabled.")) {
+        return;
+      }
+      btn.disabled = true;
+      hint.textContent = "Applying…";
+      try {
+        if (wantEnabled !== wasEnabled) {
+          await postJSON("/api/firewall/enable", { enabled: wantEnabled });
+        }
+        if (di !== (_fwData.defaults.incoming || "").toLowerCase()) {
+          await postJSON("/api/firewall/default", { direction: "incoming", policy: di });
+        }
+        if (dot !== (_fwData.defaults.outgoing || "").toLowerCase()) {
+          await postJSON("/api/firewall/default", { direction: "outgoing", policy: dot });
+        }
+        if (lv !== fwLogLevel(_fwData)) {
+          await postJSON("/api/firewall/logging", { level: lv });
+        }
+        hint.textContent = "Settings applied.";
+        await refreshFirewall();
+      } catch (err) {
+        hint.textContent = "Error: " + err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    els.fwBaseline.addEventListener("click", async () => {
+      if (!window.confirm("Save the current live ruleset as the restore baseline?")) return;
+      els.fwBaseline.disabled = true;
+      try {
+        const res = await postJSON("/api/firewall/reset", { action: "save" });
+        if (!res.ok) throw new Error(res.error || "request failed");
+        els.fwHint.textContent = "Baseline saved.";
+      } catch (err) {
+        els.fwHint.textContent = "Error: " + err.message;
+      } finally {
+        els.fwBaseline.disabled = false;
+      }
+    });
+
+    els.fwReset.addEventListener("click", async () => {
+      if (!window.confirm(
+        "Restore the saved baseline?\n\n" +
+        "This atomically replaces all IPv4/IPv6 tables " +
+        "(filter/nat/mangle/raw) with the saved baseline rules. " +
+        "Any rules added since the baseline was saved will be lost. " +
+        "Your SSH session and internet should survive, but use the LAN connection to be safe."
+      )) return;
+      els.fwReset.disabled = true;
+      try {
+        await firewallOp({ action: "restore" });
+      } catch (err) {
+        els.fwHint.textContent = "Error: " + err.message;
+      } finally {
+        els.fwReset.disabled = false;
+      }
+    });
+
+    refreshInterfaces();
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // Attack map — Overview, Security ▸ Attacks, configured in Settings ▸ Map
+  // ════════════════════════════════════════════════════════════════════════
+  let secMap = null;
+  let ovMap = null;
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const XLINK_NS = "http://www.w3.org/1999/xlink";
+  const DEFAULT_TARGET = { lat: 39.9526, lon: -75.1652 }; // Philadelphia - fallback if no location set
+  function routerTarget() {
+    if (state.routerLat != null && state.routerLon != null) {
+      return { lat: Number(state.routerLat), lon: Number(state.routerLon) };
+    }
+    return DEFAULT_TARGET;
+  }
+
+  // ── FX preferences (Settings ▸ Map) ──────────────────────────────────────
+  const MAP_FX_KEY = "tuxwall.map.fx";
+  const MAP_FX_DEFAULTS = {
+    palette: "crimson",
+    density: "normal",   // calm | normal | intense
+    arcs: true,
+    particles: true,
+    pulses: true,
+    impacts: true,
+    sweep: true,
+    grid: true,
+    scanlines: true,
+    vignette: true,
+    frame: true,
+    hud: true,
+    feed: true,
+    legend: true,
+  };
+  let mapFx = Object.assign({}, MAP_FX_DEFAULTS);
+  function loadMapFx() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(MAP_FX_KEY) || "{}");
+      for (const k of Object.keys(MAP_FX_DEFAULTS)) {
+        if (raw[k] !== undefined) mapFx[k] = raw[k];
+      }
+    } catch (_) {}
+  }
+  function saveMapFx() {
+    try { localStorage.setItem(MAP_FX_KEY, JSON.stringify(mapFx)); } catch (_) {}
+  }
+  loadMapFx();
+
+  // Every comet travels at this constant speed (px per ms) regardless of how
+  // long its arc is, so nothing ever speeds up, slows down or stalls.
+  const ARC_SPEED = 0.19;
+  const ARC_SPACING = 230;   // target px between comets in a stream
+  // Each pulsing source is 3 animated nodes; past a few dozen the per-frame
+  // cost dominates the page. Arcs still cover every source up to the budget.
+  const PULSE_MAX = 28;
+
+  const MAP_DENSITY = { calm: 16, normal: 40, intense: 80 };
+  function arcBudget() { return MAP_DENSITY[mapFx.density] || MAP_DENSITY.normal; }
+  const SEC_ARC_MAX = 40; // legacy alias
+
+  // Severity palettes — index 0 = low … 3 = critical
+  const MAP_PALETTES = {
+    crimson: [
+      { key: "low",      label: "Low",      stroke: "#2ee6ff", glow: "#00b2e0", core: "#d6f8ff" },
+      { key: "elevated", label: "Elevated", stroke: "#ffd400", glow: "#ffae00", core: "#fff6c4" },
+      { key: "high",     label: "High",     stroke: "#ff8a1f", glow: "#ff6200", core: "#ffe2bd" },
+      { key: "critical", label: "Critical", stroke: "#ff2d55", glow: "#ff0033", core: "#ffd3dd" },
+    ],
+    cyber: [
+      { key: "low",      label: "Low",      stroke: "#39f6ff", glow: "#00c8d7", core: "#dcfeff" },
+      { key: "elevated", label: "Elevated", stroke: "#7b7bff", glow: "#4a4aff", core: "#e0e0ff" },
+      { key: "high",     label: "High",     stroke: "#c45cff", glow: "#9b19ff", core: "#f1dcff" },
+      { key: "critical", label: "Critical", stroke: "#ff2fb0", glow: "#ff008c", core: "#ffd6f0" },
+    ],
+    matrix: [
+      { key: "low",      label: "Low",      stroke: "#9bffb0", glow: "#45d46a", core: "#e9fff0" },
+      { key: "elevated", label: "Elevated", stroke: "#4bff7d", glow: "#12d14a", core: "#d8ffe4" },
+      { key: "high",     label: "High",     stroke: "#d6ff3b", glow: "#9fd400", core: "#f5ffd0" },
+      { key: "critical", label: "Critical", stroke: "#ffe14b", glow: "#ffae00", core: "#fff7cf" },
+    ],
+    amber: [
+      { key: "low",      label: "Low",      stroke: "#ffd79a", glow: "#e0a44a", core: "#fff3df" },
+      { key: "elevated", label: "Elevated", stroke: "#ffb13d", glow: "#ff8c00", core: "#ffe7c2" },
+      { key: "high",     label: "High",     stroke: "#ff7a2f", glow: "#ff4f00", core: "#ffdcc4" },
+      { key: "critical", label: "Critical", stroke: "#ff3d2e", glow: "#e01000", core: "#ffd2cd" },
+    ],
+  };
+  // Animation phase is derived from a per-source hash plus elapsed wall-clock
+  // time, so when the layer is rebuilt (5s poll, pan, zoom) every arc and pulse
+  // resumes exactly where it was instead of snapping back to the start.
+  const MAP_EPOCH = Date.now();
+  function hashUnit(str) {
+    let h = 2166136261;
+    const v = String(str);
+    for (let i = 0; i < v.length; i++) { h ^= v.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return ((h >>> 0) % 10000) / 10000;
+  }
+  // Negative animation-delay = "start this many ms into the cycle".
+  function phaseDelay(key, dur) {
+    return -(((hashUnit(key) * dur) + (Date.now() - MAP_EPOCH)) % dur);
+  }
+  function mapSignature(byIp) {
+    return (byIp || []).map((i) => i.ip + ":" + i.count + ":" + i.lat + "," + i.lon).join("|");
+  }
+
+  function mapPalette() { return MAP_PALETTES[mapFx.palette] || MAP_PALETTES.crimson; }
+  function tierIndex(count) {
+    const c = Number(count) || 0;
+    if (c >= 100) return 3;
+    if (c >= 20) return 2;
+    if (c >= 5) return 1;
+    return 0;
+  }
+  function arcTier(count) { return mapPalette()[tierIndex(count)]; }
+
+  function fxLayer(el, cls) {
+    const d = document.createElement("div");
+    d.className = cls;
+    el.appendChild(d);
+    return d;
+  }
+
+  function createAttackMap(el, target) {
+    if (!el || typeof L === "undefined") return null;
+    const m = {
+      map: L.map(el, { worldCopyJump: true, zoomControl: false }).setView([25, 0], 2),
+      target,
+      targetEl: null,
+      markers: null,
+      svg: null,
+      lastByIp: null,
+      statsEl: null,
+      feedEl: null,
+      legendEl: null,
+      sweepEl: null,
+      impactEl: null,
+      impactTimer: null,
+      uid: (el.id || "map") + "-" + Math.random().toString(36).slice(2, 7),
+    };
+
+    L.control.zoom({ position: "bottomright" }).addTo(m.map);
+
+    // CARTO dark basemap with registered API key (keyless tiles are watermarked)
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=cb1_2tvx_1_e55a010f34e5e3603b0ff643", {
+      maxZoom: 18,
+      subdomains: "abcd",
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    }).addTo(m.map);
+
+    // Gateway marker lives in its own overlay above the arcs — a Leaflet
+    // marker is trapped in the z-400 map pane and gets buried by the glow.
+    m.targetEl = document.createElement("div");
+    m.targetEl.className = "sec-target-layer";
+    m.targetEl.innerHTML = `<div class="sec-target">
+      <span class="sec-target-ring sec-target-ring-3"></span>
+      <span class="sec-target-ring sec-target-ring-2"></span>
+      <span class="sec-target-ring sec-target-ring-1"></span>
+      <span class="sec-target-cross sec-target-cross-h"></span>
+      <span class="sec-target-cross sec-target-cross-v"></span>
+      <span class="sec-target-core"></span>
+      <span class="sec-target-label">GATEWAY</span>
+    </div>`;
+
+    // Decorative layers (order here is DOM order; z-index does the stacking)
+    fxLayer(el, "sec-map-grid");
+    // (target overlay appended later so it sits above the arcs)
+    m.sweepEl = fxLayer(el, "sec-map-sweep");
+    // NB: must be createElementNS — L.DomUtil.create()/document.createElement()
+    // yields an *HTML* <svg> (xhtml namespace) that never paints its children.
+    m.svg = document.createElementNS(SVG_NS, "svg");
+    m.svg.setAttribute("class", "sec-arcs");
+    el.appendChild(m.svg);
+    m.impactEl = fxLayer(el, "sec-impact-layer");
+    el.appendChild(m.targetEl);
+    fxLayer(el, "sec-map-vignette");
+    fxLayer(el, "sec-map-scanlines");
+
+    const frame = fxLayer(el, "sec-map-frame");
+    frame.innerHTML = `<i class="c1"></i><i class="c2"></i><i class="c3"></i><i class="c4"></i>`;
+
+    // HUD stats
+    m.statsEl = fxLayer(el, "sec-map-hud");
+    m.statsEl.innerHTML = `
+      <div class="sec-hud-top">
+        <span class="sec-hud-dot"></span>
+        <span class="sec-hud-label">Threat Monitor</span>
+        <span class="sec-hud-live">LIVE</span>
+      </div>
+      <div class="sec-hud-grid">
+        <div class="sec-hud-stat"><span class="sec-hud-val" data-hud="attacks">—</span><span class="sec-hud-key">Attacks</span></div>
+        <div class="sec-hud-stat"><span class="sec-hud-val" data-hud="sources">—</span><span class="sec-hud-key">Sources</span></div>
+      </div>
+      <div class="sec-hud-stat sec-hud-origin"><span class="sec-hud-val" data-hud="top">—</span><span class="sec-hud-key">Top origin</span></div>
+      <div class="sec-hud-level">
+        <div class="sec-hud-level-head"><span>Threat level</span><span data-hud="level">—</span></div>
+        <div class="sec-hud-meter"><i data-hud="meter"></i></div>
+      </div>`;
+
+    // Live attack feed
+    m.feedEl = fxLayer(el, "sec-map-feed");
+    m.feedEl.innerHTML = `
+      <div class="sec-feed-head"><span class="sec-feed-dot"></span>Live attack feed<span class="sec-feed-count" data-feed="count"></span></div>
+      <div class="sec-feed-list" data-feed="list"></div>`;
+    // Keep feed interaction from panning/zooming the map underneath
+    L.DomEvent.disableClickPropagation(m.feedEl);
+    L.DomEvent.disableScrollPropagation(m.feedEl);
+    m.feedEl.addEventListener("click", (ev) => {
+      const row = ev.target.closest(".sec-feed-row");
+      if (!row) return;
+      const lat = Number(row.dataset.lat), lon = Number(row.dataset.lon);
+      if (!isFinite(lat) || !isFinite(lon)) return;
+      m.map.setView([lat, lon], Math.max(m.map.getZoom(), 4), { animate: true });
+      const rec = (m.markerIndex || {})[row.dataset.ip];
+      if (rec) setTimeout(() => rec.marker.openPopup(), 320);
+    });
+
+    // Severity legend
+    m.legendEl = fxLayer(el, "sec-map-legend");
+
+    // Redraws are rAF-coalesced; tracer particles are suspended mid-gesture so
+    // panning a busy map stays smooth.
+    m.map.on("movestart zoomstart", () => { m.moving = true; });
+    m.map.on("moveend zoomend", () => { m.moving = false; requestArcDraw(m); });
+    m.map.on("move zoom resize", () => requestArcDraw(m));
+
+    m.awake = true;
+    m.visible = true;
+    if (typeof IntersectionObserver !== "undefined") {
+      m.io = new IntersectionObserver((entries) => {
+        m.visible = entries.some((e) => e.isIntersecting);
+        refreshMapAwake();
+      }, { threshold: 0 });
+      m.io.observe(el);
+    }
+
+    applyMapFxTo(m, true);
+    return m;
+  }
+
+  // Off-screen or backgrounded maps are stopped outright rather than left
+  // animating behind a scrolled viewport.
+  function setMapAwake(m, awake) {
+    if (!m || !m.map || m.awake === awake) return;
+    m.awake = awake;
+    m.map.getContainer().classList.toggle("fx-paused", !awake);
+    try {
+      if (awake) m.svg.unpauseAnimations(); else m.svg.pauseAnimations();
+    } catch (_) {}
+    if (awake) { scheduleImpacts(m); requestArcDraw(m); }
+    else if (m.impactTimer) { clearInterval(m.impactTimer); m.impactTimer = null; }
+  }
+
+  function refreshMapAwake() {
+    [secMap, ovMap].forEach((m) => {
+      if (!m || !m.map) return;
+      const el = m.map.getContainer();
+      const onScreen = !document.hidden && m.visible !== false && el.clientWidth > 0;
+      setMapAwake(m, onScreen);
+    });
+  }
+
+  function requestArcDraw(m) {
+    if (!m || m._raf) return;
+    m._raf = requestAnimationFrame(() => { m._raf = null; drawAttackArcs(m); });
+  }
+
+  function arcControlPoint(a, b) {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    const k = Math.min(110, dist * 0.26);
+    return { x: (a.x + b.x) / 2 - (dy / dist) * k, y: (a.y + b.y) / 2 + (dx / dist) * k };
+  }
+
+  function arcPathD(a, b) {
+    const c = arcControlPoint(a, b);
+    return `M ${a.x.toFixed(1)} ${a.y.toFixed(1)} Q ${c.x.toFixed(1)} ${c.y.toFixed(1)} ${b.x.toFixed(1)} ${b.y.toFixed(1)}`;
+  }
+
+  function bezierLength(a, b) {
+    const c = arcControlPoint(a, b);
+    const steps = 20;
+    let len = 0, px = a.x, py = a.y;
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps, mt = 1 - t;
+      const x = mt * mt * a.x + 2 * mt * t * c.x + t * t * b.x;
+      const y = mt * mt * a.y + 2 * mt * t * c.y + t * t * b.y;
+      len += Math.hypot(x - px, y - py);
+      px = x; py = y;
+    }
+    return Math.max(1, len);
+  }
+
+  function pulseSize(count) {
+    return Math.round(Math.min(34, 12 + 8 * Math.log10(Math.max(1, count))));
+  }
+
+  function pulsePopupHtml(ip, tier) {
+    return `<div class="sec-popup sev-${tier.key}">` +
+      `<div class="sec-popup-head"><span class="sec-popup-sev">${tier.label}</span><span class="sec-popup-ip">${esc(ip.ip)}</span></div>` +
+      `<div class="sec-popup-loc">${esc(ip.country || "Unknown")}${ip.city ? " · " + esc(ip.city) : ""}</div>` +
+      `<div class="sec-popup-hits"><b>${formatNumber(ip.count)}</b> hits · port <span class="mono">${esc(ip.port || "?")}</span></div>` +
+      `<div class="sec-popup-time">Last seen ${formatRelative(ip.last)}</div>` +
+      `</div>`;
+  }
+
+  // Incremental diff keyed by IP. Tearing the layer down and rebuilding it on
+  // every poll restarted each pulse animation and slammed any open popup shut.
+  function buildAttackPulses(m, byIp) {
+    if (!m) return;
+    if (!m.markers) m.markers = L.layerGroup().addTo(m.map);
+    if (!m.markerIndex) m.markerIndex = {};
+    if (!mapFx.pulses) {
+      m.markers.clearLayers();
+      m.markerIndex = {};
+      return;
+    }
+    const seen = new Set();
+    let shown = 0;
+    for (const ip of byIp) {        // already sorted by hit count, desc
+      if (ip.lat == null || ip.lon == null) continue;
+      if (++shown > PULSE_MAX) break;
+      const tier = arcTier(ip.count);
+      const size = pulseSize(ip.count);
+      const popup = pulsePopupHtml(ip, tier);
+      seen.add(ip.ip);
+      const rec = m.markerIndex[ip.ip];
+
+      if (rec) {
+        if (rec.lat !== ip.lat || rec.lon !== ip.lon) {
+          rec.marker.setLatLng([ip.lat, ip.lon]);
+          rec.lat = ip.lat; rec.lon = ip.lon;
+        }
+        if (rec.size !== size || rec.tier !== tier.key || rec.palette !== mapFx.palette) {
+          // Restyle in place rather than setIcon() — swapping the icon would
+          // recreate the node and restart its animation.
+          const node = rec.marker.getElement();
+          const stack = node && node.querySelector(".sec-pulse-stack");
+          if (stack) {
+            stack.style.width = size + "px";
+            stack.style.height = size + "px";
+            stack.style.setProperty("--pulse-color", tier.glow);
+            stack.style.setProperty("--pulse-core", tier.core);
+          }
+          if (node) {
+            node.style.width = size + "px";
+            node.style.height = size + "px";
+            node.style.marginLeft = (-size / 2) + "px";
+            node.style.marginTop = (-size / 2) + "px";
+          }
+          rec.size = size; rec.tier = tier.key; rec.palette = mapFx.palette;
+        }
+        if (rec.popup !== popup) { rec.marker.setPopupContent(popup); rec.popup = popup; }
+        continue;
+      }
+
+      const marker = L.marker([ip.lat, ip.lon], {
+        icon: L.divIcon({
+          className: "sec-pulse-wrap",
+          html: `<span class="sec-pulse-stack" style="width:${size}px;height:${size}px;--pulse-color:${tier.glow};--pulse-core:${tier.core};--pulse-delay:${phaseDelay(ip.ip, 2400).toFixed(0)}ms">
+            <span class="sec-pulse"></span>
+            <span class="sec-pulse sec-pulse-b"></span>
+            <span class="sec-pulse-core"></span>
+          </span>`,
+          iconSize: [size, size],
+          iconAnchor: [size / 2, size / 2],
+        }),
+        keyboard: false,
+      });
+      marker.bindPopup(popup, { className: "sec-popup-shell" });
+      marker.addTo(m.markers);
+      m.markerIndex[ip.ip] = {
+        marker, size, tier: tier.key, palette: mapFx.palette,
+        lat: ip.lat, lon: ip.lon, popup,
+      };
+    }
+    for (const key of Object.keys(m.markerIndex)) {
+      if (seen.has(key)) continue;
+      m.markers.removeLayer(m.markerIndex[key].marker);
+      delete m.markerIndex[key];
+    }
+  }
+
+  // Expanding shockwave at the gateway whenever a volley lands
+  function spawnImpact(m) {
+    if (!m || !m.impactEl || !mapFx.impacts) return;
+    const el = m.map.getContainer();
+    if (!el.clientWidth) return;
+    const p = m.map.latLngToContainerPoint([m.target.lat, m.target.lon]);
+    if (p.x < -80 || p.y < -80 || p.x > el.clientWidth + 80 || p.y > el.clientHeight + 80) return;
+    const ring = document.createElement("span");
+    ring.className = "sec-impact";
+    ring.style.left = p.x + "px";
+    ring.style.top = p.y + "px";
+    m.impactEl.appendChild(ring);
+    setTimeout(() => ring.remove(), 1100);
+  }
+
+  function scheduleImpacts(m) {
+    if (!m) return;
+    if (m.impactTimer) { clearInterval(m.impactTimer); m.impactTimer = null; }
+    if (!mapFx.impacts || m.awake === false) return;
+    const n = (m.lastByIp || []).filter((i) => i.lat != null).length;
+    if (!n) return;
+    const every = Math.max(220, Math.min(1600, 3200 / Math.max(1, Math.min(n, 12))));
+    m.impactTimer = setInterval(() => spawnImpact(m), every);
+  }
+
+  function drawAttackArcs(m) {
+    if (!m || !m.map || !m.svg) return;
+    const el = m.map.getContainer();
+    const w = el.clientWidth, h = el.clientHeight;
+    m.svg.setAttribute("width", w);
+    m.svg.setAttribute("height", h);
+    m.svg.innerHTML = "";
+    if (w < 10 || h < 10) return;
+
+    // Responsive chrome: drop overlays that would crowd a narrow map
+    el.classList.toggle("sec-map-compact", w < 860);
+    el.classList.toggle("sec-map-tiny", w < 620);
+
+    const tgt = m.map.latLngToContainerPoint([m.target.lat, m.target.lon]);
+
+    // Park the radar sweep on the gateway
+    if (m.sweepEl) {
+      m.sweepEl.style.left = tgt.x + "px";
+      m.sweepEl.style.top = tgt.y + "px";
+      const reach = Math.hypot(Math.max(tgt.x, w - tgt.x), Math.max(tgt.y, h - tgt.y));
+      const d = Math.max(220, Math.min(1500, reach * 2));
+      m.sweepEl.style.width = d + "px";
+      m.sweepEl.style.height = d + "px";
+    }
+
+    if (m.targetEl) {
+      m.targetEl.style.left = tgt.x + "px";
+      m.targetEl.style.top = tgt.y + "px";
+    }
+
+    const all = (m.lastByIp || []).filter((i) => i.lat != null && i.lon != null);
+    const recent = mapFx.arcs ? all.slice(0, arcBudget()) : [];
+
+    const defs = document.createElementNS(SVG_NS, "defs");
+    m.svg.appendChild(defs);
+
+    recent.forEach((ip, idx) => {
+      const src = m.map.latLngToContainerPoint([ip.lat, ip.lon]);
+      const d = arcPathD(src, tgt);
+      const len = bezierLength(src, tgt);
+      if (len < 20) return;
+      const tier = arcTier(ip.count);
+      const gid = `${m.uid}-g${idx}`;
+      const pid = `${m.uid}-p${idx}`;
+
+      // Gradient: faint at the source, hot white at the gateway
+      const grad = document.createElementNS(SVG_NS, "linearGradient");
+      grad.setAttribute("id", gid);
+      grad.setAttribute("gradientUnits", "userSpaceOnUse");
+      grad.setAttribute("x1", src.x); grad.setAttribute("y1", src.y);
+      grad.setAttribute("x2", tgt.x); grad.setAttribute("y2", tgt.y);
+      const stops = [
+        ["0%", tier.stroke, "0.05"],
+        ["45%", tier.stroke, "0.45"],
+        ["85%", tier.glow, "0.7"],
+        ["100%", tier.core, "0.85"],
+      ];
+      for (const [off, col, op] of stops) {
+        const s = document.createElementNS(SVG_NS, "stop");
+        s.setAttribute("offset", off);
+        s.setAttribute("stop-color", col);
+        s.setAttribute("stop-opacity", op);
+        grad.appendChild(s);
+      }
+      defs.appendChild(grad);
+
+      const baseW = Math.min(5, 1.4 + Math.log10(Math.max(1, ip.count)));
+      // Tile the dash pattern along the path so that as one comet leaves the
+      // gateway the next is already entering — shifting the pattern by exactly
+      // one period makes the loop seamless, with no dead time at the wrap.
+      const streams = Math.max(1, Math.round(len / ARC_SPACING));
+      const period = len / streams;
+      const dur = period / ARC_SPEED;
+      const delay = phaseDelay(ip.ip, dur);
+
+      // Layer 1 — wide atmospheric glow
+      const outerGlow = document.createElementNS(SVG_NS, "path");
+      outerGlow.setAttribute("d", d);
+      outerGlow.setAttribute("fill", "none");
+      outerGlow.setAttribute("stroke", tier.glow);
+      outerGlow.setAttribute("stroke-width", baseW * 4);
+      outerGlow.setAttribute("stroke-opacity", "0.045");
+      outerGlow.setAttribute("stroke-linecap", "round");
+      m.svg.appendChild(outerGlow);
+
+      // Layer 2 — the static trail
+      const midGlow = document.createElementNS(SVG_NS, "path");
+      midGlow.setAttribute("d", d);
+      midGlow.setAttribute("fill", "none");
+      midGlow.setAttribute("stroke", `url(#${gid})`);
+      midGlow.setAttribute("stroke-width", baseW * 1.25);
+      midGlow.setAttribute("stroke-opacity", "0.2");
+      midGlow.setAttribute("stroke-linecap", "round");
+      m.svg.appendChild(midGlow);
+
+      // Layer 3 — the bright comet head sweeping the path
+      const head = document.createElementNS(SVG_NS, "path");
+      head.setAttribute("id", pid);
+      head.setAttribute("d", d);
+      head.setAttribute("fill", "none");
+      head.setAttribute("stroke", `url(#${gid})`);
+      head.setAttribute("stroke-width", baseW * 0.95);
+      head.setAttribute("stroke-linecap", "round");
+      head.setAttribute("class", "sec-arc-head");
+      const dash = Math.max(10, Math.min(46, period * 0.26));
+      head.style.strokeDasharray = `${dash.toFixed(1)} ${Math.max(1, period - dash).toFixed(1)}`;
+      head.style.setProperty("--len", `-${period.toFixed(1)}`);
+      head.style.animationDuration = `${dur.toFixed(0)}ms`;
+      head.style.animationDelay = `${delay.toFixed(0)}ms`;
+      m.svg.appendChild(head);
+
+      // Layer 4 — tracer particle riding the curve
+      if (mapFx.particles && !m.moving) {
+        const dot = document.createElementNS(SVG_NS, "circle");
+        dot.setAttribute("r", (1.5 + baseW * 0.55).toFixed(2));
+        dot.setAttribute("fill", tier.core);
+        dot.setAttribute("class", "sec-arc-dot");
+        dot.style.setProperty("--dot-glow", tier.glow);
+        const pdur = len / ARC_SPEED;   // same px/ms as the dash stream
+        const am = document.createElementNS(SVG_NS, "animateMotion");
+        am.setAttribute("dur", `${pdur.toFixed(0)}ms`);
+        am.setAttribute("begin", `${phaseDelay(ip.ip, pdur).toFixed(0)}ms`);
+        am.setAttribute("repeatCount", "indefinite");
+        am.setAttribute("rotate", "auto");
+        const mp = document.createElementNS(SVG_NS, "mpath");
+        mp.setAttributeNS(XLINK_NS, "xlink:href", `#${pid}`);
+        mp.setAttribute("href", `#${pid}`);
+        am.appendChild(mp);
+        dot.appendChild(am);
+        m.svg.appendChild(dot);
+      }
+    });
+
+    updateMapHud(m, all);
+    updateMapLegend(m);
+  }
+
+  function updateMapHud(m, geo) {
+    if (!m || !m.statsEl) return;
+    const list = m.lastByIp || [];
+    const totalHits = list.reduce((s, i) => s + (i.count || 0), 0);
+    const peak = list.reduce((s, i) => Math.max(s, i.count || 0), 0);
+    // Top origin = country with the most hits. Reading list[0].country broke
+    // whenever the single busiest IP had no geo record (country is "" for any
+    // address db-ip City Lite cannot resolve), pinning the read-out at "—".
+    const tally = new Map();
+    for (const i of list) {
+      const c = (i.country || "").trim();
+      if (c) tally.set(c, (tally.get(c) || 0) + (i.count || 0));
+    }
+    let topCountry = "—", best = -1;
+    for (const [c, n] of tally) if (n > best) { best = n; topCountry = c; }
+    const q = (k) => m.statsEl.querySelector(`[data-hud="${k}"]`);
+    const set = (k, v) => { const n = q(k); if (n && n.textContent !== String(v)) { n.textContent = v; n.classList.remove("tick"); void n.offsetWidth; n.classList.add("tick"); } };
+    set("attacks", formatNumber(totalHits));
+    set("sources", formatNumber(geo.length));
+    set("top", topCountry);
+
+    const tier = mapPalette()[tierIndex(peak)];
+    const pct = list.length ? Math.max(8, Math.min(100, Math.round((tierIndex(peak) + 1) / 4 * 100))) : 0;
+    const lvl = q("level"), meter = q("meter");
+    if (lvl) { lvl.textContent = list.length ? tier.label.toUpperCase() : "—"; }
+    if (meter) {
+      meter.style.width = pct + "%";
+      meter.style.background = `linear-gradient(90deg, ${tier.glow}, ${tier.core})`;
+      meter.style.boxShadow = `0 0 10px ${tier.glow}`;
+    }
+    m.statsEl.dataset.sev = list.length ? tier.key : "idle";
+  }
+
+  function updateMapLegend(m) {
+    if (!m || !m.legendEl) return;
+    const pal = mapPalette();
+    const counts = [0, 0, 0, 0];
+    for (const i of (m.lastByIp || [])) counts[tierIndex(i.count)]++;
+    m.legendEl.innerHTML =
+      `<span class="sec-leg-title">Severity</span>` +
+      pal.map((t, i) =>
+        `<span class="sec-leg-item" style="--leg:${t.glow};--leg-core:${t.core}">` +
+        `<i></i><span class="sec-leg-label">${t.label}</span><b>${counts[i]}</b></span>`
+      ).join("");
+  }
+
+  function renderAttackFeed(m) {
+    if (!m || !m.feedEl) return;
+    const list = (m.lastByIp || []).filter((i) => i.lat != null && i.lon != null).slice(0, 14);
+    const body = m.feedEl.querySelector('[data-feed="list"]');
+    const cnt = m.feedEl.querySelector('[data-feed="count"]');
+    if (cnt) cnt.textContent = (m.lastByIp || []).length ? `${formatNumber((m.lastByIp || []).length)} src` : "";
+    if (!body) return;
+    if (!list.length) {
+      body.innerHTML = `<div class="sec-feed-empty">No geolocated sources</div>`;
+      m.feedSig = "";
+      return;
+    }
+    const sig = list.map((i) => i.ip).join("|");
+    if (sig === m.feedSig && body.children.length === list.length) {
+      // Same sources in the same order — refresh the numbers in place so the
+      // rows do not replay their slide-in animation on every poll.
+      list.forEach((ip, idx) => {
+        const row = body.children[idx];
+        if (!row) return;
+        const t = arcTier(ip.count);
+        row.style.setProperty("--sev", t.glow);
+        row.style.setProperty("--sev-core", t.core);
+        const hits = row.querySelector(".sec-feed-hits");
+        if (hits) hits.textContent = formatNumber(ip.count);
+        row.title = `${ip.ip} — ${formatNumber(ip.count)} hits`;
+      });
+      return;
+    }
+    m.feedSig = sig;
+    body.innerHTML = list.map((ip, idx) => {
+      const t = arcTier(ip.count);
+      const where = [ip.country || "Unknown", ip.city].filter(Boolean).map(esc).join(" · ");
+      return `<button type="button" class="sec-feed-row" style="--sev:${t.glow};--sev-core:${t.core};animation-delay:${idx * 45}ms"` +
+        ` data-ip="${esc(ip.ip)}" data-lat="${ip.lat}" data-lon="${ip.lon}" title="${esc(ip.ip)} — ${formatNumber(ip.count)} hits">` +
+        `<span class="sec-feed-bar"></span>` +
+        `<span class="sec-feed-main"><span class="sec-feed-ip">${esc(ip.ip)}</span>` +
+        `<span class="sec-feed-meta">${where}${ip.port ? " · :" + esc(ip.port) : ""}</span></span>` +
+        `<span class="sec-feed-hits">${formatNumber(ip.count)}</span></button>`;
+    }).join("");
+  }
+
+  function renderAttackMap(m, byIp, force) {
+    if (!m) return;
+    const next = byIp || [];
+    m.lastByIp = next;
+    // Only positions and severity tier affect what is drawn. Hit counts tick on
+    // almost every poll of a live firewall, but they change the picture only
+    // when they cross a tier boundary — so a plain count bump no longer tears
+    // down the marker layer and the SVG (that was the 5s stutter).
+    const geomSig = next
+      .map((i) => i.ip + ":" + i.lat + "," + i.lon + ":" + tierIndex(i.count))
+      .join("|");
+    buildAttackPulses(m, next);   // cheap incremental diff, runs every poll
+    if (force || geomSig !== m.geomSig) {
+      m.geomSig = geomSig;
+      drawAttackArcs(m);       // also refreshes the HUD and legend
+      scheduleImpacts(m);
+    } else {
+      updateMapHud(m, next.filter((i) => i.lat != null && i.lon != null));
+      updateMapLegend(m);
+    }
+    renderAttackFeed(m);
+  }
+
+  // ── FX application ───────────────────────────────────────────────────────
+  function applyMapFxTo(m, skipRender) {
+    if (!m || !m.map) return;
+    const el = m.map.getContainer();
+    el.dataset.palette = mapFx.palette;
+    const flags = ["sweep", "grid", "scanlines", "vignette", "frame", "hud", "feed", "legend"];
+    for (const f of flags) el.classList.toggle("fx-no-" + f, !mapFx[f]);
+    if (!skipRender) renderAttackMap(m, m.lastByIp || [], true);
+  }
+  function applyMapFx() {
+    applyMapFxTo(secMap);
+    applyMapFxTo(ovMap);
+  }
+
+  function initSecurityMap() {
+    const el = document.getElementById("sec-map");
+    if (!el || secMap) return;
+    secMap = createAttackMap(el, routerTarget());
+  }
+
+  function initOverviewMap() {
+    const el = document.getElementById("ov-map");
+    if (!el || ovMap) return;
+    ovMap = createAttackMap(el, routerTarget());
+  }
+
+  function updateMapTarget(m, target) {
+    if (!m) return;
+    m.target = target;
+    drawAttackArcs(m);
+  }
+
+  function applyRouterTarget() {
+    const t = routerTarget();
+    updateMapTarget(secMap, t);
+    updateMapTarget(ovMap, t);
+  }
+
+  // ── Settings ▸ Map : appearance controls (injected at runtime) ───────────
+  const MAP_FX_TOGGLES = [
+    ["arcs", "Attack arcs", "Curved trails from each source to the gateway"],
+    ["particles", "Tracer particles", "Glowing dot that rides each arc"],
+    ["pulses", "Source pulses", "Pulsing rings at attacking IP locations"],
+    ["impacts", "Impact shockwaves", "Ripple at the gateway as volleys land"],
+    ["sweep", "Radar sweep", "Rotating radar cone centred on the gateway"],
+    ["grid", "Tactical grid", "Faint coordinate grid over the basemap"],
+    ["scanlines", "Scanlines", "CRT-style scrolling scanline texture"],
+    ["vignette", "Vignette", "Darkened edges for focus"],
+    ["frame", "Corner brackets", "HUD framing brackets in each corner"],
+    ["hud", "Threat monitor HUD", "Live counters and threat level meter"],
+    ["feed", "Live attack feed", "Scrolling list of recent sources"],
+    ["legend", "Severity legend", "Colour key with per-tier counts"],
+  ];
+
+  let _mapFxUiReady = false;
+  function injectMapFxSettings() {
+    if (_mapFxUiReady) return;
+    // NB: must be scoped to .fw-pane — the subtab *button* carries the same
+    // data-settings-pane attribute and appears earlier in the DOM.
+    const pane = document.querySelector('.fw-pane[data-settings-pane="map"]');
+    if (!pane) return;
+    _mapFxUiReady = true;
+
+    const card = document.createElement("div");
+    card.className = "card mapfx-card";
+    card.innerHTML = `
+      <div class="card-head">
+        <h2>Attack map appearance</h2>
+        <span class="muted">Live preview — applies to Overview and Security ▸ Attacks</span>
+      </div>
+      <div class="mapfx-body">
+        <div class="mapfx-row">
+          <label class="mapfx-field">
+            <span class="mapfx-field-label">Threat palette</span>
+            <select id="mapfx-palette">
+              <option value="crimson">Crimson (default)</option>
+              <option value="cyber">Cyber neon</option>
+              <option value="matrix">Matrix</option>
+              <option value="amber">Amber alert</option>
+            </select>
+          </label>
+          <label class="mapfx-field">
+            <span class="mapfx-field-label">Arc density</span>
+            <select id="mapfx-density">
+              <option value="calm">Calm — 16 arcs</option>
+              <option value="normal">Normal — 40 arcs</option>
+              <option value="intense">Intense — 80 arcs</option>
+            </select>
+          </label>
+        </div>
+        <div class="mapfx-swatches" id="mapfx-swatches"></div>
+        <div class="mapfx-grid" id="mapfx-toggles">
+          ${MAP_FX_TOGGLES.map(([k, label, hint]) => `
+            <label class="mapfx-toggle" title="${esc(hint)}">
+              <input type="checkbox" data-fx="${k}">
+              <span class="mapfx-switch"></span>
+              <span class="mapfx-toggle-text"><b>${esc(label)}</b><em>${esc(hint)}</em></span>
+            </label>`).join("")}
+        </div>
+        <div class="mapfx-actions">
+          <button class="btn btn-sm" id="mapfx-reset" type="button">Reset to defaults</button>
+          <span class="muted mapfx-saved" id="mapfx-msg"></span>
+        </div>
+      </div>`;
+    pane.appendChild(card);
+
+    const selPal = card.querySelector("#mapfx-palette");
+    const selDen = card.querySelector("#mapfx-density");
+    const msg = card.querySelector("#mapfx-msg");
+
+    function flash(t) {
+      if (!msg) return;
+      msg.textContent = t;
+      msg.classList.add("on");
+      clearTimeout(msg._t);
+      msg._t = setTimeout(() => msg.classList.remove("on"), 1400);
+    }
+    function paintSwatches() {
+      const sw = card.querySelector("#mapfx-swatches");
+      sw.innerHTML = mapPalette().map((t) =>
+        `<span class="mapfx-swatch" style="--sw:${t.glow};--sw-core:${t.core}"><i></i>${esc(t.label)}</span>`
+      ).join("");
+    }
+    function syncUi() {
+      selPal.value = mapFx.palette;
+      selDen.value = mapFx.density;
+      card.querySelectorAll("[data-fx]").forEach((cb) => { cb.checked = !!mapFx[cb.dataset.fx]; });
+      paintSwatches();
+    }
+
+    selPal.addEventListener("change", () => { mapFx.palette = selPal.value; saveMapFx(); paintSwatches(); applyMapFx(); flash("Saved"); });
+    selDen.addEventListener("change", () => { mapFx.density = selDen.value; saveMapFx(); applyMapFx(); flash("Saved"); });
+    card.querySelectorAll("[data-fx]").forEach((cb) => {
+      cb.addEventListener("change", () => { mapFx[cb.dataset.fx] = cb.checked; saveMapFx(); applyMapFx(); flash("Saved"); });
+    });
+    card.querySelector("#mapfx-reset").addEventListener("click", () => {
+      mapFx = Object.assign({}, MAP_FX_DEFAULTS);
+      saveMapFx(); syncUi(); applyMapFx(); flash("Reset");
+    });
+
+    syncUi();
+  }
+
+  // Build the settings UI once the DOM is parsed, with a click fallback in
+  // case this module is evaluated before the settings markup exists.
+  document.addEventListener("visibilitychange", refreshMapAwake);
+  setTimeout(injectMapFxSettings, 0);
+  document.addEventListener("click", (ev) => {
+    if (ev.target.closest('[data-settings-pane="map"]')) setTimeout(injectMapFxSettings, 0);
+  }, true);
+
+  // ── Security hits-over-time chart ─────────────────────────────────────────
+  let _secChartSeries  = [];
+  let _secChartHover   = null;
+  let _secChartRaf     = null;
+  let _secChartProgress = 0;   // 0→1 draw-in animation
+
+  function _secChartAttachHover(canvas) {
+    canvas._secHoverBound = canvas._secHoverBound || ((e) => {
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const n  = _secChartSeries.length;
+      if (!n) { _secChartHover = null; return; }
+      const padL = 42, padR = 12;
+      const pw = rect.width - padL - padR;
+      const idx = Math.round(((mx - padL) / pw) * (n - 1));
+      _secChartHover = Math.max(0, Math.min(n - 1, idx));
+      _drawSecChart(canvas);
+    });
+    canvas._secLeaveBound = canvas._secLeaveBound || ((() => {
+      _secChartHover = null;
+      _drawSecChart(canvas);
+    }));
+    canvas.removeEventListener("mousemove", canvas._secHoverBound);
+    canvas.removeEventListener("mouseleave", canvas._secLeaveBound);
+    canvas.addEventListener("mousemove", canvas._secHoverBound);
+    canvas.addEventListener("mouseleave", canvas._secLeaveBound);
+  }
+
+  function _drawSecChart(canvas, progress = 1) {
+    if (!canvas) return;
+    const dpr  = window.devicePixelRatio || 1;
+    const rect  = canvas.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10) return;
+    canvas.width  = Math.round(rect.width  * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const w = rect.width, h = rect.height;
+    ctx.clearRect(0, 0, w, h);
+
+    const series = _secChartSeries;
+    const n = series.length;
+
+    if (n < 2) {
+      ctx.fillStyle = cssVar("--muted", "#8b949e");
+      ctx.font = `12px ${cssVar("--font","sans-serif")}`;
+      ctx.textAlign = "center";
+      ctx.fillText("Collecting samples…", w / 2, h / 2);
+      return;
+    }
+
+    // Layout
+    const padT = 18, padB = 28, padL = 42, padR = 12;
+    const pw = w - padL - padR;
+    const ph = h - padT - padB;
+
+    const vals = series.map(s => s[1]);
+    const max  = Math.max(1, ...vals);
+
+    // Colour tokens
+    const red    = cssVar("--red",    "#f85149");
+    const accent = cssVar("--accent", "#4f8cff");
+    const muted  = cssVar("--muted",  "#8b949e");
+    const border = cssVar("--border", "#2d333b");
+
+    // X/Y helpers
+    const xOf = i => padL + (pw * i) / (n - 1);
+    const yOf = v => padT + ph - (ph * Math.min(v, max) / max);
+
+    // ── Grid lines + Y labels ──────────────────────────────────────────────
+    const gridSteps = 4;
+    ctx.save();
+    ctx.strokeStyle = hexToRgba(border, 0.7);
+    ctx.lineWidth   = 1;
+    ctx.setLineDash([3, 4]);
+    for (let g = 0; g <= gridSteps; g++) {
+      const gy = padT + (ph / gridSteps) * g;
+      ctx.beginPath();
+      ctx.moveTo(padL, gy);
+      ctx.lineTo(w - padR, gy);
+      ctx.stroke();
+      const val = Math.round(max - (max / gridSteps) * g);
+      ctx.fillStyle = hexToRgba(muted, 0.7);
+      ctx.font = "10px monospace";
+      ctx.textAlign = "right";
+      ctx.fillText(val, padL - 6, gy + 3.5);
+    }
+    ctx.restore();
+
+    // ── Clipping mask for animated draw-in ────────────────────────────────
+    const drawUpTo = padL + pw * Math.min(progress, 1);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(padL, 0, drawUpTo - padL, h);
+    ctx.clip();
+
+    // ── Gradient fill under line ───────────────────────────────────────────
+    const grad = ctx.createLinearGradient(0, padT, 0, padT + ph);
+    grad.addColorStop(0,   hexToRgba(accent, 0.45));
+    grad.addColorStop(0.5, hexToRgba(accent, 0.15));
+    grad.addColorStop(1,   hexToRgba(accent, 0.0));
+
+    ctx.beginPath();
+    ctx.moveTo(xOf(0), yOf(vals[0]));
+    for (let i = 1; i < n; i++) {
+      const cx = (xOf(i - 1) + xOf(i)) / 2;
+      ctx.bezierCurveTo(cx, yOf(vals[i - 1]), cx, yOf(vals[i]), xOf(i), yOf(vals[i]));
+    }
+    ctx.lineTo(xOf(n - 1), padT + ph);
+    ctx.lineTo(xOf(0),     padT + ph);
+    ctx.closePath();
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // ── Main line ─────────────────────────────────────────────────────────
+    ctx.beginPath();
+    ctx.moveTo(xOf(0), yOf(vals[0]));
+    for (let i = 1; i < n; i++) {
+      const cx = (xOf(i - 1) + xOf(i)) / 2;
+      ctx.bezierCurveTo(cx, yOf(vals[i - 1]), cx, yOf(vals[i]), xOf(i), yOf(vals[i]));
+    }
+    ctx.strokeStyle = accent;
+    ctx.lineWidth   = 2;
+    ctx.setLineDash([]);
+    ctx.stroke();
+
+    // ── Peak glow dots ────────────────────────────────────────────────────
+    const peakIdx = vals.indexOf(max);
+    for (let i = 0; i < n; i++) {
+      if (vals[i] === 0) continue;
+      const isPeak = i === peakIdx;
+      const isLast = i === n - 1;
+      if (!isPeak && !isLast && vals[i] < max * 0.6) continue;
+      const px = xOf(i), py = yOf(vals[i]);
+      const col = isPeak ? red : accent;
+
+      if (isPeak) {
+        // Outer glow ring
+        const glow = ctx.createRadialGradient(px, py, 0, px, py, 14);
+        glow.addColorStop(0,   hexToRgba(col, 0.35));
+        glow.addColorStop(1,   hexToRgba(col, 0.0));
+        ctx.beginPath();
+        ctx.arc(px, py, 14, 0, Math.PI * 2);
+        ctx.fillStyle = glow;
+        ctx.fill();
+      }
+
+      // Dot
+      ctx.beginPath();
+      ctx.arc(px, py, isPeak ? 5 : 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = isPeak ? red : hexToRgba(accent, 0.9);
+      ctx.fill();
+      ctx.strokeStyle = cssVar("--card", "#1c2333");
+      ctx.lineWidth = isPeak ? 2 : 1.5;
+      ctx.stroke();
+    }
+
+    ctx.restore();  // end clip
+
+    // ── X axis time labels ─────────────────────────────────────────────────
+    ctx.fillStyle = hexToRgba(muted, 0.8);
+    ctx.font = "10px monospace";
+    ctx.textAlign = "center";
+    const steps = Math.min(6, n);
+    for (let i = 0; i < steps; i++) {
+      const idx = Math.round((i * (n - 1)) / (steps - 1));
+      const t   = new Date(series[idx][0] * 1000);
+      const lbl = `${String(t.getHours()).padStart(2,"0")}:${String(t.getMinutes()).padStart(2,"0")}:${String(t.getSeconds()).padStart(2,"0")}`;
+      ctx.fillText(lbl, xOf(idx), padT + ph + 18);
+    }
+
+    // ── Hover crosshair + tooltip ──────────────────────────────────────────
+    if (_secChartHover !== null && _secChartHover < n) {
+      const hi  = _secChartHover;
+      const hx  = xOf(hi);
+      const hv  = vals[hi];
+      const hy  = yOf(hv);
+
+      // Vertical crosshair
+      ctx.save();
+      ctx.strokeStyle = hexToRgba(muted, 0.5);
+      ctx.lineWidth   = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(hx, padT);
+      ctx.lineTo(hx, padT + ph);
+      ctx.stroke();
+      ctx.restore();
+
+      // Highlight dot
+      ctx.beginPath();
+      ctx.arc(hx, hy, 6, 0, Math.PI * 2);
+      ctx.fillStyle = hexToRgba(accent, 0.25);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(hx, hy, 4, 0, Math.PI * 2);
+      ctx.fillStyle = accent;
+      ctx.fill();
+
+      // Tooltip bubble
+      const t   = new Date(series[hi][0] * 1000);
+      const tLbl = `${String(t.getHours()).padStart(2,"0")}:${String(t.getMinutes()).padStart(2,"0")}:${String(t.getSeconds()).padStart(2,"0")}`;
+      const tip = `${hv} hit${hv !== 1 ? "s" : ""}  ${tLbl}`;
+      ctx.font = "bold 11px monospace";
+      const tipW = ctx.measureText(tip).width + 16;
+      const tipH = 22;
+      let tx = hx + 10;
+      if (tx + tipW > w - padR) tx = hx - tipW - 10;
+      const ty = Math.max(padT, hy - tipH / 2);
+
+      ctx.fillStyle   = cssVar("--card", "#1c2333");
+      ctx.strokeStyle = hexToRgba(accent, 0.6);
+      ctx.lineWidth   = 1;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.roundRect(tx, ty, tipW, tipH, 5);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle  = cssVar("--text", "#e6edf3");
+      ctx.textAlign  = "left";
+      ctx.fillText(tip, tx + 8, ty + 14.5);
+    }
+  }
+
+  function drawSecurityChart(canvas, series) {
+    if (!canvas) return;
+    _secChartSeries = series || [];
+    _secChartAttachHover(canvas);
+
+    // Animate draw-in
+    if (_secChartRaf) cancelAnimationFrame(_secChartRaf);
+    _secChartProgress = 0;
+    const start = performance.now();
+    const dur   = 600;
+
+    function tick(now) {
+      _secChartProgress = Math.min((now - start) / dur, 1);
+      // Ease out cubic
+      const p = 1 - Math.pow(1 - _secChartProgress, 3);
+      _drawSecChart(canvas, p);
+      if (_secChartProgress < 1) _secChartRaf = requestAnimationFrame(tick);
+    }
+    _secChartRaf = requestAnimationFrame(tick);
+  }
+
+  function renderSecurity(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "Security stats unavailable");
+      return;
+    }
+    const st = d.stats || {};
+    els.secHits.textContent = formatNumber(st.hits);
+    els.secIps.textContent = formatNumber(st.unique_ips);
+    els.secCountries.textContent = formatNumber(st.countries);
+    els.secRate.textContent = st.hits_1m != null ? `${formatNumber(st.hits_1m)} / min` : "—";
+    els.secGeoHint.textContent = d.geo_db.hint || `${formatNumber(st.unique_ips)} sources · last hit ${formatRelative(st.last_event)}`;
+
+    renderAttackMap(secMap, d.by_ip || []);
+
+    const countries = d.countries || [];
+    const cTotal = countries.reduce((s, c) => s + c.count, 0) || 1;
+    const cMax   = countries[0] ? countries[0].count : 1;
+    const cChip  = document.getElementById("sec-countries-chip");
+    if (cChip) cChip.textContent = `${formatNumber(countries.length)} ${countries.length === 1 ? "country" : "countries"}`;
+
+    // Colour ramp for rank: top 3 get distinct colours, rest fade through amber→muted
+    const RANK_COLORS = ["#f85149", "#ffa657", "#d29922"];
+    function rankColor(idx) {
+      if (idx < 3) return RANK_COLORS[idx];
+      const t = Math.min((idx - 3) / 12, 1);
+      // fade from amber to muted
+      return `color-mix(in srgb, var(--amber) ${Math.round((1-t)*60)}%, var(--muted))`;
+    }
+
+    const buildCountryRow = (c, idx) => {
+      const pct     = Math.round(c.count / cMax * 100);
+      const sharePct = ((c.count / cTotal) * 100).toFixed(1);
+      const color   = rankColor(idx);
+      const iso     = (c.iso && c.iso !== "??") ? c.iso.toUpperCase() : "—";
+      return `
+      <tr class="country-row">
+        <td>
+          <div class="country-cell">
+            <span class="country-rank" style="color:${color}">#${idx + 1}</span>
+            <span class="country-iso-badge" style="--cc:${color}">${esc(iso)}</span>
+            <span class="country-name">${esc(c.name || "Unknown")}</span>
+          </div>
+        </td>
+        <td>
+          <div class="country-bar-wrap">
+            <div class="country-bar-fill" style="width:${pct}%;background:${color}"></div>
+          </div>
+        </td>
+        <td class="country-hits">${formatNumber(c.count)}</td>
+        <td class="country-share">${sharePct}%</td>
+      </tr>`;
+    };
+
+    els.secCountriesBody.innerHTML = countries.map(buildCountryRow).join("");
+    // Full list lives inline now (the row-cap toggle shows 25 / expands);
+    // the countries modal popup is retired.
+    document.getElementById("sec-countries-more-wrap").hidden = true;
+
+    const byIp = d.by_ip || [];
+    const ipMax = byIp[0] ? byIp[0].count : 1;
+    // While the first availability probe is in flight, render the ban buttons
+    // anyway. They used to stay empty until the 15s security poll ran, which
+    // made Top Attackers look like it had no actions for several seconds.
+    const csUp = state.secCrowdsecUp !== false;
+    const iChip = document.getElementById("sec-ips-chip");
+    if (iChip) iChip.textContent = `${formatNumber(byIp.length)} sources`;
+
+    // Threat level derived from hit-count percentile
+    function threatLevel(count) {
+      const pct = count / ipMax;
+      if (pct >= 0.5) return "HIGH";
+      if (pct >= 0.15) return "MED";
+      return "LOW";
+    }
+    function threatBadge(count, banned) {
+      if (banned) return '<span class="ip-threat ip-threat-banned">BANNED</span>';
+      const lvl = threatLevel(count);
+      return `<span class="ip-threat ip-threat-${lvl.toLowerCase()}">${lvl}</span>`;
+    }
+    const IP_COPY_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+    const IP_DONE_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`;
+    const REPORT_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3Z"/></svg>`;
+
+    // How recently an attacker was last seen is the difference between a live
+    // problem and history, so the column is weighted rather than uniformly muted.
+    function recencyClass(ts) {
+      if (!ts) return "";
+      const age = Date.now() / 1000 - ts;
+      if (age < 300) return "fresh";
+      if (age < 3600) return "recent";
+      if (age > 86400) return "stale";
+      return "";
+    }
+
+    // The address is the row's identifier, so it is rendered as plain
+    // monospace that aligns down the column rather than as a coloured pill.
+    // Severity is carried once, by the threat badge plus the row rail.
+    //
+    // A full IPv6 address is 39 chars and would otherwise dictate the width
+    // of the whole column (measured: 329px vs 126px for v4), so the middle
+    // is elided. The complete value is kept in data-copy, the row's data-ip
+    // and the title, so copy / hover / ban all still use the real address.
+    const IP_SHORT_MAX = 24;
+    function shortenIp(ip) {
+      if (!ip || ip.length <= IP_SHORT_MAX || ip.indexOf(":") === -1) return ip;
+      return ip.slice(0, 13) + "\u2026" + ip.slice(-8);
+    }
+    function ipAddr(ip) {
+      const short = shortenIp(ip);
+      const attr  = short !== ip ? ` title="${esc(ip)}"` : "";
+      return `<span class="atk-ip">` +
+        `<span class="atk-ip-addr"${attr}>${esc(short)}</span>` +
+        `<button class="ip-copy-btn" title="Copy IP" data-copy="${esc(ip)}">${IP_COPY_SVG}</button>` +
+        `</span>`;
+    }
+
+    // tuxwall.org community info button — links to the per-IP report card.
+    // The API result is used for COLOUR ONLY (no hit count is rendered):
+    // low=green, medium=yellow, high=red, critical=purple. Values come from
+    // the module-level cache (5 min TTL); uncached IPs are fetched once and
+    // deduped in-flight.
+    const COMMUNITY_SEV = ["low", "medium", "high", "critical"];
+
+    function communityTitle(sev) {
+      if (sev === "none")    return "No community reports yet — open tuxwall.org report card";
+      if (sev === "unknown") return "tuxwall.org unreachable — open report card";
+      if (!sev)              return "Checking tuxwall.org community severity…";
+      return `Community severity: ${sev.toUpperCase()} — open tuxwall.org report card`;
+    }
+
+    function communityBadge(ip) {
+      const safe = esc(ip);
+      const cached = communityCache.get(ip);
+      const fresh = cached && Date.now() - cached.ts < COMMUNITY_TTL;
+      const sev = fresh ? cached.sev : "";
+      if (!fresh) communityLookup(ip);
+      return `<a class="act-btn act-report com-badge com-sev-${esc(sev || "pending")}" href="https://tuxwall.org/ip/${safe}" target="_blank" rel="noopener" data-cip="${safe}" title="${esc(communityTitle(sev))}" aria-label="Community report for ${safe}">${REPORT_SVG}</a>`;
+    }
+
+    function applyCommunitySev(ip, sev) {
+      document.querySelectorAll(`.com-badge[data-cip="${CSS.escape(ip)}"]`).forEach(el => {
+        el.className = `act-btn act-report com-badge com-sev-${sev}`;
+        el.title = communityTitle(sev);
+      });
+    }
+
+    function communityLookup(ip) {
+      if (communityInFlight.has(ip)) return;
+      communityInFlight.add(ip);
+      fetch(`https://tuxwall.org/api/public/bans/${encodeURIComponent(ip)}`,
+            { headers: { "Accept": "application/json" } })
+        .then(r => r.ok ? r.json() : { reported: false })
+        .then(d => {
+          const raw = d && d.report ? String(d.report.severity || "").toLowerCase() : "";
+          const sev = COMMUNITY_SEV.includes(raw) ? raw : "none";
+          communityCache.set(ip, { ts: Date.now(), sev });
+          applyCommunitySev(ip, sev);
+        })
+        .catch(() => applyCommunitySev(ip, "unknown"))
+        .finally(() => communityInFlight.delete(ip));
+    }
+
+    // Build a full <tr> string for a given IP entry
+    function buildIpRow(i) {
+      const banned    = state.secBannedIps.has(i.ip);
+      const pct       = Math.round(i.count / ipMax * 100);
+      const firstSeen = i.first ? new Date(i.first * 1000).toLocaleDateString() : "—";
+      const lastSeen  = i.last  ? new Date(i.last  * 1000).toLocaleString()     : "—";
+      const location  = [i.city, i.country].filter(Boolean).join(", ") || "Unknown";
+      const banBtn    = csUp
+        ? (banned
+            ? actBtn("active", "Remove CrowdSec ban", `data-ip="${esc(i.ip)}"`, "sec-unban")
+            : actBtn("ban", "Ban via CrowdSec", `data-ip="${esc(i.ip)}"`, "sec-ban act-danger"))
+        : "";
+      const abuseBtn = communityBadge(i.ip);
+      return `<tr class="ip-row" data-ip="${esc(i.ip)}"
+          data-location="${esc(location)}"
+          data-port="${esc(i.port || "—")}"
+          data-first="${esc(firstSeen)}"
+          data-last="${esc(lastSeen)}"
+          data-count="${i.count}"
+          data-pct="${pct}"
+          data-banned="${banned}"
+          data-threat="${banned ? "banned" : threatLevel(i.count).toLowerCase()}">
+        <td>${ipAddr(i.ip)}</td>
+        <td>${threatBadge(i.count, banned)}</td>
+        <td>${flagEmoji(i.iso)} <span class="ip-location">${esc(location)}</span>
+            <span class="ip-isp muted" id="isp-${esc(i.ip).replace(/\./g,'-')}"></span></td>
+        <td class="atk-port">${i.port ? `<span class="port-chip">:${esc(i.port)}</span>` : '<span class="muted">—</span>'}</td>
+        <td class="atk-hits"><b>${formatNumber(i.count)}</b>
+            <div class="bar"><div class="bar-fill bar-fill-err" style="width:${pct}%"></div></div></td>
+        <td class="atk-last ${recencyClass(i.last)}" title="${esc(lastSeen)}">${i.last ? esc(formatRelative(i.last)) : '<span class="muted">—</span>'}</td>
+        <td class="td-right"><div class="svc-actions">${banBtn}${abuseBtn}</div></td>
+      </tr>`;
+    }
+
+    // Keyed diff update — only touch rows that changed, never flash the whole table
+    function diffIpTable(tbody, entries, limit) {
+      const slice      = entries.slice(0, limit);
+      const newIps     = slice.map(i => i.ip);
+      const newMap     = Object.fromEntries(slice.map(i => [i.ip, i]));
+      const existingRows = Array.from(tbody.querySelectorAll("tr[data-ip]"));
+      const existingIps  = existingRows.map(r => r.dataset.ip);
+
+      // Remove rows no longer in the list
+      existingRows.forEach(r => {
+        if (!newMap[r.dataset.ip]) r.remove();
+      });
+
+      // Insert / update rows in order
+      newIps.forEach((ip, idx) => {
+        const entry      = newMap[ip];
+        const banned     = state.secBannedIps.has(ip);
+        const pct        = Math.round(entry.count / ipMax * 100);
+        let   row        = tbody.querySelector(`tr[data-ip="${CSS.escape(ip)}"]`);
+        const isNew      = !row;
+
+        if (isNew) {
+          // Brand-new IP — insert a fresh row
+          const tmp = document.createElement("tbody");
+          tmp.innerHTML = buildIpRow(entry);
+          row = tmp.firstElementChild;
+          row.classList.add("ip-row-new");
+          setTimeout(() => row.classList.remove("ip-row-new"), 600);
+        } else {
+          // Existing row — update only the cells that change frequently
+          // (threat badge, hit count, bar, ban button — NOT the ISP span)
+          const cells      = row.cells;
+          const curBanned  = row.dataset.banned === "true";
+          const countChanged = row.dataset.count !== String(entry.count);
+          const bannedChanged = curBanned !== banned;
+
+          // Update cells that change on each refresh
+          if (countChanged || bannedChanged) {
+            // Row severity rail (replaces the old IP pill colour)
+            row.dataset.threat = banned ? "banned" : threatLevel(entry.count).toLowerCase();
+            // Threat badge
+            if (cells[1]) cells[1].innerHTML = threatBadge(entry.count, banned);
+            // Hit count + share bar now share one cell (index 4)
+            if (cells[4]) cells[4].innerHTML =
+              `<b>${formatNumber(entry.count)}</b>` +
+              `<div class="bar"><div class="bar-fill bar-fill-err" style="width:${pct}%"></div></div>`;
+            // Update data attrs
+            row.dataset.count  = entry.count;
+            row.dataset.pct    = pct;
+            row.dataset.banned = banned;
+          }
+          // Relative timestamps go stale on their own, so this one is
+          // refreshed unconditionally rather than only when the count moves.
+          if (cells[5] && entry.last) {
+            cells[5].textContent = formatRelative(entry.last);
+            cells[5].title = new Date(entry.last * 1000).toLocaleString();
+            cells[5].className = "atk-last " + recencyClass(entry.last);
+          }
+          // Always rebuild the actions cell — csUp may have changed since first render,
+          // and this is just buttons so there's no flicker risk
+          if (cells[6]) {
+            const abuseBtn = communityBadge(entry.ip);
+            const banBtn = csUp
+              ? (banned
+                  ? actBtn("active", "Remove CrowdSec ban", `data-ip="${esc(entry.ip)}"`, "sec-unban")
+                  : actBtn("ban", "Ban via CrowdSec", `data-ip="${esc(entry.ip)}"`, "sec-ban act-danger"))
+              : "";
+            cells[6].innerHTML = `<div class="svc-actions">${banBtn}${abuseBtn}</div>`;
+          }
+        }
+
+        // Ensure correct DOM order
+        const sibling = tbody.children[idx];
+        if (sibling !== row) tbody.insertBefore(row, sibling || null);
+
+        // Wire up copy button if new row
+        if (isNew) {
+          const copyBtn = row.querySelector(".ip-copy-btn");
+          if (copyBtn) {
+            copyBtn.addEventListener("click", (e) => {
+              e.stopPropagation();
+              navigator.clipboard.writeText(copyBtn.dataset.copy).then(() => {
+                copyBtn.innerHTML = IP_DONE_SVG;
+                copyBtn.classList.add("copied");
+                setTimeout(() => {
+                  copyBtn.innerHTML = IP_COPY_SVG;
+                  copyBtn.classList.remove("copied");
+                }, 1200);
+              });
+            });
+          }
+          attachIpRowHover(row);
+        }
+      });
+
+      // If table was empty placeholder, clear it
+      const placeholder = tbody.querySelector("td[colspan]");
+      if (placeholder && newIps.length) placeholder.closest("tr")?.remove();
+    }
+
+    // Attach hover card to a single row (called once per row, on insert)
+    function attachIpRowHover(row) {
+      const hoverCard = document.getElementById("ip-hover-card");
+      const ipCell = row.querySelector("td:first-child");
+      if (!ipCell) return;
+      
+      ipCell.addEventListener("mouseenter", (e) => {
+        const ispEl = document.getElementById("isp-" + row.dataset.ip.replace(/\./g, "-"));
+        const isp   = ispEl ? ispEl.textContent.replace(/^·\s*/, "").trim() : "";
+        hoverCard.innerHTML = `
+          <div class="iph-ip mono">${esc(row.dataset.ip)}</div>
+          <div class="iph-row"><span class="iph-label">Location</span><span>${esc(row.dataset.location)}</span></div>
+          ${isp ? `<div class="iph-row"><span class="iph-label">ISP</span><span>${esc(isp)}</span></div>` : ""}
+          <div class="iph-row"><span class="iph-label">Top Port</span><span class="mono">${esc(row.dataset.port)}</span></div>
+          <div class="iph-row"><span class="iph-label">Hits</span><span>${esc(row.dataset.count)} <span class="muted">(${esc(row.dataset.pct)}% of max)</span></span></div>
+          <div class="iph-row"><span class="iph-label">First seen</span><span>${esc(row.dataset.first)}</span></div>
+          <div class="iph-row"><span class="iph-label">Last seen</span><span>${esc(row.dataset.last)}</span></div>
+          <div class="iph-row"><span class="iph-label">CrowdSec</span>
+            <span style="color:${row.dataset.banned==='true'?'var(--red)':'var(--green)'}">
+              ${row.dataset.banned === "true" ? "Banned ✓" : "Not banned"}
+            </span></div>`;
+        hoverCard.hidden = false;
+        positionHoverCard(e);
+      });
+      ipCell.addEventListener("mousemove", positionHoverCard);
+      ipCell.addEventListener("mouseleave", () => { hoverCard.hidden = true; });
+    }
+
+    // Run the diff update
+    const newIps = byIp.map(i => i.ip);
+    const prevIps = Array.from(els.secIpsBody.querySelectorAll("tr[data-ip]")).map(r => r.dataset.ip);
+    diffIpTable(els.secIpsBody, byIp, byIp.length);
+
+    // Server-side ISP (DB-IP ASN) is available directly in the snapshot —
+    // fill the spans immediately instead of waiting on ip-api.com.
+    byIp.forEach((i) => {
+      if (i.isp) {
+        const el = document.getElementById("isp-" + i.ip.replace(/\./g, "-"));
+        if (el && !el.textContent) el.textContent = i.isp;
+      }
+    });
+
+    // Only fetch ISP info for IPs that are new to the table
+    const brandNewIps = byIp.filter(i => !prevIps.includes(i.ip));
+    if (brandNewIps.length) fetchIspInfo(brandNewIps, "sec-ips");
+
+    // Full list lives inline now (the row-cap toggle shows 25 / expands);
+    // the attackers modal popup is retired.
+    document.getElementById("sec-ips-more-wrap").hidden = true;
+
+    // (Recent Hits table replaced by Traffic Monitor)
+
+    requestAnimationFrame(() => {
+      drawSecurityChart(els.secChart, d.series || []);
+    });
+  }
+
+  async function refreshSecurity() {
+    try {
+      const data = await fetchJSON("/api/security");
+      renderSecurity(data);
+    } catch (err) {
+      showBanner(true, "Security stats error: " + err.message);
+    }
+  }
+
+  function renderSuricata(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "Suricata data unavailable");
+      return;
+    }
+    if (!d.enabled) {
+      els.secSuricataHint.textContent = "not running";
+      els.secSuricataBody.innerHTML =
+        `<tr><td colspan="5" class="empty">${esc(d.hint || "Suricata not available.")}</td></tr>`;
+      return;
+    }
+    const alerts = d.alerts || [];
+    const counts = { HIGH: 0, MEDIUM: 0, LOW: 0 };
+    alerts.forEach((a) => { if (counts[a.severity] != null) counts[a.severity]++; });
+    const sev = counts[state.suricataSev] != null ? state.suricataSev : "HIGH";
+    state.suricataSev = sev;
+    els.secSuricataTabs.querySelectorAll(".seg-btn").forEach((b) => {
+      const key = (b.dataset.sev || "").toLowerCase();
+      b.classList.toggle("active", b.dataset.sev === sev);
+      const c = b.querySelector(".seg-count");
+      if (c && counts[b.dataset.sev] != null) c.textContent = formatNumber(counts[b.dataset.sev]);
+    });
+    els.secSuricataHint.textContent = `${formatNumber(d.count_24h)} alerts in last 24h`;
+    const shown = alerts.filter((a) => a.severity === sev);
+    els.secSuricataBody.innerHTML = shown.map((a) => `
+      <tr>
+        <td class="mono">${formatTime(a.ts)}</td>
+        <td><b>${esc(a.sig)}</b></td>
+        <td><span class="badge sev-${esc(a.severity)}">${esc(a.severity)}</span></td>
+        <td class="mono">${esc(a.src)}${a.sport ? ":" + esc(a.sport) : ""}</td>
+        <td class="mono">${esc(a.dst)}${a.dport ? ":" + esc(a.dport) : ""}</td>
+      </tr>`).join("")
+      || `<tr><td colspan="5" class="empty">No ${esc(sev)} alerts in the last 24h.</td></tr>`;
+  }
+
+  async function refreshSuricata() {
+    try {
+      const data = await fetchJSON("/api/security/suricata");
+      renderSuricata(data);
+    } catch (err) {
+      showBanner(true, "Suricata error: " + err.message);
+    }
+  }
+
+  function renderZeek(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "Zeek data unavailable");
+      return;
+    }
+    if (!d.enabled) {
+      els.secZeekHint.textContent = "not running";
+      els.secZeekBody.innerHTML =
+        `<tr><td colspan="5" class="empty">${esc(d.hint || "Zeek not available.")}</td></tr>`;
+      els.secZeekDevHint.textContent = "not running";
+      els.secZeekDevBody.innerHTML =
+        `<tr><td colspan="5" class="empty">${esc(d.hint || "Zeek not available.")}</td></tr>`;
+      return;
+    }
+    const notices = d.notices || [];
+    els.secZeekHint.textContent = notices.length
+      ? `${formatNumber(d.count_24h)} notices in last 24h`
+      : "no notices in last 24h";
+    els.secZeekBody.innerHTML = notices.map((n) => `
+      <tr>
+        <td class="mono">${formatTime(n.ts)}</td>
+        <td><span class="badge sev-LOW">${esc(n.note)}</span></td>
+        <td>${esc(n.msg || "—")}</td>
+        <td class="mono">${esc(n.src)}${n.sport ? ":" + esc(n.sport) : ""}</td>
+        <td class="mono">${esc(n.dst)}${n.dport ? ":" + esc(n.dport) : ""}</td>
+      </tr>`).join("")
+      || `<tr><td colspan="5" class="empty">No Zeek notices in the last 24h — normal for a quiet network.</td></tr>`;
+    const devices = d.devices || [];
+    els.secZeekDevHint.textContent = devices.length
+      ? `${devices.length} active devices · last hour`
+      : "no active devices · last hour";
+    els.secZeekDevBody.innerHTML = devices.map((v) => `
+      <tr>
+        <td class="mono">${esc(v.device)}</td>
+        <td>${formatNumber(v.conns)}</td>
+        <td>${formatNumber(v.peer_count)}</td>
+        <td class="mono">${esc(v.top_peer || "—")}${v.top_peer_hits ? ` <span class="muted">×${formatNumber(v.top_peer_hits)}</span>` : ""}</td>
+        <td class="mono">${formatTime(v.last_ts)}</td>
+      </tr>`).join("")
+      || `<tr><td colspan="5" class="empty">No LAN→external connections seen in the last hour.</td></tr>`;
+  }
+
+  async function refreshZeek() {
+    try {
+      const data = await fetchJSON("/api/security/zeek");
+      renderZeek(data);
+    } catch (err) {
+      showBanner(true, "Zeek error: " + err.message);
+    }
+  }
+
+  function renderZeekQuic(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "Zeek QUIC data unavailable");
+      return;
+    }
+    if (!d.enabled) {
+      els.secQuicHint.textContent = "no QUIC traffic seen yet";
+      els.secQuicBody.innerHTML =
+        `<tr><td colspan="5" class="empty">${esc(d.hint || "—")}</td></tr>`;
+      return;
+    }
+    const flows = d.flows || [];
+    els.secQuicHint.textContent = flows.length
+      ? `${formatNumber(d.count_1h)} QUIC flows · last hour`
+      : "no QUIC flows in last hour";
+    els.secQuicBody.innerHTML = flows.map((f) => {
+      const port = String(f.port || "");
+      const odd = !f.sni && port !== "443";
+      return `
+      <tr>
+        <td class="mono">${formatTime(f.ts)}</td>
+        <td class="mono">${esc(f.device)}</td>
+        <td class="mono">${esc(f.peer)}${port ? ":" + esc(port) : ""}</td>
+        <td>${esc(f.version || "—")}</td>
+        <td class="mono">${odd ? "<b>— (anonymous)</b>" : esc(f.sni || "—")}</td>
+      </tr>`; }).join("")
+      || `<tr><td colspan="5" class="empty">No QUIC flows in the last hour.</td></tr>`;
+  }
+
+  async function refreshZeekQuic() {
+    try {
+      const data = await fetchJSON("/api/security/zeek/quic");
+      renderZeekQuic(data);
+    } catch (err) {
+      showBanner(true, "Zeek QUIC error: " + err.message);
+    }
+  }
+
+  let aidePollTimer = null;
+
+  function renderAide(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "AIDE data unavailable");
+      return;
+    }
+    if (!d.enabled) {
+      els.secAideHint.textContent = "not installed";
+      els.secAideSummary.textContent = d.hint || "";
+      els.secAideBody.innerHTML =
+        `<tr><td colspan="2" class="empty">${esc(d.hint || "AIDE not available.")}</td></tr>`;
+      return;
+    }
+    const st = d.state || {};
+    const db = d.db;
+    const nightly = d.nightly || {};
+    const dbBits = db ? `baseline ${formatTime(db.mtime)}` : "no baseline database";
+
+    if (st.running) {
+      const mins = st.started_at ? Math.max(0, Math.round((Date.now() / 1000 - st.started_at) / 60)) : 0;
+      els.secAideHint.textContent = `running ${st.op}… ${mins} min`;
+      els.secAideSummary.textContent = "Full scan in progress (about 25 min on this system). This page will update automatically.";
+      els.secAideBody.innerHTML =
+        `<tr><td colspan="2" class="empty">AIDE ${esc(st.op)} running since ${formatTime(st.started_at)}…</td></tr>`;
+      if (!aidePollTimer) aidePollTimer = setInterval(async () => {
+        try {
+          const data = await fetchJSON("/api/security/aide");
+          if (!(data.state || {}).running) {
+            clearInterval(aidePollTimer);
+            aidePollTimer = null;
+          }
+          renderAide(data);
+        } catch (err) { /* transient */ }
+      }, 10000);
+    } else {
+      if (aidePollTimer) { clearInterval(aidePollTimer); aidePollTimer = null; }
+      const nightBits = nightly.enabled
+        ? `nightly check on${(nightly.last && nightly.last.summary) && nightly.last.summary.total != null ? ` · last: ${formatNumber(nightly.last.summary.total)} entries` : ""}`
+        : "nightly check off";
+      els.secAideHint.textContent = `v${d.version || "?"} · ${dbBits} · ${nightBits}`;
+
+      const summary = st.summary;
+      const changes = st.changes || [];
+      if (st.error) {
+        els.secAideSummary.textContent = "Last run error: " + st.error;
+      } else if (summary && (summary.added != null || summary.removed != null || summary.changed != null)) {
+        els.secAideSummary.textContent = `Last ${st.op || "check"}: ${formatNumber(summary.added || 0)} added · ${formatNumber(summary.removed || 0)} removed · ${formatNumber(summary.changed || 0)} changed — ${summary.added || summary.removed || summary.changed ? "review below" : "system clean"}`;
+      } else {
+        const last = nightly.last;
+        els.secAideSummary.textContent = last && last.summary && (last.summary.added != null || last.summary.changed != null || last.summary.removed != null)
+          ? `Nightly result: ${formatNumber(last.summary.added || 0)} added · ${formatNumber(last.summary.removed || 0)} removed · ${formatNumber(last.summary.changed || 0)} changed`
+          : "No check results yet — run a check (takes ~25 min).";
+      }
+      const source = (changes.length ? changes : ((nightly.last || {}).changes || []));
+      els.secAideBody.innerHTML = source.map((c) => {
+        const badge = c.type === "added" ? "sev-HIGH" : (c.type === "changed" ? "sev-MEDIUM" : "sev-LOW");
+        return `<tr><td><span class="badge ${badge}">${esc(c.type)}</span></td><td class="mono">${esc(c.path)}</td></tr>`;
+      }).join("")
+      || `<tr><td colspan="2" class="empty">No file changes detected since the baseline.</td></tr>`;
+    }
+    els.secAideRun.disabled = !!st.running;
+    els.secAideUpdate.disabled = !!st.running;
+  }
+
+  async function refreshAide() {
+    try {
+      const data = await fetchJSON("/api/security/aide");
+      renderAide(data);
+    } catch (err) {
+      showBanner(true, "AIDE error: " + err.message);
+    }
+  }
+
+  function setSecTab(pane) {
+    document.querySelectorAll("#sec-subtabs .fw-subtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.secPane === pane));
+    document.querySelectorAll("#view-security .fw-pane[data-sec-pane]").forEach((p) => {
+      p.hidden = p.dataset.secPane !== pane;
+    });
+  }
+  document.querySelectorAll("#sec-subtabs .fw-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => setSecTab(btn.dataset.secPane));
+  });
+
+  function bindAideActions() {
+    els.secAideRun.addEventListener("click", async () => {
+      try {
+        await postJSON("/api/security/aide/check", {});
+        await refreshAide();
+      } catch (err) {
+        showBanner(true, "AIDE check: " + err.message);
+      }
+    });
+    els.secAideUpdate.addEventListener("click", async () => {
+      if (!window.confirm("Re-baseline the AIDE database? This records every current file state as trusted — only do this after reviewing changes or intentional upgrades (~25 min).")) return;
+      try {
+        await postJSON("/api/security/aide/update", {});
+        await refreshAide();
+      } catch (err) {
+        showBanner(true, "AIDE update: " + err.message);
+      }
+    });
+  }
+
+  function renderHoneypot(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "Honeypot data unavailable");
+      return;
+    }
+    const conf = d.conf || {};
+    const st = d.state || {};
+    const stats = st.stats || {};
+    els.secHoneyPorts.value = (conf.ports || []).join(", ");
+    els.secHoneyAutoban.checked = !!conf.auto_ban;
+    els.secHoneyThreshold.value = conf.ban_threshold || 1;
+
+    if (st.listening) {
+      els.secHoneyHint.textContent = `active on ${st.wan_ip}${st.wan_ip6 ? " / " + st.wan_ip6 : ""} · ports ${(st.ports || []).join(", ")}`;
+      setBtnIcon(els.secHoneyToggle, "disable", "Disable", true);
+      els.secHoneyToggle.className = "btn btn-sm btn-danger btn-act";
+    } else {
+      els.secHoneyHint.textContent = st.error ? `error: ${st.error}` : "disabled";
+      setBtnIcon(els.secHoneyToggle, "enable", "Enable", false);
+      els.secHoneyToggle.className = "btn btn-sm btn-primary btn-act";
+    }
+    const wastedH = stats.wasted ? (stats.wasted / 3600).toFixed(1) : "0.0";
+    els.secHoneySummary.innerHTML = stats.total
+      ? `<div class="honey-stat trapped"><div class="honey-stat-value">${formatNumber(stats.total)}</div><div class="honey-stat-label">Trapped</div></div>
+         <div class="honey-stat unique"><div class="honey-stat-value">${formatNumber(stats.unique)}</div><div class="honey-stat-label">Unique IPs</div></div>
+         <div class="honey-stat held"><div class="honey-stat-value">${stats.active_count || 0}</div><div class="honey-stat-label">Held Now</div></div>
+         <div class="honey-stat wasted"><div class="honey-stat-value">${wastedH}h</div><div class="honey-stat-label">Time Wasted</div></div>
+         <div class="honey-stat banned"><div class="honey-stat-value">${formatNumber(stats.banned || 0)}</div><div class="honey-stat-label">Auto-banned</div></div>`
+      : `<span class="muted" style="padding:0 4px;">No scanners trapped yet.</span>`;
+    const honeyDot = document.getElementById("honey-status-dot");
+    if (honeyDot) honeyDot.dataset.status = st.active ? "active" : "inactive";
+
+    const active = st.active || [];
+    const traps = st.traps || [];
+    const rows = [];
+    const now = Date.now() / 1000;
+    active.slice(0, 25).forEach((a) => {
+      rows.push(`<tr><td><span class="badge sev-HIGH">trapping</span></td><td class="mono">${esc(a.ip)}</td><td class="mono">${esc(a.port)}</td><td class="mono">${formatDuration(now - a.connected_at)}</td><td class="muted">${formatTime(a.connected_at)}</td></tr>`);
+    });
+    traps.slice(0, 15).forEach((t) => {
+      rows.push(`<tr><td><span class="badge sev-LOW">released</span></td><td class="mono">${esc(t.ip)}</td><td class="mono">${esc(t.port)}</td><td class="mono">${formatDuration(t.duration)}</td><td class="muted">${formatTime(t.connected_at)}</td></tr>`);
+    });
+    els.secHoneyBody.innerHTML = rows.join("")
+      || `<tr><td colspan="5" class="empty">Honeypot is ${st.listening ? "listening — no scanners yet" : "disabled"}.</td></tr>`;
+  }
+
+  async function refreshHoneypot() {
+    try {
+      const data = await fetchJSON("/api/security/honeypot");
+      renderHoneypot(data);
+    } catch (err) {
+      showBanner(true, "Honeypot error: " + err.message);
+    }
+  }
+
+  function renderCanary(c) {
+    if (!c.ok) {
+      els.secCanaryHint.textContent = "unavailable";
+      return;
+    }
+    const ports = (c.modules || []).map((m) => `${esc(m.name)}:${m.port}`).join(" · ");
+    els.secCanaryHint.textContent = c.active
+      ? `active · ${ports}`
+      : (c.hint || "disabled");
+    const canaryDot = document.getElementById("canary-status-dot");
+    if (canaryDot) canaryDot.dataset.status = c.active ? "active" : "inactive";
+    setBtnIcon(els.secCanaryToggle, c.active ? "disable" : "enable", c.active ? "Disable" : "Enable", !!c.active);
+    els.secCanaryToggle.className = "btn btn-sm btn-act " + (c.active ? "btn-danger" : "btn-primary");
+    els.secCanaryEvents.textContent = formatNumber(c.events_24h || 0);
+    els.secCanarySources.textContent = formatNumber(c.sources_24h || 0);
+    els.secCanaryCreds.textContent = formatNumber(c.creds_24h || 0);
+    els.secCanaryBans.textContent = formatNumber(c.bans_active || 0);
+    els.secCanarySummary.textContent = (c.events_24h || c.bans_active)
+      ? `last banned: ${esc(c.last_ban_ip || "—")}`
+      : "No canary events yet - the emulators are listening.";
+    const evs = c.events || [];
+    els.secCanaryBody.innerHTML = evs.map((e) => {
+      const cred = e.service === "ssh login attempt" ? " sev-MEDIUM" : "";
+      return `<tr><td class="muted">${formatTime(e.ts)}</td><td class="mono">${esc(e.src)}</td><td>${esc(e.service)}</td><td class="mono">${esc(e.dst_port)}</td><td class="mono${cred}">${esc(e.detail)}</td></tr>`;
+    }).join("")
+      || `<tr><td colspan="5" class="empty">No deception-service events yet.</td></tr>`;
+  }
+
+  async function refreshCanary() {
+    try {
+      renderCanary(await fetchJSON("/api/security/canary"));
+    } catch (err) { /* passive card */ }
+  }
+
+  function bindCanaryActions() {
+    els.secCanaryToggle.addEventListener("click", async () => {
+      const enabling = els.secCanaryToggle.dataset.on !== "1";
+      if (enabling && !window.confirm("Enable the deception canary? Starts the emulators (SSH 22, VNC 5900, MSSQL 1433, Redis 6379, SNMP 161) on the WAN address and opens WAN rules only for the ports they bind.")) return;
+      if (!enabling && !window.confirm("Disable the deception canary? Stops the emulators and closes their WAN ports (the tarpit is unaffected).")) return;
+      els.secCanaryToggle.disabled = true;
+      try {
+        await postJSON("/api/security/canary/config", { enabled: enabling });
+        await refreshCanary();
+      } catch (err) {
+        showBanner(true, "Canary: " + err.message);
+      } finally {
+        els.secCanaryToggle.disabled = false;
+      }
+    });
+  }
+
+  function bindHoneypotActions() {
+    const applyConf = async (extra = {}) => {
+      const ports = (els.secHoneyPorts.value || "")
+        .split(/[\s,;]+/).map((s) => parseInt(s, 10)).filter((n) => n > 0 && n < 65536);
+      if (!ports.length) {
+        showBanner(true, "Honeypot: enter at least one port");
+        return;
+      }
+      try {
+        await postJSON("/api/security/honeypot/config", {
+          ports,
+          auto_ban: els.secHoneyAutoban.checked,
+          ban_threshold: parseInt(els.secHoneyThreshold.value, 10) || 1,
+          ...extra,
+        });
+        showBanner(false, "");
+        await refreshHoneypot();
+      } catch (err) {
+        showBanner(true, "Honeypot: " + err.message);
+      }
+    };
+    els.secHoneyApply.addEventListener("click", () => applyConf());
+    els.secHoneyToggle.addEventListener("click", async () => {
+      const enabling = els.secHoneyToggle.dataset.on !== "1";
+      if (enabling && !window.confirm("Enable the honeypot? This opens UFW allow rules for the listed ports on the WAN interface (enp5s0) ONLY, then traps and auto-bans anything that connects.")) return;
+      if (!enabling && !window.confirm("Disable the honeypot and close its UFW allow rules?")) return;
+      await applyConf({ enabled: enabling });
+    });
+  }
+
+  // ===================== TRAFFIC MONITOR =====================
+  const TM_LIMIT = 100;
+  let tmPaused = false;
+  let tmFilter = "all";
+  let tmEntries = [];
+  let tmInterval = null;
+
+  function tmBadge(type) {
+    switch (type) {
+      case "fw-block":  return '<span class="tm-badge tm-badge-block">FW Block</span>';
+      case "fw-allow":  return '<span class="tm-badge tm-badge-allow">FW Allow</span>';
+      case "dns-block": return '<span class="tm-badge tm-badge-dns">DNS Block</span>';
+      default:          return '<span class="tm-badge">' + esc(type) + '</span>';
+    }
+  }
+
+  function tmRowClass(type) {
+    if (type === "fw-block")  return "tm-row-block";
+    if (type === "dns-block") return "tm-row-dns";
+    if (type === "fw-allow")  return "tm-row-allow";
+    return "";
+  }
+
+  function tmDirection(dir) {
+    return dir === "in"
+      ? '<span class="tm-dir tm-dir-in">↓ IN</span>'
+      : '<span class="tm-dir tm-dir-out">↑ OUT</span>';
+  }
+
+  function renderTrafficMonitor() {
+    const body = document.getElementById("tm-body");
+    if (!body) return;
+    const visible = tmFilter === "all"
+      ? tmEntries
+      : tmEntries.filter(e => e.type === tmFilter);
+    if (!visible.length) {
+      body.innerHTML = '<tr><td colspan="6" class="empty">No events yet — traffic will appear as connections are made or blocked.</td></tr>';
+      document.getElementById("tm-count").textContent = "";
+      return;
+    }
+    body.innerHTML = visible.slice(0, TM_LIMIT).map(e => {
+      const ts = e.ts ? e.ts.replace("T", " ").substring(0, 19).replace("+", " +") : "—";
+      const src = e.src ? `<span class="mono">${esc(e.src)}</span>` : '<span class="muted">—</span>';
+      const dst = e.dst
+        ? (e.proto === "DNS" ? `<span class="mono tm-domain">${esc(e.dst)}</span>` : `<span class="mono">${esc(e.dst)}</span>`)
+        : '<span class="muted">—</span>';
+      const proto = e.port
+        ? `<span class="mono">${esc(e.proto)}/${esc(e.port)}</span>`
+        : (e.proto ? `<span class="mono">${esc(e.proto)}</span>` : '<span class="muted">—</span>');
+      return `<tr class="${tmRowClass(e.type)}">
+        <td class="mono tm-ts">${esc(ts)}</td>
+        <td>${tmBadge(e.type)}</td>
+        <td>${tmDirection(e.direction || "in")}</td>
+        <td>${src}</td>
+        <td>${dst}</td>
+        <td>${proto}</td>
+      </tr>`;
+    }).join("");
+    document.getElementById("tm-count").textContent = `${visible.length} events`;
+  }
+
+  async function refreshTrafficMonitor() {
+    if (tmPaused) return;
+    if (document.hidden) return;
+    try {
+      const d = await fetchJSON("/api/traffic-monitor");
+      if (!d.ok) return;
+      tmEntries = d.entries || [];
+      renderTrafficMonitor();
+      document.getElementById("tm-status").textContent =
+        `Last updated ${new Date().toLocaleTimeString()} · auto-refresh every 15s`;
+    } catch (e) {
+      document.getElementById("tm-status").textContent = "Error fetching traffic data: " + e.message;
+    }
+  }
+
+  function initTrafficMonitor() {
+    // Filter buttons
+    document.getElementById("tm-filter-btns").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-tm-filter]");
+      if (!btn) return;
+      tmFilter = btn.dataset.tmFilter;
+      document.querySelectorAll("[data-tm-filter]").forEach(b =>
+        b.classList.toggle("active", b === btn));
+      renderTrafficMonitor();
+    });
+
+    // Pause/resume
+    document.getElementById("tm-pause-btn").addEventListener("click", () => {
+      tmPaused = !tmPaused;
+      document.getElementById("tm-pause-btn").textContent = tmPaused ? "▶ Resume" : "⏸ Pause";
+      document.getElementById("tm-status").textContent = tmPaused
+        ? "Paused — click Resume to continue"
+        : "Resuming…";
+      if (!tmPaused) refreshTrafficMonitor();
+    });
+
+    refreshTrafficMonitor();
+    if (tmInterval) clearInterval(tmInterval);
+    tmInterval = setInterval(refreshTrafficMonitor, 15000);
+  }
+
+  // ===================== DIAGNOSE TOOL =====================
+  async function runDiagnose() {
+    const target = (document.getElementById("diag-target").value || "").trim();
+    if (!target) return;
+    const btn = document.getElementById("diag-btn");
+    const out = document.getElementById("diag-results");
+    btn.disabled = true;
+    btn.textContent = "Checking…";
+    out.hidden = false;
+    out.innerHTML = '<div class="diag-loading">Checking ' + esc(target) + '…</div>';
+    try {
+      const d = await postJSON("/api/diagnose", { target });
+      if (!d.ok) {
+        out.innerHTML = `<div class="diag-error">${esc(d.error || "Unknown error")}</div>`;
+        return;
+      }
+      const overallClass = d.blocked ? "diag-overall-blocked" : "diag-overall-ok";
+      const overallText = d.blocked ? "⚠ Something is blocking " + esc(d.target) : "✓ No blocks found for " + esc(d.target);
+      out.innerHTML = `
+        <div class="diag-overall ${overallClass}">${overallText}</div>
+        <div class="diag-checks">
+          ${(d.results || []).map(r => {
+            const cls = r.blocked === true ? "diag-check-blocked"
+                      : r.blocked === false ? "diag-check-ok"
+                      : "diag-check-unknown";
+            const icon = r.blocked === true ? "🔴" : r.blocked === false ? "🟢" : "⚪";
+            return `<div class="diag-check ${cls}">
+              <div class="diag-check-head">
+                <span class="diag-check-icon">${icon}</span>
+                <span class="diag-check-name">${esc(r.check)}</span>
+              </div>
+              <div class="diag-check-detail">${esc(r.detail)}</div>
+              ${r.action ? `<div class="diag-check-action">→ ${esc(r.action)}</div>` : ""}
+            </div>`;
+          }).join("")}
+        </div>`;
+    } catch (e) {
+      out.innerHTML = `<div class="diag-error">Request failed: ${esc(e.message)}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Check";
+    }
+  }
+
+  // ---- IP hover card positioning ----
+  function positionHoverCard(e) {
+    const card = document.getElementById("ip-hover-card");
+    if (!card || card.hidden) return;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const cw = card.offsetWidth || 260, ch = card.offsetHeight || 180;
+    let x = e.clientX + 14, y = e.clientY + 14;
+    if (x + cw > vw - 10) x = e.clientX - cw - 10;
+    if (y + ch > vh - 10) y = e.clientY - ch - 10;
+    card.style.left = x + "px";
+    card.style.top  = y + "px";
+  }
+
+  // ---- ISP batch lookup via ip-api.com (free, no key) ----
+  async function fetchIspInfo(ipList, tablePrefix) {
+    if (!ipList || !ipList.length) return;
+    // ip-api.com free tier is HTTP-only; browsers block it as mixed content
+    // on HTTPS pages. Skip silently there -- snapshot ISP data from the
+    // server-side DB-IP database already covers most rows.
+    if (window.location.protocol === "https:") return;
+    const ips = ipList.slice(0, 50).map(i => ({ query: i.ip, fields: "query,org,hosting" }));
+    try {
+      const resp = await fetch("http://ip-api.com/batch?fields=query,org,hosting", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(ips),
+      });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      data.forEach(r => {
+        const id = `isp-${(r.query || "").replace(/\./g, "-")}`;
+        const el = document.getElementById(id);
+        if (!el) return;
+        const hosting = r.hosting ? " · <span class='ip-hosting-badge'>Hosting</span>" : "";
+        el.innerHTML = r.org ? `${esc(r.org)}${hosting}` : "";
+      });
+    } catch (_) { /* ip-api unreachable, skip silently */ }
+  }
+
+  function initDiagnose() {
+    document.getElementById("diag-btn").addEventListener("click", runDiagnose);
+    document.getElementById("diag-target").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") runDiagnose();
+    });
+  }
+
+  function renderAiSummary(d) {
+    if (!d.ok) {
+      if (d.error === "not_configured") {
+        els.secAiSummary.innerHTML = `<span class="muted">${esc(d.hint || "AI summaries not configured.")}</span>`;
+      } else {
+        els.secAiSummary.innerHTML = `<span class="text-err">Error: ${esc(d.error)}${d.detail ? " \u2014 " + esc(d.detail) : ""}</span>`;
+      }
+      return;
+    }
+    const lines = (d.summary || "").trim().split("\n");
+    let html = "";
+    let inCmd = false;
+    lines.forEach((l) => {
+      let t = l.trim().replace(/\*\*/g, "").replace(/^#{1,3}\s*/, "").replace(/`/g, "").replace(/^\*\s*/, "").trim();
+      if (!t) return;
+      if (/^(bash|sh|shell|zsh)$/i.test(t)) return;
+      if (/^```|^~~~/.test(t)) {
+        inCmd = !inCmd;
+        if (inCmd) html += '<pre class="ai-cmd">';
+        else html += "</pre>";
+        return;
+      }
+      const isCmd = /^(ufw |sudo |nft |iptables |cscli |systemctl )/.test(t);
+      if (/^commands:?$/i.test(t)) {
+        html += '<div class="ai-cmd-label">Commands:</div>';
+        return;
+      }
+      if (isCmd) {
+        if (!inCmd) { html += '<pre class="ai-cmd">'; inCmd = true; }
+        html += esc(t) + "\n";
+        return;
+      }
+      if (inCmd) { html += "</pre>"; inCmd = false; }
+      if (/^\d+[.)]/.test(t)) {
+        t = t.replace(/^\d+[.)]\s*/, "");
+        html += `<div class="ai-li">${esc(t)}</div>`;
+      } else if (/^[-*\u2022]/.test(t)) {
+        html += `<div class="ai-li">${esc(t.replace(/^[-*\u2022]\s*/, ""))}</div>`;
+      } else if (/^top action:/i.test(t)) {
+        html += `<div class="ai-top">${esc(t)}</div>`;
+      } else {
+        html += `<div>${esc(t)}</div>`;
+      }
+    });
+    if (inCmd) html += "</pre>";
+    const cmds = d.commands || [];
+    if (cmds.length) {
+      html += '<div class="ai-cmd-label">Commands:</div><pre class="ai-cmd">'
+        + cmds.map((c) => esc(c)).join("\n")
+        + "</pre>";
+    }
+    els.secAiSummary.innerHTML = html;
+    els.secAiStatus.textContent = (d.model || "") + " \u00b7 Generated " + formatRelative(d.generated_at);
+  }
+
+  function populateAiModelSelect(models, configured) {
+    const sel = els.secAiModel;
+    sel.innerHTML = "";
+    const list = models.slice();
+    if (configured && list.indexOf(configured) === -1) list.unshift(configured);
+    if (!list.length) {
+      const o = document.createElement("option");
+      o.value = "";
+      o.textContent = configured || "no models";
+      sel.appendChild(o);
+      return;
+    }
+    list.forEach((m) => {
+      const o = document.createElement("option");
+      o.value = m;
+      o.textContent = m;
+      if (m === configured) o.selected = true;
+      sel.appendChild(o);
+    });
+  }
+
+
+
+  let _secBanAvailInFlight = null;
+
+  function updateSecBanAvailability() {
+    // Coalesce overlapping probes from view switches and the 15s poll.
+    if (_secBanAvailInFlight) return _secBanAvailInFlight;
+    _secBanAvailInFlight = (async () => {
+      // One compact call is enough for the inline Ban/Unban state. Fall back
+      // to the two full endpoints only when the compact route is not there yet
+      // (rolling restart / older backend).
+      let compact = null;
+      try {
+        compact = await fetchJSON("/api/crowdsec/ban-state");
+      } catch (_) {
+        compact = null;
+      }
+
+      let up = false;
+      const banned = new Set();
+      if (compact && typeof compact.ok === "boolean") {
+        up = !!compact.ok;
+        (compact.ips || []).forEach((ip) => banned.add(ip));
+      } else {
+        const [cs, bl] = await Promise.allSettled([
+          fetchJSON("/api/crowdsec"),
+          fetchJSON("/api/crowdsec/blocklist"),
+        ]);
+        up = cs.status === "fulfilled" && !!cs.value.ok;
+        // Banned = permanent banlist entries AND any active local decision,
+        // so timed bans (custom/local-ban) also flip the button to "remove".
+        if (bl.status === "fulfilled") {
+          (bl.value.entries || []).forEach((e) => banned.add(e.value));
+        }
+        if (cs.status === "fulfilled" && cs.value.ok) {
+          (cs.value.decisions || []).forEach((d) => {
+            if (d.ip && d.type !== "unban") banned.add(d.ip);
+          });
+        }
+      }
+      state.secCrowdsecUp = up;
+      state.secBannedIps = banned;
+      els.secBanAll.disabled = !up;
+      if (!up) setSecBanStatus("CrowdSec unavailable");
+      if (els.secIpsBody.rows.length) refreshSecurity();
+    })().finally(() => {
+      _secBanAvailInFlight = null;
+    });
+    return _secBanAvailInFlight;
+  }
+
+  function setSecBanStatus(text) {
+    els.secBanStatus.textContent = text || "";
+  }
+
+  // ---- Community ban reporting (tuxwall.org) ----
+
+
+
+  // ---- Local bans (CrowdSec) --------------------------------------------
+  // All bans from this dashboard are LOCAL decisions on this firewall and
+  // are never reported to tuxwall.org - the community ban list is built
+  // exclusively from canary/honeypot evidence, never user judgment.
+  // - duration "perm" -> permanent file-backed banlist entry (1y)
+  // - anything else    -> timed local decision (tagged custom/local-ban)
+
+  async function banCrowdsec(ip, duration) {
+    const data = duration === "perm"
+      ? await postJSON("/api/crowdsec/blocklist/add", { entry: ip })
+      : await postJSON("/api/crowdsec/ban", { ip, duration });
+    if (!data.ok) throw new Error(data.error || "Ban failed");
+    return data;
+  }
+
+  async function unbanCrowdsec(ip) {
+    // The backend remove handles both kinds: file entries take the full
+    // path (file line + decision), timed local bans fall back to plain
+    // decision deletion.
+    const data = await postJSON("/api/crowdsec/blocklist/remove", { entry: ip });
+    if (!data.ok) throw new Error(data.error || "Unban failed");
+    return data;
+  }
+
+  // ---- Ban duration modal (Top Attackers + Community Bans) -------------
+
+  const csBanCtx = { ips: [] };
+
+  function openCsBanModal(ipOrIps) {
+    const ips = Array.isArray(ipOrIps) ? ipOrIps : [ipOrIps];
+    if (!ips.length) return;
+    csBanCtx.ips = ips;
+    els.csBanTitle.textContent = ips.length > 1
+      ? `Ban ${ips.length} IPs via CrowdSec`
+      : "Ban via CrowdSec";
+    els.csBanTarget.textContent = ips.length > 1
+      ? `${ips.length} IPs`
+      : ips[0];
+    els.csBanStatus.textContent = "";
+    els.csBanConfirm.disabled = false;
+    els.csBanModal.hidden = false;
+  }
+
+  function closeCsBanModal() {
+    els.csBanModal.hidden = true;
+  }
+
+  async function confirmCsBan() {
+    const duration = els.csBanDuration.value;
+    const label = duration === "perm" ? "permanent banlist entry" : duration;
+    const ips = csBanCtx.ips;
+    els.csBanConfirm.disabled = true;
+    let ok = 0;
+    let failed = 0;
+    for (const ip of ips) {
+      try {
+        await banCrowdsec(ip, duration);
+        state.secBannedIps.add(ip);
+        ok++;
+        if (ips.length > 1) {
+          els.csBanStatus.textContent = `Banned ${ok}/${ips.length} (${ip}, ${label}).`;
+        }
+      } catch (err) {
+        failed++;
+        els.csBanStatus.textContent = `Failed on ${ip}: ${err.message}`;
+      }
+    }
+    els.csBanConfirm.disabled = false;
+    if (!failed) {
+      closeCsBanModal();
+      setSecBanStatus(ips.length === 1
+        ? `Banned ${ips[0]} locally (${label}). Never reported to tuxwall.org.`
+        : `Banned ${ok} IPs locally (${label}). Never reported to tuxwall.org.`);
+      refreshSecurity();
+      refreshCrowdsec();
+      refreshCustomBlocklist();
+    }
+  }
+
+  function bindCsBanModal() {
+    // Guard: if the modal markup is ever missing/misplaced, skip binding
+    // rather than killing the whole boot chain (a null addEventListener here
+    // once bricked the dashboard - no login gate, no logout).
+    if (!els.csBanModal || !els.csBanConfirm) return;
+    els.csBanConfirm.addEventListener("click", confirmCsBan);
+    els.csBanCancel.addEventListener("click", closeCsBanModal);
+    els.csBanClose.addEventListener("click", closeCsBanModal);
+    els.csBanModal.addEventListener("click", (e) => {
+      if (e.target === e.currentTarget) closeCsBanModal();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !els.csBanModal.hidden) closeCsBanModal();
+    });
+  }
+
+
+  function bindSecurityBans() {
+    els.secIpsBody.addEventListener("click", async (e) => {
+      const banBtn = e.target.closest(".sec-ban");
+      const unbanBtn = e.target.closest(".sec-unban");
+      if (!banBtn && !unbanBtn) return;
+      const btn = banBtn || unbanBtn;
+      const ip = btn.dataset.ip;
+      if (banBtn) {
+        // Duration choice first - never an instant ban.
+        openCsBanModal(ip);
+        return;
+      }
+      btn.disabled = true;
+      try {
+        await unbanCrowdsec(ip);
+        state.secBannedIps.delete(ip);
+        setSecBanStatus(`Removed the local ban for ${ip}.`);
+        // One re-render, no availability chain: the outcome is already
+        // known locally, so the button flips on the next security fetch.
+        refreshSecurity();
+      } catch (err) {
+        setSecBanStatus(`Failed: ${err.message}`);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    els.secBanAll.addEventListener("click", () => {
+      const ips = [...els.secIpsBody.querySelectorAll(".sec-ban")]
+        .map((b) => b.dataset.ip);
+      if (!ips.length) return;
+      openCsBanModal(ips);
+    });
+
+
+    // Modal close buttons
+    document.getElementById("sec-countries-modal-close").onclick = () => {
+      document.getElementById("sec-countries-modal").hidden = true;
+    };
+    document.getElementById("sec-ips-modal-close").onclick = () => {
+      document.getElementById("sec-ips-modal").hidden = true;
+    };
+    // Close on backdrop click
+    document.getElementById("sec-countries-modal").addEventListener("click", (e) => {
+      if (e.target === e.currentTarget) e.currentTarget.hidden = true;
+    });
+    document.getElementById("sec-ips-modal").addEventListener("click", (e) => {
+      if (e.target === e.currentTarget) e.currentTarget.hidden = true;
+    });
+  }
+
+  function formatHandshake(ts) {
+    if (!ts) return "never";
+    return formatRelative(ts);
+  }
+
+  function renderWireguard(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "WireGuard stats unavailable");
+      return;
+    }
+    state.wgData = d;
+    els.wgUnconfigured.hidden = !!d.configured;
+    els.wgConfigured.hidden = !d.configured;
+    if (!d.configured) return;
+
+    const iface = d.interface || {};
+    els.wgState.textContent = iface.up ? "Connected" : "Stopped";
+    els.wgState.style.color = iface.up ? "var(--green)" : "var(--red)";
+    els.wgEndpoint.textContent = d.endpoint || "—";
+    els.wgEndpoint.title = d.wan_ip ? `WAN IP ${d.wan_ip}` : "";
+    els.wgPeers.textContent = formatNumber((d.peers || []).length);
+    const totalTx = (d.peers || []).reduce((n, p) => n + (p.tx || 0), 0);
+    const totalRx = (d.peers || []).reduce((n, p) => n + (p.rx || 0), 0);
+    els.wgTransfer.textContent = `${formatBytes(totalRx)} ↓ / ${formatBytes(totalTx)} ↑`;
+
+    const peers = d.peers || [];
+    els.wgHint.textContent = iface.up
+      ? `wg0 · ${iface.address || ""} · listening on UDP ${iface.listen_port || ""}`
+      : "interface is stopped";
+    els.wgPeersBody.innerHTML = peers.length
+      ? peers.map((p) => {
+          const last = p.last_handshake ? `<span class="peer-up">${formatHandshake(p.last_handshake)}</span>` : `never`;
+          const rk = esc(p.public_key).slice(0, 10) + "…" + esc(p.public_key).slice(-8);
+          return `
+          <tr data-pk="${esc(p.public_key)}">
+            <td><b>${esc(p.name)}</b><br><span class="mono muted">${rk}</span></td>
+            <td class="mono">${esc(p.address || "—")}</td>
+            <td class="mono">${esc(p.endpoint || "—")}</td>
+            <td>${last}</td>
+            <td class="mono">${formatBytes(p.rx || 0)} / ${formatBytes(p.tx || 0)}</td>
+            <td><div class="wg-actions">
+              ${actBtn("config", "Show WireGuard config", `data-pk="${esc(p.public_key)}"`, "wg-config-btn")}
+              ${actBtn("edit", "Rename peer", `data-pk="${esc(p.public_key)}"`, "wg-rename-btn")}
+              ${actBtn("delete", "Remove peer", `data-pk="${esc(p.public_key)}" data-name="${esc(p.name)}"`, "wg-remove-btn")}
+            </div></td>
+          </tr>`;
+        }).join("")
+      : `<tr><td colspan="6" class="empty">No clients yet. Click “Add Client” to create one.</td></tr>`;
+    els.wgPeerNote.hidden = peers.length === 0;
+  }
+
+  async function refreshWireguard() {
+    try {
+      const data = await fetchJSON("/api/wireguard");
+      renderWireguard(data);
+    } catch (err) {
+      showBanner(true, "WireGuard error: " + err.message);
+    }
+  }
+
+  function wgShowModal(title, config) {
+    els.wgModalTitle.textContent = title;
+    els.wgModalText.value = config;
+    els.wgModal.dataset.config = config;
+    const qr = (typeof qrcode !== "undefined") && qrcode(0, "M");
+    if (qr) {
+      qr.addData(config);
+      qr.make();
+      els.wgQr.width = 240;
+      els.wgQr.height = 240;
+      const ctx = els.wgQr.getContext("2d");
+      const img = qr.createDataURL(8, 4);
+      const im = new Image();
+      im.onload = () => {
+        ctx.clearRect(0, 0, 240, 240);
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, 240, 240);
+        ctx.drawImage(im, 0, 0, 240, 240);
+      };
+      im.src = img;
+    } else {
+      els.wgQr.width = 0;
+      els.wgQr.height = 0;
+    }
+    els.wgModal.hidden = false;
+  }
+
+  function wgCloseModal() {
+    els.wgModal.hidden = true;
+  }
+
+  async function wgAddClient() {
+    const name = window.prompt("Name for this client (e.g. Jeff Phone):", "phone");
+    if (name === null) return;
+    try {
+      const data = await postJSON("/api/wireguard/peer/add", { name });
+      await refreshWireguard();
+      wgShowModal(`Config for ${data.name || "client"}`, data.config);
+    } catch (err) {
+      showBanner(true, "Add client: " + err.message);
+    }
+  }
+
+  async function wgShowConfig(pk) {
+    try {
+      const data = await postJSON("/api/wireguard/peer/config", { public_key: pk });
+      wgShowModal(`Config for ${data.name || "client"}`, data.config);
+    } catch (err) {
+      showBanner(true, "Config: " + err.message);
+    }
+  }
+
+  async function wgRename(pk) {
+    const row = els.wgPeersBody.querySelector(`tr[data-pk="${CSS.escape(pk)}"]`);
+    const current = row ? row.querySelector("b").textContent : "client";
+    const name = window.prompt("New name:", current);
+    if (name === null) return;
+    try {
+      await postJSON("/api/wireguard/peer/rename", { public_key: pk, name });
+      await refreshWireguard();
+    } catch (err) {
+      showBanner(true, "Rename: " + err.message);
+    }
+  }
+
+  async function wgRemove(pk, name) {
+    if (!window.confirm(`Remove client “${name}”? This immediately revokes its access.`)) return;
+    try {
+      await postJSON("/api/wireguard/peer/remove", { public_key: pk });
+      await refreshWireguard();
+    } catch (err) {
+      showBanner(true, "Remove client: " + err.message);
+    }
+  }
+
+  function bindWireguardActions() {
+    if (els.ovWgToggle) els.ovWgToggle.addEventListener("click", toggleOverviewWireguard);
+
+    els.wgSetupForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = els.wgSetupBtn;
+      btn.disabled = true;
+      els.wgSetupError.textContent = "";
+      try {
+        const body = {
+          address: els.wgSetupAddress.value.trim(),
+          listen_port: parseInt(els.wgSetupPort.value, 10),
+          dns: els.wgSetupDns.value.trim(),
+          allowed_ips: els.wgSetupAllowed.value.trim(),
+          endpoint: els.wgSetupEndpoint.value.trim(),
+          keepalive: parseInt(els.wgSetupKeepalive.value, 10),
+        };
+        const data = await postJSON("/api/wireguard/setup", body);
+        await refreshWireguard();
+        if (data.public_key) {
+          els.wgSetupError.textContent = "";
+          alert(`WireGuard is set up. Server public key: ${data.public_key.slice(0, 12)}…\nAdd a client to generate a config to scan.`);
+        }
+      } catch (err) {
+        els.wgSetupError.textContent = "Setup failed: " + err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    els.wgAddPeer.addEventListener("click", wgAddClient);
+
+    els.wgPeersBody.addEventListener("click", (e) => {
+      const btn = e.target.closest(".wg-config-btn, .wg-rename-btn, .wg-remove-btn");
+      if (!btn) return;
+      const pk = btn.dataset.pk;
+      if (btn.classList.contains("wg-config-btn")) wgShowConfig(pk);
+      else if (btn.classList.contains("wg-rename-btn")) wgRename(pk);
+      else wgRemove(pk, btn.dataset.name);
+    });
+
+    els.wgModalClose.addEventListener("click", wgCloseModal);
+    els.wgModalClose2.addEventListener("click", wgCloseModal);
+    els.wgModal.addEventListener("click", (e) => {
+      if (e.target === els.wgModal) wgCloseModal();
+    });
+
+    els.wgModalCopy.addEventListener("click", () => {
+      const copied = () => {
+        els.wgModalCopy.textContent = "Copied";
+        setTimeout(() => { els.wgModalCopy.textContent = "Copy"; }, 1500);
+      };
+      els.wgModalText.select();
+      let ok = false;
+      try { ok = document.execCommand("copy"); } catch (e) { /* ignore */ }
+      if (!ok && navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(els.wgModalText.value).then(copied);
+        return;
+      }
+      copied();
+    });
+
+    els.wgModalDownload.addEventListener("click", () => {
+      const blob = new Blob([els.wgModalText.value], { type: "text/plain" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `wireguard-${els.wgModalTitle.textContent.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.conf`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    });
+  }
+
+  function renderCrowdsec(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "CrowdSec stats unavailable");
+      return;
+    }
+    const decisions = d.decisions || [];
+    const bouncers = d.bouncers || [];
+    const alerts = d.alerts || [];
+
+    const activeBouncers = bouncers.filter((b) => !b.revoked).length;
+
+    els.csActive.textContent = formatNumber(d.active_count != null ? d.active_count : decisions.length);
+    els.csBans.textContent = formatNumber(d.bans_count != null ? d.bans_count : decisions.filter((x) => x.type === "ban").length);
+    els.csBouncers.textContent = `${activeBouncers} / ${bouncers.length}`;
+    els.csExpiring.textContent = formatNumber(decisions.filter((x) => x.expiring).length);
+
+    els.csDecisionsBody.innerHTML = decisions.map((x) => `
+      <tr>
+        <td class="mono">${esc(x.ip || "—")}</td>
+        <td class="mono">${esc(x.scenario || "—")}</td>
+        <td><span class="badge ${x.type === "ban" ? "badge-err" : "badge-ok"}">${esc(x.type || "—")}</span></td>
+        <td>${esc(x.origin || "—")}</td>
+        <td class="mono">${esc(x.until || "—")}</td>
+      </tr>`).join("") || '<tr><td colspan="5" class="empty">No active decisions</td></tr>';
+
+    els.csBouncersBody.innerHTML = bouncers.map((b) => `
+      <tr>
+        <td><b>${esc(b.name || "—")}</b></td>
+        <td>${esc(b.type || "—")}</td>
+        <td class="mono">${esc(b.version || "—")}</td>
+        <td class="mono">${b.last_pull ? esc(b.last_pull) : "—"}</td>
+        <td><span class="badge ${b.revoked ? "badge" : "badge-ok"}">${b.revoked ? "Revoked" : "Active"}</span></td>
+      </tr>`).join("") || '<tr><td colspan="5" class="empty">No bouncers registered</td></tr>';
+
+    els.csAlertsBody.innerHTML = alerts.map((a) => {
+      const types = (a.decisions || []).map((x) => x.type).filter(Boolean);
+      return `
+      <tr>
+        <td class="mono">${esc(a.created_at || "—")}</td>
+        <td class="mono">${esc((a.scenario || "").replace(/^crowdsecurity\//, "") || "—")}</td>
+        <td class="mono">${esc((a.source && a.source.value) || "—")}</td>
+        <td>${formatNumber(a.events_count != null ? a.events_count : (a.events || []).length)}</td>
+        <td>${types.length
+          ? types.map((t) => `<span class="badge ${t === "ban" ? "badge-err" : "badge-ok"}">${esc(t)}</span>`).join(" ")
+          : "—"}</td>
+      </tr>`;
+    }).join("") || '<tr><td colspan="5" class="empty">No alerts yet</td></tr>';
+  }
+
+  async function refreshCrowdsec() {
+    try {
+      const data = await fetchJSON("/api/crowdsec");
+      renderCrowdsec(data);
+    } catch (err) {
+      showBanner(true, "CrowdSec stats error: " + err.message);
+    }
+  }
+
+  function renderCustomBlocklist(d) {
+    if (!d.ok) {
+      if (els.cblStatus) els.cblStatus.textContent = d.error || "Banlist unavailable";
+      return;
+    }
+    if (els.cblFile) els.cblFile.textContent = d.file || "";
+    const entries = d.entries || [];
+    els.cblEmpty.hidden = entries.length > 0;
+    els.cblBody.innerHTML = entries.map((e) => {
+      const timed = e.kind === "timed";
+      const remaining = e.until_ts
+        ? formatDuration(e.until_ts - Math.floor(Date.now() / 1000))
+        : null;
+      return `
+      <tr>
+        <td class="mono">${esc(e.value)}</td>
+        <td>${timed
+          ? '<span class="badge">Timed</span>'
+          : '<span class="badge badge-ok">Permanent</span>'}</td>
+        <td>${e.banned
+          ? `<span class="badge badge-err">Banned${e.simulated ? " (simulated)" : ""}</span>`
+          : '<span class="badge">Not active</span>'}</td>
+        <td class="mono">${timed
+          ? (remaining != null ? esc(remaining) : "—")
+          : "1y"}</td>
+        <td style="text-align:right">
+          ${actBtn("delete", timed ? "Remove timed ban" : "Remove entry", `data-entry="${esc(e.value)}"`, "cbl-remove")}
+        </td>
+      </tr>`;
+    }).join("");
+    if (els.cblStatus) els.cblStatus.textContent = "";
+  }
+
+  async function refreshCustomBlocklist() {
+    try {
+      const data = await fetchJSON("/api/crowdsec/blocklist");
+      renderCustomBlocklist(data);
+    } catch (err) {
+      if (els.cblStatus) els.cblStatus.textContent = "Error: " + err.message;
+    }
+  }
+
+  // ---- Community bans (tuxwall.org) ------------------------------------
+  // Deception-evidence only (enforced collector-side): every listed IP has
+  // canary/honeypot proof. Banning from here is a local action; nothing
+  // here ever flows back to tuxwall.org.
+
+  const CBAN_SEV_RANK = { low: 1, medium: 2, high: 3, critical: 4 };
+  const CBAN_PAGE = 25; // rows per chunk — keeps the table panel compact
+  const CBAN_AUTO_KEY = "tuxwall-cban-auto";
+  const communityBans = { data: null, filter: "all", shown: CBAN_PAGE, loadedAt: 0, auto: null };
+
+  function setCbanAutoBadge(enabled, label) {
+    if (!els.cbanAutoBadge) return;
+    els.cbanAutoBadge.dataset.state = enabled ? "active" : "inactive";
+    els.cbanAutoBadge.textContent = label || (enabled ? "Active" : "Inactive");
+  }
+
+  function setCbanShareBadge(state, label) {
+    if (!els.cbanShareBadge) return;
+    els.cbanShareBadge.dataset.state = state;
+    els.cbanShareBadge.textContent = label;
+  }
+
+  function readCbanAutoCache() {
+    try {
+      const v = JSON.parse(localStorage.getItem(CBAN_AUTO_KEY) || "null");
+      if (v && typeof v.enabled === "boolean") return v;
+    } catch (err) { /* ignore */ }
+    return null;
+  }
+
+  function writeCbanAutoCache(state) {
+    try {
+      localStorage.setItem(CBAN_AUTO_KEY, JSON.stringify({
+        enabled: !!state.enabled,
+        last_sync: state.last_sync || 0,
+        added_total: state.added_total || 0,
+        pending: state.pending || 0,
+        ts: Date.now(),
+      }));
+    } catch (err) { /* ignore */ }
+  }
+
+  function cbanFilteredRows() {
+    const d = communityBans.data;
+    if (!d || !d.ok) return [];
+    const rank = CBAN_SEV_RANK[communityBans.filter] || 0;
+    return (d.bans || []).filter((b) => (CBAN_SEV_RANK[b.severity] || 0) >= rank);
+  }
+
+  function cbanSevBadge(sev) {
+    const s = ["critical", "high", "medium", "low"].includes(sev) ? sev : "low";
+    return `<span class="cban-sev cban-sev-${s}">${esc((sev || "?").toUpperCase())}</span>`;
+  }
+
+  function renderCommunityBans() {
+    const d = communityBans.data;
+    if (!d || !d.ok) return;
+    const rows = cbanFilteredRows();
+    const shown = rows.slice(0, communityBans.shown);
+    const auto = communityBans.auto || {};
+    // Automatic mode owns enforcement: hide the manual bulk button (every
+    // listed IP is already covered by the background sync) and show its
+    // stats instead.
+    if (els.cbanBanAll) els.cbanBanAll.hidden = !!auto.enabled;
+    setCbanAutoBadge(!!auto.enabled);
+    if (els.cbanAuto) els.cbanAuto.checked = !!auto.enabled;
+    if (els.cbanAutoStats) {
+      if (auto.enabled) {
+        const synced = auto.last_sync ? formatRelative(auto.last_sync) : "never";
+        els.cbanAutoStats.textContent =
+          `Last sync ${synced}` +
+          (auto.pending ? ` · ${formatNumber(auto.pending)} pending` : "") +
+          (auto.added_total ? ` · ${formatNumber(auto.added_total)} ensured` : "");
+      } else {
+        els.cbanAutoStats.textContent = "Manual mode — per-row ban buttons";
+      }
+    }
+    els.cbanGenerated.textContent =
+      `${formatNumber(rows.length)} of ${formatNumber(d.bans ? d.bans.length : 0)} IPs` +
+      (d.cached ? " · cached" : "");
+    els.cbanBanAll.textContent = `Ban all shown (${formatNumber(shown.length)}) (90d)`;
+    els.cbanBody.innerHTML = shown.map((b) => `
+      <tr>
+        <td class="mono">${esc(b.ip)}</td>
+        <td>${cbanSevBadge(b.severity)}</td>
+        <td class="mono">${esc(formatNumber(b.hits))}</td>
+        <td class="mono">${esc(formatNumber(b.reporters))}</td>
+        <td>${esc([b.city, b.country].filter(Boolean).join(", ") || "—")}</td>
+        <td>${esc(b.isp || "—")}${b.asn ? ` <span class="muted">AS${esc(b.asn)}</span>` : ""}</td>
+        <td class="mono muted">${esc(formatRelative(b.last_seen))}</td>
+        <td style="text-align:right">
+          ${actBtn("ban", "Ban via CrowdSec", `data-ip="${esc(b.ip)}"`, "cban-ban act-danger")}
+        </td>
+      </tr>`).join("") || '<tr><td colspan="8" class="empty">No community bans match this filter</td></tr>';
+    if (rows.length > communityBans.shown) {
+      els.cbanBody.insertAdjacentHTML("beforeend", `
+        <tr class="cban-more-row">
+          <td colspan="8" style="text-align:center;padding:10px">
+            <button class="btn" type="button" id="cban-more">Load ${Math.min(CBAN_PAGE, rows.length - communityBans.shown)} more
+              (${formatNumber(communityBans.shown)} of ${formatNumber(rows.length)} shown)</button>
+          </td>
+        </tr>`);
+    }
+  }
+
+  async function refreshCommunityBans(force) {
+    if (!force && communityBans.data && Date.now() - communityBans.loadedAt < 300000) {
+      renderCommunityBans();
+      return;
+    }
+    els.cbanStatus.textContent = "Loading…";
+    try {
+      const data = await fetchJSON("/api/crowdsec/community-bans");
+      if (!data.ok) throw new Error(data.error || "unavailable");
+      communityBans.data = data;
+      // The cached community-bans response can omit `auto`; keep the last
+      // known server state (or the browser cache) instead of flipping the
+      // switch off on every refresh.
+      const serverAuto = data.auto || null;
+      communityBans.auto = serverAuto || communityBans.auto || readCbanAutoCache() || { enabled: false };
+      if (serverAuto) writeCbanAutoCache(serverAuto);
+      communityBans.loadedAt = Date.now();
+      renderCommunityBans();
+      els.cbanStatus.textContent = "";
+    } catch (err) {
+      els.cbanStatus.textContent = "Error: " + err.message;
+    }
+  }
+
+  // ---- Community sharing (key registration) ----------------------------
+  // Sends ONLY this install's key to tuxwall.org: registration starts the
+  // 7-day trust clock at install time, after which this install's deception
+  // evidence counts fully toward community severity.
+
+  async function updateShareStatus() {
+    if (!els.cbanShare || !els.cbanShareStatus) return;
+    try {
+      const d = await fetchJSON("/api/crowdsec/reporting/status");
+      if (!d.ok) throw new Error(d.error || "status unavailable");
+      if (d.warning) {
+        els.cbanShareStatus.textContent = "Sharing status unavailable";
+        els.cbanShare.textContent = "Retry";
+        setCbanShareBadge("unknown", "Unknown");
+        return;
+      }
+      if (d.registered && d.status !== "revoked") {
+        const trustedAt = d.trusted_after || 0;
+        setCbanShareBadge("active", "Active");
+        if (trustedAt && trustedAt <= Date.now() / 1000) {
+          els.cbanShareStatus.textContent = "Community sharing active — evidence fully trusted";
+        } else {
+          const wait = trustedAt - Date.now() / 1000;
+          els.cbanShareStatus.textContent =
+            "Sharing active — full trust in " + formatDuration(wait);
+        }
+        els.cbanShare.textContent = "Registered";
+        els.cbanShare.disabled = true;
+      } else {
+        setCbanShareBadge("inactive", "Inactive");
+        els.cbanShareStatus.textContent = "Not registered — local only";
+        els.cbanShare.textContent = "Enable community sharing";
+        els.cbanShare.disabled = false;
+      }
+    } catch (err) {
+      els.cbanShareStatus.textContent = "Sharing status unavailable";
+      setCbanShareBadge("unknown", "Unknown");
+    }
+  }
+
+  function bindCommunityBans() {
+    // Guard: never let a missing element kill the boot chain.
+    if (!els.cbanBody || !els.cbanBanAll) return;
+    if (els.cbanShare) {
+      els.cbanShare.addEventListener("click", async () => {
+        els.cbanShare.disabled = true;
+        setCbanShareBadge("pending", "Registering…");
+        els.cbanShareStatus.textContent = "Registering…";
+        try {
+          const d = await postJSON("/api/crowdsec/reporting/register", {});
+          if (!d.ok) throw new Error(d.error || "registration failed");
+          els.cbanShareStatus.textContent = "Registered — sharing active.";
+        } catch (err) {
+          els.cbanShareStatus.textContent = "Failed: " + err.message;
+          setCbanShareBadge("inactive", "Inactive");
+          els.cbanShare.disabled = false;
+          return;
+        }
+        await updateShareStatus();
+      });
+    }
+    if (els.cbanAuto) {
+      els.cbanAuto.addEventListener("change", async () => {
+        const enabled = els.cbanAuto.checked;
+        const previous = !enabled;
+        els.cbanAuto.disabled = true;
+        setCbanAutoBadge(enabled, "Updating…");
+        els.cbanAutoStats.textContent = enabled ? "Enabling… first sync within ~30s." : "Disabling…";
+        try {
+          const d = await postJSON("/api/crowdsec/community-bans/auto", { enabled });
+          if (!d.ok) throw new Error(d.error || "toggle failed");
+          communityBans.auto = d.auto || { enabled };
+          writeCbanAutoCache(communityBans.auto);
+          renderCommunityBans();
+        } catch (err) {
+          els.cbanAuto.checked = previous;
+          setCbanAutoBadge(previous);
+          els.cbanAutoStats.textContent = "Failed: " + err.message;
+        } finally {
+          els.cbanAuto.disabled = false;
+        }
+      });
+    }
+    document.querySelectorAll("[data-cban-sev]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        communityBans.filter = btn.dataset.cbanSev;
+        communityBans.shown = CBAN_PAGE; // new filter: back to the first page
+        document.querySelectorAll("[data-cban-sev]").forEach((b) =>
+          b.classList.toggle("btn-primary", b === btn));
+        renderCommunityBans();
+      });
+    });
+
+    els.cbanBody.addEventListener("click", (e) => {
+      const more = e.target.closest("#cban-more");
+      if (more) {
+        communityBans.shown += CBAN_PAGE;
+        renderCommunityBans();
+        return;
+      }
+      const btn = e.target.closest(".cban-ban");
+      if (!btn) return;
+      openCsBanModal(btn.dataset.ip);
+    });
+
+    els.cbanBanAll.addEventListener("click", async () => {
+      const d = communityBans.data;
+      if (!d || !d.ok) return;
+      // Bans what is actually displayed (respecting filter + paging), so
+      // the button label "Ban all shown (N)" is always truthful.
+      const ips = cbanFilteredRows()
+        .slice(0, communityBans.shown)
+        .map((b) => b.ip);
+      if (!ips.length) return;
+      if (!window.confirm(`Ban all ${ips.length} shown community IPs for 90 days? (local bans - nothing is reported to tuxwall.org)`)) return;
+      els.cbanBanAll.disabled = true;
+      let ok = 0;
+      let failed = 0;
+      for (const ip of ips) {
+        try {
+          const data = await postJSON("/api/crowdsec/ban", { ip, duration: "90d" });
+          if (!data.ok) throw new Error(data.error || "ban failed");
+          ok++;
+          els.cbanStatus.textContent = `Banned ${ok}/${ips.length} (${ip}).`;
+        } catch (err) {
+          failed++;
+        }
+      }
+      els.cbanBanAll.disabled = false;
+      els.cbanStatus.textContent = `Banned ${ok} of ${ips.length} community IPs (90d, local only)${failed ? ` - ${failed} failed` : ""}.`;
+      refreshCustomBlocklist();
+      refreshCrowdsec();
+    });
+  }
+
+  function setCsTab(pane) {
+    document.querySelectorAll("#cs-subtabs .fw-subtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.csPane === pane));
+    document.querySelectorAll("#view-crowdsec .fw-pane[data-cs-pane]").forEach((p) => {
+      p.hidden = p.dataset.csPane !== pane;
+    });
+    // Lazy loads: the community tab pulls (cached) on first open; the
+    // banlist tab refetches so timed bans/expiry are fresh.
+    if (pane === "community") {
+      refreshCommunityBans();
+      updateShareStatus();
+    }
+    if (pane === "blocklist") refreshCustomBlocklist();
+  }
+  document.querySelectorAll("#cs-subtabs .fw-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => setCsTab(btn.dataset.csPane));
+  });
+
+  function bindCustomBlocklist() {
+    els.cblAdd.addEventListener("click", async () => {
+      const value = els.cblInput.value.trim();
+      if (!value) return;
+      els.cblAdd.disabled = true;
+      els.cblStatus.textContent = "Adding…";
+      try {
+        const data = await postJSON("/api/crowdsec/blocklist/add", { entry: value });
+        els.cblInput.value = "";
+        els.cblStatus.textContent = data.warning
+          ? data.message + " (" + data.warning + ")"
+          : (data.message || "Added.");
+        await refreshCustomBlocklist();
+      } catch (err) {
+        els.cblStatus.textContent = err.message;
+      } finally {
+        els.cblAdd.disabled = false;
+      }
+    });
+
+    els.cblInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") els.cblAdd.click();
+    });
+
+    els.cblBody.addEventListener("click", async (e) => {
+      const btn = e.target.closest(".cbl-remove");
+      if (!btn) return;
+      const entry = btn.dataset.entry;
+      if (!window.confirm(`Remove ${entry} from the blocklist and lift its ban?`)) return;
+      btn.disabled = true;
+      els.cblStatus.textContent = "Removing…";
+      try {
+        const data = await postJSON("/api/crowdsec/blocklist/remove", { entry });
+        els.cblStatus.textContent = data.warning
+          ? data.message + " (" + data.warning + ")"
+          : (data.message || "Removed.");
+        await refreshCustomBlocklist();
+      } catch (err) {
+        els.cblStatus.textContent = err.message;
+        btn.disabled = false;
+      }
+    });
+  }
+
+  let blPollTimer = null;
+
+  function blocklistStatusLabel(status) {
+    switch (status) {
+      case "idle": return "Ready";
+      case "updating": return "Updating…";
+      case "ok": return "OK";
+      case "error": return "Error";
+      default: return String(status || "—").toUpperCase();
+    }
+  }
+
+  function blocklistStatusBadge(s) {
+    if (s.last_status === "ok") return '<span class="badge badge-ok">OK</span>';
+    if (s.last_status === "error") {
+      return `<span class="badge badge-err" title="${esc(s.last_error || "")}">Error</span>`;
+    }
+    return '<span class="badge">Never</span>';
+  }
+
+  function renderBlocklists(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "Blocklist data unavailable");
+      return;
+    }
+    const st = d.state || {};
+    const sources = d.sources || [];
+    const enabledCount = sources.filter((s) => s.enabled).length;
+
+    els.blDomains.textContent = formatNumber(st.total_domains || 0);
+    els.blSources.textContent = `${enabledCount} / ${sources.length}`;
+    els.blStatus.textContent = blocklistStatusLabel(st.status);
+    els.blStatus.title = st.last_error || "";
+    els.blUpdated.textContent = st.last_update ? formatRelative(st.last_update) : "Never";
+
+    const stats = d.stats || {};
+    els.blQueries.textContent = stats.queries != null ? formatNumber(stats.queries) : "—";
+    els.blBlocked.textContent = stats.blocked != null ? formatNumber(stats.blocked) : "—";
+
+    els.blEmpty.hidden = sources.length > 0;
+    els.blBody.innerHTML = sources.map((s) => `
+      <tr>
+        <td>
+          <label class="toggle" title="Enable/disable this source">
+            <input type="checkbox" class="bl-toggle" data-url="${esc(s.url)}" ${s.enabled ? "checked" : ""}>
+            <span class="toggle-track"></span>
+          </label>
+        </td>
+        <td class="mono">${esc(s.url)}</td>
+        <td>${s.last_status === "ok" ? formatNumber(s.domains) : "—"}</td>
+        <td class="muted">${s.last_updated ? formatRelative(s.last_updated) : "—"}</td>
+        <td>${blocklistStatusBadge(s)}</td>
+        <td>
+          ${actBtn("delete", "Remove blocklist", `data-url="${esc(s.url)}"`, "bl-remove")}
+        </td>
+      </tr>`).join("");
+
+    const whitelist = d.whitelist || [];
+    els.wlEmpty.hidden = whitelist.length > 0;
+    els.wlBody.innerHTML = whitelist.map((d) => `
+      <tr>
+        <td class="mono">${esc(d)}</td>
+        <td>
+          ${actBtn("delete", "Remove from whitelist", `data-domain="${esc(d)}"`, "wl-remove")}
+        </td>
+      </tr>`).join("");
+
+    els.blLog.textContent = (st.log || []).join("\n") || "(no update has run yet)";
+    els.blLog.scrollTop = els.blLog.scrollHeight;
+
+    els.blUpdate.disabled = st.status === "updating";
+    els.blHint.textContent = st.status === "updating" ? "Downloading lists and reloading Unbound…" : "";
+  }
+
+  async function postJSON(url, body) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+      cache: "no-store",
+    });
+    if (res.status === 401 && url !== "/api/auth/login") handleSessionExpired();
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    return data;
+  }
+
+  async function refreshBlocklists() {
+    try {
+      const data = await fetchJSON("/api/blocklists");
+      renderBlocklists(data);
+      const status = (data.state || {}).status;
+      if (status === "updating") {
+        if (!blPollTimer) blPollTimer = setInterval(refreshBlocklists, 3000);
+      } else if (blPollTimer) {
+        clearInterval(blPollTimer);
+        blPollTimer = null;
+      }
+    } catch (err) {
+      showBanner(true, "Blocklist error: " + err.message);
+    }
+    try {
+      renderRpz(await fetchJSON("/api/rpz"));
+    } catch (err) {
+      // RPZ section is optional; only surface a real API failure
+      if (!err.message || !err.message.includes("HTTP 404")) {
+        showBanner(true, "RPZ error: " + err.message);
+      }
+    }
+  }
+
+  function setBlTab(pane) {
+    document.querySelectorAll("#bl-subtabs .fw-subtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.blPane === pane));
+    document.querySelectorAll("#view-blocklists .fw-pane[data-bl-pane]").forEach((p) => {
+      p.hidden = p.dataset.blPane !== pane;
+    });
+  }
+  document.querySelectorAll("#bl-subtabs .fw-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => setBlTab(btn.dataset.blPane));
+  });
+
+  // ---- DNS page: Stats / Upstream subtabs + upstream resolver form ----
+  function setDnsTab(pane) {
+    document.querySelectorAll("#dns-subtabs .fw-subtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.dnsPane === pane));
+    document.querySelectorAll("#view-dns .fw-pane[data-dns-pane]").forEach((p) => {
+      p.hidden = p.dataset.dnsPane !== pane;
+    });
+  }
+  document.querySelectorAll("#dns-subtabs .fw-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => setDnsTab(btn.dataset.dnsPane));
+  });
+
+  const DNS_UPSTREAM_PRESETS = {
+    recursive: [],
+    adguard: ["94.140.14.14", "94.140.15.15", "2a10:50c0::ad1", "2a10:50c0::ad2"],
+    cleanbrowsing: ["185.228.168.168", "185.228.169.168", "2a0d:2a00:1::", "2a0d:2a00:2::"],
+    cloudflare: ["1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"],
+    comodo: ["8.26.56.26", "8.20.247.20"],
+    controd: ["76.76.10.0", "76.76.2.0", "2606:1a40::", "2606:1a40:1::"],
+    dnswatch: ["84.200.69.80", "84.200.70.40", "2001:1608:10:25::1c04:b12f", "2001:1608:10:25::9249:d69a"],
+    google: ["8.8.8.8", "8.8.4.4", "2001:4860:4860::8888", "2001:4860:4860::8844"],
+    mullvad: ["194.242.2.2", "2a07:a8c0::2"],
+    opendns: ["208.67.222.222", "208.67.220.220", "2620:119:35::35", "2620:119:53::53"],
+    quad9: ["9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"],
+  };
+
+  // Providers with a published DoT hostname (verified reachable/cert-valid
+  // from this router). Compose forwarders as IP@853#hostname when TLS is on.
+  // Mullvad excluded: their public DNS service shuts down Nov 2, 2026.
+  const DNS_UPSTREAM_DOT = {
+    adguard: "dns.adguard-dns.com",
+    cleanbrowsing: "family-filter-dns.cleanbrowsing.org",
+    cloudflare: "cloudflare-dns.com",
+    google: "dns.google",
+    opendns: "dnsovertls.opendns.com",
+    quad9: "dns.quad9.net",
+  };
+
+  function dnsUpCompose(choice, tls) {
+    const ips = DNS_UPSTREAM_PRESETS[choice] || [];
+    const host = tls ? DNS_UPSTREAM_DOT[choice] : null;
+    if (!host) return ips;
+    return ips.map((ip) => ip + "@853#" + host);
+  }
+
+  function dnsUpDetectChoice(fwd) {
+    if (!fwd || !fwd.length) return "recursive";
+    for (const name of Object.keys(DNS_UPSTREAM_PRESETS)) {
+      for (const tls of [false, true]) {
+        const ips = dnsUpCompose(name, tls);
+        if (ips.length && ips.length === fwd.length && ips.every((ip) => fwd.includes(ip)))
+          return name;
+      }
+    }
+    return "pihole";
+  }
+
+  function dnsUpSyncTlsBox(choice) {
+    const box = document.getElementById("dns-up-tls");
+    if (!box) return;
+    const supported = !!DNS_UPSTREAM_DOT[choice];
+    box.disabled = !supported;
+    if (!supported) box.checked = false;
+  }
+  document.querySelectorAll('input[name="dns-up-choice"]').forEach((r) => {
+    r.addEventListener("change", () => dnsUpSyncTlsBox(r.value));
+  });
+
+  async function loadDnsUpstream() {
+    const cur = document.getElementById("dns-up-current");
+    const hint = document.getElementById("dns-up-hint");
+    if (!cur) return;
+    try {
+      const d = await fetchJSON("/api/system/unbound-form");
+      if (!d.ok) throw new Error(d.error || "load failed");
+      const choice = dnsUpDetectChoice(d.forwarders || []);
+      const radio = document.querySelector('input[name="dns-up-choice"][value="' + choice + '"]');
+      if (radio) radio.checked = true;
+      if (choice === "pihole" && (d.forwarders || []).length)
+        document.getElementById("dns-up-pihole").value = d.forwarders[0];
+      const tlsBox = document.getElementById("dns-up-tls");
+      if (tlsBox) tlsBox.checked = !!d.tls_upstream;
+      dnsUpSyncTlsBox(choice);
+      cur.textContent = "Mode: " + (d.mode || "recursive") +
+        (d.tls_upstream ? " (DNS-over-TLS)" : "") +
+        ((d.forwarders || []).length ? " (" + d.forwarders.join(", ") + ")" : "");
+      hint.textContent = "";
+    } catch (err) {
+      cur.textContent = "error";
+      hint.textContent = err.message;
+    }
+  }
+
+  const dnsUpSaveBtn = document.getElementById("dns-up-save");
+  if (dnsUpSaveBtn) dnsUpSaveBtn.addEventListener("click", async () => {
+    const hint = document.getElementById("dns-up-hint");
+    const choice = (document.querySelector('input[name="dns-up-choice"]:checked') || {}).value || "recursive";
+    const tlsBox = document.getElementById("dns-up-tls");
+    const useTls = !!(tlsBox && tlsBox.checked && DNS_UPSTREAM_DOT[choice]);
+    let forwarders = [];
+    if (choice === "pihole") {
+      const ip = document.getElementById("dns-up-pihole").value.trim();
+      if (!ip) { hint.textContent = "Enter the Pi-hole / custom server address first."; return; }
+      forwarders = [ip];
+    } else {
+      forwarders = dnsUpCompose(choice, useTls);
+    }
+    if (!window.confirm("Change upstream DNS (" + (useTls ? "DNS-over-TLS" : "plaintext port 53") + ") and hot-reload Unbound? A backup of router-dns.conf is made first; LAN DNS blips for a second.")) return;
+    hint.textContent = "Saving…";
+    dnsUpSaveBtn.disabled = true;
+    try {
+      // read the live form first so listen addresses/port/protocols are preserved
+      const cur = await fetchJSON("/api/system/unbound-form");
+      if (!cur.ok) throw new Error(cur.error || "load failed");
+      await postJSON("/api/system/unbound-form", {
+        interfaces: (cur.interfaces || []).join("\n"),
+        port: String(cur.port != null ? cur.port : 53),
+        do_ip4: !!cur.do_ip4,
+        do_ip6: !!cur.do_ip6,
+        forwarders: forwarders.join("\n"),
+      });
+      hint.textContent = "Saved — Unbound reloaded.";
+      await loadDnsUpstream();
+    } catch (err) {
+      hint.textContent = err.message;
+    } finally {
+      dnsUpSaveBtn.disabled = false;
+    }
+  });
+
+  function bindBlocklistCatalog() {
+    const modal = document.getElementById("bl-browse-modal");
+    if (!modal) return;
+    const body = document.getElementById("bl-browse-body");
+    const search = document.getElementById("bl-browse-search");
+    const hint = document.getElementById("bl-browse-hint");
+    let mode = "sources";
+    let items = [];
+    let addedUrls = new Set();
+
+    const closeModal = () => { modal.hidden = true; };
+
+    function render() {
+      const q = search.value.trim().toLowerCase();
+      const rows = items.filter((i) =>
+        !q || (i.name + " " + i.description + " " + i.url).toLowerCase().includes(q));
+      body.innerHTML = rows.map((i) => {
+        const added = addedUrls.has(i.url);
+        return `<tr>
+          <td>
+            <b>${esc(i.name)}</b>${i.description ? ` <span class="muted">— ${esc(i.description)}</span>` : ""}<br>
+            <span class="mono muted bl-browse-url">${esc(i.url)}</span>
+          </td>
+          <td>${added
+            ? `<span class="muted">✓ added</span>`
+            : `<button class="btn btn-sm btn-primary bl-browse-add" data-url="${esc(i.url)}" type="button">Add</button>`}</td>
+        </tr>`;
+      }).join("") || `<tr><td class="empty">No matches.</td></tr>`;
+    }
+
+    async function openBrowse(m) {
+      mode = m;
+      document.getElementById("bl-browse-title").textContent =
+        m === "sources" ? "Browse blocklists" : "Browse RPZ feeds";
+      hint.textContent = "Curated lists from tuxwall.org — entries already on this router show a checkmark.";
+      search.value = "";
+      items = [];
+      render();
+      modal.hidden = false;
+      search.focus();
+      try {
+        // already-added sets from live table data
+        addedUrls = new Set();
+        try {
+          const bl = await fetchJSON("/api/blocklists");
+          (bl.sources || []).forEach((s) => addedUrls.add(s.url));
+        } catch (err) { /* optional */ }
+        if (mode === "rpz") {
+          try {
+            const rpz = await fetchJSON("/api/rpz");
+            ((rpz && rpz.feeds) || []).forEach((f) => addedUrls.add(f.url));
+          } catch (err) { /* optional */ }
+        }
+        const cat = await fetchJSON("/api/blocklists/catalog");
+        items = (mode === "sources" ? cat.sources : cat.rpz) || [];
+        if (!items.length) {
+          const errs = (cat.errors || []).join("; ");
+          hint.textContent = errs
+            ? "Catalog unavailable from tuxwall.org: " + errs
+            : "The catalog is empty — nothing published yet.";
+        }
+      } catch (err) {
+        hint.textContent = "Catalog unavailable: " + err.message;
+      }
+      render();
+    }
+
+    body.addEventListener("click", async (e) => {
+      const btn = e.target.closest(".bl-browse-add");
+      if (!btn) return;
+      btn.disabled = true;
+      try {
+        if (mode === "sources") {
+          await postJSON("/api/blocklists/add", { url: btn.dataset.url });
+        } else {
+          const item = items.find((it) => it.url === btn.dataset.url);
+          await postJSON("/api/rpz/feed/add", { url: btn.dataset.url, name: item ? item.name : "" });
+        }
+        addedUrls.add(btn.dataset.url);
+        render();
+        await refreshBlocklists();
+      } catch (err) {
+        showBanner(true, "Catalog add: " + err.message);
+        btn.disabled = false;
+      }
+    });
+
+    search.addEventListener("input", render);
+    document.getElementById("bl-browse").addEventListener("click", () => openBrowse("sources"));
+    document.getElementById("rpzf-browse").addEventListener("click", () => openBrowse("rpz"));
+    document.getElementById("bl-browse-close").addEventListener("click", closeModal);
+    modal.addEventListener("click", (e) => { if (e.target === modal) closeModal(); });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !modal.hidden) closeModal();
+    });
+  }
+
+  function bindBlocklistActions() {
+    els.blAdd.addEventListener("click", async () => {
+      const url = els.blUrl.value.trim();
+      if (!url) return;
+      els.blAdd.disabled = true;
+      try {
+        await postJSON("/api/blocklists/add", { url });
+        els.blUrl.value = "";
+        await refreshBlocklists();
+      } catch (err) {
+        showBanner(true, "Add list: " + err.message);
+      } finally {
+        els.blAdd.disabled = false;
+      }
+    });
+
+    els.blUrl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") els.blAdd.click();
+    });
+
+    els.blUpdate.addEventListener("click", async () => {
+      try {
+        await postJSON("/api/blocklists/update", {});
+      } catch (err) {
+        showBanner(true, "Update: " + err.message);
+      }
+      await refreshBlocklists();
+    });
+
+    els.blBody.addEventListener("click", async (e) => {
+      const btn = e.target.closest(".bl-remove");
+      if (!btn) return;
+      if (!window.confirm("Remove this blocklist source?")) return;
+      try {
+        await postJSON("/api/blocklists/remove", { url: btn.dataset.url });
+        await refreshBlocklists();
+      } catch (err) {
+        showBanner(true, "Remove: " + err.message);
+      }
+    });
+
+    els.blBody.addEventListener("change", async (e) => {
+      const toggle = e.target.closest(".bl-toggle");
+      if (!toggle) return;
+      try {
+        await postJSON("/api/blocklists/toggle", { url: toggle.dataset.url });
+      } catch (err) {
+        showBanner(true, "Toggle: " + err.message);
+      }
+      await refreshBlocklists();
+    });
+
+    els.wlAdd.addEventListener("click", async () => {
+      const domain = els.wlDomain.value.trim();
+      if (!domain) return;
+      els.wlAdd.disabled = true;
+      try {
+        await postJSON("/api/blocklists/whitelist/add", { domain });
+        els.wlDomain.value = "";
+        await refreshBlocklists();
+      } catch (err) {
+        showBanner(true, "Whitelist: " + err.message);
+      } finally {
+        els.wlAdd.disabled = false;
+      }
+    });
+
+    els.wlDomain.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") els.wlAdd.click();
+    });
+
+    els.wlBody.addEventListener("click", async (e) => {
+      const btn = e.target.closest(".wl-remove");
+      if (!btn) return;
+      if (!window.confirm(`Remove "${btn.dataset.domain}" from the whitelist?`)) return;
+      try {
+        await postJSON("/api/blocklists/whitelist/remove", { domain: btn.dataset.domain });
+        await refreshBlocklists();
+      } catch (err) {
+        showBanner(true, "Whitelist remove: " + err.message);
+      }
+    });
+  }
+
+  const RPZ_ACTION_LABELS = {
+    block: "Block (NXDOMAIN)",
+    drop: "Drop (no answer)",
+    redirect: "Redirect",
+    passthru: "Passthru (exempt)",
+  };
+
+  function renderRpz(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "RPZ data unavailable");
+      return;
+    }
+    const entries = d.entries || [];
+    els.rpzEmpty.hidden = entries.length > 0;
+    els.rpzBody.innerHTML = entries.map((e) => `
+      <tr>
+        <td class="mono">${e.match === "ip" ? `<span class="muted" title="Answer-IP policy">IP</span> ` : ""}${e.match === "ip" ? esc(e.domain) : "*." + esc(e.domain)}</td>
+        <td>${RPZ_ACTION_LABELS[e.action] || esc(e.action)}</td>
+        <td class="mono">${e.action === "redirect" ? esc(e.target) : "—"}</td>
+        <td class="muted">${e.added_at ? formatRelative(e.added_at) : "—"}</td>
+        <td>
+          ${actBtn("delete", "Remove block", `data-domain="${esc(e.domain)}"`, "rpz-remove")}
+        </td>
+      </tr>`).join("");
+    els.rpzHint.textContent = d.last_update ? `Zone last applied ${formatRelative(d.last_update)}` : "";
+
+    const stats = d.stats || {};
+    const statBits = [];
+    if (stats["num.rpz.action.rpz-nxdomain"] != null) statBits.push(`blocked ${formatNumber(stats["num.rpz.action.rpz-nxdomain"])}`);
+    if (stats["num.rpz.action.rpz-drop"] != null) statBits.push(`dropped ${formatNumber(stats["num.rpz.action.rpz-drop"])}`);
+    if (stats["num.rpz.action.rpz-cname"] != null) statBits.push(`redirected ${formatNumber(stats["num.rpz.action.rpz-cname"])}`);
+    if (stats["num.rpz.action.rpz-passthru"] != null) statBits.push(`passed ${formatNumber(stats["num.rpz.action.rpz-passthru"])}`);
+    els.rpzaStats.textContent = statBits.length ? `Since restart: ${statBits.join(" · ")}` : "No RPZ hits yet";
+
+    const hits = d.hits || [];
+    els.rpzaEmpty.hidden = hits.length > 0;
+    els.rpzaBody.innerHTML = hits.map((h) => `
+      <tr>
+        <td class="muted">${esc(h.time || "")}</td>
+        <td class="mono">${esc(h.zone || "")}</td>
+        <td class="mono">${esc(h.qname || "")}</td>
+        <td>${esc((h.action || "").replace("rpz-", ""))}</td>
+        <td class="mono">${esc(h.client || "")}</td>
+      </tr>`).join("");
+
+    const feeds = d.feeds || [];
+    els.rpzfEmpty.hidden = feeds.length > 0;
+    els.rpzfBody.innerHTML = feeds.map((f) => `
+      <tr>
+        <td>
+          <label class="toggle" title="Enable/disable this feed">
+            <input type="checkbox" class="rpzf-toggle" data-url="${esc(f.url)}" ${f.enabled ? "checked" : ""}>
+            <span class="toggle-track"></span>
+          </label>
+        </td>
+        <td class="mono" title="${esc(f.name || "")}">${esc(f.name || f.url)}${f.name ? ` <span class="muted">(${esc(f.url)})</span>` : ""}</td>
+        <td>${f.last_updated ? formatNumber(f.entries) : "—"}</td>
+        <td class="muted">${f.last_updated ? formatRelative(f.last_updated) : "pending first download"}</td>
+        <td>
+          ${actBtn("delete", "Remove feed", `data-url="${esc(f.url)}"`, "rpzf-remove")}
+        </td>
+      </tr>`).join("");
+  }
+
+  function bindRpzActions() {
+    const updateRpzPlaceholders = () => {
+      const ipMode = els.rpzMatch.value === "ip";
+      els.rpzDomain.placeholder = ipMode
+        ? "IP range, e.g. 192.0.2.0/24 (blocks any answer resolving into it)"
+        : "Domain, e.g. tracker.example.com (wildcard: covers subdomains too)";
+    };
+
+    els.rpzMatch.addEventListener("change", updateRpzPlaceholders);
+    updateRpzPlaceholders();
+
+    els.rpzAction.addEventListener("change", () => {
+      els.rpzTarget.hidden = els.rpzAction.value !== "redirect";
+    });
+
+    els.rpzAdd.addEventListener("click", async () => {
+      const domain = els.rpzDomain.value.trim();
+      if (!domain) return;
+      els.rpzAdd.disabled = true;
+      try {
+        await postJSON("/api/rpz/add", {
+          domain,
+          match: els.rpzMatch.value,
+          action: els.rpzAction.value,
+          target: els.rpzTarget.value.trim(),
+        });
+        els.rpzDomain.value = "";
+        els.rpzTarget.value = "";
+        await refreshBlocklists();
+      } catch (err) {
+        showBanner(true, "RPZ add: " + err.message);
+      } finally {
+        els.rpzAdd.disabled = false;
+      }
+    });
+
+    els.rpzDomain.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") els.rpzAdd.click();
+    });
+    els.rpzTarget.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") els.rpzAdd.click();
+    });
+
+    els.rpzBulk.addEventListener("click", () => {
+      els.rpzBulkRow.hidden = !els.rpzBulkRow.hidden;
+    });
+
+    els.rpzBulkGo.addEventListener("click", async () => {
+      const text = els.rpzBulkText.value.trim();
+      if (!text) return;
+      els.rpzBulkGo.disabled = true;
+      try {
+        const res = await postJSON("/api/rpz/import", { text });
+        if (res.errors && res.errors.length) {
+          showBanner(true, "RPZ import (partial): " + res.errors.join("; "));
+        } else {
+          showBanner(false, "");
+        }
+        els.rpzBulkText.value = "";
+        els.rpzBulkRow.hidden = true;
+        await refreshBlocklists();
+      } catch (err) {
+        showBanner(true, "RPZ import: " + err.message);
+      } finally {
+        els.rpzBulkGo.disabled = false;
+      }
+    });
+
+    els.rpzApply.addEventListener("click", async () => {
+      try {
+        await postJSON("/api/rpz/apply", {});
+      } catch (err) {
+        showBanner(true, "RPZ apply: " + err.message);
+      }
+      await refreshBlocklists();
+    });
+
+    els.rpzBody.addEventListener("click", async (e) => {
+      const btn = e.target.closest(".rpz-remove");
+      if (!btn) return;
+      if (!window.confirm(`Remove the RPZ policy for "${btn.dataset.domain}"?`)) return;
+      try {
+        await postJSON("/api/rpz/remove", { domain: btn.dataset.domain });
+        await refreshBlocklists();
+      } catch (err) {
+        showBanner(true, "RPZ remove: " + err.message);
+      }
+    });
+
+    els.rpzfAdd.addEventListener("click", async () => {
+      const url = els.rpzfUrl.value.trim();
+      if (!url) return;
+      els.rpzfAdd.disabled = true;
+      try {
+        await postJSON("/api/rpz/feed/add", { url, name: els.rpzfName.value.trim() });
+        els.rpzfUrl.value = "";
+        els.rpzfName.value = "";
+        await refreshBlocklists();
+      } catch (err) {
+        showBanner(true, "RPZ feed add: " + err.message);
+      } finally {
+        els.rpzfAdd.disabled = false;
+      }
+    });
+
+    els.rpzfUrl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") els.rpzfAdd.click();
+    });
+    els.rpzfName.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") els.rpzfAdd.click();
+    });
+
+    els.rpzfRefresh.addEventListener("click", async () => {
+      els.rpzfRefresh.disabled = true;
+      try {
+        await postJSON("/api/rpz/feed/refresh", {});
+      } catch (err) {
+        showBanner(true, "RPZ feed refresh: " + err.message);
+      } finally {
+        els.rpzfRefresh.disabled = false;
+      }
+      await refreshBlocklists();
+    });
+
+    els.rpzfBody.addEventListener("click", async (e) => {
+      const btn = e.target.closest(".rpzf-remove");
+      if (!btn) return;
+      if (!window.confirm("Remove this RPZ feed? Its zone is removed from Unbound on the next reload.")) return;
+      try {
+        await postJSON("/api/rpz/feed/remove", { url: btn.dataset.url });
+        await refreshBlocklists();
+      } catch (err) {
+        showBanner(true, "RPZ feed remove: " + err.message);
+      }
+    });
+
+    els.rpzfBody.addEventListener("change", async (e) => {
+      const toggle = e.target.closest(".rpzf-toggle");
+      if (!toggle) return;
+      try {
+        await postJSON("/api/rpz/feed/toggle", { url: toggle.dataset.url });
+      } catch (err) {
+        showBanner(true, "RPZ feed toggle: " + err.message);
+      }
+      await refreshBlocklists();
+    });
+  }
+
+  function pct(part, total) {
+    if (!total) return "";
+    return ` (${Math.round((part / total) * 100)}%)`;
+  }
+
+  function renderSystem(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "System info unavailable");
+      return;
+    }
+    const brandVersion = document.getElementById("brand-version");
+    if (brandVersion && d.tuxwall_version) brandVersion.textContent = "v" + d.tuxwall_version;
+    const cpu = d.cpu || {};
+    const mem = d.mem || {};
+    const swap = d.swap || {};
+    const disk = d.disk || {};
+
+    els.sysHost.textContent = d.hostname || "—";
+    state.sysHostname = d.hostname || "";
+    if (!state.editingHost) {
+      els.sysHost.textContent = state.sysHostname || "—";
+    }
+    els.sysCpu.textContent = cpu.cores ? `${cpu.cores} cores` + (cpu.temp != null ? ` · ${cpu.temp}°C` : "") : "—";
+    els.sysMem.textContent = mem.total ? `${formatBytes(mem.used)} / ${formatBytes(mem.total)}${pct(mem.used, mem.total)}` : "—";
+    els.sysUptime.textContent = formatUptime(d.uptime);
+    els.sysLoad.textContent = (d.load || []).map((x) => x.toFixed(2)).join(" / ");
+    els.sysDisk.textContent = disk.total ? `${formatBytes(disk.used)} / ${formatBytes(disk.total)}${pct(disk.used, disk.total)}` : "—";
+    els.sysSwap.textContent = swap.total ? `${formatBytes(swap.used)} / ${formatBytes(swap.total)}` : "—";
+    els.sysOs.textContent = d.os ? `${d.os}` : "—";
+    if (els.sysRebootUptime) els.sysRebootUptime.textContent = d.uptime != null ? formatUptime(d.uptime) : "—";
+    if (els.sysRebootBoot) els.sysRebootBoot.textContent = d.uptime != null
+      ? new Date(Date.now() - d.uptime * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
+      : "—";
+    if (els.sysRebootChip) els.sysRebootChip.textContent = d.uptime != null ? `Up ${formatUptime(d.uptime)}` : "—";
+    renderSysDetail(d);
+
+    renderSysInterfaces(d);
+  }
+
+  // Interfaces arrive in kernel order with no indication of what each one is
+  // for. The /api/system payload already tells us the WAN device and the DHCP
+  // router address, so the role can be derived here without any API change.
+  const SYS_IF_ROLES = [
+    ["WAN", "wan"], ["LAN", "lan"], ["VPN", "vpn"], ["VLAN", "vlan"],
+    ["BRIDGE", "bridge"], ["SHAPER", "shaper"], ["VIRT", "virt"],
+  ];
+
+  function sysIfaceRole(iface, d) {
+    const name = iface.name || "";
+    if (name && name === (d.wan || {}).ifname) return "WAN";
+    if (/^wg\d/i.test(name)) return "VPN";
+    if (/^ifb/i.test(name)) return "SHAPER";
+    if (/[.@]\d+$/.test(name) || /^vlan/i.test(name)) return "VLAN";
+    if (/^(br|bond)/i.test(name)) return "BRIDGE";
+    const router = (d.dhcp || {}).router;
+    if (router && (iface.addrs || []).some((a) => a.addr === router)) return "LAN";
+    if (/^(docker|veth|virbr|tun|tap)/i.test(name)) return "VIRT";
+    return "";
+  }
+
+  function renderSysInterfaces(d) {
+    if (!els.sysInterfacesBody) return;
+    const order = SYS_IF_ROLES.map((r) => r[0]);
+    const list = (d.interfaces || []).map((i) => ({ i, role: sysIfaceRole(i, d) }));
+    // WAN first, then LAN, then the rest - kernel order is meaningless here
+    list.sort((a, b) => {
+      const ra = order.indexOf(a.role), rb = order.indexOf(b.role);
+      return (ra < 0 ? 99 : ra) - (rb < 0 ? 99 : rb)
+          || String(a.i.name).localeCompare(String(b.i.name));
+    });
+
+    els.sysInterfacesBody.innerHTML = list.map(({ i, role }) => {
+      // Point-to-point devices (wg0) and shaping devices (ifb*) report
+      // operstate UNKNOWN while working normally - red would imply a fault,
+      // so UNKNOWN gets its own neutral state rather than being lumped in
+      // with DOWN the way the old badge did.
+      const st = String(i.state || "").toUpperCase();
+      const dot = st === "UP" ? "active" : st === "DOWN" ? "inactive" : "unknown";
+      const stTitle = dot === "unknown"
+        ? "The kernel reports no carrier state for this device type; this is normal for WireGuard and shaping interfaces."
+        : "";
+      const cls = (SYS_IF_ROLES.find((r) => r[0] === role) || [])[1] || "";
+      const roleChip = role ? `<span class="if-role if-role-${cls}">${role}</span>` : "";
+
+      const addrs = i.addrs || [];
+      const MAX = 4;
+      const shown = addrs.slice(0, MAX).map((a) => {
+        const v6 = a.family === "inet6";
+        return `<span class="if-ip"><i class="if-fam${v6 ? " v6" : ""}">${v6 ? "v6" : "v4"}</i>` +
+               `<span class="mono">${esc(a.addr)}/${esc(a.mask)}</span></span>`;
+      }).join("");
+      const extra = addrs.length > MAX
+        ? `<span class="if-more" title="${esc(addrs.slice(MAX).map((a) => a.addr + "/" + a.mask).join("\n"))}">+${addrs.length - MAX} more</span>`
+        : "";
+
+      return `<tr>
+        <td><span class="if-name"><b class="mono">${esc(i.name)}</b>${roleChip}</span></td>
+        <td><span class="if-state" title="${esc(stTitle)}"><span class="status-dot" data-status="${dot}"></span>` +
+          `${esc(st || "UNKNOWN")}</span></td>
+        <td class="mono if-mac">${esc(i.mac || "—")}</td>
+        <td>${shown + extra || "<span class=\"muted\">—</span>"}</td>
+      </tr>`;
+    }).join("");
+  }
+
+  async function refreshFastfetch() {
+    if (!els.sysFfInfo) return;
+    try {
+      const d = await fetchJSON("/api/system/fastfetch");
+      if (!d.ok) {
+        els.sysFfInfo.textContent = `Error: ${d.error || "fastfetch unavailable"}`;
+      } else if (d.html_info || d.html) {
+        els.sysFfInfo.innerHTML = d.html_info || d.html;
+      } else {
+        els.sysFfInfo.textContent = d.info || d.output;
+      }
+    } catch (err) {
+      els.sysFfInfo.textContent = `Error: ${err.message}`;
+    }
+  }
+
+  function renderSysDetail(d) {
+    if (!els.sysDetail) return;
+    if (!d || !d.ok) {
+      els.sysDetail.innerHTML = `<p class="muted">Error: ${esc((d && d.error) || "system info unavailable")}</p>`;
+      return;
+    }
+    const cpu = d.cpu || {};
+    const mem = d.mem || {};
+    const swap = d.swap || {};
+    const disk = d.disk || {};
+    const wan = d.wan || {};
+    const dash = "\u2014";
+    const val = (v) => (v === "" || v == null ? dash : esc(String(v)));
+    const model = (cpu.model || "").replace(/\(R\)|\(TM\)/g, "").replace(/\s+CPU.*$/i, "").replace(/\s+/g, " ").trim();
+    const upIfaces = (d.interfaces || []).filter((i) => i && i.state === "UP");
+    const row = (k, v) => `<div class="sys-drow"><span>${k}</span><b>${v}</b></div>`;
+    // Usage figures read as bare text; a bar makes "how full is it" scannable
+    // at a glance and colours the warning levels.
+    const meter = (k, v, used, total) => {
+      const p = total ? Math.max(0, Math.min(100, (used / total) * 100)) : 0;
+      const lvl = p >= 90 ? "crit" : p >= 75 ? "warn" : "";
+      return `<div class="sys-drow sys-drow-meter"><span>${k}</span><b>${v}</b>` +
+             `<div class="bar sys-dbar ${lvl}"><div class="bar-fill" style="width:${p.toFixed(1)}%"></div></div></div>`;
+    };
+    const grp = (title, rows, cls) => `<div class="sys-dgroup${cls ? " " + cls : ""}"><h4>${title}</h4>${rows}</div>`;
+    const lanRows = upIfaces
+      .filter((i) => i.name !== wan.ifname)
+      .map((i) => {
+        const v4 = (i.addrs || []).find((a) => a.family === "inet");
+        return row("LAN " + esc(i.name), esc(v4 ? v4.addr + "/" + v4.mask : "no IPv4"));
+      }).join("");
+    els.sysDetail.innerHTML =
+      grp("Platform",
+        row("Hostname", val(d.hostname)) +
+        row("OS", val(d.os)) +
+        row("Kernel", val(d.kernel)) +
+        row("Arch", val(d.arch)) +
+        row("TuxWall", val(d.tuxwall_version ? "v" + d.tuxwall_version : "")) +
+        row("Uptime", val(formatUptime(d.uptime)))) +
+      grp("Processor",
+        row("Model", val(model)) +
+        row("Cores", val(cpu.cores || "")) +
+        row("Temp", val(cpu.temp != null ? cpu.temp + "\u00B0C" : "")) +
+        row("Load", val((d.load || []).map((x) => Number(x).toFixed(2)).join(" / ")))) +
+      grp("Memory",
+        (mem.total
+          ? meter("RAM", `${esc(formatBytes(mem.used))} / ${esc(formatBytes(mem.total))}`, mem.used, mem.total)
+          : row("RAM", dash)) +
+        (swap.total
+          ? meter("Swap", `${esc(formatBytes(swap.used))} / ${esc(formatBytes(swap.total))}`, swap.used, swap.total)
+          : row("Swap", "none")) +
+        row("Available", val(mem.available != null ? formatBytes(mem.available) : ""))) +
+      grp("Storage",
+        (disk.total
+          ? meter("Used", `${esc(formatBytes(disk.used))} / ${esc(formatBytes(disk.total))}`, disk.used, disk.total)
+          : row("Used", dash)) +
+        row("Free", val(disk.avail != null ? formatBytes(disk.avail) : "")) +
+        row("Device", val(disk.fs)) +
+        row("Mount", val(disk.mount)), "sys-dgroup-storage") +
+      grp("Network",
+        row("WAN", val(wan.ifname ? `${wan.ifname}${wan.ipv4 ? " · " + wan.ipv4 : ""}` : "")) +
+        row("Gateway", val(wan.gateway4)) +
+        (lanRows || row("LAN", upIfaces.length ? `${upIfaces.length} up` : dash)), "sys-dgroup-net");
+  }
+
+  async function refreshSystem() {
+    try {
+      const data = await fetchJSON("/api/system");
+      renderSystem(data);
+    } catch (err) {
+      showBanner(true, "System info error: " + err.message);
+    }
+    refreshSqm();
+    refreshPools();
+  }
+
+  async function refreshSqm() {
+    if (!els.sqmStatus) return;
+    try {
+      const d = await fetchJSON("/api/sqm");
+      if (!d.ok) throw new Error(d.error || "SQM unavailable");
+      const isActive = d.active;
+      els.sqmStatus.innerHTML = `<span class="sqm-status-dot sqm-status-${isActive ? 'active' : 'inactive'}"></span>${isActive ? "Active" : "Inactive"}`;
+      els.sqmStatus.className = isActive ? "sqm-status-active" : "sqm-status-inactive";
+      els.sqmStatusNote.textContent = d.active
+        ? `CAKE on ${d.wan} + ${d.ifb}`
+        : "shaping not applied — run Apply to enable";
+      els.sqmWan.textContent = d.wan || "—";
+      els.sqmDown.innerHTML = d.down_mbit != null ? `<span class="sqm-down-value">${d.down_mbit} Mbps</span>` : "—";
+      els.sqmUp.innerHTML = d.up_mbit != null ? `<span class="sqm-up-value">${d.up_mbit} Mbps</span>` : "—";
+      els.sqmDrops.textContent = d.down_drops != null
+        ? `${formatNumber(d.down_drops)} drops${d.down_overlimits != null ? ` / ${formatNumber(d.down_overlimits)} overlimits` : ""}`
+        : "—";
+      if (document.activeElement !== els.sqmDownIn) els.sqmDownIn.value = d.down_mbit ?? "";
+      if (document.activeElement !== els.sqmUpIn) els.sqmUpIn.value = d.up_mbit ?? "";
+      if (d.speedtest_available === false) {
+        els.sqmTest.disabled = true;
+        els.sqmTest.title = d.speedtest_hint || "speedtest not installed";
+        els.sqmHint.textContent = d.speedtest_hint || "speedtest not installed";
+      } else if (!state.sqmTestRunning) {
+        els.sqmTest.disabled = false;
+      }
+    } catch (err) {
+      els.sqmStatus.textContent = "Error";
+      els.sqmStatusNote.textContent = err.message;
+    }
+  }
+
+  function setSysTab(pane) {
+    document.querySelectorAll("#sys-subtabs .fw-subtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.sysPane === pane));
+    document.querySelectorAll("#view-system .fw-pane[data-sys-pane]").forEach((p) => {
+      p.hidden = p.dataset.sysPane !== pane;
+    });
+    if (pane === "plugins") {
+      loadPluginsView();
+      loadAvailablePlugins();
+    }
+  }
+  document.querySelectorAll("#sys-subtabs .fw-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => setSysTab(btn.dataset.sysPane));
+  });
+
+  function bindSqm() {
+    if (!els.sqmApply) return;
+    els.sqmApply.addEventListener("click", async () => {
+      const down = parseInt(els.sqmDownIn.value, 10);
+      const up = parseInt(els.sqmUpIn.value, 10);
+      els.sqmHint.textContent = "Applying…";
+      try {
+        const d = await postJSON("/api/sqm", { down_mbit: down, up_mbit: up });
+        if (!d.ok) throw new Error(d.error || "apply failed");
+        els.sqmHint.textContent = "Applied — shaping active.";
+        refreshSqm();
+      } catch (err) {
+        els.sqmHint.textContent = err.message;
+      }
+    });
+    let pollTimer = null;
+    const pollTest = async () => {
+      try {
+        const s = await fetchJSON("/api/sqm/speedtest/status");
+        if (s.running) {
+          state.sqmTestRunning = true;
+          els.sqmTestStage.textContent = s.stage || "Running…";
+          pollTimer = setTimeout(pollTest, 3000);
+          return;
+        }
+        clearTimeout(pollTimer);
+        pollTimer = null;
+        state.sqmTestRunning = false;
+        els.sqmTest.disabled = false;
+        if (s.error) {
+          els.sqmTestStage.textContent = "Error: " + s.error;
+          return;
+        }
+        const r = s.result;
+        if (!r) {
+          els.sqmTestStage.textContent = "No result.";
+          return;
+        }
+        els.sqmTestStage.textContent = `Done — via ${esc(r.server || "speedtest")} at ${esc(r.measured_at || "")}`;
+        const sug = r.suggestion || {};
+        const warns = (sug.warnings || []).map((w) => `<p class="sqm-warn">${esc(w)}</p>`).join("");
+        els.sqmTestResult.innerHTML = `
+          <div class="cache-grid">
+            <div class="cache-item"><span>Download</span><b>${r.down_mbps != null ? esc(String(r.down_mbps)) + " Mbps" : "—"}</b></div>
+            <div class="cache-item"><span>Upload</span><b>${r.up_mbps != null ? esc(String(r.up_mbps)) + " Mbps" : "—"}</b></div>
+            <div class="cache-item"><span>Packet loss</span><b>${r.packet_loss != null ? esc(String(r.packet_loss)) + "%" : "—"}</b></div>
+            <div class="cache-item"><span>Suggested down</span><b>${sug.down_suggested != null ? esc(String(sug.down_suggested)) + " Mbps" : "—"}</b></div>
+            <div class="cache-item"><span>Suggested up</span><b>${sug.up_suggested != null ? esc(String(sug.up_suggested)) + " Mbps" : "—"}</b></div>
+          </div>
+          ${warns}
+          <div class="card-toolbar bl-toolbar">
+            <button class="btn btn-primary" id="sqm-use-suggested" type="button">Use suggested rates</button>
+            ${r.result_url ? `<a class="muted" href="${esc(r.result_url)}" target="_blank" rel="noopener">speedtest result</a>` : ""}
+          </div>`;
+        const useBtn = document.getElementById("sqm-use-suggested");
+        if (useBtn && sug.down_suggested && sug.up_suggested) {
+          useBtn.addEventListener("click", async () => {
+            els.sqmDownIn.value = sug.down_suggested;
+            els.sqmUpIn.value = sug.up_suggested;
+            els.sqmApply.click();
+          });
+        }
+      } catch (err) {
+        state.sqmTestRunning = false;
+        els.sqmTestStage.textContent = "Poll error: " + err.message;
+        els.sqmTest.disabled = false;
+      }
+    };
+    els.sqmTest.addEventListener("click", async () => {
+      if (!window.confirm("Run speedtest? Shaping is briefly removed for a clean measurement (~1 min), then restored automatically.")) return;
+      els.sqmTest.disabled = true;
+      els.sqmTestBox.hidden = false;
+      els.sqmTestResult.innerHTML = "";
+      els.sqmTestStage.textContent = "Starting…";
+      try {
+        await postJSON("/api/sqm/speedtest/start", {});
+        state.sqmTestRunning = true;
+        pollTimer = setTimeout(pollTest, 3000);
+      } catch (err) {
+        state.sqmTestRunning = false;
+        els.sqmTestStage.textContent = err.message;
+        els.sqmTest.disabled = false;
+      }
+    });
+  }
+
+  async function refreshPools() {
+    if (!els.sysPoolsBody) return;
+    try {
+      const d = await fetchJSON("/api/dhcp/subnets");
+      if (!d.ok) throw new Error(d.error || "pools unavailable");
+      state.poolCandidates = d.interfaces || [];
+      els.sysPoolsBody.innerHTML = (d.subnets || []).map((s) => {
+        const svc = s.serving_ifaces || [];
+        let ifaceCell;
+        if (!s.interface) {
+          ifaceCell = `<span class="muted" title="No interface bound — Kea serves this on any matching interface">auto</span>`;
+        } else if (svc.length && !svc.includes(s.interface)) {
+          ifaceCell = `<b class="mono">${esc(s.interface)}</b> <span class="badge badge-err" title="Bound interface holds no address in this subnet">stale</span>`;
+        } else {
+          ifaceCell = `<b class="mono">${esc(s.interface)}</b>`;
+        }
+        return `
+      <tr>
+        <td>${ifaceCell}</td>
+        <td class="mono">${esc(s.subnet || "—")}</td>
+        <td class="mono">${(s.pools || []).map(esc).join("<br>") || "—"}</td>
+        <td class="mono">${esc(s.router || "—")}</td>
+        <td class="mono">${esc(s.dns || "—")}</td>
+        <td>${s.reservations != null ? s.reservations : "—"}</td>
+        <td>${actBtn("edit", "Edit pool", `data-key="${s.key}"`, "pool-edit")}</td>
+      </tr>`;
+      }).join("") || `<tr><td colspan="7" class="muted">No DHCP pools configured. Add one for a LAN interface.</td></tr>`;
+      els.sysPoolsNote.textContent = `${(d.subnets || []).length} pool(s)`;
+      els.sysPoolsBody.querySelectorAll(".pool-edit").forEach((btn) => {
+        btn.addEventListener("click", () => openPoolForm(btn.dataset.key));
+      });
+    } catch (err) {
+      els.sysPoolsBody.innerHTML = `<tr><td colspan="7" class="muted">Pools error: ${esc(err.message)}</td></tr>`;
+    }
+  }
+
+  function fillPoolIfaces(selected) {
+    const sel = document.getElementById("dhcp-f-iface");
+    sel.innerHTML = (state.poolCandidates || []).map((c) =>
+      `<option value="${esc(c.name)}"${c.name === selected ? " selected" : ""}>${esc(c.name)}${c.is_wan ? " (WAN)" : ""} — ${(c.nets || []).map(esc).join(", ")}</option>`).join("");
+    if (selected && ![...(sel.options)].some((o) => o.value === selected)) {
+      const opt = document.createElement("option");
+      opt.value = selected;
+      opt.textContent = selected + " (not currently addressed)";
+      sel.appendChild(opt);
+      sel.value = selected;
+    }
+  }
+
+  const openPoolForm = async (key) => {
+    const modal = document.getElementById("dhcp-form-modal");
+    const hint = document.getElementById("dhcp-form-hint");
+    document.getElementById("dhcp-form-title").textContent =
+      (key === undefined || key === null || key === "") ? "Add DHCP Pool" : "Edit DHCP Pool";
+    document.getElementById("dhcp-f-key").value = (key === undefined || key === null) ? "" : key;
+    hint.textContent = "Loading…";
+    modal.hidden = false;
+    try {
+      const d = await fetchJSON("/api/dhcp/subnets");
+      if (!d.ok) throw new Error(d.error || "load failed");
+      state.poolCandidates = d.interfaces || [];
+      const s = (d.subnets || []).find((x) => String(x.key) === String(key));
+      fillPoolIfaces(s ? s.interface : ((d.interfaces || []).find((c) => !c.is_wan) || {}).name);
+      const pool = s && s.pools && s.pools[0] ? String(s.pools[0]).split("-") : ["", ""];
+      document.getElementById("dhcp-f-subnet").value = (s && s.subnet) || "";
+      document.getElementById("dhcp-f-start").value = (pool[0] || "").trim();
+      document.getElementById("dhcp-f-end").value = (pool[1] || "").trim();
+      document.getElementById("dhcp-f-router").value = (s && s.router) || "";
+      document.getElementById("dhcp-f-dns").value = (s && s.dns) || "";
+      document.getElementById("dhcp-f-domain").value = (s && s.domain) || "";
+      document.getElementById("dhcp-f-lease").value = (s && s.lease_time) || "";
+      hint.textContent = s
+        ? `${s.reservations || 0} static reservation(s) kept. Changes reload Kea automatically.`
+        : "The interface must already hold an address in the subnet. Changes reload Kea automatically.";
+    } catch (err) {
+      hint.textContent = err.message;
+    }
+  };
+
+  function bindHostEdit() {
+    els.sysHostEdit.addEventListener("click", () => {
+      if (state.editingHost) return;
+      state.editingHost = true;
+      els.sysHost.innerHTML = `
+        <span class="host-editor">
+          <input type="text" id="host-input" value="${esc(state.sysHostname)}" maxlength="63" autocomplete="off" spellcheck="false">
+          <button class="host-save" type="button">Save</button>
+          <button class="host-cancel" type="button">Cancel</button>
+        </span>`;
+      const input = document.getElementById("host-input");
+      input.focus();
+      input.select();
+      const close = (save) => {
+        state.editingHost = false;
+        if (save) {
+          const val = input.value.trim();
+          if (val) {
+            els.sysHost.textContent = val;
+            postJSON("/api/system/hostname", { hostname: val })
+              .then(() => refreshSystem())
+              .catch((err) => showBanner(true, "Hostname: " + err.message));
+            return;
+          }
+        }
+        els.sysHost.textContent = state.sysHostname || "—";
+      };
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") close(true);
+        else if (e.key === "Escape") close(false);
+      });
+      els.sysHost.querySelector(".host-save").addEventListener("click", () => close(true));
+      els.sysHost.querySelector(".host-cancel").addEventListener("click", () => close(false));
+    });
+  }
+
+  function bindConfigEdit() {
+    const openCfg = async (kind, title) => {
+      state.cfgTarget = kind;
+      els.cfgModalTitle.textContent = title;
+      els.cfgModalHint.textContent = "";
+      els.cfgModalText.value = "Loading…";
+      els.cfgModal.hidden = false;
+      els.cfgModalSave.disabled = false;
+      try {
+        const data = await fetchJSON(`/api/system/${kind}-config`);
+        if (!data.ok) throw new Error(data.error || "load failed");
+        els.cfgModalText.value = data.content;
+        els.cfgModalHint.className = "muted cfg-hint";
+        els.cfgModalHint.textContent = data.path;
+      } catch (err) {
+        els.cfgModalHint.className = "muted cfg-hint cfg-hint-err";
+        els.cfgModalHint.textContent = err.message;
+      }
+    };
+    const closeCfg = () => {
+      els.cfgModal.hidden = true;
+      state.cfgTarget = null;
+      els.cfgModalSave.disabled = false;
+    };
+    const closeDhcpForm = () => {
+      document.getElementById("dhcp-form-modal").hidden = true;
+    };
+    const openUnboundForm = async () => {
+      const modal = document.getElementById("unbound-form-modal");
+      const hint = document.getElementById("unbound-form-hint");
+      hint.textContent = "Loading…";
+      modal.hidden = false;
+      try {
+        const d = await fetchJSON("/api/system/unbound-form");
+        if (!d.ok) throw new Error(d.error || "load failed");
+        document.getElementById("unbound-f-ifaces").value = (d.interfaces || []).join("\n");
+        document.getElementById("unbound-f-port").value = d.port != null ? d.port : 53;
+        document.getElementById("unbound-f-ip4").checked = !!d.do_ip4;
+        document.getElementById("unbound-f-ip6").checked = !!d.do_ip6;
+        document.getElementById("unbound-f-fwd").value = (d.forwarders || []).join("\n");
+        hint.textContent = "Mode: " + (d.mode || "recursive") + ". Empty forwarders = recursive resolution.";
+      } catch (err) {
+        hint.textContent = err.message;
+      }
+    };
+    const closeUnboundForm = () => {
+      document.getElementById("unbound-form-modal").hidden = true;
+    };
+
+    els.sysEditKea.addEventListener("click", () => openCfg("kea", "Edit Kea DHCP config"));
+    els.sysPoolAdd.addEventListener("click", () => openPoolForm(null));
+    document.getElementById("dhcp-form-close").addEventListener("click", closeDhcpForm);
+    document.getElementById("dhcp-form-cancel").addEventListener("click", closeDhcpForm);
+    document.getElementById("unbound-form-close").addEventListener("click", closeUnboundForm);
+    document.getElementById("unbound-form-cancel").addEventListener("click", closeUnboundForm);
+    document.getElementById("dhcp-raw-btn").addEventListener("click", () => {
+      closeDhcpForm();
+      openCfg("kea", "Edit Kea DHCP config");
+    });
+    document.getElementById("unbound-raw-btn").addEventListener("click", () => {
+      closeUnboundForm();
+      openCfg("unbound", "Edit Unbound config");
+    });
+    document.getElementById("dhcp-form-save").addEventListener("click", async () => {
+      const hint = document.getElementById("dhcp-form-hint");
+      hint.textContent = "Saving…";
+      try {
+        const d = await postJSON("/api/dhcp/subnets", {
+          key: document.getElementById("dhcp-f-key").value.trim(),
+          interface: document.getElementById("dhcp-f-iface").value,
+          subnet: document.getElementById("dhcp-f-subnet").value.trim(),
+          pool_start: document.getElementById("dhcp-f-start").value.trim(),
+          pool_end: document.getElementById("dhcp-f-end").value.trim(),
+          router: document.getElementById("dhcp-f-router").value.trim(),
+          dns: document.getElementById("dhcp-f-dns").value.trim(),
+          domain: document.getElementById("dhcp-f-domain").value.trim(),
+          lease_time: document.getElementById("dhcp-f-lease").value.trim(),
+        });
+        if (!d.ok) throw new Error(d.error || "save failed");
+        hint.textContent = "Saved." + ((d.warnings || []).length ? " " + d.warnings.join(" ") : "");
+        closeDhcpForm();
+        refreshPools();
+      } catch (err) {
+        hint.textContent = err.message;
+      }
+    });
+    document.getElementById("unbound-form-save").addEventListener("click", async () => {
+      const hint = document.getElementById("unbound-form-hint");
+      hint.textContent = "Saving…";
+      try {
+        const d = await postJSON("/api/system/unbound-form", {
+          interfaces: document.getElementById("unbound-f-ifaces").value,
+          port: document.getElementById("unbound-f-port").value.trim(),
+          do_ip4: document.getElementById("unbound-f-ip4").checked,
+          do_ip6: document.getElementById("unbound-f-ip6").checked,
+          forwarders: document.getElementById("unbound-f-fwd").value,
+        });
+        if (!d.ok) throw new Error(d.error || "save failed");
+        hint.textContent = "Saved.";
+        closeUnboundForm();
+        refreshSystem();
+      } catch (err) {
+        hint.textContent = err.message;
+      }
+    });
+    els.cfgModalClose.addEventListener("click", closeCfg);
+    els.cfgModalCancel.addEventListener("click", closeCfg);
+    els.cfgModal.addEventListener("click", (e) => {
+      if (e.target === els.cfgModal) closeCfg();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !els.cfgModal.hidden) closeCfg();
+    });
+
+    els.cfgModalSave.addEventListener("click", async () => {
+      const kind = state.cfgTarget;
+      if (!kind) return;
+      if (!window.confirm("Save changes and restart the service? A backup of the current file is made first.")) return;
+      els.cfgModalSave.disabled = true;
+      try {
+        const data = await postJSON(`/api/system/${kind}-config`, { content: els.cfgModalText.value });
+        els.cfgModalSave.disabled = false;
+        els.cfgModalHint.className = "muted cfg-hint cfg-hint-ok";
+        els.cfgModalHint.textContent = "Saved. Backup: " + data.backup;
+        setTimeout(closeCfg, 900);
+        refreshSystem();
+      } catch (err) {
+        els.cfgModalSave.disabled = false;
+        els.cfgModalHint.className = "muted cfg-hint cfg-hint-err";
+        els.cfgModalHint.textContent = err.message;
+      }
+    });
+  }
+
+  async function uploadSystemBackupExamine(buf) {
+    const res = await fetch("/api/backups/system/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/gzip" },
+      body: buf,
+      cache: "no-store",
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    return data;
+  }
+
+  let bkMsgTimer = null;
+
+  function setBkSysMsg(msg, err) {
+    els.bkSysMsg.textContent = msg || "";
+    els.bkSysMsg.className = "muted" + (err ? " bk-msg-err" : msg ? " bk-msg-ok" : "");
+    if (bkMsgTimer) { clearTimeout(bkMsgTimer); bkMsgTimer = null; }
+    if (msg) {
+      bkMsgTimer = setTimeout(() => {
+        els.bkSysMsg.textContent = "";
+        els.bkSysMsg.className = "muted";
+        bkMsgTimer = null;
+      }, err ? 14000 : 7000);
+    }
+  }
+
+  function updateBackupFileHint() {
+    const file = els.bkSysFile.files && els.bkSysFile.files[0];
+    if (els.bkSysUpload) els.bkSysUpload.disabled = !file;
+    if (els.bkSysFileHint) {
+      els.bkSysFileHint.textContent = file
+        ? `${file.name} · ${formatBytes(file.size)}`
+        : "Choose a .tar.gz — or drop one here.";
+    }
+  }
+
+  function renderSystemBackups(d) {
+    const backups = (d.backups || []).slice().sort((a, b) => (b.time || 0) - (a.time || 0));
+    const latest = backups.reduce((m, b) => Math.max(m, b.time || 0), 0);
+    els.bkSysBody.innerHTML = backups.map((b) => {
+      const created = b.time ? new Date(b.time * 1000) : null;
+      const age = b.time ? formatRelative(b.time) : "";
+      return `
+      <tr>
+        <td class="mono bk-backup-name">${esc(b.name)}${b.time === latest ? ' <span class="bk-latest">Latest</span>' : ""}</td>
+        <td>${formatBytes(b.size)}</td>
+        <td class="bk-created">
+          <span>${created ? created.toLocaleString() : "—"}</span>
+          ${age ? `<span class="bk-age">${esc(age)}</span>` : ""}
+        </td>
+        <td class="td-right">
+          ${actBtn("download", "Download this backup", `data-name="${esc(b.name)}"`, "bk-sys-dl")}
+          <button class="btn btn-sm btn-act bk-sys-browse" data-name="${esc(b.name)}" type="button">${ICONS.browse}<span>Browse</span></button>
+          ${actBtn("export", "Export sanitized copy (secrets removed)", `data-name="${esc(b.name)}"`, "bk-sys-san")}
+          ${actBtn("delete", "Delete this backup", `data-name="${esc(b.name)}"`, "bk-sys-del")}
+        </td>
+      </tr>`;
+    }).join("") || `<tr><td colspan="4" class="muted" style="text-align:center;padding:1.5rem">No backups yet — create one above.</td></tr>`;
+
+    if (els.bkSysCount) {
+      const total = backups.reduce((s, b) => s + (b.size || 0), 0);
+      els.bkSysCount.textContent = backups.length
+        ? `${backups.length} backup${backups.length === 1 ? "" : "s"} · ${formatBytes(total)}`
+        : "";
+    }
+  }
+
+  let bkSysItemsCache = [];
+
+  function renderSystemBackupItems(items) {
+    bkSysItemsCache = items || [];
+    els.bkSysItems.innerHTML = (items || []).map((it) => `
+      <label class="bk-item">
+        <input type="checkbox" class="bk-item-chk" data-arc="${esc(it.arc)}" ${it.exists ? "checked" : " disabled"} />
+        <span class="bk-item-label">${esc(it.label)} <span class="muted mono">${esc(it.arc)}</span></span>
+        <span class="muted">${it.exists ? formatBytes(it.size) : "not present"}</span>
+      </label>`).join("") ||
+      `<p class="muted">No config items available.</p>`;
+    updateBackupSelection();
+  }
+
+  function selectedSystemBackupItems() {
+    return Array.from(els.bkSysItems.querySelectorAll(".bk-item-chk:checked"))
+      .map((c) => c.dataset.arc);
+  }
+
+  function updateBackupSelection() {
+    const boxes = Array.from(els.bkSysItems.querySelectorAll(".bk-item-chk:not(:disabled)"));
+    const checked = boxes.filter((c) => c.checked);
+    let size = 0;
+    checked.forEach((c) => {
+      const item = bkSysItemsCache.find((it) => it.arc === c.dataset.arc);
+      size += (item && item.size) || 0;
+    });
+    if (els.bkSysSel) {
+      els.bkSysSel.textContent = !boxes.length
+        ? ""
+        : checked.length
+          ? `${checked.length} of ${boxes.length} selected · ${formatBytes(size)}`
+          : `None of ${boxes.length} selected`;
+    }
+  }
+
+  async function refreshSystemBackupItems() {
+    try {
+      const data = await fetchJSON("/api/backups/system/items");
+      renderSystemBackupItems(data.items);
+    } catch (err) {
+      els.bkSysItems.innerHTML = `<p class="muted bk-msg-err">Could not load config items: ${esc(err.message)}</p>`;
+    }
+  }
+
+  function filterSystemBackupFiles() {
+    const query = (els.bkSysFilesSearch.value || "").trim().toLowerCase();
+    const rows = Array.from(els.bkSysFiles.querySelectorAll("tr"));
+    let shown = 0;
+    rows.forEach((row) => {
+      if (row.dataset.search == null) row.dataset.search = row.textContent.toLowerCase();
+      const hit = !query || row.dataset.search.includes(query);
+      row.hidden = !hit;
+      if (hit) shown += 1;
+    });
+    if (els.bkSysFilesCount) {
+      els.bkSysFilesCount.textContent = query
+        ? `${shown} of ${rows.length} files`
+        : `${rows.length} file${rows.length === 1 ? "" : "s"}`;
+    }
+    if (els.bkSysFilesEmpty) els.bkSysFilesEmpty.hidden = !(query && rows.length && !shown);
+  }
+
+  function revealBackupContents() {
+    const header = document.querySelector("header.topbar");
+    const offset = header ? header.getBoundingClientRect().height : 64;
+    const r = els.bkSysContents.getBoundingClientRect();
+    if (r.top < offset + 12 || r.top > window.innerHeight - 160) {
+      els.bkSysContents.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+
+  function renderSystemBackupContents(data) {
+    els.bkSysContentsTitle.textContent = "Contents of " + data.backup;
+    els.bkSysFiles.innerHTML = (data.files || []).map((f) => `
+      <tr>
+        <td class="mono">${esc(f.name)}</td>
+        <td>${formatBytes(f.size)}</td>
+        <td class="muted">${esc(f.service || "—")}</td>
+        <td class="td-right">
+          ${actBtn("download", "Download this file", `data-name="${esc(data.backup)}" data-file="${esc(f.name)}"`, "bk-file-dl")}
+          ${actBtn("backup", "Restore this file from the backup", `data-name="${esc(data.backup)}" data-file="${esc(f.name)}" data-service="${esc(f.service || "")}"`, "bk-file-restore")}
+        </td>
+      </tr>`).join("") || `<tr><td colspan="4" class="muted">No files.</td></tr>`;
+    els.bkSysContents.hidden = false;
+    if (els.bkSysFilesSearch) els.bkSysFilesSearch.value = "";
+    filterSystemBackupFiles();
+    requestAnimationFrame(revealBackupContents);
+  }
+
+  async function browseSystemBackup(name) {
+    try {
+      const data = await fetchJSON("/api/backups/system/contents?name=" + encodeURIComponent(name));
+      renderSystemBackupContents(data);
+      setBkSysMsg("");
+    } catch (err) {
+      setBkSysMsg("Browse: " + err.message, true);
+    }
+  }
+
+  async function refreshSystemBackups() {
+    try {
+      const data = await fetchJSON("/api/backups/system");
+      renderSystemBackups(data);
+      return data;
+    } catch (err) {
+      setBkSysMsg("System backups: " + err.message, true);
+      return null;
+    }
+  }
+
+  let bkSysPollTimer = null;
+
+  async function pollSystemBackup() {
+    try {
+      const data = await refreshSystemBackups();
+      if (!data) return;
+      if (data.running) {
+        els.bkSysProgress.hidden = false;
+        els.bkSysBar.style.width = (data.pct || 0) + "%";
+        els.bkSysStatus.textContent = `${data.pct || 0}% — ${data.step || "Running..."}`;
+        els.bkSysCreate.disabled = true;
+        bkSysPollTimer = setTimeout(pollSystemBackup, 600);
+      } else {
+        els.bkSysProgress.hidden = true;
+        els.bkSysCreate.disabled = false;
+        if (bkSysPollTimer) { clearTimeout(bkSysPollTimer); bkSysPollTimer = null; }
+        if (data.error) setBkSysMsg("Backup failed: " + data.error, true);
+        else if (data.result) setBkSysMsg(`Backup created: ${data.result}. Download and store it off this machine.`, false);
+      }
+    } catch (err) {
+      els.bkSysProgress.hidden = true;
+      els.bkSysCreate.disabled = false;
+      setBkSysMsg("Backup status: " + err.message, true);
+    }
+  }
+
+  async function downloadSystemBackup(name) {
+    const res = await fetch("/api/backups/system/download?name=" + encodeURIComponent(name), { cache: "no-store" });
+    if (!res.ok) throw new Error("Download failed");
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
+
+  function bindSystemBackups() {
+    els.bkSysAll.addEventListener("click", () => {
+      els.bkSysItems.querySelectorAll(".bk-item-chk:not(:disabled)").forEach((c) => { c.checked = true; });
+      updateBackupSelection();
+    });
+    els.bkSysNone.addEventListener("click", () => {
+      els.bkSysItems.querySelectorAll(".bk-item-chk").forEach((c) => { c.checked = false; });
+      updateBackupSelection();
+    });
+    els.bkSysItems.addEventListener("change", updateBackupSelection);
+
+    els.bkSysCreate.addEventListener("click", async () => {
+      const include = selectedSystemBackupItems();
+      if (!include.length) {
+        setBkSysMsg("Select at least one config item to back up.", true);
+        return;
+      }
+      try {
+        await postJSON("/api/backups/system/create", { include });
+        setBkSysMsg("Starting system backup...", false);
+        await pollSystemBackup();
+      } catch (err) {
+        setBkSysMsg(err.message, true);
+      }
+    });
+
+    els.bkSysUpload.addEventListener("click", async () => {
+      const file = els.bkSysFile.files && els.bkSysFile.files[0];
+      if (!file) {
+        setBkSysMsg("Choose a .tar.gz system backup file first.", true);
+        return;
+      }
+      try {
+        setBkSysMsg("Uploading and examining " + file.name + "…", false);
+        const buf = await file.arrayBuffer();
+        const data = await uploadSystemBackupExamine(buf);
+        els.bkSysFile.value = "";
+        updateBackupFileHint();
+        renderSystemBackupContents({ backup: data.name, files: data.files });
+        setBkSysMsg(
+          `Examined "${data.name}" — ${(data.files || []).length} restorable file(s) listed below. ` +
+          "Choose which to restore; current files get a timestamped .bak.", false);
+      } catch (err) {
+        setBkSysMsg("Upload: " + err.message, true);
+      }
+    });
+
+    els.bkSysFile.addEventListener("change", updateBackupFileHint);
+    els.bkSysFilesSearch.addEventListener("input", filterSystemBackupFiles);
+    els.bkSysMsg.addEventListener("click", () => setBkSysMsg(""));
+
+    if (els.bkSysDrop) {
+      const drop = els.bkSysDrop;
+      ["dragenter", "dragover"].forEach((ev) =>
+        drop.addEventListener(ev, (e) => {
+          e.preventDefault();
+          drop.classList.add("bk-drop-active");
+        }));
+      drop.addEventListener("dragleave", (e) => {
+        if (!drop.contains(e.relatedTarget)) drop.classList.remove("bk-drop-active");
+      });
+      drop.addEventListener("dragend", () => drop.classList.remove("bk-drop-active"));
+      drop.addEventListener("drop", (e) => {
+        e.preventDefault();
+        drop.classList.remove("bk-drop-active");
+        const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        if (!file) return;
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        els.bkSysFile.files = dt.files;
+        updateBackupFileHint();
+      });
+    }
+    updateBackupFileHint();
+
+    els.bkSysBody.addEventListener("click", async (e) => {
+      const dl = e.target.closest(".bk-sys-dl");
+      if (dl) {
+        try {
+          await downloadSystemBackup(dl.dataset.name);
+        } catch (err) {
+          setBkSysMsg(err.message, true);
+        }
+        return;
+      }
+      const browse = e.target.closest(".bk-sys-browse");
+      if (browse) {
+        await browseSystemBackup(browse.dataset.name);
+        return;
+      }
+      const san = e.target.closest(".bk-sys-san");
+      if (san) {
+        if (!window.confirm(
+          `Create a sanitized export of "${san.dataset.name}"?\n\n` +
+          "Secrets (WireGuard keys, CrowdSec/cloudflared credentials, tuxwall auth) are removed or redacted. " +
+          "The export downloads automatically and a copy stays on this server."
+        )) return;
+        try {
+          const res = await postJSON("/api/backups/system/sanitize", { name: san.dataset.name });
+          if (!res.ok || !res.name) throw new Error(res.error || "sanitize failed");
+          await downloadSystemBackup(res.name);
+          setBkSysMsg(
+            `Sanitized export ${res.name} downloaded — ` +
+            `${(res.dropped || []).length} secret file(s) dropped, ${res.redacted || 0} key(s) redacted. ` +
+            "Verify SANITIZED.txt inside before sharing.", false);
+        } catch (err) {
+          setBkSysMsg("Sanitize: " + err.message, true);
+        }
+        return;
+      }
+      const del = e.target.closest(".bk-sys-del");
+      if (del) {
+        if (!window.confirm(`Delete system backup "${del.dataset.name}"?`)) return;
+        try {
+          await postJSON("/api/backups/system/delete", { name: del.dataset.name });
+          setBkSysMsg("System backup deleted.", false);
+          els.bkSysContents.hidden = true;
+          await refreshSystemBackups();
+        } catch (err) {
+          setBkSysMsg(err.message, true);
+        }
+      }
+    });
+
+    els.bkSysFiles.addEventListener("click", async (e) => {
+      const dl = e.target.closest(".bk-file-dl");
+      if (dl) {
+        const url = "/api/backups/system/file?name=" + encodeURIComponent(dl.dataset.name) +
+          "&file=" + encodeURIComponent(dl.dataset.file);
+        window.location.href = url;
+        return;
+      }
+      const rst = e.target.closest(".bk-file-restore");
+      if (rst) {
+        const svc = rst.dataset.service;
+        const isFw = rst.dataset.file === "iptables-save.txt" || rst.dataset.file === "ip6tables-save.txt";
+        const isCode = rst.dataset.file.startsWith("var/www/html/includes/") ||
+          rst.dataset.file.startsWith("var/www/html/scripts/");
+        if (!window.confirm(
+          `Restore "${rst.dataset.file}" from this backup?\n\n` +
+          (isFw
+            ? "This atomically replaces the ENTIRE live ruleset (IPv4 or IPv6) with the rules from the backup. Do this from a LAN connection."
+            : "The current file is kept as a timestamped .bak alongside it." +
+              (svc ? `\nAfterwards, apply it with: sudo systemctl restart ${svc}` : ""))
+        )) return;
+        if (isCode && !window.confirm(
+          `SECOND CONFIRMATION — "${rst.dataset.file}" is executable dashboard code.\n\n` +
+          "Restoring it changes what the dashboard itself runs. Only proceed if you trust this backup."
+        )) return;
+        try {
+          const res = await postJSON("/api/backups/system/restore-file", {
+            name: rst.dataset.name, file: rst.dataset.file,
+            confirm_code_replace: isCode,
+          });
+          if (!res.ok) throw new Error(res.error || "restore failed");
+          setBkSysMsg(
+            `Restored ${res.restored}.` +
+            (res.restart_required ? ` To apply, run: sudo systemctl restart ${res.restart_required}` : "") +
+            (res.note ? ` (${res.note})` : ""), false);
+        } catch (err) {
+          setBkSysMsg("Restore: " + err.message, true);
+        }
+      }
+    });
+  }
+
+  function renderUpdates(d) {
+    els.sysUpdDistro.textContent = d.distro || "—";
+    els.sysUpdKernel.textContent = d.kernel || "—";
+    els.sysUpdChecked.textContent = d.last_check ? new Date(d.last_check * 1000).toLocaleString() : "Never";
+    els.sysUpdLast.textContent = d.last_upgrade ? new Date(d.last_upgrade * 1000).toLocaleString() : "Never";
+    els.sysUpdCount.textContent = d.upgradable >= 0 ? formatNumber(d.upgradable) : "—";
+    const running = !!d.running;
+    els.sysUpdProgress.hidden = !running;
+    els.sysUpdCheck.disabled = running;
+    els.sysUpdApply.disabled = running;
+
+    let updState = "idle";
+    let updLabel = "Not checked";
+    if (d.upgradable > 0) {
+      updState = "warn";
+      updLabel = `${formatNumber(d.upgradable)} pending`;
+    } else if (d.upgradable === 0) {
+      updState = "ok";
+      updLabel = "Up to date";
+    } else if (d.last_check) {
+      updLabel = "Unknown";
+    }
+    if (els.sysUpdCard) els.sysUpdCard.dataset.state = updState;
+    if (els.sysUpdChip) {
+      els.sysUpdChip.textContent = updLabel;
+      els.sysUpdChip.dataset.state = updState;
+    }
+
+    const note = els.sysUpdNote;
+    if (!running && d.upgradable > 0) {
+      note.textContent = `${formatNumber(d.upgradable)} update${d.upgradable === 1 ? "" : "s"} available`;
+      note.className = "upd-note upd-note-warn";
+    } else if (!running && d.upgradable === 0) {
+      note.textContent = "System is up to date";
+      note.className = "upd-note upd-note-ok";
+    } else if (!running && !d.last_check) {
+      note.textContent = "Run a check to refresh the package cache.";
+      note.className = "upd-note upd-note-muted";
+    } else {
+      note.textContent = "";
+      note.className = "upd-note";
+    }
+    if (running) {
+      const pct = d.percent != null ? Math.max(0, Math.min(100, d.percent)) : 0;
+      els.sysUpdBar.style.width = pct + "%";
+      els.sysUpdStatus.textContent = `${d.phase || "Working"} — ${pct}%`;
+      els.sysUpdLog.textContent = (d.log || []).join("\n");
+      els.sysUpdLog.scrollTop = els.sysUpdLog.scrollHeight;
+    } else if (d.exit_code != null) {
+      els.sysUpdStatus.textContent = d.exit_code === 0
+        ? (d.last_upgrade ? "System update complete." : "Check complete.")
+        : `Failed (exit ${d.exit_code}). See the log below or run 'Check for updates' for details.`;
+      els.sysUpdLog.textContent = (d.log || []).join("\n");
+    } else {
+      els.sysUpdStatus.textContent = "";
+      els.sysUpdLog.textContent = "";
+    }
+  }
+
+  function stopUpdPoll() {
+    if (state.updTimer) {
+      clearInterval(state.updTimer);
+      state.updTimer = null;
+    }
+  }
+
+  function startUpdPoll() {
+    if (state.updTimer) return;
+    state.updTimer = setInterval(async () => {
+      try {
+        const d = await fetchJSON("/api/system/updates");
+        renderUpdates(d);
+        if (!d.running) stopUpdPoll();
+      } catch (err) {
+        showBanner(true, "Updates: " + err.message);
+        stopUpdPoll();
+      }
+    }, 1000);
+  }
+
+  async function refreshUpdates() {
+    try {
+      const d = await fetchJSON("/api/system/updates");
+      renderUpdates(d);
+      if (d.running) startUpdPoll();
+    } catch (err) {
+      showBanner(true, "Updates: " + err.message);
+    }
+  }
+
+  function bindUpdates() {
+    els.sysUpdCheck.addEventListener("click", async () => {
+      try {
+        await postJSON("/api/system/updates/check", {});
+        startUpdPoll();
+        refreshUpdates();
+      } catch (err) {
+        showBanner(true, "Updates: " + err.message);
+      }
+    });
+    els.sysUpdApply.addEventListener("click", async () => {
+      if (!window.confirm("Install all available system updates now? This can take several minutes. A reboot may be recommended afterwards.")) return;
+      try {
+        await postJSON("/api/system/updates/apply", {});
+        startUpdPoll();
+        refreshUpdates();
+      } catch (err) {
+        showBanner(true, "Updates: " + err.message);
+      }
+    });
+    els.sysReboot.addEventListener("click", async () => {
+      if (!window.confirm("Reboot the router now? The dashboard and network go offline for about a minute.")) return;
+      if (!window.confirm("Are you sure? All connections through this router will drop.")) return;
+      try {
+        await postJSON("/api/system/reboot", {});
+        els.sysReboot.textContent = "Rebooting…";
+        els.sysReboot.disabled = true;
+      } catch (err) {
+        showBanner(true, "Reboot: " + err.message);
+      }
+    });
+
+    els.sysSvcRefresh.addEventListener("click", () => refreshServices());
+
+    els.svcTabs.addEventListener("click", (ev) => {
+      const t = ev.target.closest(".svc-tab");
+      if (!t || t.classList.contains("active")) return;
+      state.svcTab = t.dataset.tab;
+      els.svcTabs.querySelectorAll(".svc-tab").forEach((x) => x.classList.toggle("active", x === t));
+      renderServices();
+    });
+
+    els.sysServicesBody.addEventListener("click", async (ev) => {
+      const btn = ev.target.closest("button[data-action]");
+      if (!btn || btn.disabled) return;
+      const unit = btn.dataset.unit;
+      const action = btn.dataset.action;
+      const warn = {
+        stop: `Stop ${unit}? It will stay stopped until started again.`,
+        restart: `Restart ${unit}? Active connections through it may drop.`,
+        reload: `Reload ${unit}?`,
+        start: `Start ${unit}?`,
+      }[action];
+      if (!window.confirm(warn)) return;
+      btn.disabled = true;
+      try {
+        await postJSON("/api/system/services/action", { unit, action });
+        showBanner(false);
+        await refreshServices();
+      } catch (err) {
+        showBanner(true, `${unit} ${action}: ` + err.message);
+        await refreshServices();
+      }
+    });
+  }
+
+  const BW_RX_FALLBACK = "#4f8cff";
+  const BW_TX_FALLBACK = "#d29922";
+
+  function logQuery() {
+    return `source=${encodeURIComponent(els.logSource.value)}&lines=${els.logLines.value}&priority=${encodeURIComponent(els.logPriority.value)}`;
+  }
+
+  async function refreshLog() {
+    try {
+      const d = await fetchJSON(`/api/logs/tail?${logQuery()}`);
+      const atBottom = els.logView.scrollHeight - els.logView.scrollTop - els.logView.clientHeight < 40;
+      els.logView.textContent = d.content || "(no log entries)";
+      els.logMeta.textContent = `${d.lines} line(s) · ${els.logSource.options[els.logSource.selectedIndex].text}`;
+      if (els.logFollow.checked || atBottom) els.logView.scrollTop = els.logView.scrollHeight;
+    } catch (err) {
+      els.logMeta.textContent = err.message;
+    }
+  }
+
+  async function loadLogSources() {
+    try {
+      const d = await fetchJSON("/api/logs/services");
+      const cur = els.logSource.value;
+      els.logSource.innerHTML = (d.sources || []).map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");
+      if (cur && Array.from(els.logSource.options).some((o) => o.value === cur)) els.logSource.value = cur;
+      refreshLog();
+    } catch (err) {
+      els.logMeta.textContent = err.message;
+    }
+  }
+
+  function startLogTimer() {
+    if (state.logTimer) return;
+    state.logTimer = setInterval(() => {
+      if (els.logFollow.checked) refreshLog();
+    }, 5000);
+  }
+
+  function stopLogTimer() {
+    if (state.logTimer) {
+      clearInterval(state.logTimer);
+      state.logTimer = null;
+    }
+  }
+
+  function updateLogLive() {
+    if (!els.logLive || !els.logFollow) return;
+    const live = els.logFollow.checked;
+    els.logLive.textContent = live ? "Live" : "Paused";
+    els.logLive.classList.toggle("is-live", live);
+    els.logLive.classList.toggle("is-paused", !live);
+  }
+
+  async function copyLogText(text) {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) { /* fall through to execCommand */ }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0";
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function bindLogs() {
+    els.logRefresh.addEventListener("click", refreshLog);
+    els.logSource.addEventListener("change", refreshLog);
+    els.logPriority.addEventListener("change", refreshLog);
+    els.logLines.addEventListener("change", refreshLog);
+    els.logFollow.addEventListener("change", () => {
+      updateLogLive();
+      if (els.logFollow.checked) refreshLog();
+    });
+    if (els.logCopy) {
+      els.logCopy.addEventListener("click", async () => {
+        const ok = await copyLogText(els.logView.textContent || "");
+        const prev = els.logCopy.textContent;
+        els.logCopy.textContent = ok ? "Copied" : "Copy failed";
+        setTimeout(() => { els.logCopy.textContent = prev; }, 1400);
+      });
+    }
+    updateLogLive();
+  }
+
+  function hexToRgba(hex, alpha) {
+    const h = hex.replace("#", "");
+    return `rgba(${parseInt(h.slice(0, 2), 16)},${parseInt(h.slice(2, 4), 16)},${parseInt(h.slice(4, 6), 16)},${alpha})`;
+  }
+
+  function cssVar(name, fallback) {
+    // Overview uses a muted semantic palette so its chart data matches the
+    // ov-mon monitor tiles; every other view keeps the active theme colours.
+    let scope = document.documentElement;
+    if (state && state.activeView === "overview" &&
+        (name === "--accent" || name === "--green" || name === "--red" || name === "--amber")) {
+      const ov = document.getElementById("view-overview");
+      if (ov) scope = ov;
+    }
+    const v = getComputedStyle(scope).getPropertyValue(name).trim();
+    if (!v) return fallback;
+    if (/^#[0-9a-fA-F]{6}$/.test(v)) return v;
+    return fallback;
+  }
+
+  // Smooth curve helper using Catmull-Rom → cubic bezier conversion
+  // Centred 3-tap smoothing (0.25 / 0.5 / 0.25). Symmetric, so unlike an EMA
+  // it adds no time lag — a peak stays on the sample it happened on. This
+  // only affects the drawn line: every numeric readout still comes from the
+  // raw series, so spikes are still reported at full height.
+  function smoothSeries(values, passes) {
+    const n = values.length;
+    if (n < 3) return values;
+    let out = values;
+    for (let p = 0; p < (passes || 1); p++) {
+      const src = out;
+      const dst = new Array(n);
+      dst[0] = src[0];
+      dst[n - 1] = src[n - 1];
+      for (let i = 1; i < n - 1; i++) {
+        dst[i] = src[i - 1] * 0.25 + src[i] * 0.5 + src[i + 1] * 0.25;
+      }
+      out = dst;
+    }
+    return out;
+  }
+
+  // Pick a smoothing strength from how tightly samples are packed. At ~2.6px
+  // per sample (300 bandwidth points in a ~790px card) the line zigzags at
+  // the pixel level; wide cards with few points need no help.
+  function smoothPasses(n, widthPx) {
+    const pxPerSample = widthPx / Math.max(1, n - 1);
+    if (pxPerSample >= 8) return 0;
+    if (pxPerSample >= 4) return 1;
+    return 2;
+  }
+
+  // Catmull-Rom written as cubic beziers. The control-point coefficient is
+  // 1/6 — the value that makes the bezier actually match the spline. It was
+  // 0.4, which overshot every point and invented up to ~24px of vertical
+  // wobble that was never in the data.
+  // Control points are additionally clamped to each segment's own y-range.
+  // A bezier is contained by the convex hull of its control points, so this
+  // makes overshoot impossible rather than merely smaller.
+  function smoothCurvePath(ctx, pts) {
+    if (pts.length < 2) return;
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    if (pts.length === 2) { ctx.lineTo(pts[1][0], pts[1][1]); return; }
+    const k = 1 / 6;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[Math.max(i - 1, 0)];
+      const p1 = pts[i];
+      const p2 = pts[i + 1];
+      const p3 = pts[Math.min(i + 2, pts.length - 1)];
+      const loY = Math.min(p1[1], p2[1]);
+      const hiY = Math.max(p1[1], p2[1]);
+      const clampY = (v) => (v < loY ? loY : v > hiY ? hiY : v);
+      const cp1x = p1[0] + (p2[0] - p0[0]) * k;
+      const cp1y = clampY(p1[1] + (p2[1] - p0[1]) * k);
+      const cp2x = p2[0] - (p3[0] - p1[0]) * k;
+      const cp2y = clampY(p2[1] - (p3[1] - p1[1]) * k);
+      ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2[0], p2[1]);
+    }
+  }
+
+  // Animated chart transitions (Overview CPU & Bandwidth).
+  // Each refresh tweens plotted values from the previous snapshot to the
+  // new one (~0.8s, ease-out) so the graphs glide instead of jump-cutting.
+  // Length changes (new samples) are handled by resampling the old series
+  // onto the new sample count. Skipped under prefers-reduced-motion.
+  const chartTween = new WeakMap();
+  const TWEEN_MS = 800;
+  function tweenChartDraw(canvas, history, extra, drawFn, valIdx) {
+    const target = (history || []).map((s) => s.slice());
+    const to = target.map((s) => valIdx.map((k) => s[k]));
+    const prev = chartTween.get(canvas);
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduceMotion || !prev || !prev.values.length || !to.length) {
+      chartTween.set(canvas, { values: to, raf: 0 });
+      drawFn(canvas, target, extra);
+      return;
+    }
+    if (prev.raf) cancelAnimationFrame(prev.raf);
+    const from = prev.values;
+    const sample = (arr, j, outLen) => {
+      if (!arr.length || !outLen) return 0;
+      if (arr.length === 1 || outLen === 1) return arr[0];
+      const p = (j * (arr.length - 1)) / (outLen - 1);
+      const i0 = Math.floor(p), i1 = Math.min(arr.length - 1, i0 + 1);
+      return arr[i0] + (arr[i1] - arr[i0]) * (p - i0);
+    };
+    const t0 = performance.now();
+    const state = { values: to, raf: 0 };
+    chartTween.set(canvas, state);
+    const step = (t) => {
+      const e = 1 - Math.pow(1 - Math.min(1, (t - t0) / TWEEN_MS), 3);
+      const blended = target.map((row, j) => {
+        const out = row.slice();
+        valIdx.forEach((k, m) => {
+          out[k] = sample(from[m] || [], j, to.length) * (1 - e) + to[j][m] * e;
+        });
+        return out;
+      });
+      drawFn(canvas, blended, extra);
+      state.raf = e < 1 ? requestAnimationFrame(step) : 0;
+    };
+    state.raf = requestAnimationFrame(step);
+  }
+
+  // Live graph lane: every 2s (matching the fastest backend sampler)
+  // the two Overview graphs repaint from fresh snapshots with current
+  // values in their HTML legends. Gated on login + auto-refresh + the
+  // Overview being visible; the 15s cycle remains the error reporter.
+  let liveGraphsTimer = 0;
+  function paintLiveGraphs(sys, bw, latSeries) {
+    const fmtLiveMs = (v) => (v == null ? "—" : v >= 100 ? Math.round(v) + " ms" : v.toFixed(1) + " ms");
+    if (Array.isArray(latSeries)) liveLatSnap = latSeries;
+    const lastLat = liveLatSnap.length ? liveLatSnap[liveLatSnap.length - 1] : null;
+    if (els.ovLatAvg) els.ovLatAvg.textContent = lastLat ? fmtLiveMs(lastLat[1]) : "—";
+    if (els.ovLatMax) els.ovLatMax.textContent = lastLat ? fmtLiveMs(lastLat[2]) : "—";
+    if (els.ovJitMdev) els.ovJitMdev.textContent = lastLat ? fmtLiveMs(lastLat[3]) : "—";
+    if (!sys || !sys.ok || !bw || !bw.ok) return;
+    const usage = sys.usage || {};
+    if (els.ovResCpu) els.ovResCpu.textContent = usage.cpu_pct != null ? Math.round(usage.cpu_pct) + "%" : "—";
+    if (els.ovResMem) els.ovResMem.textContent = usage.mem_pct != null ? usage.mem_pct.toFixed(1) + "%" : "—";
+    liveSysSnap = sys;
+    const ifaces = bw.interfaces || [];
+    const totDown = ifaces.reduce((n, i) => n + (i.rx_bps || 0), 0);
+    const totUp = ifaces.reduce((n, i) => n + (i.tx_bps || 0), 0);
+    if (els.ovBwDown) els.ovBwDown.textContent = formatBits(totDown);
+    if (els.ovBwUp) els.ovBwUp.textContent = formatBits(totUp);
+    liveBwSnap = bw;
+  }
+  function liveChartsVisible() {
+    return [els.ovResChart, els.ovBwChart, els.ovLatChart, els.ovJitChart]
+      .some((c) => c && ovChartVisible.get(c) !== false);
+  }
+
+  function startLiveGraphs() {
+    if (liveGraphsTimer) return;
+    [els.ovResChart, els.ovBwChart, els.ovLatChart, els.ovJitChart].forEach(ovWatchChart);
+    requestAnimationFrame(sweepFrame);
+    liveGraphsTimer = setInterval(async () => {
+      if (!state.authed || !els.auto.checked || state.activeView !== "overview" || document.hidden) return;
+      if (!liveChartsVisible()) return;   // charts are scrolled away - nothing to paint
+      try {
+        const [sys, bw, latH] = await Promise.all([fetchJSON("/api/system"), fetchJSON("/api/bandwidth"), fetchJSON("/api/latency/history?hours=1").catch(() => ({ series: [] }))]);
+        paintLiveGraphs(sys, bw, latH.series || []);
+      } catch (_) { /* silent: the 15s cycle surfaces errors */ }
+    }, 2000);
+  }
+
+  // Heart-monitor sweep (Overview CPU & Bandwidth).
+  // Instead of redrawing on each poll, every animation frame resamples the
+  // stored histories onto a moving 2-minute time grid, so the traces drift
+  // left continuously like a live monitor. The existing draw functions do
+  // the actual painting (axes, smoothing, glow, head dot), fed with
+  // synthetic timestamped rows. New samples ease in via hold-last
+  // interpolation at the leading edge -- no jumps, no tween fighting.
+  let liveSysSnap = null, liveBwSnap = null, liveLatSnap = [];
+  // Eased leading-edge values for the latency/jitter sweep (see below).
+  let liveHead = { latAvg: null, latMax: null, jit: null, t: 0 };
+  let liveScale = { lat: 0, jit: 0, t: 0 };
+  const SWEEP_FAST_SEC = 300, SWEEP_FAST_PTS = 150;   // CPU, Bandwidth: live 5 min
+  const SWEEP_SLOW_SEC = 3600, SWEEP_SLOW_PTS = 180; // Latency, Jitter: past hour
+  // Resample value series onto a moving window ending now.
+  function sweepRows(now, windowSec, pts, cols) {
+    const t0 = now - windowSec;
+    const rows = [];
+    for (let i = 0; i < pts; i++) {
+      const t = t0 + (windowSec * i) / (pts - 1);
+      rows.push([t].concat(cols.map((c) => sweepValueAt(c, t))));
+    }
+    return rows;
+  }
+  function sweepValueAt(pairs, t) {
+    // pairs: [[ts, v], ...] ascending. Hold edges, lerp between.
+    const n = pairs.length;
+    if (!n) return 0;
+    if (t <= pairs[0][0]) return pairs[0][1];
+    if (t >= pairs[n - 1][0]) return pairs[n - 1][1];
+    let lo = 0, hi = n - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (pairs[mid][0] <= t) lo = mid; else hi = mid;
+    }
+    const a = pairs[lo], b = pairs[hi];
+    const f = (t - a[0]) / Math.max(1e-6, b[0] - a[0]);
+    return a[1] + (b[1] - a[1]) * f;
+  }
+  // The latency/jitter charts show a full hour across ~900px, so one pixel is
+  // about four seconds of data - repainting them 30x a second buys nothing.
+  // They get a 1s cadence; only the 5-minute CPU/bandwidth traces sweep.
+  const SWEEP_SLOW_REDRAW_MS = 1000;
+  let _sweepSlowLast = 0;
+  function paintLiveSweep() {
+    const now = Date.now() / 1000;
+    const nowMsAbs = now * 1000;
+    const slowDue = (nowMsAbs - _sweepSlowLast) >= SWEEP_SLOW_REDRAW_MS;
+    if (slowDue) _sweepSlowLast = nowMsAbs;
+    const vis = (c) => c && ovChartVisible.get(c) !== false;
+    const visSlow = (c) => slowDue && vis(c);
+    // CPU & Memory: fast 5-minute sweep.
+    const hist = (liveSysSnap && liveSysSnap.history) || [];
+    if (!hist.length) {
+      if (vis(els.ovResChart)) drawResourceChart(els.ovResChart, []);
+    } else {
+      if (vis(els.ovResChart)) drawResourceChart(els.ovResChart, sweepRows(now, SWEEP_FAST_SEC, SWEEP_FAST_PTS,
+        [hist.map((r) => [r[0], r[1]]), hist.map((r) => [r[0], r[2]])]));
+    }
+    // Bandwidth.
+    const ifaces = (liveBwSnap && liveBwSnap.interfaces) || [];
+    const merged = mergeInterfaceHistory(ifaces);
+    if (!merged.length) {
+      if (vis(els.ovBwChart)) drawBandwidth(els.ovBwChart, [], 1);
+    } else {
+      let maxBps = 1;
+      for (const m of merged) {
+        if (m[1] > maxBps) maxBps = m[1];
+        if (m[2] > maxBps) maxBps = m[2];
+      }
+      if (vis(els.ovBwChart)) drawBandwidth(els.ovBwChart, sweepRows(now, SWEEP_FAST_SEC, SWEEP_FAST_PTS,
+        [merged.map((r) => [r[0], r[1]]), merged.map((r) => [r[0], r[2]])]), maxBps);
+    }
+    // WAN latency (avg + max) and jitter (mdev) share one history.
+    const latBase = (liveSysSnap && liveSysSnap.latency && liveSysSnap.latency.baseline_ms) || 0;
+    if (!slowDue) { /* latency/jitter not due this frame */ }
+    else if (!liveLatSnap.length) {
+      if (visSlow(els.ovLatChart)) drawLatencyChart(els.ovLatChart, [], 0);
+      if (visSlow(els.ovJitChart)) drawJitterChart(els.ovJitChart, []);
+    } else {
+      const lRows = sweepRows(now, SWEEP_SLOW_SEC, SWEEP_SLOW_PTS,
+        [liveLatSnap.map((r) => [r[0], r[1]]), liveLatSnap.map((r) => [r[0], r[2]])]);
+      const jRows = sweepRows(now, SWEEP_SLOW_SEC, SWEEP_SLOW_PTS,
+        [liveLatSnap.map((r) => [r[0], 0]), liveLatSnap.map((r) => [r[0], 0]), liveLatSnap.map((r) => [r[0], r[3]])]);
+      // Ease the leading edge toward each new ping sample instead of
+      // snapping: samples land roughly every 12s, and hold-last made the
+      // head jump vertically on every one. tau ~0.7s glides to the truth.
+      const lastRow = lRows.length - 1;
+      const nowMs = now * 1000;
+      const dtHead = liveHead.t ? Math.min(2, (nowMs - liveHead.t) / 1000) : 0;
+      liveHead.t = nowMs;
+      const kHead = dtHead > 0 ? 1 - Math.exp(-dtHead / 1.2) : 1;
+      const easeHead = (key, target) => {
+        if (liveHead[key] == null) liveHead[key] = target;
+        liveHead[key] += (target - liveHead[key]) * kHead;
+        return liveHead[key];
+      };
+      lRows[lastRow][1] = easeHead("latAvg", lRows[lastRow][1]);
+      lRows[lastRow][2] = easeHead("latMax", lRows[lastRow][2]);
+      jRows[lastRow][3] = easeHead("jit", jRows[lastRow][3]);
+      // Stabilize the Y scales: jump to a new spike immediately (truthful),
+      // then relax slowly when it ages out (no downward snap).
+      let latMaxT = 1, jitMaxT = 0.5;
+      for (const r of lRows) if (r[2] > latMaxT) latMaxT = r[2];
+      for (const r of jRows) if (r[3] > jitMaxT) jitMaxT = r[3];
+      latMaxT *= 1.15; jitMaxT *= 1.15;
+      const kScale = dtHead > 0 ? 1 - Math.exp(-dtHead / 4) : 1;
+      liveScale.lat = (!liveScale.lat || latMaxT > liveScale.lat)
+        ? latMaxT : liveScale.lat + (latMaxT - liveScale.lat) * kScale;
+      liveScale.jit = (!liveScale.jit || jitMaxT > liveScale.jit)
+        ? jitMaxT : liveScale.jit + (jitMaxT - liveScale.jit) * kScale;
+      if (visSlow(els.ovLatChart)) drawLatencyChart(els.ovLatChart, lRows, latBase, liveScale.lat);
+      if (visSlow(els.ovJitChart)) drawJitterChart(els.ovJitChart, jRows, liveScale.jit);
+    }
+  }
+  // paintLiveSweep() redraws four canvases from scratch off ~1000 resampled
+  // points. At a full 60fps that was the heaviest thing on the Overview page
+  // by a wide margin, so cap it to ~30fps (visually identical for a trace
+  // that drifts a couple of pixels a second) and skip it outright when the
+  // charts are not on screen.
+  // Sweep frame budget. 20fps is visually identical for a trace that drifts a
+  // couple of pixels a second, and roughly halves the cost of the heaviest
+  // thing on this page. Override with localStorage tuxwall.sweepFps if needed.
+  let SWEEP_MIN_MS = 50;
+  try {
+    const fps = parseFloat(localStorage.getItem("tuxwall.sweepFps"));
+    if (fps > 0 && fps <= 60) SWEEP_MIN_MS = 1000 / fps;
+  } catch (_) {}
+  let _sweepLast = 0;
+  let _sweepPaints = 0;
+  function sweepFrame(ts) {
+    const t = ts || 0;
+    if (state.authed && els.auto.checked && state.activeView === "overview"
+        && !document.hidden && (t - _sweepLast) >= SWEEP_MIN_MS && liveChartsVisible()) {
+      _sweepLast = t;
+      _sweepPaints++;
+      paintLiveSweep();
+    }
+    requestAnimationFrame(sweepFrame);
+  }
+
+  function drawBandwidth(canvas, history, maxBps) {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10) return;
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const w = rect.width, h = rect.height;
+    ctx.clearRect(0, 0, w, h);
+
+    const padT = 10, padB = 16, padL = 4, padR = 4;
+    const pw = w - padL - padR;
+    const ph = h - padT - padB;
+    const n = history.length;
+    if (n < 2) {
+      ctx.fillStyle = cssVar("--muted", "#8b949e");
+      ctx.font = "11px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Collecting samples…", w / 2, h / 2);
+      return;
+    }
+
+    ctx.font = "10px sans-serif";
+    ctx.textAlign = "left";
+    const ticks = 4;
+    for (let i = 0; i <= ticks; i++) {
+      const y = padT + (ph * i) / ticks;
+      ctx.strokeStyle = hexToRgba(cssVar("--text", "#e6edf3"), 0.06);
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.moveTo(padL, y);
+      ctx.lineTo(padL + pw, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = hexToRgba(cssVar("--muted", "#8b949e"), 0.8);
+      ctx.fillText(formatBits(maxBps * (1 - i / ticks)), padL + 2, y - 3);
+    }
+
+    ctx.textAlign = "center";
+    const steps = Math.min(5, n);
+    for (let i = 0; i < steps; i++) {
+      const idx = Math.round((i * (n - 1)) / (steps - 1));
+      const t = new Date(history[idx][0] * 1000);
+      const label = `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}:${String(t.getSeconds()).padStart(2, "0")}`;
+      ctx.fillStyle = hexToRgba(cssVar("--muted", "#8b949e"), 0.8);
+      ctx.fillText(label, padL + (pw * idx) / (n - 1), padT + ph + 11);
+    }
+
+    function drawSeries(series, color) {
+      const plot = smoothSeries(series, smoothPasses(n, pw));
+      const pts = [];
+      for (let i = 0; i < n; i++) {
+        const x = padL + (pw * i) / (n - 1);
+        const y = padT + ph * Math.max(0, 1 - plot[i] / maxBps);
+        pts.push([x, y]);
+      }
+      // Gradient fill
+      const grad = ctx.createLinearGradient(0, padT, 0, padT + ph);
+      grad.addColorStop(0, hexToRgba(color, 0.34));
+      grad.addColorStop(1, hexToRgba(color, 0.02));
+      ctx.beginPath();
+      smoothCurvePath(ctx, pts);
+      ctx.lineTo(padL + pw, padT + ph);
+      ctx.lineTo(padL, padT + ph);
+      ctx.closePath();
+      ctx.fillStyle = grad;
+      ctx.fill();
+      // Smooth line
+      ctx.save();
+      ctx.beginPath();
+      smoothCurvePath(ctx, pts);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.shadowColor = hexToRgba(color, 0.45);
+      ctx.shadowBlur = 6;
+      ctx.stroke();
+      ctx.restore();
+      // Glowing head dot riding the latest sample.
+      const lp = pts[pts.length - 1];
+      if (lp) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(lp[0], lp[1], 3, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 8;
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    drawSeries(history.map((s) => s[2]), cssVar("--amber", BW_TX_FALLBACK));
+    drawSeries(history.map((s) => s[1]), cssVar("--accent", BW_RX_FALLBACK));
+  }
+
+  function renderBandwidth(d) {
+    if (!d.ok) {
+      showBanner(true, d.error || "Bandwidth stats unavailable");
+      return;
+    }
+    state.bwData = d;
+    const ifaces = d.interfaces || [];
+    const totDown = ifaces.reduce((n, i) => n + (i.rx_bps || 0), 0);
+    const totUp = ifaces.reduce((n, i) => n + (i.tx_bps || 0), 0);
+    els.bwDown.textContent = formatBits(totDown);
+    els.bwUp.textContent = formatBits(totUp);
+    els.bwWindow.textContent = formatDuration(d.max_samples * d.interval);
+    els.bwSamples.textContent = formatNumber(d.max_samples);
+
+    const maxBps = ifaces.reduce((m, i) => {
+      for (const s of i.history) {
+        if (s[1] > m) m = s[1];
+        if (s[2] > m) m = s[2];
+      }
+      return m;
+    }, 1);
+
+    els.bwCharts.innerHTML = ifaces.map((i) => `
+      <div class="card bw-card">
+        <div class="bw-head card-head card-head-ico">
+          <span class="card-head-ico" aria-hidden="true">${cardIconSvg("Network Interfaces")}</span>
+          <div class="card-head-copy">
+            <h2 class="mono">${esc(i.name)}</h2>
+            <span class="muted">Interface throughput</span>
+          </div>
+          <div class="bw-rates">
+            <div class="bw-dn"><span>Down</span><b>${formatBits(i.rx_bps)}</b></div>
+            <div class="bw-up"><span>Up</span><b>${formatBits(i.tx_bps)}</b></div>
+          </div>
+        </div>
+        <div class="bw-canvas-wrap"><canvas class="bw-canvas" data-iface="${esc(i.name)}"></canvas></div>
+      </div>`).join("");
+
+    requestAnimationFrame(() => {
+      ifaces.forEach((i) => {
+        const cv = els.bwCharts.querySelector(`canvas[data-iface="${CSS.escape(i.name)}"]`);
+        if (cv) drawBandwidth(cv, i.history, maxBps);
+      });
+    });
+
+    const clients = d.clients || [];
+    els.bwClientsEmpty.hidden = clients.length > 0;
+    if (d.clients_error) {
+      els.bwClientsEmpty.hidden = false;
+      els.bwClientsEmpty.textContent = d.clients_error;
+      els.bwClientsBody.innerHTML = "";
+      return;
+    }
+    els.bwClientsBody.innerHTML = clients.map((c) => `
+      <tr>
+        <td>
+          <span class="bw-client-status"></span>
+          <span class="mono">${esc(c.ip)}</span>${c.hostname ? `<span class="muted"> · ${esc(c.hostname)}</span>` : ""}
+        </td>
+        <td class="mono">${esc(c.mac || "—")}</td>
+        <td>
+          <span class="bw-arrow bw-arrow-down ${(c.rx_bytes_per_s || 0) > 1024 ? 'bw-arrow-active' : ''}">↓</span>
+          <span class="mono">${formatMBs(c.rx_bytes_per_s)}</span>
+        </td>
+        <td>
+          <span class="bw-arrow bw-arrow-up ${(c.tx_bytes_per_s || 0) > 1024 ? 'bw-arrow-active' : ''}">↑</span>
+          <span class="mono">${formatMBs(c.tx_bytes_per_s)}</span>
+        </td>
+        <td>${formatBytes(c.rx_bytes)}</td>
+        <td>${formatBytes(c.tx_bytes)}</td>
+      </tr>`).join("");
+
+    renderTopDownloaders(clients);
+  }
+
+  // Top 10 downloaders: legend on the left (always 10 rows), pie on the right.
+  function renderTopDownloaders(clients) {
+    const legend = document.getElementById("bw-top-legend");
+    const pie = document.getElementById("bw-top-pie");
+    if (!legend || !pie) return;
+    const hint = document.getElementById("bw-top-hint");
+    const top = (clients || [])
+      .sort((a, b) => (b.rx_bytes_per_s || 0) - (a.rx_bytes_per_s || 0))
+      .slice(0, 10);
+    if (hint) {
+      hint.textContent = top.length
+        ? `Top ${top.length} by current download rate`
+        : "No clients online";
+    }
+    if (!top.length) {
+      legend.innerHTML = "";
+      pie.innerHTML = `<p class="muted">No clients online.</p>`;
+      return;
+    }
+    const total = top.reduce((s, c) => s + (c.rx_bytes_per_s || 0), 0);
+    const rows = top.map((c, i) => {
+      const pct = total > 0 ? ((c.rx_bytes_per_s || 0) / total) * 100 : 0;
+      return `
+        <div class="bw-top-row" data-idx="${i}" style="--pct:${pct.toFixed(1)}%;--i:${i}">
+          <span class="bw-top-swatch" style="background:${CHART_COLORS[i % CHART_COLORS.length]}"></span>
+          <span class="mono">${esc(c.hostname || c.ip)}</span>
+          <span class="muted mono">${esc(c.ip)}</span>
+          <span class="mono" style="margin-left:auto">${formatMBs(c.rx_bytes_per_s)}</span>
+          <span class="muted mono" style="width:48px;text-align:right">${pct.toFixed(1)}%</span>
+        </div>`;
+    });
+    // Always show 10 legend rows, padding with placeholders.
+    for (let i = rows.length; i < 10; i++) {
+      rows.push(`
+        <div class="bw-top-row bw-top-empty-row">
+          <span class="bw-top-swatch" style="background:#21262d"></span>
+          <span class="muted mono">—</span>
+          <span class="muted mono">—</span>
+          <span class="muted mono" style="margin-left:auto">—</span>
+          <span class="muted mono" style="width:48px;text-align:right">—</span>
+        </div>`);
+    }
+    legend.classList.toggle("bw-no-enter", legend.dataset.drawn === "1");
+    legend.innerHTML = rows.join("");
+    legend.dataset.drawn = "1";
+    pie.innerHTML = topPieSVG(top, total);
+  }
+
+  function topPieSVG(top, total) {
+    const size = 240;
+    const cx = size / 2, cy = size / 2;
+    const outerR = 100, innerR = 62;
+    const svg = [];
+    const defs = [`<defs>`];
+    
+    // Radial gradients for each slice with glow
+    for (let i = 0; i < CHART_COLORS.length; i++) {
+      const color = CHART_COLORS[i];
+      defs.push(`
+        <radialGradient id="bw-grad-${i}">
+          <stop offset="0%" style="stop-color:${color};stop-opacity:1" />
+          <stop offset="100%" style="stop-color:${color};stop-opacity:0.85" />
+        </radialGradient>
+        <filter id="bw-glow-${i}" x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+          <feMerge>
+            <feMergeNode in="coloredBlur"/>
+            <feMergeNode in="SourceGraphic"/>
+          </feMerge>
+        </filter>`);
+    }
+    defs.push(`<linearGradient id="bw-comet" x1="0" y1="1" x2="1" y2="0">
+        <stop offset="0%" stop-color="#ffffff" stop-opacity=".95"/>
+        <stop offset="55%" stop-color="${CHART_COLORS[0]}" stop-opacity=".9"/>
+        <stop offset="100%" stop-color="${CHART_COLORS[0]}" stop-opacity="0"/>
+      </linearGradient>`);
+    defs.push(`</defs>`);
+    svg.push(defs.join(""));
+
+    let angle = -Math.PI / 2;
+    if (total <= 0) {
+      // Empty donut
+      svg.push(donutPath(cx, cy, outerR, innerR, 0, Math.PI * 2, "#21262d", null, 0));
+    } else if (top.length === 1) {
+      // Full donut ring
+      svg.push(donutPath(cx, cy, outerR, innerR, 0, Math.PI * 2, `url(#bw-grad-0)`, 0, 0));
+    } else {
+      for (let i = 0; i < top.length; i++) {
+        const frac = (top[i].rx_bytes_per_s || 0) / total;
+        if (frac <= 0) continue;
+        const sweep = frac * Math.PI * 2;
+        const a0 = angle, a1 = angle + sweep;
+        angle = a1;
+        const label = esc(top[i].hostname || top[i].ip);
+        svg.push(donutPath(cx, cy, outerR, innerR, a0, a1, `url(#bw-grad-${i % CHART_COLORS.length})`, i, label + " · " + formatMBs(top[i].rx_bytes_per_s)));
+      }
+    }
+    
+    // Living ring: pulse halo, bright comet orbit, faint counter-orbit
+    const orbitR = outerR + 8;
+    svg.push(`<circle class="bw-pie-pulse" cx="${cx}" cy="${cy}" r="${outerR}" fill="none" stroke="${CHART_COLORS[0]}" stroke-width="1.4"/>`);
+    svg.push(`<g class="bw-orbit">
+      <circle cx="${cx}" cy="${cy}" r="${orbitR}" fill="none" stroke="url(#bw-comet)" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="42 ${(2 * Math.PI * orbitR - 42).toFixed(0)}"/>
+      <circle cx="${cx + orbitR}" cy="${cy}" r="3" fill="#fff" filter="url(#bw-glow-0)"/>
+    </g>`);
+    svg.push(`<g class="bw-orbit-2"><circle cx="${cx}" cy="${cy}" r="${innerR - 6}" fill="none" stroke="${CHART_COLORS[0]}" stroke-width="1" stroke-dasharray="2 11"/></g>`);
+
+    // Center hole with subtle inner shadow
+    svg.push(`<circle cx="${cx}" cy="${cy}" r="${innerR}" fill="#0d1117" opacity="0.6"/>`);
+    
+    svg.push(`<text x="${cx}" y="${cy - 6}" text-anchor="middle" class="bw-top-total">${formatMBs(total)}</text>`);
+    svg.push(`<text x="${cx}" y="${cy + 10}" text-anchor="middle" class="bw-top-total-label">total down</text>`);
+    return `<svg viewBox="0 0 ${size} ${size}" style="width:100%;max-width:${size}px;height:auto" role="img">` + svg.join("") + "</svg>";
+  }
+
+  function donutPath(cx, cy, outerR, innerR, a0, a1, fill, filterIdx, title) {
+    const x0Out = cx + outerR * Math.cos(a0), y0Out = cy + outerR * Math.sin(a0);
+    const x1Out = cx + outerR * Math.cos(a1), y1Out = cy + outerR * Math.sin(a1);
+    const x0In = cx + innerR * Math.cos(a0), y0In = cy + innerR * Math.sin(a0);
+    const x1In = cx + innerR * Math.cos(a1), y1In = cy + innerR * Math.sin(a1);
+    const large = (a1 - a0) > Math.PI ? 1 : 0;
+    const d = `M ${x0Out.toFixed(2)} ${y0Out.toFixed(2)} A ${outerR} ${outerR} 0 ${large} 1 ${x1Out.toFixed(2)} ${y1Out.toFixed(2)} L ${x1In.toFixed(2)} ${y1In.toFixed(2)} A ${innerR} ${innerR} 0 ${large} 0 ${x0In.toFixed(2)} ${y0In.toFixed(2)} Z`;
+    const filter = filterIdx !== null ? ` filter="url(#bw-glow-${filterIdx % CHART_COLORS.length})"` : "";
+    const titleTag = title ? `<title>${title}</title>` : "";
+    const idx = filterIdx !== null ? ` data-idx="${filterIdx}"` : "";
+    return `<path class="bw-pie-slice" d="${d}" fill="${fill}"${filter}${idx}>${titleTag}</path>`;
+  }
+
+  function setBwTab(pane) {
+    document.querySelectorAll("#bw-subtabs .fw-subtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.bwPane === pane));
+    document.querySelectorAll("#view-bandwidth .fw-pane[data-bw-pane]").forEach((p) => {
+      p.hidden = p.dataset.bwPane !== pane;
+    });
+    if (pane === "interfaces" && state.bwData) renderBandwidth(state.bwData);
+  }
+  document.querySelectorAll("#bw-subtabs .fw-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => setBwTab(btn.dataset.bwPane));
+  });
+
+  // Legend ↔ slice hover linking for Top Downloaders (delegated: the legend
+  // and donut are rebuilt on every sample).
+  (function bindBwTopHover() {
+    const wrap = document.querySelector("#view-bandwidth .bw-top-wrap");
+    if (!wrap) return;
+    const clear = () => {
+      wrap.classList.remove("has-hot");
+      wrap.querySelectorAll(".is-hot").forEach((el) => el.classList.remove("is-hot"));
+    };
+    wrap.addEventListener("pointerover", (e) => {
+      const hit = e.target.closest("[data-idx]");
+      if (!hit || hit.dataset.idx === "") return;
+      const idx = hit.dataset.idx;
+      wrap.querySelectorAll(".is-hot").forEach((el) => el.classList.remove("is-hot"));
+      wrap.querySelectorAll(`[data-idx="${CSS.escape(idx)}"]`).forEach((el) => el.classList.add("is-hot"));
+      wrap.classList.add("has-hot");
+    });
+    wrap.addEventListener("pointerleave", clear);
+    wrap.addEventListener("pointercancel", clear);
+  })();
+
+  async function refreshBandwidth() {
+    try {
+      const data = await fetchJSON("/api/bandwidth");
+      renderBandwidth(data);
+    } catch (err) {
+      showBanner(true, "Bandwidth stats error: " + err.message);
+    }
+  }
+
+  const CHART_COLORS = [
+    "#4f8cff", "#3fb950", "#d29922", "#f85149", "#bc8cff",
+    "#39c5cf", "#db61a2", "#ffa657", "#7ee787", "#a5d6ff",
+    "#ff7b72", "#8b949e",
+  ];
+
+  function drawResourceChart(canvas, history) {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10) return;
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const w = rect.width, h = rect.height;
+    ctx.clearRect(0, 0, w, h);
+
+    const padT = 10, padB = 16, padL = 4, padR = 4;
+    const pw = w - padL - padR;
+    const ph = h - padT - padB;
+    const n = history.length;
+    if (n < 2) {
+      ctx.fillStyle = cssVar("--muted", "#8b949e");
+      ctx.font = "11px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Collecting samples…", w / 2, h / 2);
+      return;
+    }
+
+    ctx.font = "10px sans-serif";
+    ctx.textAlign = "left";
+    for (let i = 0; i <= 4; i++) {
+      const y = padT + (ph * i) / 4;
+      ctx.strokeStyle = hexToRgba(cssVar("--text", "#e6edf3"), 0.06);
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.moveTo(padL, y);
+      ctx.lineTo(padL + pw, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = hexToRgba(cssVar("--muted", "#8b949e"), 0.8);
+      ctx.fillText(String(Math.round(100 - i * 25)) + "%", padL + 2, y - 3);
+    }
+
+    ctx.textAlign = "center";
+    const steps = Math.min(5, n);
+    for (let i = 0; i < steps; i++) {
+      const idx = Math.round((i * (n - 1)) / (steps - 1));
+      const t = new Date(history[idx][0] * 1000);
+      const label = `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}:${String(t.getSeconds()).padStart(2, "0")}`;
+      ctx.fillStyle = hexToRgba(cssVar("--muted", "#8b949e"), 0.9);
+      ctx.fillText(label, padL + (pw * idx) / (n - 1), padT + ph + 11);
+    }
+
+    function drawSeries(series, color) {
+      const plot = smoothSeries(series, smoothPasses(n, pw));
+      const pts = [];
+      for (let i = 0; i < n; i++) {
+        const x = padL + (pw * i) / (n - 1);
+        const y = padT + ph * Math.max(0, Math.min(1, 1 - plot[i] / 100));
+        pts.push([x, y]);
+      }
+      const grad = ctx.createLinearGradient(0, padT, 0, padT + ph);
+      grad.addColorStop(0, hexToRgba(color, 0.34));
+      grad.addColorStop(1, hexToRgba(color, 0.02));
+      ctx.beginPath();
+      smoothCurvePath(ctx, pts);
+      ctx.lineTo(padL + pw, padT + ph);
+      ctx.lineTo(padL, padT + ph);
+      ctx.closePath();
+      ctx.fillStyle = grad;
+      ctx.fill();
+      ctx.save();
+      ctx.beginPath();
+      smoothCurvePath(ctx, pts);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.shadowColor = hexToRgba(color, 0.45);
+      ctx.shadowBlur = 6;
+      ctx.stroke();
+      ctx.restore();
+      // Glowing head dot riding the latest sample.
+      const lp2 = pts[pts.length - 1];
+      if (lp2) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(lp2[0], lp2[1], 3, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 8;
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    const resCpu = cssVar("--amber", "#d29922");
+    const resMem = cssVar("--accent", "#4f8cff");
+    drawSeries(history.map((s) => s[1]), resCpu);
+    drawSeries(history.map((s) => s[2]), resMem);
+
+  }
+
+  function drawLatencyChart(canvas, history, baselineMs, maxOverride) {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10) return;
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const w = rect.width, h = rect.height;
+    ctx.clearRect(0, 0, w, h);
+
+    const padT = 10, padB = 16, padL = 4, padR = 4;
+    const pw = w - padL - padR;
+    const ph = h - padT - padB;
+    const n = history.length;
+    if (n < 2) {
+      ctx.fillStyle = cssVar("--muted", "#8b949e");
+      ctx.font = "11px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Collecting samples…", w / 2, h / 2);
+      return;
+    }
+
+    let maxMs = (typeof maxOverride === "number" && maxOverride > 0) ? maxOverride : 1;
+    if (!(typeof maxOverride === "number" && maxOverride > 0)) {
+      for (const s of history) {
+        if (s[2] > maxMs) maxMs = s[2];
+      }
+      maxMs *= 1.15;
+    }
+    ctx.font = "10px sans-serif";
+    ctx.textAlign = "left";
+    for (let i = 0; i <= 3; i++) {
+      const y = padT + (ph * i) / 3;
+      ctx.strokeStyle = hexToRgba(cssVar("--text", "#e6edf3"), 0.06);
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.moveTo(padL, y);
+      ctx.lineTo(padL + pw, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = hexToRgba(cssVar("--muted", "#8b949e"), 0.8);
+      const v = maxMs * (1 - i / 3);
+      ctx.fillText(v >= 100 ? Math.round(v) + "ms" : v.toFixed(1), padL + 2, y - 3);
+    }
+
+    ctx.textAlign = "center";
+    const steps = Math.min(5, n);
+    for (let i = 0; i < steps; i++) {
+
+      const idx = Math.round((i * (n - 1)) / (steps - 1));
+      const t = new Date(history[idx][0] * 1000);
+      const label = `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
+      ctx.fillStyle = hexToRgba(cssVar("--muted", "#8b949e"), 0.8);
+      ctx.fillText(label, padL + (pw * idx) / (n - 1), padT + ph + 11);
+    }
+
+    function yFor(ms) {
+      return padT + ph * Math.max(0, Math.min(1, 1 - ms / maxMs));
+    }
+
+    function drawSeries(col, color, filled) {
+      const pts = [];
+      for (let i = 0; i < n; i++) {
+        pts.push([padL + (pw * i) / (n - 1), yFor(history[i][col])]);
+      }
+      if (filled) {
+        const grad = ctx.createLinearGradient(0, padT, 0, padT + ph);
+        grad.addColorStop(0, hexToRgba(color, 0.26));
+        grad.addColorStop(1, hexToRgba(color, 0.01));
+        ctx.beginPath();
+        smoothCurvePath(ctx, pts);
+        ctx.lineTo(padL + pw, padT + ph);
+        ctx.lineTo(padL, padT + ph);
+        ctx.closePath();
+        ctx.fillStyle = grad;
+        ctx.fill();
+      }
+      ctx.save();
+      ctx.beginPath();
+      smoothCurvePath(ctx, pts);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.shadowColor = hexToRgba(color, 0.45);
+      ctx.shadowBlur = 6;
+      ctx.stroke();
+      ctx.restore();
+      // Head dot on the filled (avg) series.
+      if (filled) {
+        const lp = pts[pts.length - 1];
+        if (lp) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(lp[0], lp[1], 3, 0, Math.PI * 2);
+          ctx.fillStyle = color;
+          ctx.shadowColor = color;
+          ctx.shadowBlur = 8;
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+    }
+
+    const latMax = cssVar("--red", "#f85149");
+    const latAvg = cssVar("--accent", "#4f8cff");
+    drawSeries(2, hexToRgba(latMax, 0.6), false);
+    drawSeries(1, latAvg, true);
+
+    if (baselineMs > 0 && baselineMs < maxMs) {
+      const by = yFor(baselineMs);
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = hexToRgba(cssVar("--green", "#3fb950"), 0.7);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(padL, by);
+      ctx.lineTo(padL + pw, by);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+  }
+
+  function drawJitterChart(canvas, history, maxOverride) {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10) return;
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const w = rect.width, h = rect.height;
+    ctx.clearRect(0, 0, w, h);
+
+    const padT = 10, padB = 16, padL = 4, padR = 4;
+    const pw = w - padL - padR;
+    const ph = h - padT - padB;
+    const pts = history.filter((s) => s.length > 3 && s[3] > 0);
+    const n = pts.length;
+    if (n < 2) {
+      ctx.fillStyle = cssVar("--muted", "#8b949e");
+      ctx.font = "11px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Collecting samples…", w / 2, h / 2);
+      return;
+    }
+
+    let maxMs = (typeof maxOverride === "number" && maxOverride > 0) ? maxOverride : 0.5;
+    if (!(typeof maxOverride === "number" && maxOverride > 0)) {
+      for (const s of pts) {
+        if (s[3] > maxMs) maxMs = s[3];
+      }
+      maxMs *= 1.15;
+    }
+
+    ctx.font = "10px sans-serif";
+    ctx.textAlign = "left";
+    for (let i = 0; i <= 3; i++) {
+      const y = padT + (ph * i) / 3;
+      ctx.strokeStyle = hexToRgba(cssVar("--text", "#e6edf3"), 0.06);
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.moveTo(padL, y);
+      ctx.lineTo(padL + pw, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = hexToRgba(cssVar("--muted", "#8b949e"), 0.8);
+      const v = maxMs * (1 - i / 3);
+      ctx.fillText(v >= 100 ? Math.round(v) + "ms" : v.toFixed(1), padL + 2, y - 3);
+    }
+
+    ctx.textAlign = "center";
+    const steps = Math.min(5, n);
+    for (let i = 0; i < steps; i++) {
+      const idx = Math.round((i * (n - 1)) / (steps - 1));
+      const t = new Date(pts[idx][0] * 1000);
+      const label = `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
+      ctx.fillStyle = hexToRgba(cssVar("--muted", "#8b949e"), 0.8);
+      ctx.fillText(label, padL + (pw * idx) / (n - 1), padT + ph + 11);
+    }
+
+    const jitColor = cssVar("--amber", "#d29922");
+    const curvePts = pts.map((s, i) => [
+      padL + (pw * i) / (n - 1),
+      padT + ph * Math.max(0, Math.min(1, 1 - s[3] / maxMs)),
+    ]);
+    const grad = ctx.createLinearGradient(0, padT, 0, padT + ph);
+    grad.addColorStop(0, hexToRgba(jitColor, 0.34));
+    grad.addColorStop(1, hexToRgba(jitColor, 0.02));
+    ctx.beginPath();
+    smoothCurvePath(ctx, curvePts);
+    ctx.lineTo(padL + pw, padT + ph);
+    ctx.lineTo(padL, padT + ph);
+    ctx.closePath();
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.save();
+    ctx.beginPath();
+    smoothCurvePath(ctx, curvePts);
+    ctx.strokeStyle = jitColor;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.shadowColor = hexToRgba(jitColor, 0.45);
+    ctx.shadowBlur = 6;
+    ctx.stroke();
+    ctx.restore();
+    // Head dot on the latest sample.
+    const jp = curvePts[curvePts.length - 1];
+    if (jp) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(jp[0], jp[1], 3, 0, Math.PI * 2);
+      ctx.fillStyle = jitColor;
+      ctx.shadowColor = jitColor;
+      ctx.shadowBlur = 8;
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  const PIE_SPACING = 0.06;
+  const PIE_EASE = 7;
+  const PIE_SPIN_RATE = 8;
+  const donutStates = new WeakMap();
+  let pieTip = null;
+
+  function pieTipEl() {
+    if (!pieTip) {
+      pieTip = document.createElement("div");
+      pieTip.className = "pie-tip";
+      document.body.appendChild(pieTip);
+    }
+    return pieTip;
+  }
+  function showPieTip(e, slice, total, bytes) {
+    const tip = pieTipEl();
+    const pct = total ? Math.round((slice.value / total) * 100) : 0;
+    const val = bytes ? formatBytes(slice.value) : formatNumber(slice.value);
+    tip.innerHTML = `<span class="pie-tip-dot" style="background:${slice.color};box-shadow:0 0 8px ${slice.color}"></span><b>${esc(slice.label)}</b><span class="pie-tip-val">${val} · ${pct}%</span>`;
+    tip.style.display = "block";
+    tip.style.left = (e.clientX + 16) + "px";
+    tip.style.top = (e.clientY + 16) + "px";
+    tip.style.setProperty("--tip-accent", slice.color);
+  }
+  function hidePieTip() {
+    if (pieTip) pieTip.style.display = "none";
+  }
+
+  function shadeColor(hex, amt) {
+    const n = parseInt(hex.slice(1), 16);
+    const r = Math.min(255, Math.max(0, (n >> 16) + amt));
+    const g = Math.min(255, Math.max(0, ((n >> 8) & 0xff) + amt));
+    const b = Math.min(255, Math.max(0, (n & 0xff) + amt));
+    return `rgb(${r},${g},${b})`;
+  }
+
+  /* ── Donut colour model ────────────────────────────────────────────────
+     The categorical donuts (Query Types, Attacks by Country) used to pull
+     from CHART_COLORS, a 12-entry rainbow — six unrelated hues in one 200px
+     donut read as noise. They now use an analogous ramp generated from the
+     active theme's --accent: a ±60° hue sweep at a fixed saturation and
+     lightness, so slices stay distinguishable while sharing one colour
+     family, and the ramp re-derives itself for every theme.
+     CHART_COLORS is deliberately left untouched for the line/area charts. */
+  function hexToHsl(hex) {
+    const h = hex.replace("#", "");
+    const r = parseInt(h.slice(0, 2), 16) / 255;
+    const g = parseInt(h.slice(2, 4), 16) / 255;
+    const b = parseInt(h.slice(4, 6), 16) / 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const l = (max + min) / 2;
+    let s = 0, hue = 0;
+    if (max !== min) {
+      const d = max - min;
+      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+      if (max === r) hue = ((g - b) / d + (g < b ? 6 : 0));
+      else if (max === g) hue = (b - r) / d + 2;
+      else hue = (r - g) / d + 4;
+      hue *= 60;
+    }
+    return { h: hue, s: s * 100, l: l * 100 };
+  }
+
+  function hslToHex(h, s, l) {
+    h = ((h % 360) + 360) % 360;
+    s = Math.min(100, Math.max(0, s)) / 100;
+    l = Math.min(100, Math.max(0, l)) / 100;
+    const c = (1 - Math.abs(2 * l - 1)) * s;
+    const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+    const m = l - c / 2;
+    let rgb;
+    if (h < 60) rgb = [c, x, 0];
+    else if (h < 120) rgb = [x, c, 0];
+    else if (h < 180) rgb = [0, c, x];
+    else if (h < 240) rgb = [0, x, c];
+    else if (h < 300) rgb = [x, 0, c];
+    else rgb = [c, 0, x];
+    const to = (v) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
+    return `#${to(rgb[0])}${to(rgb[1])}${to(rgb[2])}`;
+  }
+
+  // Full-strength resting colour; hovering adds glow + thickness instead,
+  // which is what makes the focused slice read as "lit up".
+  function softenHex(hex, factor) {
+    const c = hexToHsl(hex);
+    return hslToHex(c.h, c.s * (factor == null ? 1.0 : factor), c.l);
+  }
+
+  /* Two-slice donuts whose categories carry no ok/bad meaning (IPv4 vs IPv6,
+     Down vs Up) previously paired the theme --accent with a hardcoded colour
+     (#39c5cf / --amber). That collided badly: the IPv4/IPv6 pair was within
+     40° of hue in 10 of the 12 built-in themes — 2° apart on Cyberpunk and 9°
+     on Nord, i.e. visually identical. Deriving both ends from the accent with
+     an explicit separation guarantees they can never converge. */
+  function donutDuo(sep) {
+    const base = hexToHsl(cssVar("--accent", "#4f8cff"));
+    const isLight = document.body.classList.contains("light-theme");
+    const sat = Math.min(78, Math.max(50, base.s));
+    const lit = isLight ? 46 : 60;
+    return [
+      hslToHex(base.h, sat, lit),
+      hslToHex(base.h + (sep || 150), sat - 4, lit + (isLight ? 10 : 9)),
+    ];
+  }
+
+  /* Categorical donuts that share one analogous ramp collapse when the theme
+     accent is itself green/teal (A vs AAAA were two greens). Spread the hues
+     across most of the wheel but keep saturation/lightness in one family so it
+     still reads as a designed chart rather than a rainbow. */
+  const DONUT_HUE_SPAN = 300;
+  function donutRamp(n) {
+    const base = hexToHsl(cssVar("--accent", "#4f8cff"));
+    const isLight = document.body.classList.contains("light-theme");
+    const sat = Math.min(74, Math.max(48, base.s));
+    const lit = isLight ? 44 : 61;
+    const step = n > 1 ? DONUT_HUE_SPAN / (n - 1) : 0;
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const hue = base.h - DONUT_HUE_SPAN / 2 + step * i;
+      // Alternate lightness and saturation so neighbours separate even where
+      // the hue delta is small.
+      out.push(hslToHex(hue, sat - (i % 2) * 9, lit + (i % 2 ? (isLight ? 9 : 8) : 0)));
+    }
+    return out;
+  }
+
+  function donutGeometry(rect, shownCount) {
+    const w = rect.width, h = rect.height;
+    const legendRows = shownCount * 13;
+    const legendGap = 12;
+    // Size the ring from the space left after the legend, then centre the
+    // ring + legend as one block so tall bento tiles don't strand the legend
+    // at the bottom with a huge gap above it.
+    const availH = h - legendRows - legendGap;
+    const donutR = Math.max(16, Math.min(w / 2 - 10, availH / 2 - 6, 78));
+    // Thinner ring (0.60 → 0.67) reads as a chart rather than a pie wedge.
+    const innerR = Math.max(8, donutR * 0.67);
+    const thickness = donutR - innerR;
+    const groupH = donutR * 2 + legendGap + legendRows;
+    const top = Math.max(0, (h - groupH) / 2);
+    const cx = w / 2;
+    const cy = top + donutR;
+    return {
+      cx, cy, donutR, innerR, thickness,
+      midR: innerR + thickness / 2,
+      legendTop: top + donutR * 2 + legendGap,
+    };
+  }
+
+  function donutState(canvas) {
+    let st = donutStates.get(canvas);
+    if (!st) {
+      st = {
+        shown: [],
+        total: 0,
+        center: "",
+        totalLabel: "",
+        target: [],
+        current: [],
+        spin: 0,
+        raf: 0,
+        last: 0,
+        hover: -1,
+        wasVisible: false,
+      };
+      canvas.addEventListener("mousemove", (e) => donutHoverMove(canvas, st, e));
+      canvas.addEventListener("mouseleave", () => {
+        st.hover = -1;
+        hidePieTip();
+        if (st.total > 0) donutDraw(canvas, st);
+      });
+      donutStates.set(canvas, st);
+    }
+    return st;
+  }
+
+  function donutDraw(canvas, st) {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10) return;
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    if (!st.total) {
+      ctx.fillStyle = cssVar("--muted", "#8b949e");
+      ctx.font = "11px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("No data yet", rect.width / 2, rect.height / 2);
+      return;
+    }
+
+    const g = donutGeometry(rect, st.shown.length);
+    const spacing = st.shown.length > 1 ? PIE_SPACING : 0;
+    let acc = 0;
+    const arcs = st.shown.map((s, i) => {
+      const a = st.current[i] != null ? st.current[i] : 0;
+      const half = Math.min(spacing / 2, a * 0.25);
+      const arc = { from: acc + half, to: acc + a - half, s };
+      acc += a;
+      return arc;
+    });
+
+    const start = -Math.PI / 2 + st.spin;
+
+    // --- Track ring (dark background) ---
+    ctx.beginPath();
+    ctx.arc(g.cx, g.cy, g.midR, 0, Math.PI * 2);
+    ctx.strokeStyle = hexToRgba(cssVar("--border", "#2d333b"), 0.9);
+    ctx.lineWidth = g.thickness;
+    ctx.lineCap = "butt";
+    ctx.stroke();
+
+    // --- Main segment arcs ---
+    // Each segment is drawn as: soft outer glow → gradient body → inner
+    // highlight. When any slice is hovered the others drop to 34% alpha and
+    // lose their glow, so the focused slice is the only lit element.
+    ctx.lineCap = "round";
+    const hovering = st.hover !== -1;
+    arcs.forEach((arc, i) => {
+      const hot = st.hover === i;
+      const dim = hovering && !hot;
+      if (arc.to <= arc.from) return;
+
+      const baseColor = hot ? arc.s.color : softenHex(arc.s.color);
+      const mid = start + (arc.from + arc.to) / 2;
+
+      ctx.save();
+      ctx.globalAlpha = dim ? 0.34 : 1;
+
+      // Depth: bright toward the inner edge, deeper at the outer edge.
+      const grad = ctx.createLinearGradient(
+        g.cx + Math.cos(mid) * g.innerR, g.cy + Math.sin(mid) * g.innerR,
+        g.cx + Math.cos(mid) * g.donutR, g.cy + Math.sin(mid) * g.donutR
+      );
+      grad.addColorStop(0, shadeColor(baseColor, hot ? 36 : 26));
+      grad.addColorStop(1, shadeColor(baseColor, hot ? -12 : -30));
+
+      if (!dim) {
+        ctx.shadowColor = hexToRgba(arc.s.color, hot ? 0.7 : 0.32);
+        ctx.shadowBlur = hot ? 14 : 5;
+      }
+      ctx.beginPath();
+      ctx.arc(g.cx, g.cy, g.midR, start + arc.from, start + arc.to);
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = hot ? g.thickness + 5 : g.thickness;
+      ctx.stroke();
+      ctx.restore();
+
+      // Inner highlight — bright thin arc near inner edge
+      ctx.save();
+      ctx.globalAlpha = dim ? 0.1 : (hot ? 0.5 : 0.2);
+      ctx.beginPath();
+      ctx.arc(g.cx, g.cy, g.innerR + 2, start + arc.from + 0.04, start + arc.to - 0.04);
+      ctx.strokeStyle = shadeColor(arc.s.color, 60);
+      ctx.lineWidth = 1.5;
+      ctx.lineCap = "round";
+      ctx.stroke();
+      ctx.restore();
+    });
+
+    // --- Center gradient circle ---
+    const cGrad = ctx.createRadialGradient(g.cx, g.cy - 4, 2, g.cx, g.cy, g.innerR - 2);
+    const topColor = st.shown[st.hover >= 0 ? st.hover : 0]?.color || cssVar("--accent", "#4f8cff");
+    cGrad.addColorStop(0, hexToRgba(topColor, 0.12));
+    cGrad.addColorStop(1, hexToRgba(topColor, 0.02));
+    ctx.beginPath();
+    ctx.arc(g.cx, g.cy, g.innerR - 2, 0, Math.PI * 2);
+    ctx.fillStyle = cGrad;
+    ctx.fill();
+
+    // --- Center KPI ---
+    // A fitted headline sits in the hole (total queries, % blocked, …) and
+    // switches to the hovered slice so the ring and the number agree.
+    let big = st.centerBig || "";
+    let sub = st.centerSub || "";
+    let bigColor = cssVar("--text", "#e6edf3");
+    if (st.hover >= 0 && st.hover < st.shown.length) {
+      const s = st.shown[st.hover];
+      big = Math.round((s.value / st.total) * 100) + "%";
+      sub = s.label;
+      bigColor = s.color;
+    }
+    if (big) {
+      const maxW = Math.max(26, g.innerR * 1.5);
+      const family = "system-ui, -apple-system, 'Segoe UI', sans-serif";
+      let fs = Math.min(25, g.innerR * 0.72);
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.font = `700 ${fs}px ${family}`;
+      while (fs > 9 && ctx.measureText(big).width > maxW) {
+        fs -= 1;
+        ctx.font = `700 ${fs}px ${family}`;
+      }
+      ctx.fillStyle = bigColor;
+      ctx.fillText(big, g.cx, g.cy - (sub ? 6 : 0));
+      if (sub) {
+        let sf = 10;
+        const subText = sub.length > 18 ? sub.slice(0, 16) + "…" : sub;
+        ctx.font = `600 ${sf}px ${family}`;
+        while (sf > 7 && ctx.measureText(subText).width > maxW + 10) {
+          sf -= 1;
+          ctx.font = `600 ${sf}px ${family}`;
+        }
+        ctx.fillStyle = hexToRgba(cssVar("--muted", "#8b949e"), 0.95);
+        ctx.fillText(subText.toUpperCase(), g.cx, g.cy + 11);
+      }
+    }
+
+    // --- Legend ---
+    const ly0 = g.legendTop + 9;
+    ctx.font = "11px sans-serif";
+    const legDim = hexToRgba(cssVar("--muted", "#8b949e"), 0.35);
+    st.shown.forEach((s, i) => {
+      const ly = ly0 + i * 13;
+      const dim = st.hover !== -1 && st.hover !== i;
+      const dotAlpha = dim ? 0.3 : 1;
+      // Rounded dot
+      ctx.save();
+      ctx.shadowBlur = dim ? 0 : (st.hover === i ? 12 : 7);
+      ctx.shadowColor = s.color;
+      ctx.beginPath();
+      ctx.arc(rect.width / 2 - 99, ly - 3, 4, 0, Math.PI * 2);
+      ctx.fillStyle = hexToRgba(s.color, dotAlpha);
+      ctx.fill();
+      ctx.restore();
+      // Label
+      ctx.fillStyle = dim ? hexToRgba(cssVar("--text", "#e6edf3"), 0.35) : cssVar("--text", "#e6edf3");
+      ctx.textAlign = "left";
+      const label = s.label.length > 16 ? s.label.slice(0, 14) + "…" : s.label;
+      ctx.fillText(label, rect.width / 2 - 90, ly);
+      // Percentage
+      ctx.fillStyle = dim ? hexToRgba(cssVar("--muted", "#8b949e"), 0.35) : hexToRgba(s.color, 0.78);
+      ctx.textAlign = "right";
+      ctx.font = "bold 11px sans-serif";
+      ctx.fillText(Math.round((s.value / st.total) * 100) + "%", rect.width / 2 + 100, ly);
+      ctx.font = "11px sans-serif";
+    });
+  }
+
+  function donutTick(canvas, st, t) {
+    st.raf = 0;
+    const dt = st.last ? Math.min((t - st.last) / 1000, 0.1) : 0.016;
+    st.last = t;
+    if (st.spin > 0) st.spin = Math.max(0, st.spin - dt * PIE_SPIN_RATE);
+    let animating = st.spin > 0;
+    for (let i = 0; i < st.target.length; i++) {
+      const cur = st.current[i] != null ? st.current[i] : 0;
+      const tgt = st.target[i];
+      if (Math.abs(tgt - cur) > 0.0006) {
+        st.current[i] = cur + (tgt - cur) * Math.min(1, dt * PIE_EASE);
+        animating = true;
+      } else {
+        st.current[i] = tgt;
+      }
+    }
+    st.current.length = st.target.length;
+    donutDraw(canvas, st);
+    if (animating) st.raf = requestAnimationFrame((tt) => donutTick(canvas, st, tt));
+  }
+
+  function donutHoverMove(canvas, st, e) {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    let idx = -1;
+    if (st.total > 0 && rect.width >= 10) {
+      const g = donutGeometry(rect, st.shown.length);
+      const dist = Math.hypot(x - g.cx, y - g.cy);
+      if (dist >= g.innerR - 2 && dist <= g.donutR + 8) {
+        const a = (Math.atan2(y - g.cy, x - g.cx) + Math.PI * 2) % (Math.PI * 2);
+        const start = ((-Math.PI / 2 + st.spin) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+        const rel = (a - start + Math.PI * 2) % (Math.PI * 2);
+        const spacing = st.shown.length > 1 ? PIE_SPACING : 0;
+        let acc = 0;
+        for (let i = 0; i < st.shown.length; i++) {
+          const len = st.current[i] || 0;
+          const half = Math.min(spacing / 2, len * 0.25);
+          if (rel >= acc + half && rel <= acc + len - half) { idx = i; break; }
+          acc += len;
+        }
+      }
+    }
+    if (idx !== st.hover) {
+      st.hover = idx;
+      if (st.total > 0) donutDraw(canvas, st);
+    }
+    if (idx >= 0) {
+      showPieTip(e, st.shown[idx], st.total, !!st.totalLabel);
+    } else {
+      hidePieTip();
+    }
+  }
+
+  function drawDonut(canvas, slices, centerLabel, totalLabel) {
+    const rect = canvas.getBoundingClientRect();
+    const visNow = rect.width >= 10 && rect.height >= 10;
+
+    const items = (slices || []).filter((s) => s && s.value > 0);
+    const total = items.reduce((n, s) => n + s.value, 0);
+    let shown = [];
+    if (total > 0) {
+      const MAX_LEGEND = 5;
+      // Slices under 0.5% render as a hairline arc and a "0%" legend row;
+      // fold them into Other up front so neither the ring nor the legend
+      // carries noise.
+      const meaningful = [];
+      let tiny = 0;
+      items.forEach((s) => {
+        if (s.value / total < 0.005) tiny += s.value;
+        else meaningful.push(s);
+      });
+      shown = meaningful.slice(0, MAX_LEGEND);
+      tiny += meaningful.slice(MAX_LEGEND).reduce((n, s) => n + s.value, 0);
+      if (tiny / total >= 0.005) {
+        shown.push({
+          label: "Other",
+          value: tiny,
+          color: cssVar("--muted", "#8b949e"),
+        });
+      }
+    }
+
+    // Centre headline: "52% blocked" -> big "52%", caption "blocked".
+    const parts = (centerLabel || "").trim().match(/^([\d.,]+\s*%?)\s+(.+)$/);
+    const centerBig = parts ? parts[1].replace(/\s+/g, "") : (centerLabel || "").trim();
+    const centerSub = parts ? parts[2] : "";
+
+    // Screen-reader summary, since a canvas has no accessible content.
+    const tileEl = canvas.closest(".ovb-tile");
+    const tileTitleEl = tileEl ? tileEl.querySelector(".ovb-tile-title") : null;
+    const cardEl = canvas.closest(".card");
+    const cardH2 = cardEl ? cardEl.querySelector(".card-head h2") : null;
+    const cardTitle = tileTitleEl
+      ? (tileTitleEl.firstChild && tileTitleEl.firstChild.textContent || "").trim()
+      : cardH2 ? cardH2.textContent.trim() : "";
+    canvas.setAttribute("role", "img");
+    canvas.setAttribute(
+      "aria-label",
+      total
+        ? `${cardTitle || "Chart"}: ` +
+          shown.map((s) => `${s.label} ${Math.round((s.value / total) * 100)}%`).join(", ")
+        : `${cardTitle || "Chart"}: no data yet`
+    );
+
+    const st = donutState(canvas);
+    st.shown = shown;
+    st.total = total;
+    st.center = centerLabel || "";
+    st.centerBig = centerBig;
+    st.centerSub = centerSub;
+    st.totalLabel = totalLabel || "";
+    st.target = shown.map((s) => (s.value / total) * Math.PI * 2);
+
+    if (visNow && !st.wasVisible) {
+      st.wasVisible = true;
+      st.current = st.target.map(() => 0);
+      st.spin = Math.PI * 2;
+    }
+    st.wasVisible = visNow;
+
+    if (!st.total) {
+      if (st.raf) { cancelAnimationFrame(st.raf); st.raf = 0; }
+      donutDraw(canvas, st);
+      return;
+    }
+    if (!st.raf) {
+      st.last = performance.now();
+      st.raf = requestAnimationFrame((t) => donutTick(canvas, st, t));
+    }
+  }
+
+  function mergeInterfaceHistory(interfaces) {
+    const byTs = new Map();
+    for (const iface of interfaces || []) {
+      for (const s of iface.history || []) {
+        const cur = byTs.get(s[0]);
+        if (cur) {
+          cur[1] += s[1];
+          cur[2] += s[2];
+        } else {
+          byTs.set(s[0], [s[0], s[1], s[2]]);
+        }
+      }
+    }
+    return [...byTs.values()].sort((a, b) => a[0] - b[0]);
+  }
+
+  // The eight overview donuts sit below the fold. Redrawing them every poll
+  // while they are scrolled out of sight was the single biggest cost on the
+  // page, so they are gated on visibility and catch up when scrolled back to.
+  const ovChartVisible = new WeakMap();
+  const ovChartPending = new WeakMap();
+  let ovChartIO = null;
+  function ovWatchChart(canvas) {
+    if (!canvas || ovChartVisible.has(canvas)) return;
+    ovChartVisible.set(canvas, true);
+    if (typeof IntersectionObserver === "undefined") return;
+    if (!ovChartIO) {
+      ovChartIO = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          ovChartVisible.set(e.target, e.isIntersecting);
+          if (!e.isIntersecting) continue;
+          const pending = ovChartPending.get(e.target);
+          if (pending) { ovChartPending.delete(e.target); pending(); }
+        }
+      }, { rootMargin: "150px" });
+    }
+    ovChartIO.observe(canvas);
+  }
+
+  function ovPie(canvas, slices, centerLabel, totalLabel) {
+    if (!canvas) return;
+    ovWatchChart(canvas);
+    const draw = () => requestAnimationFrame(
+      () => drawDonut(canvas, slices, centerLabel, totalLabel));
+    if (ovChartVisible.get(canvas) === false) ovChartPending.set(canvas, draw);
+    else draw();
+  }
+
+  function ovSpark(vals) {
+    const clean = (vals || []).map((v) => Number(v) || 0);
+    if (clean.length < 2) return "";
+    const w = 200, h = 32, pad = 3;
+    // Robust scale: a single outlier (one latency spike) shouldn't flatten the
+    // whole sparkline. Clip at ~p95 + headroom.
+    const sorted = [...clean].sort((a, b) => a - b);
+    const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
+    const max = Math.min(Math.max(...clean), Math.max(p95 * 1.25, 1));
+    const min = Math.min(...clean);
+    const span = max - min || 1;
+    const capVal = (v) => Math.min(v, max);
+    const pts = clean.map((v, i) => [
+      (i / (clean.length - 1)) * w,
+      h - pad - ((capVal(v) - min) / span) * (h - pad * 2),
+    ]);
+    const d = pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(" ");
+    const area = `${d} L${w} ${h} L0 ${h} Z`;
+    const last = pts[pts.length - 1];
+    return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="trend">` +
+      `<path class="s-area" d="${area}"/>` +
+      `<path class="s-line" d="${d}"/>` +
+      `<circle class="s-dot" cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="2.2"/></svg>`;
+  }
+
+  function renderOverview(d) {
+    state.ovData = d;
+    const sys = d.sys || {};
+    const usage = sys.usage || {};
+    const mem = sys.mem || {};
+    const disk = sys.disk || {};
+    const bw = d.bw || {};
+    const dns = d.dns || {};
+    const sec = d.sec || {};
+    const fw = d.fw || {};
+
+    els.ovCpu.textContent = (usage.cpu_pct != null ? Math.round(usage.cpu_pct) : "—") + "%";
+    els.ovCpu.title = "Load: " + ((sys.load || []).map((x) => x.toFixed(2)).join(" / ") || "—");
+    els.ovMem.textContent = usage.mem_pct != null
+      ? Math.round(usage.mem_pct) + "%"
+      : (mem.total ? Math.round(mem.used / mem.total * 100) + "%" : "—");
+    els.ovMem.title = mem.total ? `${formatBytes(mem.used)} / ${formatBytes(mem.total)}` : "";
+    els.ovDisk.textContent = usage.disk_pct != null
+      ? Math.round(usage.disk_pct) + "%"
+      : (disk.total ? Math.round(disk.used / disk.total * 100) + "%" : "—");
+    els.ovDisk.title = disk.total ? `${formatBytes(disk.used)} / ${formatBytes(disk.total)}` : "";
+    els.ovUptime.textContent = formatUptime(sys.uptime);
+    const ovLeases = d.leases || [];
+    els.ovClients.textContent = formatNumber(ovLeases.filter((l) => l.online).length);
+    const dhcpKnownEl = document.getElementById("ov-dhcp-known");
+    if (dhcpKnownEl) {
+      dhcpKnownEl.textContent = formatNumber(ovLeases.length);
+      dhcpKnownEl.title = `${ovLeases.length} known DHCP leases`;
+    }
+    els.ovFwBlocks.textContent = formatNumber((fw.traffic || {}).block || 0);
+    els.ovAttacks.textContent = (sec.stats || {}).hits_1m != null
+      ? `${formatNumber((sec.stats || {}).hits_1m)} / min`
+      : "—";
+
+    const lat = sys.latency || {};
+    const fmtMs = (v) => (v == null ? "—" : v >= 100 ? Math.round(v) + " ms" : v.toFixed(1) + " ms");
+    els.ovLatNow.textContent = fmtMs(lat.current_ms);
+    els.ovLatNow.title = lat.target
+      ? `Ping to ${lat.target} | batch max: ${fmtMs(lat.current_max_ms)} | 24h baseline: ${fmtMs(lat.baseline_ms)}`
+      : "";
+    const peak = lat.peak_1h_ms || 0;
+    const base = lat.baseline_ms || 0;
+    els.ovLatPeak.textContent = fmtMs(peak > 0 ? peak : null);
+    els.ovLatPeak.title =
+      base > 0 && peak > base * 2
+        ? `Spike detected: ${Math.round((peak / base - 1) * 100)}% above 24h baseline`
+        : "Highest single ping in the last hour";
+    els.ovLatPeak.style.color = base > 0 && peak > base * 2 ? cssVar("--red", "#f85149") : "";
+    els.ovLatLoss.textContent = lat.loss_1h_pct != null ? lat.loss_1h_pct + "%" : "—";
+    els.ovLatLoss.title = "Average packet loss over the last hour";
+    els.ovLatJitter.textContent = fmtMs(lat.jitter_ms);
+    els.ovLatJitter.title = "Mean deviation of recent ping batches (last 10 min)";
+
+    const wan = sys.wan || {};
+    els.ovWanIp.textContent = wan.ipv4 || "—";
+    els.ovWanIp.title = wan.ifname
+      ? `${wan.ifname}${(wan.ipv6 || [])[0] ? " · v6: " + wan.ipv6[0] : ""}`
+      : "no default route";
+
+    const netSpark = document.getElementById("ov-net-spark");
+    if (netSpark) netSpark.innerHTML = ovSpark((d.latHistory || []).map((r) => r[1]));
+
+    const netTrend = document.getElementById("ov-net-trend");
+    if (netTrend) {
+      if (lat.current_ms == null) {
+        netTrend.hidden = true;
+      } else {
+        netTrend.hidden = false;
+        if (lat.loss_1h_pct > 1) {
+          netTrend.textContent = `${lat.loss_1h_pct}% loss`;
+          netTrend.className = "ov-mon-trend t-hot";
+          netTrend.title = "Packet loss over the last hour is elevated";
+        } else if (lat.baseline_ms > 0 && lat.current_ms > lat.baseline_ms * 1.5) {
+          netTrend.textContent = `▲ ${(lat.current_ms / lat.baseline_ms).toFixed(1)}× baseline`;
+          netTrend.className = "ov-mon-trend t-hot";
+          netTrend.title = `Current ${fmtMs(lat.current_ms)} vs 24h baseline ${fmtMs(lat.baseline_ms)}`;
+        } else if (lat.baseline_ms > 0 && lat.current_ms < lat.baseline_ms * 0.8) {
+          netTrend.textContent = "below baseline";
+          netTrend.className = "ov-mon-trend t-calm";
+          netTrend.title = `Current ${fmtMs(lat.current_ms)} vs 24h baseline ${fmtMs(lat.baseline_ms)}`;
+        } else {
+          netTrend.textContent = "normal";
+          netTrend.className = "ov-mon-trend";
+          netTrend.title = "Latency is within its normal range";
+        }
+      }
+    }
+
+    const secSpark = document.getElementById("ov-sec-spark");
+    if (secSpark) secSpark.innerHTML = ovSpark((sec.series || []).map((b) => b[1]));
+
+    const secTrend = document.getElementById("ov-sec-trend");
+    if (secTrend) {
+      const st = sec.stats || {};
+      const cur = st.hits_1m;
+      const perMin = st.hits_10m != null ? st.hits_10m / 10 : null;
+      if (cur == null || perMin == null) {
+        secTrend.hidden = true;
+      } else {
+        secTrend.hidden = false;
+        if (cur > Math.max(2, perMin * 1.8)) {
+          secTrend.textContent = `▲ ${(cur / Math.max(perMin, 0.1)).toFixed(1)}× 10m avg`;
+          secTrend.className = "ov-mon-trend t-hot";
+          secTrend.title = `${cur}/min now vs ${perMin.toFixed(1)}/min average over 10 minutes`;
+        } else if (cur <= perMin * 0.4) {
+          secTrend.textContent = "▼ quiet";
+          secTrend.className = "ov-mon-trend t-calm";
+          secTrend.title = `${cur}/min now vs ${perMin.toFixed(1)}/min average over 10 minutes`;
+        } else {
+          secTrend.textContent = "steady";
+          secTrend.className = "ov-mon-trend";
+          secTrend.title = `${cur}/min now vs ${perMin.toFixed(1)}/min average over 10 minutes`;
+        }
+      }
+    }
+
+    const wgPeers = ((d.wg || {}).peers || []);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const wgOnline = wgPeers.filter((p) => (p.last_handshake || 0) > nowSec - 180).length;
+    els.ovWgPeers.textContent = wgPeers.length ? `${wgOnline}/${wgPeers.length}` : "—";
+    els.ovWgPeers.title = "WireGuard peers with a handshake in the last 3 minutes";
+
+    const dnsT = dns.totals || {};
+    const dnsOk = !!(dns.ok && dnsT.queries);
+    const blocked = dnsT.nxdomain || 0;
+    const allowed = Math.max(0, (dnsT.queries || 0) - blocked);
+    els.ovDnsBlocked.textContent = dnsOk && dnsT.nxdomain != null
+      ? Math.round(blocked / Math.max(1, dnsT.queries) * 100) + "%"
+      : (dnsT.queries ? formatNumber(dnsT.queries) : "—");
+    els.ovDnsBlocked.title = dnsOk && dnsT.nxdomain != null
+      ? `${formatNumber(blocked)} blocked (NXDOMAIN) of ${formatNumber(dnsT.queries)} queries`
+      : "Total queries";
+
+    const pieGreen = cssVar("--green", "#3fb950");
+    const pieRed = cssVar("--red", "#f85149");
+    const pieBlue = cssVar("--accent", "#4f8cff");
+    const pieAmber = cssVar("--amber", "#d29922");
+    const memSlices = [
+      { label: "Used", value: mem.used || 0, color: pieBlue },
+      { label: "Available", value: (mem.available || mem.total || 0), color: pieGreen },
+    ];
+    const fwSlices = [
+      { label: "Allow", value: (fw.traffic || {}).allow || 0, color: pieGreen },
+      { label: "Block", value: (fw.traffic || {}).block || 0, color: pieRed },
+    ];
+    const sinkholeSlices = [
+      { label: "Allowed", value: allowed, color: pieGreen },
+      { label: "Blocked", value: blocked, color: pieRed },
+    ];
+    const ipvSlices = [
+      { label: "IPv4", value: Math.max(0, (dnsT.queries || 0) - (dnsT.ipv6 || 0)), color: "#4f8cff" },
+      { label: "IPv6", value: dnsT.ipv6 || 0, color: "#a371f7" },
+    ];
+    const cacheSlices = [
+      { label: "Cache hit", value: dnsT.cachehits || 0, color: pieGreen },
+      { label: "Cache miss", value: dnsT.cachemiss || 0, color: pieAmber },
+    ];
+
+    // Categorical donuts use one anchored ramp (see donutRamp) so categories
+    // stay distinguishable in every theme. Only the first 6 entries can be
+    // visible — drawDonut folds the tail into a muted "Other".
+    // One designed Overview palette: blue, teal, violet, amber, green, red.
+    const donutColors = ["#4f8cff", "#39c5cf", "#a371f7", "#d29922", "#3fb950", "#f85149"];
+    const qtypeSlices = (dns.qtypes || []).map((q, i) => ({
+      label: q.label, value: q.count, color: donutColors[i % donutColors.length],
+    }));
+    const countrySlices = (sec.countries || []).map((c, i) => ({
+      label: !c.name || c.name === "??" ? "Unknown" : c.name,
+      value: c.count,
+      color: donutColors[i % donutColors.length],
+    }));
+
+    const ifaces = bw.interfaces || [];
+    const totDown = ifaces.reduce((n, i) => n + (i.rx_total || 0), 0);
+    const totUp = ifaces.reduce((n, i) => n + (i.tx_total || 0), 0);
+    const bwSlices = [
+      { label: "Down", value: totDown, color: "#4f8cff" },
+      { label: "Up", value: totUp, color: "#d29922" },
+    ];
+
+    const fwTot = ((fw.traffic || {}).allow || 0) + ((fw.traffic || {}).block || 0);
+    const fwPct = fwTot ? Math.round((fw.traffic.block || 0) / fwTot * 100) + "% block" : "";
+
+    ovPie(els.ovPieSinkhole, sinkholeSlices, blocked && allowed ? Math.round(blocked / (blocked + allowed) * 100) + "% blocked" : "");
+    ovPie(els.ovPieQtypes, qtypeSlices, dnsT.queries ? `${formatNumber(dnsT.queries)} queries` : "");
+    ovPie(els.ovPieIpv, ipvSlices, dnsT.ipv6 ? Math.round((dnsT.ipv6 / Math.max(1, dnsT.queries)) * 100) + "% IPv6" : "");
+    ovPie(els.ovPieMem, memSlices, mem.total ? Math.round((mem.used || 0) / mem.total * 100) + "% used" : "");
+    ovPie(els.ovPieFw, fwSlices, fwPct);
+    ovPie(els.ovPieCountries, countrySlices, (sec.stats || {}).unique_ips ? `${formatNumber((sec.stats || {}).unique_ips)} sources` : "");
+    ovPie(els.ovPieBw, bwSlices, totDown + totUp ? `${formatBytes(totDown + totUp)} total` : "", formatBytes(totDown + totUp));
+    ovPie(els.ovPieCache, cacheSlices, dnsT.hitrate != null ? Math.round(dnsT.hitrate * 100) + "% hit" : "");
+
+    els.ovResHint.textContent = sys.uptime != null ? "Live · 5 min" : "";
+    liveSysSnap = sys;
+
+    els.ovBwHint.textContent = ifaces.length
+      ? `${ifaces.map((i) => i.name).join(", ")} · live 5 min`
+      : "Collecting samples…";
+    liveBwSnap = bw;
+
+    els.ovLatHint.textContent = (d.latHistory || []).length
+      ? `ping ${((sys.latency || {}).target || "")} · past hour`
+      : "Collecting samples…";
+    els.ovJitHint.textContent = (d.latHistory || []).length
+      ? `ping ${((sys.latency || {}).target || "")} · past hour`
+      : "Collecting samples…";
+    if (!liveLatSnap.length) liveLatSnap = d.latHistory || [];
+
+    renderAttackMap(ovMap, sec.by_ip || []);
+    els.ovGeoHint.textContent = (sec.geo_db && sec.geo_db.hint) || `${formatNumber((sec.stats || {}).unique_ips || 0)} attack sources`;
+
+    const clients = (bw.clients || []).slice(0, 6).sort((a, b) => (b.rx_bytes_per_s || 0) - (a.rx_bytes_per_s || 0));
+    els.ovTalkersBody.innerHTML = clients.length
+      ? clients.map((c) => `
+        <tr>
+          <td><span class="mono">${esc(c.ip)}</span>${c.hostname ? `<span class="muted"> · ${esc(c.hostname)}</span>` : ""}</td>
+          <td>${formatMBs(c.rx_bytes_per_s)}</td>
+          <td>${formatMBs(c.tx_bytes_per_s)}</td>
+        </tr>`).join("")
+      : `<tr><td colspan="3" class="empty">No client traffic yet.</td></tr>`;
+
+    const sur = d.sur || {};
+    els.ovSuricataHint.textContent = sur.enabled ? `${formatNumber(sur.count_24h)} alerts in last 24h` : "not running";
+    els.ovSuricataBody.innerHTML = sur.enabled && (sur.top || []).length
+      ? (sur.top || []).slice(0, 6).map((a) => `
+        <tr>
+          <td>${esc(a.sig)}</td>
+          <td><span class="badge sev-${esc(a.severity)}">${esc(a.severity)}</span></td>
+          <td>${formatNumber(a.count)}</td>
+        </tr>`).join("")
+      : `<tr><td colspan="3" class="empty">${esc(sur.hint || "No Suricata alerts.")}</td></tr>`;
+
+    renderWanCard(sys);
+    renderWgCard(d.wg || {});
+  }
+
+  function renderWanCard(sys) {
+    const body = document.getElementById("ov-wan-body");
+    const hint = document.getElementById("ov-wan-hint");
+    const wan = sys.wan || {};
+    if (!body) return;
+    const card = body.closest(".card");
+    if (!wan.ifname) {
+      hint.textContent = "no default route";
+      body.innerHTML = `<p class="muted">No WAN interface detected.</p>`;
+      if (card) card.classList.remove("is-up"), card.classList.add("is-down");
+      return;
+    }
+    const up = (wan.state || "").toUpperCase() === "UP";
+    hint.textContent = wan.ifname;
+    if (card) card.classList.toggle("is-up", up), card.classList.toggle("is-down", !up);
+    const rows = [];
+    const row = (label, value, cls) => `
+      <div class="ov-kv-row">
+        <span class="ov-kv-label">${esc(label)}</span>
+        <span class="ov-kv-value ${cls || ""}">${esc(value || "—")}</span>
+      </div>`;
+    rows.push(row("Link", `${wan.ifname} · ${(wan.state || "—").toUpperCase()}`, up ? "ok" : "down"));
+    rows.push(row("IPv4", wan.ipv4));
+    for (const a of (wan.ipv6 || []).slice(0, 3)) rows.push(row("IPv6", a));
+    if ((wan.ipv6 || []).length > 3) rows.push(row("", `+${wan.ipv6.length - 3} more global v6 addrs`));
+    rows.push(row("Gateway v4", wan.gateway4));
+    rows.push(row("Gateway v6", wan.gateway6));
+    body.innerHTML = rows.join("");
+  }
+
+  function renderWgCard(wg) {
+    const body = document.getElementById("ov-wg-body");
+    if (!body) return;
+    const card = document.getElementById("ov-post-wg");
+    const hint = document.getElementById("ov-wg-hint");
+    const toggle = els.ovWgToggle;
+    if (!wg || !wg.configured) {
+      if (hint) {
+        hint.textContent = "WireGuard is not configured.";
+        hint.title = hint.textContent;
+      }
+      if (els.ovWgState) els.ovWgState.textContent = "—";
+      if (els.ovWgUnit) els.ovWgUnit.textContent = "not configured";
+      if (els.ovWgFoot) els.ovWgFoot.textContent = "";
+      if (toggle) toggle.hidden = true;
+      body.innerHTML = `<p class="muted">Set it up from the WireGuard page to add VPN peers.</p>`;
+      if (card) {
+        card.classList.remove("is-up", "is-down");
+        card.removeAttribute("data-state");
+      }
+      return;
+    }
+    const iface = wg.interface || {};
+    const peers = wg.peers || [];
+    const now = Math.floor(Date.now() / 1000);
+    const ONLINE_WINDOW = 180;
+    const online = peers.filter((p) => (p.last_handshake || 0) > now - ONLINE_WINDOW);
+    const up = !!iface.up;
+    if (els.ovWgState) els.ovWgState.textContent = `${online.length} / ${peers.length}`;
+    if (els.ovWgUnit) els.ovWgUnit.textContent = peers.length === 1 ? "peer online" : "peers online";
+    if (hint) {
+      hint.textContent = up
+        ? `Tunnel up · ↓ ${formatBytes(iface.rx || 0)} · ↑ ${formatBytes(iface.tx || 0)}`
+        : "Interface stopped — peers are offline.";
+      hint.title = hint.textContent;
+    }
+    if (els.ovWgFoot) els.ovWgFoot.textContent = `${iface.name || "wg0"} · UDP ${iface.listen_port || "—"}`;
+    if (toggle) {
+      toggle.hidden = state.role !== "admin";
+      toggle.dataset.on = up ? "1" : "0";
+      toggle.setAttribute("aria-pressed", up ? "true" : "false");
+      toggle.title = up ? "Disable WireGuard" : "Enable WireGuard";
+      if (els.ovWgToggleLabel) els.ovWgToggleLabel.textContent = up ? "Enabled" : "Disabled";
+      toggle.disabled = false;
+    }
+    if (card) {
+      card.classList.toggle("is-up", up);
+      card.classList.toggle("is-down", !up);
+      card.dataset.state = up ? "ok" : "bad";
+    }
+    const peerRows = peers.slice(0, 5).map((p) => {
+      const age = (p.last_handshake || 0) > 0 ? formatUptime(now - p.last_handshake) : "never";
+      const isOn = (p.last_handshake || 0) > now - ONLINE_WINDOW;
+      return `
+        <div class="ov-wg-peer">
+          <span>${esc(p.name || p.address)}${isOn ? ' <span class="badge badge-ok">on</span>' : ""}</span>
+          <span class="muted">hs ${esc(age)} · ↓${formatBytes(p.rx || 0)} ↑${formatBytes(p.tx || 0)}</span>
+        </div>`;
+    }).join("");
+    body.innerHTML = peers.length
+      ? `<div class="ov-wg-peers">${peerRows}</div>`
+      : `<p class="muted">No peers configured.</p>`;
+  }
+
+  async function toggleOverviewWireguard() {
+    const btn = els.ovWgToggle;
+    if (!btn || btn.hidden) return;
+    if (state.role !== "admin") return;
+    const on = btn.dataset.on === "1";
+    if (!window.confirm(on
+      ? "Disable WireGuard?\n\nAll VPN peers disconnect immediately. If you are connected through WireGuard, " +
+        "you will lose access to this dashboard until the tunnel is enabled again."
+      : "Enable WireGuard?\n\nThe wg0 interface will start with the saved configuration.")) return;
+    btn.disabled = true;
+    try {
+      await postJSON(on ? "/api/wireguard/stop" : "/api/wireguard/start", {});
+      await refreshOverview({ force: true });
+    } catch (err) {
+      showBanner(true, "WireGuard: " + err.message);
+      btn.disabled = false;
+    }
+  }
+
+
+  // ══════════════════════════════════════════════════════════════════════
+  // Overview: system health score
+  // ══════════════════════════════════════════════════════════════════════
+  const ovPosture = {};          // slow-tier data (updates, exposure, bans, backups)
+
+  function ovPenalty(list, points, severity, text, view) {
+    if (points <= 0) return 0;
+    list.push({ points, severity, text, view });
+    return points;
+  }
+
+  function computeOvHealth() {
+    const issues = [];
+    let lost = 0;
+    const sys = (state.ovData && state.ovData.sys) || {};
+    const usage = sys.usage || {};
+    const rows = ((state.svcData || {}).services || []);
+    const byUnit = new Map(rows.map((r) => [r.unit, r]));
+
+    // ── services ──────────────────────────────────────────────────────
+    let known = 0;
+    for (const [unit, name] of OV_SERVICES) {
+      const svc = byUnit.get(unit);
+      if (!svc) continue;                       // not installed
+      known += 1;
+      if (svc.active === "active") continue;
+      const w = OV_SERVICE_WEIGHT[unit] || 3;
+      const failed = svc.active === "failed";
+      lost += ovPenalty(issues, w, failed ? "crit" : "warn",
+        `${name} is ${failed ? "failed" : "stopped"}`, "system");
+    }
+
+    // ── resource pressure ─────────────────────────────────────────────
+    const cpu = usage.cpu_pct, mem = usage.mem_pct, disk = usage.disk_pct, swap = usage.swap_pct;
+    if (cpu != null) lost += ovPenalty(issues, cpu > 90 ? 8 : cpu > 75 ? 4 : 0,
+      cpu > 90 ? "crit" : "warn", `CPU at ${Math.round(cpu)}%`, "system");
+    if (mem != null) lost += ovPenalty(issues, mem > 92 ? 8 : mem > 85 ? 4 : 0,
+      mem > 92 ? "crit" : "warn", `Memory at ${Math.round(mem)}%`, "system");
+    if (disk != null) lost += ovPenalty(issues, disk > 95 ? 15 : disk > 90 ? 8 : disk > 80 ? 3 : 0,
+      disk > 90 ? "crit" : "warn", `Root filesystem ${Math.round(disk)}% full`, "system");
+    if (swap != null) lost += ovPenalty(issues, swap > 50 ? 4 : 0, "warn",
+      `Swap in use (${Math.round(swap)}%)`, "system");
+
+    const temp = (sys.cpu || {}).temp;
+    if (temp) lost += ovPenalty(issues, temp > 85 ? 10 : temp > 75 ? 5 : 0,
+      temp > 85 ? "crit" : "warn", `CPU temperature ${Math.round(temp)}\u00b0C`, "system");
+
+    const cores = (sys.cpu || {}).cores || 1;
+    const load1 = (sys.load || usage.load || [0])[0] || 0;
+    lost += ovPenalty(issues, load1 > cores * 2 ? 6 : load1 > cores ? 3 : 0, "warn",
+      `Load ${load1.toFixed(2)} on ${cores} core${cores === 1 ? "" : "s"}`, "system");
+
+    // ── WAN quality ───────────────────────────────────────────────────
+    // Field names must match build_latency(): current_ms / loss_1h_pct /
+    // jitter_ms / baseline_ms.
+    const lat = sys.latency || {};
+    const loss = lat.loss_1h_pct;
+    if (loss != null) lost += ovPenalty(issues, loss > 5 ? 12 : loss > 1 ? 5 : 0,
+      loss > 5 ? "crit" : "warn", `WAN packet loss ${Number(loss).toFixed(1)}%`, "overview");
+    const rtt = lat.current_ms;
+    if (rtt != null) lost += ovPenalty(issues, rtt > 150 ? 5 : 0, "warn",
+      `WAN latency ${Math.round(rtt)} ms`, "overview");
+    const jit = lat.jitter_ms;
+    if (jit != null) lost += ovPenalty(issues, jit > 30 ? 4 : 0, "warn",
+      `WAN jitter ${Number(jit).toFixed(1)} ms`, "overview");
+    if ((sys.wan || {}).state && sys.wan.state !== "UP" && sys.wan.state !== "UNKNOWN") {
+      lost += ovPenalty(issues, 25, "crit", `WAN link is ${sys.wan.state}`, "overview");
+    }
+
+    // ── posture (advisory) ────────────────────────────────────────────
+    if (ovPosture.updates && ovPosture.updates.upgradable > 0) {
+      const n = ovPosture.updates.upgradable;
+      lost += ovPenalty(issues, n > 30 ? 5 : 3, "info",
+        `${n} package update${n === 1 ? "" : "s"} available`, "system");
+    }
+    if (ovPosture.backupAgeDays != null && ovPosture.backupAgeDays > 30) {
+      lost += ovPenalty(issues, 4, "info",
+        `Last backup ${Math.round(ovPosture.backupAgeDays)} days ago`, "backups");
+    } else if (ovPosture.backupAgeDays != null && ovPosture.backupAgeDays > 14) {
+      lost += ovPenalty(issues, 2, "info",
+        `Backup is ${Math.round(ovPosture.backupAgeDays)} days old`, "backups");
+    }
+    if (ovPosture.failedUnits > 0) {
+      lost += ovPenalty(issues, Math.min(6, ovPosture.failedUnits * 2), "warn",
+        `${ovPosture.failedUnits} failed systemd unit${ovPosture.failedUnits === 1 ? "" : "s"}`, "system");
+    }
+
+    // ── security telemetry (already cached in the mid tier) ───────────
+    const sur = (state.ovData || {}).sur || {};
+    if (sur.enabled !== false && sur.count_24h > 0) {
+      const high = (sur.alerts || []).filter((a) => a.severity === "HIGH").length;
+      if (high) lost += ovPenalty(issues, Math.min(6, Math.max(2, Math.ceil(high / 8))), "warn",
+        `${high} high-severity IDS alert${high === 1 ? "" : "s"} (recent)`, "security");
+    }
+
+    // ── DHCP pool headroom ────────────────────────────────────────────
+    const sysDhcp = sys.dhcp || {};
+    let poolSize = 0;
+    for (const pool of (sysDhcp.pools || [])) {
+      const range = String(pool).split("-").map((x) => x.trim());
+      if (range.length !== 2) continue;
+      const toInt = (ip) => ip.split(".").reduce((n, o) => (n << 8) + (parseInt(o, 10) || 0), 0) >>> 0;
+      const a = toInt(range[0]), b = toInt(range[1]);
+      if (b >= a) poolSize += (b - a + 1);
+    }
+    if (poolSize) {
+      const leased = ((state.ovData || {}).leases || []).length;
+      const poolPct = Math.round(leased / poolSize * 100);
+      if (poolPct > 90) lost += ovPenalty(issues, 6, "crit",
+        `DHCP pool ${poolPct}% used (${leased}/${poolSize})`, "clients");
+      else if (poolPct > 80) lost += ovPenalty(issues, 3, "warn",
+        `DHCP pool ${poolPct}% used (${leased}/${poolSize})`, "clients");
+    }
+
+    const score = Math.max(0, Math.min(100, Math.round(100 - lost)));
+    issues.sort((a, b) => b.points - a.points);
+    return { score, issues, known, ready: known > 0 || !!sys.uptime };
+  }
+
+  const OV_HEALTH_BANDS = [
+    [90, "Healthy",  "ok",   "Every monitored service is up and resources are comfortable."],
+    [75, "Good",     "ok",   "Running normally with a few things worth a look."],
+    [50, "Degraded", "warn", "Something is off \u2014 review the items below."],
+    [25, "At risk",  "bad",  "Multiple problems are affecting this router."],
+    [0,  "Critical", "bad",  "Core services are down. The network is likely impacted."],
+  ];
+
+  function renderOvHealth() {
+    const ring = document.getElementById("ov-health-ring");
+    if (!ring) return;
+    const { score, issues, ready } = computeOvHealth();
+    const scoreEl = document.getElementById("ov-health-score");
+    const verdictEl = document.getElementById("ov-health-verdict");
+    const subEl = document.getElementById("ov-health-sub");
+    const listEl = document.getElementById("ov-health-issues");
+    const hintEl = document.getElementById("ov-health-hint");
+
+    if (!ready) {
+      if (scoreEl) scoreEl.textContent = "\u2014";
+      if (verdictEl) verdictEl.textContent = "Checking\u2026";
+      return;
+    }
+
+    const band = OV_HEALTH_BANDS.find((b) => score >= b[0]) || OV_HEALTH_BANDS[OV_HEALTH_BANDS.length - 1];
+    const card = ring.closest(".ov-health-card");
+    if (card) card.dataset.state = band[2];
+
+    // r=52 -> circumference 326.7
+    const CIRC = 2 * Math.PI * 52;
+    ring.style.strokeDasharray = CIRC.toFixed(1);
+    ring.style.strokeDashoffset = (CIRC * (1 - score / 100)).toFixed(1);
+
+    if (scoreEl) scoreEl.textContent = score;
+    if (verdictEl) verdictEl.textContent = band[1];
+    if (subEl) subEl.textContent = issues.length ? band[3] : band[3];
+    if (hintEl) hintEl.textContent = issues.length
+      ? `${issues.length} item${issues.length === 1 ? " needs" : "s need"} attention`
+      : "nothing to report";
+
+    if (listEl) {
+      const SEV = { crit: "Critical", warn: "Warning", info: "Notice" };
+      if (!issues.length) {
+        listEl.innerHTML = `<li class="ov-issue sev-ok"><span class="ov-issue-dot"></span>` +
+          `<span class="ov-issue-text">All clear — services, resources and backups look healthy</span></li>`;
+      } else {
+        const shown = issues.slice(0, 6);
+        const more = issues.length - shown.length;
+        listEl.innerHTML = shown.map((i) => {
+          const view = i.view || "";
+          const attrs = view ? ` data-view="${esc(view)}" role="button" tabindex="0"` : "";
+          return `<li class="ov-issue sev-${i.severity}"${attrs}>` +
+          `<span class="ov-issue-dot"></span>` +
+          `<span class="ov-issue-text">${esc(i.text)}</span>` +
+          `<span class="ov-issue-sev">${SEV[i.severity] || ""}</span></li>`;
+        }).join("") +
+          (more > 0 ? `<li class="ov-issue sev-more"><span class="ov-issue-dot"></span>` +
+            `<span class="ov-issue-text">+${more} more item${more === 1 ? "" : "s"}</span></li>` : "");
+      }
+    }
+  }
+
+  // ── Swap / temperature / load tiles + usage mini-bars ───────────────
+  function renderOvTiles(sys) {
+    const usage = sys.usage || {};
+    const set = (id, text, title) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = text;
+      if (title) el.title = title;
+    };
+    const bar = (id, pct, warn, crit) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const v = Math.max(0, Math.min(100, pct || 0));
+      el.style.width = v + "%";
+      el.style.background = v >= crit ? cssVar("--red", "#f85149")
+        : v >= warn ? cssVar("--amber", "#d29922") : "";
+    };
+
+    const swap = (sys.swap || {});
+    set("ov-swap", swap.total ? Math.round(usage.swap_pct || 0) + "%" : "off",
+      swap.total ? `${formatBytes(swap.used || 0)} of ${formatBytes(swap.total)} swap in use`
+                 : "No swap configured");
+
+    const temp = (sys.cpu || {}).temp;
+    set("ov-temp", temp ? Math.round(temp) + "\u00b0C" : "\u2014",
+      temp ? "CPU package temperature" : "No temperature sensor exposed");
+    const tEl = document.getElementById("ov-temp");
+    // Colour must mean "hot", not just "this tile is red"
+    if (tEl) tEl.style.color = temp == null ? ""
+      : temp > 85 ? cssVar("--red", "#f85149")
+      : temp > 75 ? cssVar("--amber", "#d29922")
+      : cssVar("--green", "#3fb950");
+
+    const load = (sys.load || usage.load || []);
+    const cores = (sys.cpu || {}).cores || 1;
+    set("ov-load", load.length ? Number(load[0]).toFixed(2) : "\u2014",
+      load.length ? `1m ${load[0]} \u00b7 5m ${load[1]} \u00b7 15m ${load[2]} across ${cores} core${cores === 1 ? "" : "s"}` : "");
+    const lEl = document.getElementById("ov-load");
+    if (lEl && load.length) lEl.style.color = load[0] > cores * 2 ? cssVar("--red", "#f85149")
+      : load[0] > cores ? cssVar("--amber", "#d29922") : "";
+
+    bar("ov-cpu-bar", usage.cpu_pct, 75, 90);
+    bar("ov-mem-bar", usage.mem_pct, 85, 92);
+    bar("ov-disk-bar", usage.disk_pct, 80, 90);
+    bar("ov-swap-bar", usage.swap_pct, 25, 50);
+
+    // DHCP pool occupancy — the "will I run out of addresses soon?" signal.
+    const dhcp = sys.dhcp || {};
+    const leases = ((state.ovData || {}).leases || []);
+    let poolSize = 0;
+    for (const pool of (dhcp.pools || [])) {
+      const range = String(pool).split("-").map((x) => x.trim());
+      if (range.length !== 2) continue;
+      const toInt = (ip) => ip.split(".").reduce((n, o) => (n << 8) + (parseInt(o, 10) || 0), 0) >>> 0;
+      const a = toInt(range[0]), b = toInt(range[1]);
+      if (b >= a) poolSize += (b - a + 1);
+    }
+    const poolBar = document.getElementById("ov-dhcp-bar");
+    if (poolSize) {
+      const pct = Math.min(100, Math.round(leases.length / poolSize * 100));
+      set("ov-dhcp-pool", pct + "%", `${leases.length} of ${poolSize} addresses leased`);
+      if (poolBar) {
+        poolBar.style.width = pct + "%";
+        poolBar.style.background = pct >= 90 ? cssVar("--red", "#f85149")
+          : pct >= 75 ? cssVar("--amber", "#d29922") : "";
+      }
+    } else {
+      set("ov-dhcp-pool", "—", "No DHCP pool reported");
+      if (poolBar) poolBar.style.width = "0%";
+    }
+  }
+
+  // ── LAN / DHCP panel ────────────────────────────────────────────────
+  function renderOvLan(d) {
+    const body = document.getElementById("ov-lan-body");
+    if (!body) return;
+    const sys = d.sys || {};
+    const dhcp = sys.dhcp || {};
+    const leases = d.leases || [];
+    const online = leases.filter((l) => l.online).length;
+
+    // Pool size from the first "start - end" range Kea reports
+    let poolSize = 0;
+    for (const pool of (dhcp.pools || [])) {
+      const m = String(pool).split("-").map((x) => x.trim());
+      if (m.length !== 2) continue;
+      const toInt = (ip) => ip.split(".").reduce((n, o) => (n << 8) + (parseInt(o, 10) || 0), 0) >>> 0;
+      const a = toInt(m[0]), b = toInt(m[1]);
+      if (b >= a) poolSize += (b - a + 1);
+    }
+    const used = leases.length;
+    const pct = poolSize ? Math.min(100, Math.round(used / poolSize * 100)) : 0;
+    const poolCls = pct > 90 ? "down" : pct > 75 ? "" : "ok";
+
+    const row = (label, value, cls) =>
+      `<div class="ov-kv-row"><span class="ov-kv-label">${esc(label)}</span>` +
+      `<span class="ov-kv-value ${cls || ""}">${esc(value == null || value === "" ? "\u2014" : String(value))}</span></div>`;
+
+    let html = "";
+    html += row("Subnet", dhcp.subnet || "\u2014");
+    html += row("Gateway", dhcp.router || "\u2014");
+    html += row("Clients online", `${online} of ${leases.length} known`, online ? "ok" : "");
+    if (poolSize) {
+      html += row("DHCP pool", `${used} / ${poolSize} (${pct}%)`, poolCls);
+      html += `<div class="ov-pool"><i style="width:${pct}%" class="${poolCls === "down" ? "hot" : ""}"></i></div>`;
+    } else if ((dhcp.pools || []).length) {
+      html += row("DHCP pool", (dhcp.pools || []).join(", "));
+    }
+    const lanV6 = (sys.interfaces || []).find((i) => (i.ipv6 || []).length && i.name !== (sys.wan || {}).ifname);
+    if (lanV6) html += row("IPv6", (lanV6.ipv6 || [])[0]);
+    body.innerHTML = html;
+
+    const hint = document.getElementById("ov-lan-hint");
+    if (hint) hint.textContent = dhcp.domain ? dhcp.domain : "";
+  }
+
+  // ── Posture cards (slow tier) ───────────────────────────────────────
+  function setPost(valId, subId, value, sub, cardId, state) {
+    const v = document.getElementById(valId), sEl = document.getElementById(subId);
+    if (v) v.textContent = value;
+    if (sEl && sub != null) sEl.textContent = sub;
+    const card = cardId && document.getElementById(cardId);
+    if (card) card.dataset.state = state || "";
+  }
+
+  function ovChip(id, text) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text || "";
+  }
+  function ovViz(id, html) {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = html || "";
+  }
+  function ovFoot(id, text) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text || "";
+  }
+  function ovCountdown(ts) {
+    if (!ts) return "";
+    const secs = ts - Date.now() / 1000;
+    if (secs <= 0) return "now";
+    if (secs < 3600) return Math.max(1, Math.ceil(secs / 60)) + "m";
+    if (secs < 86400) return Math.ceil(secs / 3600) + "h";
+    return Math.ceil(secs / 86400) + "d";
+  }
+
+  function renderOvPosture() {
+    const u = ovPosture.updates;
+    if (u) {
+      const n = Math.max(0, u.upgradable || 0);
+      const running = !!u.running;
+      setPost("ov-updates-val", "ov-updates-sub",
+        running ? (u.percent != null ? Math.round(u.percent) + "%" : "Working") :
+        n === 0 ? "Up to date" : String(n),
+        running ? (u.phase || "updating…")
+                : n === 0 ? (u.last_check ? "checked " + formatRelative(u.last_check) : "no updates pending")
+                          : `package${n === 1 ? "" : "s"} upgradable`,
+        "ov-post-updates", n === 0 && !running ? "ok" : n > 30 ? "warn" : "info");
+      ovChip("ov-updates-chip", running ? "Updating" : n === 0 ? "Clean" : n > 30 ? "Attention" : "Pending");
+      if (running) {
+        const pct = Math.max(2, Math.min(100, u.percent || 0));
+        ovViz("ov-updates-viz",
+          `<div class="ov-bar"><i style="width:${pct}%"></i></div>
+           <div class="ov-bar-legend"><span>upgrade in progress</span><b>${Math.round(u.percent || 0)}%</b></div>`);
+      } else {
+        ovViz("ov-updates-viz",
+          `<div class="ov-mini"><span>Last check</span><b>${esc(u.last_check ? formatRelative(u.last_check) : "never")}</b></div>
+           <div class="ov-mini"><span>Last upgrade</span><b>${esc(u.last_upgrade ? formatRelative(u.last_upgrade) : "—")}</b></div>`);
+      }
+      ovFoot("ov-updates-foot", u.distro ? esc(u.distro) : (n ? `${n} waiting` : "nothing pending"));
+    }
+
+    if (ovPosture.exposed != null) {
+      const n = ovPosture.exposed, d = ovPosture.dmzCount || 0, tot = n + d;
+      setPost("ov-exposed-val", "ov-exposed-sub", String(tot),
+        tot ? "reachable from the internet" : "nothing reachable",
+        "ov-post-exposed", d ? "warn" : n ? "info" : "ok");
+      ovChip("ov-exposed-chip", d ? "DMZ live" : n ? "Forwarded" : "Sealed");
+      ovViz("ov-exposed-viz",
+        `<div class="ov-split">${n ? `<i class="pf" style="width:${(n / tot * 100).toFixed(1)}%"></i>` : ""}${d ? `<i class="dmz" style="width:${(d / tot * 100).toFixed(1)}%"></i>` : ""}</div>
+         <div class="ov-bar-legend">
+           <span><i class="ov-dot" style="background:var(--accent)"></i><b>${n}</b> forward${n === 1 ? "" : "s"}</span>
+           <span><i class="ov-dot" style="background:var(--amber)"></i><b>${d}</b> DMZ</span>
+         </div>`);
+      ovFoot("ov-exposed-foot", tot ? "WAN ingress rules" : "no inbound holes");
+    }
+
+    if (ovPosture.bans != null) {
+      const count = ovPosture.bans;
+      setPost("ov-bans-val", "ov-bans-sub", formatNumber(count),
+        "CrowdSec decisions", "ov-post-bans", count ? "info" : "ok");
+      ovChip("ov-bans-chip", count ? "Monitoring" : "Clear");
+      const dec = ovPosture.decisions || [];
+      const tally = new Map();
+      dec.forEach((x) => {
+        const k = x.scenario || "unknown";
+        tally.set(k, (tally.get(k) || 0) + 1);
+      });
+      const top = [...tally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
+      const colors = ["var(--red)", "var(--amber)", "var(--accent)"];
+      if (count && top.length) {
+        const shown = top.reduce((a, b) => a + b[1], 0);
+        const other = Math.max(0, count - shown);
+        const seg = (cls, w, color) => w > 0 ? `<i class="${cls}" style="width:${(w / count * 100).toFixed(1)}%;background:${color}"></i>` : "";
+        ovViz("ov-bans-viz",
+          `<div class="ov-split">${top.map(([k, v], i) => seg("", v, colors[i])).join("")}${seg("", other, "color-mix(in srgb, var(--muted) 55%, transparent)")}</div>
+           <div class="ov-bar-legend ov-ban-legend">${top.map(([k, v], i) =>
+             `<span title="${esc(k)}"><i class="ov-dot" style="background:${colors[i]}"></i><span class="nm">${esc(k)}</span><b>${v}</b></span>`).join("")}</div>`);
+      } else {
+        ovViz("ov-bans-viz", `<div class="ov-split"></div><div class="ov-bar-legend"><span>no active decisions</span><b>0</b></div>`);
+      }
+      const next = dec.map((x) => x.until_ts).filter(Boolean).sort((a, b) => a - b)[0];
+      ovFoot("ov-bans-foot", next ? `next release in ${ovCountdown(next)}` : "no expiry scheduled");
+    }
+
+    if (ovPosture.backupAgeDays !== undefined) {
+      const a = ovPosture.backupAgeDays;
+      const fresh = a == null ? 0 : Math.max(0, Math.round(100 * (1 - Math.min(a, 30) / 30)));
+      setPost("ov-backup-val", "ov-backup-sub",
+        a == null ? "None" : a < 1 ? "Today" : `${Math.round(a)}d ago`,
+        a == null ? "no system snapshot" : "system snapshot",
+        "ov-post-backup", a == null ? "warn" : a > 30 ? "warn" : "ok");
+      ovChip("ov-backup-chip", a == null ? "None" : a > 30 ? "Stale" : a > 14 ? "Aging" : "Fresh");
+      const newest = ovPosture.backupNewest;
+      const when = newest
+        ? new Date(newest * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+        : "—";
+      ovViz("ov-backup-viz",
+        `<div class="ov-ring-row">
+           <div class="ov-ring" style="--p:${fresh}"><span>${fresh}%</span></div>
+           <div class="ov-ring-copy"><b>${when}</b>
+             <span>${ovPosture.backupCount || 0} snapshot${(ovPosture.backupCount || 0) === 1 ? "" : "s"} · ${formatBytes(ovPosture.backupSize || 0)}</span></div>
+         </div>`);
+      ovFoot("ov-backup-foot", a == null ? "create a snapshot" : `age ${Math.round(a)} day${Math.round(a) === 1 ? "" : "s"}`);
+    }
+
+    renderOvHealth();
+  }
+
+  async function refreshOvPosture() {
+    const pick = (p) => p.catch(() => null);
+    const [updates, pf, dmz, cs, bks, svcs] = await Promise.all([
+      pick(fetchJSON("/api/system/updates")),
+      pick(fetchJSON("/api/portforward")),
+      pick(fetchJSON("/api/dmz")),
+      pick(fetchJSON("/api/crowdsec")),
+      pick(fetchJSON("/api/backups/system")),
+      pick(fetchJSON("/api/system/services")),
+    ]);
+    if (updates) ovPosture.updates = updates;
+    if (pf) ovPosture.exposed = (pf.rules || []).filter((r) => r.enabled !== false).length;
+    if (dmz) ovPosture.dmzCount = dmz.dmz_count || 0;
+    if (cs) {
+      const decisions = cs.decisions || [];
+      ovPosture.bans = decisions.length;
+      ovPosture.decisions = decisions;
+    }
+    if (bks) {
+      const list = bks.backups || [];
+      const newest = list.reduce((t, b) => Math.max(t, b.time || 0), 0);
+      ovPosture.backupNewest = newest || null;
+      ovPosture.backupCount = list.length;
+      ovPosture.backupSize = list.reduce((sum, b) => sum + (b.size || 0), 0);
+      ovPosture.backupAgeDays = newest ? (Date.now() / 1000 - newest) / 86400 : null;
+    }
+    if (svcs) {
+      state.svcData = svcs;
+      ovPosture.failedUnits = (svcs.services || []).filter((x) => x.active === "failed").length;
+      renderOvServices();
+    }
+    renderOvPosture();
+  }
+
+  // Refresh tiers. Live tiles genuinely need 5s; trends do not, and posture
+  // (updates, bans, backups) changes on the order of hours. Splitting these
+  // cut the Overview's per-cycle work without losing any freshness that
+  // matters - and it costs fewer requests per second than the old flat 5s.
+  const OV_MID_MS = 15000;
+  const OV_SLOW_MS = 30000;
+  const ovTier = { mid: 0, slow: 0 };
+  const ovCache = { dns: {}, fw: {}, sur: {}, leases: [], latHistory: [], wg: {} };
+
+  async function refreshOverview(opts) {
+    const force = !!(opts && opts.force);
+    const now = Date.now();
+    try {
+      const [sys, bw, sec] = await Promise.all([
+        fetchJSON("/api/system"),
+        fetchJSON("/api/bandwidth"),
+        fetchJSON("/api/security"),
+      ]);
+
+      if (force || now - ovTier.mid >= OV_MID_MS) {
+        ovTier.mid = now;
+        const [dns, fw, sur, leaseResp, latHist, wg] = await Promise.all([
+          fetchJSON("/api/dns").catch(() => ovCache.dns),
+          fetchJSON("/api/firewall").catch(() => ovCache.fw),
+          fetchJSON("/api/security/suricata").catch(() => ovCache.sur),
+          fetchJSON("/api/leases").catch(() => ({ leases: ovCache.leases })),
+          fetchJSON("/api/latency/history?hours=24").catch(() => ({ series: ovCache.latHistory })),
+          fetchJSON("/api/wireguard").catch(() => ovCache.wg),
+        ]);
+        ovCache.dns = dns || {};
+        ovCache.fw = fw || {};
+        ovCache.sur = sur || {};
+        ovCache.leases = (leaseResp && leaseResp.leases) || [];
+        ovCache.latHistory = (latHist && latHist.series) || [];
+        ovCache.wg = wg || {};
+      }
+
+      if (force || now - ovTier.slow >= OV_SLOW_MS) {
+        ovTier.slow = now;
+        refreshOvPosture();        // self-rendering, must not block the tiles
+      }
+
+      const payload = {
+        sys, bw, sec,
+        dns: ovCache.dns, fw: ovCache.fw, sur: ovCache.sur,
+        leases: ovCache.leases, latHistory: ovCache.latHistory, wg: ovCache.wg,
+      };
+      renderOverview(payload);
+      renderOvTiles(sys);
+      renderOvLan(payload);
+      renderOvHealth();
+    } catch (err) {
+      showBanner(true, "Overview error: " + err.message);
+    }
+  }
+
+  function svcStatusBadge(s) {
+    if (s.active === "active") return `<span class="badge badge-ok">${esc(s.active)} · ${esc(s.sub)}</span>`;
+    if (s.active === "failed") return `<span class="badge badge-err">${esc(s.active)}</span>`;
+    return `<span class="muted">${esc(s.active || "—")}</span>`;
+  }
+
+  const SVC_TAB_LABELS = { active: "Active", failed: "Failed / Stopped" };
+
+  const SVC_ACTION_ICONS = {
+    start: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>',
+    stop: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M6 6h12v12H6z"/></svg>',
+    restart: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42A6.99 6.99 0 0 1 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-1.93.78-3.68 2.05-4.95L5.64 5.63A8.95 8.95 0 0 0 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.62-1.12-4.98-2.91-6.63z"/></svg>',
+    reload: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M12 6v3l4-4-4-4v3c-4.42 0-8 3.58-8 8 0 1.57.46 3.03 1.24 4.26L6.7 14.8A5.87 5.87 0 0 1 6 12c0-3.31 2.69-6 6-6zm6.76 1.74L17.3 9.2c.44.84.7 1.79.7 2.8 0 3.31-2.69 6-6 6v-3l-4 4 4 4v-3c4.42 0 8-3.58 8-8 0-1.57-.46-3.03-1.24-4.26z"/></svg>',
+  };
+
+  function svcTabCounts(rows) {
+    const counts = { active: 0, failed: 0 };
+    for (const s of rows) {
+      if (s.active === "active") counts.active++;
+      else counts.failed++;
+    }
+    return counts;
+  }
+
+  function svcMatchesTab(s) {
+    if (state.svcTab === "active") return s.active === "active";
+    return s.active !== "active";
+  }
+
+  function renderServices() {
+    const rows = ((state.svcData || {}).services || []);
+    const isAdmin = state.role === "admin";
+    const counts = svcTabCounts(rows);
+    document.querySelectorAll("#svc-tabs .svc-tab").forEach((t) => {
+      const n = counts[t.dataset.tab] || 0;
+      t.textContent = `${SVC_TAB_LABELS[t.dataset.tab] || t.dataset.tab} (${n})`;
+    });
+    const failedCount = rows.filter((s) => s.active === "failed").length;
+    if (els.sysSvcChip) {
+      els.sysSvcChip.textContent = !rows.length ? "—"
+        : failedCount ? `${formatNumber(failedCount)} failed` : `${formatNumber(counts.active)} active`;
+    }
+    if (els.sysServicesCard) {
+      els.sysServicesCard.dataset.state = !rows.length ? "idle" : failedCount ? "bad" : "ok";
+    }
+    const visible = rows.filter(svcMatchesTab);
+    els.sysServicesBody.innerHTML = visible.length
+      ? visible.map((s) => {
+          let actions = "";
+          if (isAdmin) {
+            actions = s.active === "active"
+              ? `<button class="btn btn-sm icon-btn" data-action="restart" data-unit="${esc(s.unit)}" type="button" title="Restart ${esc(s.unit)}" aria-label="Restart ${esc(s.unit)}">${SVC_ACTION_ICONS.restart}</button>
+                 <button class="btn btn-sm icon-btn" data-action="reload" data-unit="${esc(s.unit)}" type="button" title="Reload ${esc(s.unit)}" aria-label="Reload ${esc(s.unit)}">${SVC_ACTION_ICONS.reload}</button>
+                 <button class="btn btn-sm btn-danger icon-btn" data-action="stop" data-unit="${esc(s.unit)}" type="button" title="Stop ${esc(s.unit)}" aria-label="Stop ${esc(s.unit)}">${SVC_ACTION_ICONS.stop}</button>`
+              : `<button class="btn btn-sm icon-btn" data-action="start" data-unit="${esc(s.unit)}" type="button" title="Start ${esc(s.unit)}" aria-label="Start ${esc(s.unit)}">${SVC_ACTION_ICONS.start}</button>`;
+          }
+          return `
+        <tr>
+          <td><b class="mono">${esc(s.unit)}</b></td>
+          <td>${svcStatusBadge(s)}</td>
+          <td>${esc(s.desc || "—")}</td>
+          <td><div class="svc-actions">${actions}</div></td>
+        </tr>`;
+        }).join("")
+      : `<tr><td colspan="4" class="empty">No services match this filter.</td></tr>`;
+  }
+
+  const OV_SERVICES = [
+    ["unbound.service", "Unbound DNS"],
+    ["kea-dhcp4-server.service", "Kea DHCP"],
+    ["radvd.service", "radvd"],
+    ["nginx.service", "nginx"],
+    ["suricata.service", "Suricata IDS"],
+    ["crowdsec.service", "CrowdSec"],
+    ["crowdsec-firewall-bouncer.service", "CS Bouncer"],
+    ["wg-quick@wg0.service", "WireGuard"],
+    ["tuxwall.service", "tuxwall"],
+    ["tuxwall-agent.service", "tuxwall-agent"],
+    ["tuxwall-collector.service", "tuxwall-collector"],
+    ["tuxwall-nat.service", "tuxwall-nat"],
+    ["tuxwall-sqm.service", "tuxwall-sqm"],
+  ];
+  const OV_PROTECTED_SERVICES = { "nginx.service": "it serves this dashboard" };
+
+  function ensureOvServicesCard() {
+    if (!els.ovWanGrid || document.getElementById("ov-svc-card")) return;
+    els.ovWanGrid.insertAdjacentHTML("beforeend", `
+      <div class="card" id="ov-svc-card">
+        <div class="card-head"><h2>Services Status</h2><span class="muted" id="ov-svc-hint"></span></div>
+        <div class="table-wrap">
+          <table id="ov-svc-table">
+            <thead><tr><th>Service</th><th>Description</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody id="ov-svc-tbody"></tbody>
+          </table>
+        </div>
+      </div>`);
+    document.getElementById("ov-svc-tbody").addEventListener("click", async (ev) => {
+      const btn = ev.target.closest("button[data-action]");
+      if (!btn || btn.disabled) return;
+      const unit = btn.dataset.unit;
+      const action = btn.dataset.action;
+      const warn = {
+        stop: `Stop ${unit}? It will stay stopped until started again.`,
+        restart: `Restart ${unit}? Active connections through it may drop.`,
+        start: `Start ${unit}?`,
+      }[action];
+      if (!window.confirm(warn)) return;
+      btn.disabled = true;
+      try {
+        await postJSON("/api/system/services/action", { unit, action });
+        showBanner(false);
+      } catch (err) {
+        showBanner(true, `${unit} ${action}: ` + err.message);
+      }
+      await refreshServices();
+    });
+  }
+
+  // Weight = how much of the 100-point health budget this unit is worth.
+  // DNS and NAT take the whole LAN down; the agent does not.
+  const OV_SERVICE_WEIGHT = {
+    "unbound.service": 25,
+    "tuxwall-nat.service": 14,
+    "kea-dhcp4-server.service": 12,
+    "nginx.service": 8,
+    "tuxwall.service": 8,
+    "suricata.service": 7,
+    "crowdsec.service": 7,
+    "crowdsec-firewall-bouncer.service": 5,
+    "wg-quick@wg0.service": 4,
+    "radvd.service": 4,
+    "tuxwall-sqm.service": 2,
+    "tuxwall-agent.service": 1,
+    "tuxwall-collector.service": 1,
+  };
+
+  let _ovSvcBound = false;
+  function renderOvServices() {
+    const grid = document.getElementById("ov-svc-grid");
+    if (!grid) return;
+    const rows = ((state.svcData || {}).services || []);
+    const byUnit = new Map(rows.map((s) => [s.unit, s]));
+    const isAdmin = state.role === "admin";
+    const chips = [];
+    let up = 0, seen = 0;
+
+    for (const [unit, name] of OV_SERVICES) {
+      const svc = byUnit.get(unit);
+      if (!svc) continue;                     // not installed - do not judge it
+      seen += 1;
+      const ok = svc.active === "active";
+      const failed = svc.active === "failed";
+      if (ok) up += 1;
+      const label = failed ? "Failed" : ok ? (svc.sub === "running" ? "Running" : "Active") : "Stopped";
+      const cls = failed ? "bad" : ok ? "ok" : "warn";
+      let action = "";
+      if (isAdmin && !OV_PROTECTED_SERVICES[unit]) {
+        action = ok
+          ? `<button class="ov-svc-act" data-action="restart" data-unit="${esc(unit)}" type="button" title="Restart ${esc(unit)}">${SVC_ACTION_ICONS.restart}</button>`
+          : `<button class="ov-svc-act" data-action="start" data-unit="${esc(unit)}" type="button" title="Start ${esc(unit)}">${SVC_ACTION_ICONS.start}</button>`;
+      }
+      chips.push(
+        `<div class="ov-svc-chip ${cls}" title="${esc(unit)} - ${esc(svc.desc || "")}">` +
+        `<span class="ov-svc-dot"></span>` +
+        `<span class="ov-svc-name">${esc(name)}</span>` +
+        `<span class="ov-svc-state">${esc(label)}</span>${action}</div>`);
+    }
+
+    const hint = document.getElementById("ov-svc-hint");
+    if (hint) hint.textContent = seen ? `${up} of ${seen} running` : "";
+    grid.innerHTML = chips.length ? chips.join("") : `<p class="muted">No service data.</p>`;
+
+    if (!_ovSvcBound) {
+      _ovSvcBound = true;
+      grid.addEventListener("click", async (ev) => {
+        const btn = ev.target.closest("button[data-action]");
+        if (!btn || btn.disabled) return;
+        const unit = btn.dataset.unit, action = btn.dataset.action;
+        const warn = {
+          restart: `Restart ${unit}? Active connections through it may drop.`,
+          start: `Start ${unit}?`,
+        }[action];
+        if (warn && !window.confirm(warn)) return;
+        btn.disabled = true;
+        try {
+          await postJSON("/api/system/services/action", { unit, action });
+          showBanner(false);
+        } catch (err) {
+          showBanner(true, `${unit} ${action}: ` + err.message);
+        }
+        await refreshServices();
+      });
+    }
+    renderOvHealth();
+  }
+
+  async function refreshServices() {
+    try {
+      state.svcData = await fetchJSON("/api/system/services");
+      renderServices();
+      renderOvServices();
+    } catch (err) {
+      /* best-effort; system view may not be visible */
+    }
+  }
+
+  function schedule() {
+    if (state.timer) clearInterval(state.timer);
+    state.timer = setInterval(() => {
+      if (!document.hidden) {
+        refresh();
+        refreshDns();
+        refreshDomains();
+        refreshFirewall();
+        refreshCrowdsec();
+        refreshCustomBlocklist();
+        refreshBlocklists();
+        refreshSystem();
+        refreshServices();
+      }
+    }, REFRESH_MS);
+    if (state.bwTimer) clearInterval(state.bwTimer);
+    state.bwTimer = setInterval(() => {
+      if (!document.hidden && state.activeView === "bandwidth") {
+        refreshBandwidth();
+      }
+    }, BANDWIDTH_POLL_MS);
+    if (state.secTimer) clearInterval(state.secTimer);
+    state.secTimer = setInterval(() => {
+      if (!document.hidden && state.activeView === "security") {
+        refreshSecurity();
+        updateSecBanAvailability();
+        refreshSuricata();
+        refreshZeek();
+        refreshZeekQuic();
+      refreshAide();
+      refreshHoneypot();
+      refreshCanary();
+      }
+    }, SECURITY_POLL_MS);
+    if (state.wgTimer) clearInterval(state.wgTimer);
+    state.wgTimer = setInterval(() => {
+      if (!document.hidden && state.activeView === "wireguard") {
+        refreshWireguard();
+      }
+    }, WG_POLL_MS);
+    if (state.ovTimer) clearInterval(state.ovTimer);
+    state.ovTimer = setInterval(() => {
+      if (!document.hidden && state.activeView === "overview") {
+        refreshOverview();
+      }
+    }, OV_POLL_MS);
+  }
+
+  const THEME_STORAGE_KEY = "tuxwall-theme";
+  const THEME_COLOR_KEYS = ["bg", "bg-elev", "card", "border", "text", "muted", "accent", "green", "red", "amber"];
+  const THEME_SWATCH_KEYS = ["bg", "card", "border", "accent", "green", "amber", "red"];
+  const BUILTIN_THEMES = [
+    {
+      id: "dark", name: "Dark", builtin: true, dark: true,
+      colors: {
+        bg: "#0f1419", "bg-elev": "#161b22", card: "#1c2333",
+        border: "#2d333b", text: "#e6edf3", muted: "#8b949e",
+        accent: "#4f8cff", green: "#3fb950", red: "#f85149",
+        amber: "#d29922",
+      },
+    },
+    {
+      id: "light", name: "Light", builtin: true, dark: false,
+      colors: {
+        bg: "#f6f8fa", "bg-elev": "#ffffff", card: "#ffffff",
+        border: "#d0d7de", text: "#1f2328", muted: "#59636e",
+        accent: "#0969da", green: "#1a7f37", red: "#cf222e",
+        amber: "#9a6700",
+      },
+    },
+    {
+      id: "nord", name: "Nord", builtin: true, dark: true,
+      colors: {
+        bg: "#2e3440", "bg-elev": "#3b4252", card: "#3b4252",
+        border: "#4c566a", text: "#eceff4", muted: "#a7b1c2",
+        accent: "#88c0d0", green: "#a3be8c", red: "#bf616a",
+        amber: "#ebcb8b",
+      },
+    },
+    {
+      id: "dracula", name: "Dracula", builtin: true, dark: true,
+      colors: {
+        bg: "#282a36", "bg-elev": "#21222c", card: "#2f3141",
+        border: "#44475a", text: "#f8f8f2", muted: "#a4a8bc",
+        accent: "#bd93f9", green: "#50fa7b", red: "#ff5555",
+        amber: "#ffb86c",
+      },
+    },
+    {
+      id: "gruvbox", name: "Gruvbox Dark", builtin: true, dark: true,
+      colors: {
+        bg: "#282828", "bg-elev": "#1d2021", card: "#32302f",
+        border: "#504945", text: "#ebdbb2", muted: "#a89984",
+        accent: "#fe8019", green: "#b8bb26", red: "#fb4934",
+        amber: "#fabd2f",
+      },
+    },
+    {
+      id: "solarized-light", name: "Solarized Light", builtin: true, dark: false,
+      colors: {
+        bg: "#eee8d5", "bg-elev": "#fdf6e3", card: "#fdf6e3",
+        border: "#dcd4ba", text: "#073642", muted: "#657b83",
+        accent: "#268bd2", green: "#859900", red: "#dc322f",
+        amber: "#b58900",
+      },
+    },
+    {
+      id: "tokyo-night", name: "Tokyo Night", builtin: true, dark: true,
+      colors: {
+        bg: "#1a1b2e", "bg-elev": "#16213e", card: "#1f2b47",
+        border: "#2a3a5c", text: "#c0caf5", muted: "#565f89",
+        accent: "#7aa2f7", green: "#9ece6a", red: "#f7768e",
+        amber: "#e0af68",
+      },
+    },
+    {
+      id: "catppuccin", name: "Catppuccin Mocha", builtin: true, dark: true,
+      colors: {
+        bg: "#1e1e2e", "bg-elev": "#181825", card: "#313244",
+        border: "#45475a", text: "#cdd6f4", muted: "#6c7086",
+        accent: "#89b4fa", green: "#a6e3a1", red: "#f38ba8",
+        amber: "#fab387",
+      },
+    },
+    {
+      id: "cyberpunk", name: "Cyberpunk", builtin: true, dark: true,
+      colors: {
+        bg: "#0d0d1a", "bg-elev": "#12122b", card: "#1a1a3e",
+        border: "#2a2a60", text: "#e8e8ff", muted: "#7a7aaa",
+        accent: "#00f5ff", green: "#39ff14", red: "#ff0055",
+        amber: "#ffcc00",
+      },
+    },
+    {
+      id: "emerald", name: "Emerald Dark", builtin: true, dark: true,
+      colors: {
+        bg: "#0d1a14", "bg-elev": "#121f19", card: "#1a2e22",
+        border: "#274031", text: "#d4f0dc", muted: "#6a9e7a",
+        accent: "#34d475", green: "#22c55e", red: "#f56565",
+        amber: "#f6ad55",
+      },
+    },
+    {
+      id: "rose-pine", name: "Rosé Pine", builtin: true, dark: true,
+      colors: {
+        bg: "#191724", "bg-elev": "#1f1d2e", card: "#26233a",
+        border: "#393552", text: "#e0def4", muted: "#6e6a86",
+        accent: "#c4a7e7", green: "#9ccfd8", red: "#eb6f92",
+        amber: "#f6c177",
+      },
+    },
+    {
+      id: "midnight", name: "Midnight Glass", builtin: true, dark: true,
+      colors: {
+        bg: "#080c14", "bg-elev": "#0e1521", card: "#111c2e",
+        border: "#1e2d47", text: "#dce8f8", muted: "#5a7499",
+        accent: "#60a5fa", green: "#34d399", red: "#f87171",
+        amber: "#fbbf24",
+      },
+    },
+  ];
+
+  function findTheme(id) {
+    return state.allThemes.find((t) => t.id === id)
+      || BUILTIN_THEMES.find((t) => t.id === id)
+      || null;
+  }
+
+  function applyThemeColors(theme) {
+    const root = document.documentElement;
+    THEME_COLOR_KEYS.forEach((k) => {
+      root.style.setProperty(`--${k}`, theme.colors[k] || "");
+    });
+    document.body.classList.toggle("light-theme", theme.dark === false);
+  }
+
+  function cacheTheme(theme) {
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, JSON.stringify({ id: theme.id, theme }));
+    } catch (err) { }
+  }
+
+  function repaintCharts() {
+    if (!state.activeView || document.hidden) return;
+    if (state.activeView === "overview" && state.ovData) renderOverview(state.ovData);
+    else if (state.activeView === "bandwidth" && state.bwData) renderBandwidth(state.bwData);
+    else if (state.activeView === "security") {
+      refreshSecurity();
+      refreshSuricata();
+      refreshZeek();
+      refreshZeekQuic();
+      refreshAide();
+      refreshHoneypot();
+      refreshCanary();
+    } else if (state.activeView === "crowdsec") {
+      refreshCrowdsec();
+    }
+  }
+
+  // ---- Layout recovery ---------------------------------------------------
+  // Anything measured while the login gate is up comes back 0x0, because
+  // `body.locked > .layout` is display:none. Leaflet then caches that zero
+  // size and never lays out tiles, and every chart's
+  // `if (rect.width < 10) return` guard drops the frame with no retry
+  // scheduled. Re-measure once the layout is back on screen.
+  function remeasureLayout() {
+    if (state.activeView === "overview") initOverviewMap();
+    if (state.activeView === "security") initSecurityMap();
+    [ovMap, secMap].forEach((m) => {
+      if (!m) return;
+      try { m.map.invalidateSize(); } catch (err) { /* map not on screen yet */ }
+    });
+    repaintCharts();
+  }
+
+  // Safety net for the whole bug class: watch the map containers and chart
+  // canvases, and re-measure whenever one goes from zero-size back to
+  // visible. Covers view switches and anything else that measures while
+  // hidden, not just the login path.
+  function observeSizeRecovery() {
+    if (typeof ResizeObserver === "undefined") return;
+    const wasZero = new WeakSet();
+    const ro = new ResizeObserver((entries) => {
+      let recovered = false;
+      entries.forEach((e) => {
+        const { width, height } = e.contentRect;
+        if (width < 10 || height < 10) {
+          wasZero.add(e.target);
+        } else if (wasZero.has(e.target)) {
+          wasZero.delete(e.target);
+          recovered = true;
+        }
+      });
+      // Redraws only touch canvas width/height attributes, never CSS box
+      // size, so this cannot feed back into the observer.
+      if (recovered) remeasureLayout();
+    });
+    ["ov-map", "sec-map"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) ro.observe(el);
+    });
+    document.querySelectorAll("canvas.bw-canvas, canvas.pie-canvas")
+      .forEach((c) => ro.observe(c));
+  }
+
+  async function applyTheme(id, opts) {
+    const options = opts || {};
+    const theme = findTheme(id);
+    if (!theme) return false;
+    state.activeTheme = theme.id;
+    applyThemeColors(theme);
+    cacheTheme(theme);
+    if (options.persist !== false) {
+      postJSON("/api/themes/active", { id: theme.id }).catch(() => {});
+    }
+    if (options.repaint !== false) repaintCharts();
+    if (els.themeGrid) renderThemePicker();
+    return true;
+  }
+
+  function renderThemePicker() {
+    const themes = [...BUILTIN_THEMES, ...state.allThemes.filter((t) => !t.builtin)];
+    els.themeGrid.innerHTML = themes.map((t) => `
+      <div class="theme-card${t.id === state.activeTheme ? " active" : ""}" data-id="${esc(t.id)}" role="button" tabindex="0">
+        <div class="theme-swatches">
+          ${THEME_SWATCH_KEYS.map((k) => `<span class="theme-swatch" style="background:${esc(t.colors[k] || "#777777")}"></span>`).join("")}
+        </div>
+        <div class="theme-name">${esc(t.name)}${t.id === state.activeTheme ? ' <span class="theme-check">&#10003;</span>' : ""}</div>
+        <div class="theme-meta">${t.builtin ? "Built-in" : "Custom"} &middot; ${t.dark === false ? "Light" : "Dark"}</div>
+        ${t.builtin ? "" : `<button type="button" class="theme-del" data-del="${esc(t.id)}" title="Delete theme" aria-label="Delete theme">${ICONS.delete}</button>`}
+      </div>`).join("");
+    const cur = findTheme(state.activeTheme);
+    els.themeActiveHint.textContent = cur ? `${cur.name} (${cur.dark === false ? "light" : "dark"})` : "";
+  }
+
+  async function loadThemes() {
+    try {
+      const d = await fetchJSON("/api/themes");
+      state.allThemes = d.themes || [];
+      if (state.themeBootstrapped) {
+        // Theme was already restored from localStorage — keep it and sync it
+        // back to the server so the two stay in agreement.
+        if (state.activeTheme && state.activeTheme !== d.active) {
+          postJSON("/api/themes/active", { id: state.activeTheme }).catch(() => {});
+        }
+        renderThemePicker();
+        return;
+      }
+      if (d.active && findTheme(d.active)) {
+        await applyTheme(d.active, { persist: false });
+        return;
+      }
+      renderThemePicker();
+    } catch (err) {
+      if (els.themeUploadMsg) els.themeUploadMsg.textContent = "Could not load themes: " + err.message;
+    }
+  }
+
+  function populateRouterLocation() {
+    if (state.routerLat != null && els.routerLat) els.routerLat.value = state.routerLat;
+    if (state.routerLon != null && els.routerLon) els.routerLon.value = state.routerLon;
+    if (els.routerLocMsg) els.routerLocMsg.textContent = "";
+  }
+
+  // ── Settings ▸ Avatar (stored locally per user/browser) ────────────────
+  const AVATAR_KEY_PREFIX = "tuxwall-avatar:";
+  let pendingAvatar = null;
+
+  function avatarInitials() {
+    const name = (state.username || "?").trim();
+    return (name.slice(0, 1) || "?").toUpperCase();
+  }
+
+  function avatarStorageKey() {
+    return AVATAR_KEY_PREFIX + (state.username || "");
+  }
+
+  function storedAvatar() {
+    try { return localStorage.getItem(avatarStorageKey()) || ""; } catch (err) { return ""; }
+  }
+
+  function setMenuAvatar(src) {
+    if (!els.userAvatarImg || !els.userAvatarInitials) return;
+    if (src) {
+      els.userAvatarImg.src = src;
+      els.userAvatarImg.hidden = false;
+      els.userAvatarInitials.hidden = true;
+    } else {
+      els.userAvatarImg.removeAttribute("src");
+      els.userAvatarImg.hidden = true;
+      els.userAvatarInitials.hidden = false;
+      els.userAvatarInitials.textContent = avatarInitials();
+    }
+  }
+
+  function setAvatarPreview(src) {
+    if (!els.avatarPreviewImg || !els.avatarPreviewInitials) return;
+    if (src) {
+      els.avatarPreviewImg.src = src;
+      els.avatarPreviewImg.hidden = false;
+      els.avatarPreviewInitials.hidden = true;
+    } else {
+      els.avatarPreviewImg.removeAttribute("src");
+      els.avatarPreviewImg.hidden = true;
+      els.avatarPreviewInitials.hidden = false;
+      els.avatarPreviewInitials.textContent = avatarInitials();
+    }
+  }
+
+  function avatarMsg(text, err) {
+    if (!els.avatarMsg) return;
+    els.avatarMsg.textContent = text || "";
+    els.avatarMsg.className = "muted avatar-msg" + (err ? " avatar-msg-err" : text ? " avatar-msg-ok" : "");
+  }
+
+  function refreshAvatarUI() {
+    const src = storedAvatar();
+    pendingAvatar = null;
+    if (els.avatarFile) els.avatarFile.value = "";
+    if (els.avatarSave) els.avatarSave.disabled = true;
+    if (els.avatarRemove) els.avatarRemove.disabled = !src;
+    setMenuAvatar(src);
+    setAvatarPreview(src);
+    avatarMsg("");
+  }
+
+  function bindAvatarSettings() {
+    if (!els.avatarFile) return;
+    els.avatarFile.addEventListener("change", () => {
+      const file = els.avatarFile.files && els.avatarFile.files[0];
+      if (!file) return;
+      if (!file.type.startsWith("image/")) {
+        avatarMsg("Choose a PNG, JPG or WebP image.", true);
+        els.avatarFile.value = "";
+        return;
+      }
+      if (file.size > 8 * 1024 * 1024) {
+        avatarMsg("That image is over 8 MB — pick a smaller one.", true);
+        els.avatarFile.value = "";
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const side = Math.min(img.naturalWidth, img.naturalHeight);
+            if (!side) throw new Error("empty image");
+            const canvas = document.createElement("canvas");
+            const out = 160;
+            canvas.width = canvas.height = out;
+            const ctx = canvas.getContext("2d");
+            ctx.drawImage(img,
+              (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side,
+              0, 0, out, out);
+            let data = canvas.toDataURL("image/webp", 0.86);
+            if (!/^data:image\/webp/.test(data)) data = canvas.toDataURL("image/png");
+            pendingAvatar = data;
+            setAvatarPreview(data);
+            els.avatarSave.disabled = false;
+            els.avatarRemove.disabled = false;
+            avatarMsg("Preview ready — choose Save avatar to apply it.");
+          } catch (err) {
+            avatarMsg("Could not process that image.", true);
+          }
+        };
+        img.onerror = () => avatarMsg("Could not read that image.", true);
+        img.src = reader.result;
+      };
+      reader.onerror = () => avatarMsg("Could not read that file.", true);
+      reader.readAsDataURL(file);
+    });
+
+    els.avatarSave.addEventListener("click", () => {
+      if (!pendingAvatar) return;
+      try {
+        localStorage.setItem(avatarStorageKey(), pendingAvatar);
+      } catch (err) {
+        avatarMsg("Could not save the avatar in this browser.", true);
+        return;
+      }
+      setMenuAvatar(pendingAvatar);
+      setAvatarPreview(pendingAvatar);
+      pendingAvatar = null;
+      els.avatarSave.disabled = true;
+      els.avatarRemove.disabled = false;
+      els.avatarFile.value = "";
+      avatarMsg("Avatar saved in this browser.");
+    });
+
+    els.avatarRemove.addEventListener("click", () => {
+      try { localStorage.removeItem(avatarStorageKey()); } catch (err) { /* ignore */ }
+      refreshAvatarUI();
+      avatarMsg("Avatar removed.");
+    });
+  }
+
+  function setSettingsTab(pane) {
+    document.querySelectorAll("#settings-subtabs .fw-subtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.settingsPane === pane));
+    document.querySelectorAll("#view-settings .fw-pane[data-settings-pane]").forEach((p) => {
+      p.hidden = p.dataset.settingsPane !== pane;
+    });
+    if (pane === "alerts") loadAlertConfig();
+  }
+  document.querySelectorAll("#settings-subtabs .fw-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => setSettingsTab(btn.dataset.settingsPane));
+  });
+
+  function bindSettings() {
+    bindAvatarSettings();
+    bindAlertSettings();
+    els.themeFormatSample.textContent = JSON.stringify({
+      name: "My Theme",
+      dark: false,
+      colors: {
+        bg: "#f6f8fa", "bg-elev": "#ffffff", card: "#ffffff",
+        border: "#d0d7de", text: "#1f2328", muted: "#59636e",
+        accent: "#0969da", green: "#1a7f37", red: "#cf222e",
+        amber: "#9a6700",
+      },
+    }, null, 2);
+
+    els.themeGrid.addEventListener("click", async (e) => {
+      const del = e.target.closest(".theme-del");
+      if (del) {
+        e.stopPropagation();
+        const id = del.dataset.del;
+        const t = findTheme(id);
+        if (!window.confirm(`Delete custom theme "${t ? t.name : id}"?`)) return;
+        del.disabled = true;
+        try {
+          await postJSON("/api/themes/delete", { id });
+          if (state.activeTheme === id) await applyTheme("dark", { persist: false });
+          await loadThemes();
+          els.themeUploadMsg.textContent = "";
+        } catch (err) {
+          els.themeUploadMsg.textContent = "Delete failed: " + err.message;
+          del.disabled = false;
+        }
+        return;
+      }
+      const card = e.target.closest(".theme-card");
+      if (card && card.dataset.id !== state.activeTheme) {
+        applyTheme(card.dataset.id);
+      }
+    });
+
+    els.themeGrid.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      const card = e.target.closest(".theme-card");
+      if (card && !e.target.closest(".theme-del")) {
+        e.preventDefault();
+        applyTheme(card.dataset.id);
+      }
+    });
+
+    els.routerLocSave.addEventListener("click", async () => {
+      const lat = (els.routerLat.value || "").trim();
+      const lon = (els.routerLon.value || "").trim();
+      if (!lat || !lon) {
+        els.routerLocMsg.textContent = "Enter both latitude and longitude.";
+        return;
+      }
+      els.routerLocSave.disabled = true;
+      try {
+        const d = await postJSON("/api/ui/router-location", { lat, lon });
+        state.routerLat = Number(d.lat);
+        state.routerLon = Number(d.lon);
+        applyRouterTarget();
+        els.routerLocMsg.textContent = "Location saved.";
+      } catch (err) {
+        els.routerLocMsg.textContent = err.message;
+      } finally {
+        els.routerLocSave.disabled = false;
+      }
+    });
+
+    els.themeUploadBtn.addEventListener("click", async () => {
+      const file = els.themeFile.files && els.themeFile.files[0];
+      if (!file) {
+        els.themeUploadMsg.textContent = "Choose a .json theme file first.";
+        return;
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(await file.text());
+      } catch (err) {
+        els.themeUploadMsg.textContent = "Not valid JSON: " + err.message;
+        return;
+      }
+      els.themeUploadBtn.disabled = true;
+      try {
+        const d = await postJSON("/api/themes/upload", parsed);
+        els.themeUploadMsg.textContent = `Installed "${d.theme.name}". Click its card above to apply it.`;
+        els.themeFile.value = "";
+        await loadThemes();
+      } catch (err) {
+        els.themeUploadMsg.textContent = "Upload failed: " + err.message;
+      } finally {
+        els.themeUploadBtn.disabled = false;
+      }
+    });
+  }
+
+  // ── Sub-tab strips: tablist semantics, keyboard nav, scroll affordance ──
+  // Each page wires its own click handler; this layers the missing ARIA and
+  // arrow-key support on top without touching any of that.
+  function ocSubtabStrips() { return document.querySelectorAll(".fw-subtabs"); }
+
+  function syncSubtabState() {
+    ocSubtabStrips().forEach((strip) => {
+      const tabs = [...strip.querySelectorAll(".fw-subtab")];
+      let active = null;
+      tabs.forEach((t) => {
+        const on = t.classList.contains("active");
+        if (on) active = t;
+        t.setAttribute("aria-selected", on ? "true" : "false");
+        t.tabIndex = on ? 0 : -1;        // roving tabindex
+      });
+      const scrollable = strip.scrollWidth > strip.clientWidth + 1;
+      strip.classList.toggle("is-scrollable", scrollable);
+      if (scrollable) {
+        const atStart = strip.scrollLeft <= 1;
+        const atEnd = strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 1;
+        strip.classList.toggle("at-end", atEnd && !atStart);
+        strip.classList.toggle("at-mid", !atEnd && !atStart);
+      } else {
+        strip.classList.remove("at-end", "at-mid");
+      }
+
+      // Sliding active pill — one element glides between the tabs.
+      const ind = strip.querySelector(".fw-subtabs-ind");
+      const laidOut = !!(active && active.offsetParent !== null && active.offsetWidth > 0);
+      strip.classList.toggle("has-ind", laidOut);
+      if (ind) {
+        if (!laidOut) {
+          ind.style.opacity = "0";
+        } else {
+          ind.style.width = active.offsetWidth + "px";
+          ind.style.height = active.offsetHeight + "px";
+          ind.style.transform = `translate(${active.offsetLeft}px, ${active.offsetTop}px)`;
+          ind.style.opacity = "1";
+        }
+      }
+      const wrapped = tabs.length > 1 &&
+        tabs[0].offsetTop !== tabs[tabs.length - 1].offsetTop;
+      strip.classList.toggle("is-wrapped", wrapped);
+
+      // Keep the selected tab inside a scrollable strip.
+      if (scrollable && active && laidOut) {
+        const left = active.offsetLeft;
+        const right = left + active.offsetWidth;
+        const viewL = strip.scrollLeft;
+        const viewR = viewL + strip.clientWidth;
+        if (left < viewL + 8) strip.scrollLeft = Math.max(0, left - 8);
+        else if (right > viewR - 8) strip.scrollLeft = right - strip.clientWidth + 8;
+      }
+    });
+  }
+
+  // Small stroke glyphs for the shared sub-tab strips, keyed by the tab's
+  // pane value (data-*-pane). Kept in the same 24px/1.8 style as the nav
+  // and action icon sets so the whole UI reads as one family.
+  const SUBTAB_ICONS = {
+    dynamic: '<path d="M3 12h3l2.5-6 5 12 2.5-6h5"/>',
+    static: '<path d="M12 21s7-5.5 7-11a7 7 0 1 0-14 0c0 5.5 7 11 7 11z"/><circle cx="12" cy="10" r="2.5"/>',
+    stats: '<path d="M4 20v-8M9.3 20V5M14.7 20v-6M20 20V9"/><path d="M3 20h18"/>',
+    upstream: '<path d="M12 20V5M6.5 10.5 12 5l5.5 5.5"/>',
+    sources: '<path d="M12 3 3 7.2l9 4.2 9-4.2z"/><path d="M3 12l9 4.2 9-4.2M3 16.8 12 21l9-4.2"/>',
+    rpz: '<path d="M12 3 5 6v6c0 4 3 7 7 9 4-2 7-5 7-9V6z"/>',
+    whitelist: '<circle cx="12" cy="12" r="9"/><path d="m8.4 12.4 2.5 2.5 4.7-5"/>',
+    rules: '<path d="M8 6h13M8 12h13M8 18h13"/><path d="M3.6 6h.01M3.6 12h.01M3.6 18h.01"/>',
+    traffic: '<path d="M4 8h12l-3-3M20 16H8l3 3"/>',
+    nat: '<path d="M16 3l4 4-4 4M20 7H4M8 21l-4-4 4-4M4 17h16"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-2.82 1.18V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10.6 3V3a2 2 0 0 1 4 0v.09A1.65 1.65 0 0 0 15.09 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09A1.65 1.65 0 0 0 21 10.6h.09a2 2 0 0 1 0 4H21a1.65 1.65 0 0 0-1.6 1z"/>',
+    attacks: '<circle cx="12" cy="12" r="8"/><path d="M12 2v3.4M12 18.6V22M2 12h3.4M18.6 12H22"/><circle cx="12" cy="12" r="2.4"/>',
+    sensors: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.6"/><circle cx="12" cy="12" r="1"/>',
+    deception: '<path d="M2.5 13h19l-2.2-5.2H4.7z"/><path d="M6.3 13v3.1a2.2 2.2 0 0 0 4.4 0V13M13.3 13v3.1a2.2 2.2 0 0 0 4.4 0V13M8 13h8"/>',
+    integrity: '<path d="M12 3 5 6v6c0 4 3 7 7 9 4-2 7-5 7-9V6z"/><path d="m9 12 2.1 2.1L15.4 10"/>',
+    decisions: '<path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>',
+    bouncers: '<path d="M4 21V4.2c0-.6.4-1 1-1h10.5L19 6v15M4 21h16M15.4 12h.01"/>',
+    blocklist: '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
+    interfaces: '<circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="m8.3 10.8 7.4-4.4M8.3 13.2l7.4 4.4"/>',
+    top: '<path d="M12 3v12M7.2 10.2 12 15l4.8-4.8M4 21h16"/>',
+    clients: '<circle cx="9" cy="8" r="3.2"/><path d="M2.6 20a6.4 6.4 0 0 1 12.8 0M15.6 5.3a3.2 3.2 0 0 1 0 5.4M18.9 20a6.4 6.4 0 0 0-2.8-5.3"/>',
+    status: '<path d="M4 18a9 9 0 1 1 16 0"/><path d="m12 13 4.5-4.5"/><circle cx="12" cy="13" r="1.3"/>',
+    shaping: '<path d="M4 7h9M19 7h1M4 12h3M13 12h7M4 17h11M21 17h-1"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="17" r="2"/>',
+    dhcp: '<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h6M12 17.5h6"/>',
+    maintenance: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94z"/>',
+    appearance: '<path d="M12 3a9 9 0 0 0 0 18c1 0 1.7-.8 1.7-1.7 0-.5-.2-.9-.5-1.2-.3-.3-.4-.7-.4-1.1 0-1 .8-1.7 1.7-1.7H16a5 5 0 0 0 5-5c0-4.1-4-7.3-9-7.3z"/><circle cx="7.6" cy="11" r="1.15"/><circle cx="10" cy="7.6" r="1.15"/><circle cx="14.4" cy="7.6" r="1.15"/><circle cx="17" cy="11" r="1.15"/>',
+    map: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.8 2.6 15.2 0 18M12 3c-2.6 2.8-2.6 15.2 0 18"/>',
+    users: '<circle cx="12" cy="8" r="3.5"/><path d="M5.2 20a6.8 6.8 0 0 1 13.6 0"/>',
+    avatar: '<circle cx="11" cy="9" r="3.4"/><path d="M4.8 20a6.2 6.2 0 0 1 12.4 0"/><path d="M19 3.5v5M16.5 6h5"/>',
+    security: '<rect x="4" y="10" width="16" height="11" rx="2.2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 15v2.5"/>',
+    alerts: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/>'
+  };
+
+  function subtabIconKey(tab) {
+    for (const a of tab.attributes) {
+      if (a.name.startsWith("data-") && a.name.endsWith("-pane")) return a.value;
+    }
+    return "";
+  }
+
+  function injectSubtabIcon(tab) {
+    if (tab.querySelector(":scope > .tab-ic")) return;
+    const key = subtabIconKey(tab);
+    const body = SUBTAB_ICONS[key];
+    if (!body) return;
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("class", "tab-ic");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.innerHTML = body;
+    tab.prepend(svg);
+  }
+
+  function initSubtabs() {
+    ocSubtabStrips().forEach((strip) => {
+      if (strip.dataset.tabsReady) return;
+      strip.dataset.tabsReady = "1";
+      strip.setAttribute("role", "tablist");
+      strip.querySelectorAll(".fw-subtab").forEach((t) => {
+        t.setAttribute("role", "tab");
+        injectSubtabIcon(t);
+      });
+      if (!strip.querySelector(".fw-subtabs-ind")) {
+        const ind = document.createElement("span");
+        ind.className = "fw-subtabs-ind";
+        ind.setAttribute("aria-hidden", "true");
+        strip.prepend(ind);
+      }
+      strip.addEventListener("scroll", syncSubtabState, { passive: true });
+      strip.addEventListener("keydown", (ev) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(ev.key)) return;
+        const tabs = [...strip.querySelectorAll(".fw-subtab")]
+          .filter((t) => !t.disabled && t.offsetParent !== null);
+        const cur = tabs.indexOf(document.activeElement);
+        if (cur === -1) return;
+        ev.preventDefault();
+        const next = ev.key === "ArrowLeft" ? (cur - 1 + tabs.length) % tabs.length
+                   : ev.key === "ArrowRight" ? (cur + 1) % tabs.length
+                   : ev.key === "Home" ? 0 : tabs.length - 1;
+        tabs[next].focus();
+        tabs[next].click();
+        tabs[next].scrollIntoView({ block: "nearest", inline: "nearest" });
+      });
+    });
+    syncSubtabState();
+  }
+
+  document.addEventListener("click", (ev) => {
+    if (ev.target.closest(".fw-subtab")) setTimeout(syncSubtabState, 0);
+  });
+  window.addEventListener("resize", syncSubtabState);
+
+  // ── Uniform card headers: icon + title + subtitle ──────────────────
+  const CARD_ICONS = {
+    shield: '<path d="M12 2 20 5v6c0 5.2-3.4 8.7-8 11-4.6-2.3-8-5.8-8-11V5z"/>',
+    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c-5 5-5 13 0 18M12 3c5 5 5 13 0 18"/>',
+    activity: '<path d="M3 12h4l2.5-6 5 12 2.5-6h4"/>',
+    server: '<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h6M12 17.5h6"/>',
+    network: '<circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="m8.3 10.8 7.4-4.4M8.3 13.2l7.4 4.4"/>',
+    database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>',
+    terminal: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/>',
+    archive: '<ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v11c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M9 12h6"/>',
+    users: '<circle cx="9" cy="8" r="3.2"/><path d="M2.6 20a6.4 6.4 0 0 1 12.8 0M15.6 5.3a3.2 3.2 0 0 1 0 5.4M18.9 20a6.4 6.4 0 0 0-2.8-5.3"/>',
+    lock: '<rect x="4" y="10" width="16" height="11" rx="2.2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 15v2.5"/>',
+    refresh: '<path d="M20 11a8 8 0 0 0-14-5L4 8"/><path d="M4 3v5h5"/><path d="M4 13a8 8 0 0 0 14 5l2-2"/><path d="M20 21v-5h-5"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-2.82 1.18V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10.6 3V3a2 2 0 0 1 4 0v.09A1.65 1.65 0 0 0 15.09 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09A1.65 1.65 0 0 0 21 10.6h.09a2 2 0 0 1 0 4H21a1.65 1.65 0 0 0-1.6 1z"/>',
+    wifi: '<path d="M2.5 8.5a15 15 0 0 1 19 0M5.5 12a10 10 0 0 1 13 0M8.8 15.5a5 5 0 0 1 6.4 0"/><circle cx="12" cy="19" r="1"/>',
+    list: '<path d="M8 6h13M8 12h13M8 18h13M3.6 6h.01M3.6 12h.01M3.6 18h.01"/>',
+    zap: '<path d="M13 2 4 14h6l-1 8 9-12h-6z"/>',
+    cpu: '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    file: '<path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10l-7-7Z"/><path d="M13 3v7h7"/>',
+    chart: '<path d="M4 20v-8M9.3 20V5M14.7 20v-6M20 20V9"/><path d="M3 20h18"/>',
+    power: '<path d="M12 2v10"/><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>',
+    bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/>',
+    map: '<path d="M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.6"/>',
+    palette: '<path d="M12 3a9 9 0 0 0 0 18c1 0 1.7-.8 1.7-1.7 0-.5-.2-.9-.5-1.2-.3-.3-.4-.7-.4-1.1 0-1 .8-1.7 1.7-1.7H16a5 5 0 0 0 5-5c0-4.1-4-7.3-9-7.3z"/><circle cx="7.6" cy="11" r="1.15"/><circle cx="10" cy="7.6" r="1.15"/><circle cx="14.4" cy="7.6" r="1.15"/><circle cx="17" cy="11" r="1.15"/>',
+    upload: '<path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
+    check: '<circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/>',
+    route: '<path d="M16 3l4 4-4 4M20 7H4M8 21l-4-4 4-4M4 17h16"/>',
+    search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
+    download: '<path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 21h16"/>',
+    target: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>',
+    rss: '<path d="M5 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4ZM5 11a8 8 0 0 1 8 8M5 5a14 14 0 0 1 14 14"/>',
+    ban: '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
+    pin: '<path d="M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.6"/>',
+    layers: '<path d="M12 3 3 7.5 12 12l9-4.5z"/><path d="m3 12 9 4.5 9-4.5M3 16.5 12 21l9-4.5"/>'
+  };
+  const CARD_ICON_TITLES = {
+    "System Health": "activity", "WAN": "globe", "LAN & DHCP": "network",
+    "Services": "server", "Live Performance": "activity", "Attack Map": "target",
+    "Top Talkers": "activity", "Suricata Alerts": "shield", "DNS": "globe",
+    "Attacks by Country": "globe", "Memory": "cpu", "Traffic & Firewall": "activity",
+    "Static IP Reservations": "pin", "Query Types": "chart", "Response Codes": "list",
+    "Cache": "database", "Upstream DNS": "globe", "Update Log": "refresh",
+    "RPZ Policies": "shield", "RPZ Feeds": "rss", "RPZ Activity": "activity",
+    "Whitelist": "check", "Filter Rules": "shield", "Live View": "activity",
+    "Port Forwarding": "route", "DMZ Clients": "shield", "Firewall Settings": "settings",
+    "VLAN Interfaces": "network", "Inter-VLAN Routing Policies": "route",
+    "Top Countries": "globe", "Top Attackers": "target", "Hits Over Time": "activity",
+    "Zeek Notices": "file", "LAN Device Activity": "users", "QUIC Connections": "activity",
+    "File Integrity (AIDE)": "shield", "Traffic Monitor": "activity",
+    "Diagnose Blocked Traffic": "search", "WireGuard VPN": "lock", "Clients": "users",
+    "Active Decisions": "shield", "Bouncers (Remediation Components)": "server",
+    "Recent Alerts": "bell", "Custom Banlist": "ban", "Top Downloaders": "download",
+    "System Info": "cpu", "Network Interfaces": "network", "DHCP Pools per Interface": "server",
+    "System Services": "server", "Reboot": "power", "System Configuration Backup": "archive",
+    "Theme": "palette", "Install a custom theme": "upload", "Your avatar": "users",
+    "Router location": "map", "Attack map appearance": "map", "User Manager": "users",
+    "Two-Factor Authentication": "lock", "Alerts & Notifications": "bell",
+    "Monitored checks": "check", "Dynamic Leases": "users", "Local DNS Records": "globe",
+    "Blocklist Sources": "list"
+  };
+  const CARD_SUBTITLES = {
+    "Response Codes": "DNS response distribution",
+    "Cache": "Resolver cache entries and mix",
+    "Update Log": "Recent blocklist refresh results",
+    "RPZ Policies": "Response Policy Zone rules",
+    "RPZ Feeds": "Subscribed RPZ sources",
+    "Whitelist": "Domains exempt from blocking",
+    "Live View": "Live firewall packet activity",
+    "Firewall Settings": "Logging and default policy",
+    "VLAN Interfaces": "Tagged interfaces and addresses",
+    "Inter-VLAN Routing Policies": "Allow or deny traffic between VLANs",
+    "Suricata Alerts": "IDS detections in the last 24h",
+    "File Integrity (AIDE)": "Baseline file change detection",
+    "Traffic Monitor": "Live per-client traffic",
+    "Diagnose Blocked Traffic": "Trace why a destination is blocked",
+    "WireGuard VPN": "Tunnel status and peer handshakes",
+    "Active Decisions": "Current CrowdSec bans",
+    "Bouncers (Remediation Components)": "Remediation components connected to CrowdSec",
+    "Recent Alerts": "Latest CrowdSec detections",
+    "Network Interfaces": "Link state, MAC and addresses",
+    "System Services": "Core router services and state",
+    "Reboot": "Restart the gateway",
+    "System Configuration Backup": "Snapshots and restore points",
+    "Install a custom theme": "Add a JSON theme to the picker",
+    "Two-Factor Authentication": "TOTP sign-in protection",
+    "Dynamic Leases": "Active DHCP clients and lease status",
+    "Local DNS Records": "Custom names served by Unbound",
+    "Blocklist Sources": "Merged into Unbound as always-NXDOMAIN zones"
+  };
+
+  function cardIconFor(title) {
+    if (CARD_ICON_TITLES[title]) return CARD_ICON_TITLES[title];
+    const t = title.toLowerCase();
+    if (/backup|archive/.test(t)) return "archive";
+    if (/log|terminal/.test(t)) return "terminal";
+    if (/ban/.test(t)) return "ban";
+    if (/rule|policy|filter|firewall|dmz|integrity|whitelist|decision/.test(t)) return "shield";
+    if (/dns|country|wan|globe/.test(t)) return "globe";
+    if (/interface|vlan|network|routing/.test(t)) return "network";
+    if (/user|client|device|avatar/.test(t)) return "users";
+    if (/cache/.test(t)) return "database";
+    if (/cpu|memory|system info/.test(t)) return "cpu";
+    if (/alert|notification/.test(t)) return "bell";
+    if (/download/.test(t)) return "download";
+    if (/upload|install/.test(t)) return "upload";
+    if (/theme/.test(t)) return "palette";
+    if (/traffic|activity|monitor|performance|hits/.test(t)) return "activity";
+    if (/wireguard|vpn|two-factor|lock/.test(t)) return "lock";
+    if (/update|refresh/.test(t)) return "refresh";
+    return "layers";
+  }
+
+  function cardIconSvg(title) {
+    const body = CARD_ICONS[cardIconFor(title)] || CARD_ICONS.layers;
+    return `<svg viewBox="0 0 24 24" aria-hidden="true">${body}</svg>`;
+  }
+
+  function enhanceCardHeads() {
+    document.querySelectorAll(".view:not(#view-overview):not(#view-ai) .card > .card-head").forEach((head) => {
+      if (head.dataset.headEnhanced) return;
+      if (head.querySelector(":scope > .card-head-ico, :scope > .sec-ico, :scope > .log-ico, :scope > .sqm-ico, :scope > .dec-ico, :scope > .cban-ico, :scope > .upd-ico")) {
+        head.dataset.headEnhanced = "1";
+        return;
+      }
+      const h2 = head.querySelector(":scope > h2");
+      if (!h2) return;
+      const title = (h2.textContent || "").trim();
+      if (!title) return;
+
+      const ico = document.createElement("span");
+      ico.className = "card-head-ico";
+      ico.setAttribute("aria-hidden", "true");
+      ico.innerHTML = cardIconSvg(title);
+
+      const copy = document.createElement("div");
+      copy.className = "card-head-copy";
+      copy.appendChild(h2);
+
+      const sub = head.querySelector(":scope > .muted, :scope > .card-head-note");
+      if (sub) {
+        copy.appendChild(sub);
+      } else if (CARD_SUBTITLES[title]) {
+        const s = document.createElement("span");
+        s.className = "muted";
+        s.textContent = CARD_SUBTITLES[title];
+        copy.appendChild(s);
+      }
+
+      head.insertBefore(ico, head.firstChild);
+      head.insertBefore(copy, ico.nextSibling);
+      head.classList.add("card-head-ico");
+      head.dataset.headEnhanced = "1";
+    });
+  }
+
+  // ── Isolated plugin host ───────────────────────────────────────────
+  const PLUGIN_NAV_ICONS = {
+    wifi: '<path d="M2.5 8.5a15 15 0 0 1 19 0M5.5 12a10 10 0 0 1 13 0M8.8 15.5a5 5 0 0 1 6.4 0"/><circle cx="12" cy="19" r="1"/>',
+    plug: '<path d="M9 3v3M15 3v3M7 6h10a2 2 0 0 1 2 2v4a7 7 0 0 1-14 0V8a2 2 0 0 1 2-2Z"/><path d="M12 18v3"/>',
+    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c-5 5-5 13 0 18M12 3c5 5 5 13 0 18"/>',
+    server: '<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h6M12 17.5h6"/>'
+  };
+  const pluginHost = {
+    list: [], meta: new Map(), registry: new Map(),
+    mounted: new Set(), loaded: new Set()
+  };
+
+  function pluginNavSvg(name) {
+    const body = PLUGIN_NAV_ICONS[name] || PLUGIN_NAV_ICONS.plug;
+    return `<svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
+  }
+
+  function pluginApi(id) {
+    return {
+      id,
+      api: (action, payload) => postJSON(`/api/plugins/${encodeURIComponent(id)}/action`, { action, payload: payload || {} }),
+      getConfig: () => fetchJSON(`/api/plugins/${encodeURIComponent(id)}/config`),
+      saveConfig: (config) => postJSON(`/api/plugins/${encodeURIComponent(id)}/config`, { config }),
+      esc,
+      formatRelative,
+      formatNumber
+    };
+  }
+
+  function mountPlugin(id) {
+    const root = document.getElementById("plugin-root-" + id);
+    const def = pluginHost.registry.get(id);
+    if (!root) return;
+    if (!def) {
+      root.innerHTML = '<div class="plugin-loading muted">Loading plugin…</div>';
+      return;
+    }
+    if (!pluginHost.mounted.has(id)) {
+      pluginHost.mounted.add(id);
+      if (typeof def.mount === "function") def.mount(root, pluginApi(id));
+    } else if (typeof def.refresh === "function") {
+      def.refresh(pluginApi(id));
+    }
+  }
+
+  function loadPluginAssets(plugin) {
+    if (pluginHost.loaded.has(plugin.id)) return;
+    pluginHost.loaded.add(plugin.id);
+    const base = `/api/plugins/${encodeURIComponent(plugin.id)}/asset/`;
+    const css = document.createElement("link");
+    css.rel = "stylesheet";
+    css.href = base + "plugin.css";
+    document.head.appendChild(css);
+    const js = document.createElement("script");
+    js.src = base + "plugin.js";
+    js.defer = true;
+    document.head.appendChild(js);
+  }
+
+  function clearPluginHost() {
+    document.querySelectorAll("[data-plugin-nav]").forEach((el) => el.remove());
+    document.querySelectorAll("[data-plugin-view]").forEach((el) => el.remove());
+    pluginHost.meta.clear();
+    pluginHost.mounted.clear();
+  }
+
+  async function loadPluginHost() {
+    if (!isAdminUser()) return;
+    let data = null;
+    try { data = await fetchJSON("/api/plugins"); } catch (_) { return; }
+    pluginHost.list = data.plugins || [];
+    clearPluginHost();
+    const settingsNav = document.querySelector('#main-nav [data-view="settings"]');
+    const main = document.querySelector("main");
+    pluginHost.list.filter((p) => p.enabled && p.nav && p.nav.label).forEach((p) => {
+      pluginHost.meta.set(p.id, p);
+      const viewName = "plugin:" + p.id;
+      const nav = document.createElement("a");
+      nav.className = "nav-item plugin-nav";
+      nav.dataset.view = viewName;
+      nav.dataset.pluginNav = p.id;
+      nav.href = "#" + viewName;
+      nav.innerHTML = `${pluginNavSvg(p.nav.icon)}<span>${esc(p.nav.label)}</span>`;
+      nav.addEventListener("click", (e) => {
+        e.preventDefault();
+        switchView(viewName);
+        if (history.replaceState) history.replaceState(null, "", "#" + viewName);
+      });
+      if (settingsNav && settingsNav.parentNode) settingsNav.parentNode.insertBefore(nav, settingsNav);
+      else document.getElementById("main-nav").appendChild(nav);
+
+      const view = document.createElement("section");
+      view.className = "view plugin-view";
+      view.id = "view-plugin-" + p.id;
+      view.dataset.pluginView = p.id;
+      view.hidden = true;
+      view.innerHTML = `<div class="plugin-root" id="plugin-root-${esc(p.id)}"></div>`;
+      if (main) main.insertBefore(view, document.getElementById("soon-card"));
+      loadPluginAssets(p);
+    });
+    if (state.activeView && state.activeView.startsWith("plugin:")) {
+      const id = state.activeView.slice(7);
+      if (pluginHost.meta.has(id)) mountPlugin(id);
+    }
+  }
+
+  // ── Available plugins (project catalog) ────────────────────────────
+  // Browses the published plugin catalog (regenerated by CI whenever
+  // plugins/ on main changes); Install fetches the plugin source from
+  // GitHub via the same install-from-GitHub flow as the manual modal.
+  async function loadAvailablePlugins() {
+    const card = document.getElementById("plugins-available-card");
+    const listEl = document.getElementById("plugins-available-list");
+    const statusEl = document.getElementById("plugins-available-status");
+    if (!card || !listEl) return;
+    card.hidden = false;
+    let data = null;
+    try { data = await fetchJSON("/api/plugins/available"); }
+    catch (err) {
+      statusEl.textContent = "Catalog unavailable";
+      listEl.innerHTML = `<div class="plugin-empty muted">${esc(err.message)}</div>`;
+      return;
+    }
+    if (!data.ok) {
+      statusEl.textContent = "Catalog unavailable";
+      listEl.innerHTML = `<div class="plugin-empty muted">${esc(data.error || "unreachable")}</div>`;
+      return;
+    }
+    const entries = (data.plugins || []).filter((p) => p && p.id);
+    if (!entries.length) {
+      card.hidden = true;
+      return;
+    }
+    statusEl.textContent = entries.length + (entries.length === 1 ? " plugin" : " plugins")
+      + (data.cached ? " · cached" : "");
+    listEl.innerHTML = entries.map((p) => `
+      <div class="plugin-item">
+        <div class="plugin-item-main">
+          <div class="plugin-item-title">${esc(p.name || p.id)} <span class="plugin-version">${esc(p.version || "")}</span></div>
+          <div class="plugin-item-desc">${esc(p.description || "")}</div>
+          <div class="plugin-item-meta"><code>${esc(p.id)}</code>${p.url ? ` · <a href="${esc(p.url)}" target="_blank" rel="noopener">source</a>` : ""}</div>
+        </div>
+        <div class="plugin-item-actions">
+          ${p.installed
+            ? '<span class="badge badge-ok">Installed</span>'
+            : `<button class="btn btn-sm btn-primary" type="button" data-plugin-url="${esc(p.url || "")}" data-plugin-catalog-install="1">Install</button>`}
+        </div>
+      </div>`).join("");
+  }
+
+  function bindPluginCatalogInstalls() {
+    const listEl = document.getElementById("plugins-available-list");
+    if (!listEl) return;
+    listEl.addEventListener("click", async (e) => {
+      const btn = e.target.closest("[data-plugin-catalog-install]");
+      if (!btn) return;
+      const url = btn.dataset.pluginUrl;
+      if (!url) return;
+      btn.disabled = true;
+      btn.textContent = "Installing…";
+      try {
+        const d = await postJSON("/api/plugins/install", { url });
+        if (!d.ok) throw new Error(d.error || "Install failed");
+        await loadPluginsView();
+        await loadAvailablePlugins();
+        await loadPluginHost();
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = "Install";
+        const row = btn.closest(".plugin-item");
+        if (row) {
+          let errEl = row.querySelector(".plugin-install-err");
+          if (!errEl) {
+            errEl = document.createElement("div");
+            errEl.className = "login-error plugin-install-err";
+            row.querySelector(".plugin-item-actions").appendChild(errEl);
+          }
+          errEl.textContent = err.message;
+        }
+      }
+    });
+  }
+
+  async function loadPluginsView() {
+    const listEl = document.getElementById("plugins-list");
+    if (!listEl) return;
+    let data = null;
+    try { data = await fetchJSON("/api/plugins"); }
+    catch (err) { listEl.innerHTML = `<div class="plugin-empty muted">${esc(err.message)}</div>`; return; }
+    pluginHost.list = data.plugins || [];
+    if (!pluginHost.list.length) {
+      listEl.innerHTML = '<div class="plugin-empty muted">No plugins installed. Add one under <code>/etc/tuxwall/plugins</code>.</div>';
+      return;
+    }
+    listEl.innerHTML = pluginHost.list.map((p) => {
+      const canOpen = !!(p.enabled && p.nav && p.nav.label);
+      return `<div class="plugin-item${p.error ? " is-error" : ""}">
+        <div class="plugin-item-main">
+          <div class="plugin-item-title">${esc(p.name || p.id)} <span class="plugin-version">${esc(p.version || "")}</span></div>
+          <div class="plugin-item-desc">${esc(p.error || p.description || "No description.")}</div>
+          <div class="plugin-item-meta"><code>${esc(p.id)}</code> · ${p.enabled ? "enabled" : "disabled"}${p.web ? " · web view" : ""}</div>
+        </div>
+        <div class="plugin-item-actions">
+          ${canOpen ? `<button class="btn btn-sm" data-plugin-open="${esc(p.id)}" type="button">Open</button>` : ""}
+          <button class="btn btn-sm ${p.enabled ? "btn-ghost" : ""}" data-plugin-toggle="${esc(p.id)}" data-enabled="${p.enabled ? "1" : "0"}" type="button"${p.error ? " disabled" : ""}>${p.enabled ? "Disable" : "Enable"}</button>
+        </div>
+      </div>`;
+    }).join("");
+    listEl.querySelectorAll("[data-plugin-toggle]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          await postJSON(`/api/plugins/${encodeURIComponent(btn.dataset.pluginToggle)}/enable`,
+                         { enabled: btn.dataset.enabled !== "1" });
+          await loadPluginsView();
+          await loadPluginHost();
+        } catch (err) {
+          btn.disabled = false;
+        }
+      });
+    });
+    listEl.querySelectorAll("[data-plugin-open]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const viewName = "plugin:" + btn.dataset.pluginOpen;
+        switchView(viewName);
+        if (history.replaceState) history.replaceState(null, "", "#" + viewName);
+      });
+    });
+  }
+
+  function bindPluginInstall() {
+    const open = document.getElementById("plugin-install-open");
+    const modal = document.getElementById("plugin-install-modal");
+    const url = document.getElementById("plugin-install-url");
+    const run = document.getElementById("plugin-install-run");
+    const msg = document.getElementById("plugin-install-msg");
+    if (!open || !modal || !url || !run || !msg) return;
+    const close = () => { modal.hidden = true; };
+    const showError = (text) => {
+      msg.textContent = text || "";
+      msg.hidden = !text;
+    };
+    open.addEventListener("click", () => {
+      showError("");
+      modal.hidden = false;
+      setTimeout(() => url.focus(), 30);
+    });
+    document.getElementById("plugin-install-close").addEventListener("click", close);
+    document.getElementById("plugin-install-cancel").addEventListener("click", close);
+    modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !modal.hidden) close();
+    });
+    run.addEventListener("click", async () => {
+      const value = url.value.trim();
+      if (!value) { showError("Paste a GitHub folder URL."); return; }
+      run.disabled = true;
+      showError("");
+      try {
+        const d = await postJSON("/api/plugins/install", { url: value });
+        if (!d.ok) throw new Error(d.error || "Install failed");
+        url.value = "";
+        close();
+        await loadPluginsView();
+        await loadPluginHost();
+      } catch (err) {
+        showError(err.message);
+      } finally {
+        run.disabled = false;
+      }
+    });
+  }
+
+  window.TuxWallPlugins = {
+    register(id, def) {
+      if (!id || !def) return;
+      pluginHost.registry.set(id, def);
+      if (state.activeView === "plugin:" + id) mountPlugin(id);
+    },
+    api: pluginApi
+  };
+
+  function switchView(view) {
+    if (view === "plugins") {
+      switchView("system");
+      setSysTab("plugins");
+      if (history.replaceState) history.replaceState(null, "", "#system");
+      return;
+    }
+    document.querySelectorAll(".nav-item").forEach((i) => {
+      i.classList.toggle("active", i.dataset.view === view);
+    });
+    const pluginId = view.startsWith("plugin:") ? view.slice(7) : "";
+    const pluginView = pluginId ? document.getElementById("view-plugin-" + pluginId) : null;
+    const pluginMeta = pluginId ? pluginHost.meta.get(pluginId) : null;
+    els.title.textContent = pluginId
+      ? ((pluginMeta && pluginMeta.name) || "Plugin")
+      : (VIEW_TITLES[view] || "Dashboard");
+    setTimeout(() => { initSubtabs(); syncSubtabState(); enhanceCardHeads(); }, 0);
+    state.activeView = view;
+    const implemented = view === "overview" || view === "clients" || view === "dns" || view === "domains" || view === "firewall" || view === "vlans" || view === "security" || view === "wireguard" || view === "crowdsec" || view === "bandwidth" || view === "blocklists" || view === "system" || view === "backups" || view === "logs" || view === "settings" || view === "ai" || !!pluginView;
+    document.querySelectorAll(".view").forEach((v) => { v.hidden = true; });
+    document.querySelectorAll(".pie-canvas").forEach((c) => {
+      const st = donutStates.get(c);
+      if (st) st.wasVisible = false;
+    });
+    hidePieTip();
+    if (implemented) {
+      const viewEl = pluginId ? pluginView : document.getElementById("view-" + view);
+      if (viewEl) viewEl.hidden = false;
+      if (view === "overview") {
+        initOverviewMap();
+        refreshOverview({ force: true });
+        setTimeout(() => { if (ovMap) ovMap.map.invalidateSize(); }, 60);
+      }
+      if (view === "firewall") { refreshFirewall(); refreshPortForward(); refreshDmz(); }
+      if (view === "vlans") refreshVlans();
+      if (view === "domains") refreshDomains();
+      if (view === "security") {
+        initSecurityMap();
+        refreshSecurity();
+        updateSecBanAvailability();
+        refreshSuricata();
+        refreshZeek();
+        refreshZeekQuic();
+      refreshAide();
+      refreshHoneypot();
+      refreshCanary();
+            initTrafficMonitor();
+        initDiagnose();
+        setTimeout(() => { if (secMap) secMap.map.invalidateSize(); }, 60);
+      }
+      if (view === "crowdsec") {
+        refreshCrowdsec();
+        refreshCustomBlocklist();
+      }
+      if (view === "bandwidth") refreshBandwidth();
+      if (view === "blocklists") refreshBlocklists();
+      if (view === "system") {
+        refreshSystem();
+        refreshUpdates();
+        if (document.querySelector('#sys-subtabs [data-sys-pane="plugins"].active')) loadPluginsView();
+      }
+      if (view === "logs") {
+        loadLogSources();
+        startLogTimer();
+      } else {
+        stopLogTimer();
+      }
+      if (view === "wireguard") refreshWireguard();
+      if (view === "backups") {
+        refreshSystemBackups();
+        refreshSystemBackupItems();
+      }
+      if (view === "settings") {
+        loadThemes();
+        populateRouterLocation();
+        if (state.canManageUsers) loadUsers();
+      }
+      if (pluginId) mountPlugin(pluginId);
+      els.soon.hidden = true;
+      if (view === "ai" && window.__tuxwallAgentEnable) {
+        window.__tuxwallAgentEnable();
+      }
+    } else {
+      els.soon.hidden = false;
+    }
+  }
+
+  // ================================================================
+  // AI ASSISTANT
+  // ================================================================
+  (function aiChat() {
+    // ── Agent mode (opencode terminal) ────────────────────────────────
+    const agent = {
+      enabled: false, sessionID: null, busy: false, pollTimer: null,
+      tokens: 0, cost: 0, msgs: 0, model: "", booted: false,
+      version: "", directory: "", vcs: null, placeholderTimer: null,
+    };
+    const elAgentSide = document.getElementById("ai-agent-side");
+    const elAgentModel   = document.getElementById("agent-model-select");
+    const elAgentNewSess = document.getElementById("agent-new-session");
+    const elAgentStatus  = document.getElementById("agent-status");
+    const elAgentSessBtn = document.getElementById("agent-sessions-btn");
+    const elTerminal  = document.getElementById("oc-terminal");
+    const elOcScreen  = document.getElementById("oc-screen");
+    const elOcInput   = document.getElementById("oc-input");
+    const elOcSend    = document.getElementById("oc-send");
+    const elOcPopup   = document.getElementById("oc-popup");
+    const elOcOverlay = document.getElementById("oc-overlay");
+    const elOcModal   = document.getElementById("oc-modal");
+    const elOcStatus  = document.getElementById("oc-statusbar");
+    const elOcState   = document.getElementById("oc-agent-state");
+    const elOcVer     = document.getElementById("oc-term-ver");
+    const elOcVerSide = document.getElementById("oc-agent-version");
+    const elOcMark    = document.getElementById("oc-prompt-mark");
+    const elOcNote    = document.getElementById("oc-mode-note");
+
+    // Authentic opencode TUI logo (packages/tui/src/logo.ts)
+    const OC_LOGO = {
+      left:  ["                   ", "█▀▀█ █▀▀█ █▀▀█ █▀▀▄", "█__█ █__█ █^^^ █__█", "▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀"],
+      right: ["             ▄     ", "█▀▀▀ █▀▀█ █▀▀█ █▀▀█", "█___ █__█ █__█ █^^^", "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"],
+    };
+    const OC_SUGGESTIONS = [
+      "Audit my firewall rules for anything risky",
+      "Why is DNS resolution slow right now?",
+      "Summarise today's Suricata alerts",
+      "Which clients are using the most bandwidth?",
+      "Is anything exposed to the WAN that shouldn't be?",
+      "Check WireGuard peer handshakes",
+    ];
+    const OC_PLACEHOLDERS = OC_SUGGESTIONS.slice(0, 4);
+
+    // The sidebar had ~400px of dead space below the usage stats; these fill
+    // it with something useful and give a one-click way into the agent.
+    function ocRenderSuggestions() {
+      const list = document.getElementById("ai-prompt-list");
+      if (!list || list.dataset.ready) return;
+      list.dataset.ready = "1";
+      list.innerHTML = OC_SUGGESTIONS.map((q) =>
+        `<button type="button" class="ai-prompt-chip">${esc(q)}</button>`).join("");
+      list.addEventListener("click", (ev) => {
+        const chip = ev.target.closest(".ai-prompt-chip");
+        if (!chip || !elOcInput) return;
+        elOcInput.value = chip.textContent;
+        elOcInput.focus();
+        elOcInput.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    }
+    const OC_COMMANDS = [
+      { cmd: "/new",      desc: "start a new session",                       alias: "/clear" },
+      { cmd: "/sessions", desc: "list and switch sessions",                  alias: "/resume" },
+      { cmd: "/undo",     desc: "undo last message and file changes" },
+      { cmd: "/redo",     desc: "redo previously undone changes" },
+      { cmd: "/compact",  desc: "compact the session context",               alias: "/summarize" },
+      { cmd: "/share",    desc: "share session, get a link" },
+      { cmd: "/unshare",  desc: "stop sharing the session" },
+      { cmd: "/init",     desc: "analyze project and create AGENTS.md" },
+      { cmd: "/abort",    desc: "abort the running task" },
+      { cmd: "/clear",    desc: "start a new session (alias of /new)" },
+      { cmd: "/models",   desc: "change the agent model" },
+      { cmd: "/help",     desc: "show all commands" },
+      { cmd: "/exit",     desc: "no-op — opencode is the only assistant",       alias: "/quit /q" },
+    ];
+
+    function agentUpdateStats() {
+      const t = document.getElementById("agent-tokens");
+      const c = document.getElementById("agent-cost");
+      const m = document.getElementById("agent-msgs");
+      if (t) t.textContent = agent.tokens.toLocaleString();
+      if (c) c.textContent = agent.cost ? "$" + agent.cost.toFixed(4) : "$0.00";
+      if (m) m.textContent = String(agent.msgs);
+      ocRenderStatus();
+    }
+
+    async function agentLoadModels() {
+      if (!elAgentModel || elAgentModel.dataset.loaded === "1") return;
+      try {
+        const d = await fetchJSON("/api/agent/models");
+        if (!d.ok || !d.models || !d.models.length) {
+          elAgentModel.innerHTML = `<option value="">no models available</option>`;
+          return;
+        }
+        const groups = {};
+        d.models.forEach((m) => { (groups[m.provider] = groups[m.provider] || []).push(m); });
+        elAgentModel.innerHTML = Object.keys(groups).sort().map((prov) =>
+          `<optgroup label="${esc(prov)}">` + groups[prov].map((m) =>
+            `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join("") +
+          "</optgroup>").join("");
+        // preselect: last-used model (localStorage), else server default
+        const lastModel = localStorage.getItem("tuxwall.agent.model") || "";
+        if (lastModel && d.models.some((m) => m.id === lastModel)) {
+          elAgentModel.value = lastModel;
+        } else {
+          const defModel = (d.configured || "");
+          if (defModel && d.models.some((m) => m.id === defModel)) {
+            elAgentModel.value = defModel;
+          }
+        }
+        elAgentModel.dataset.loaded = "1";
+      } catch (_) {
+        elAgentModel.innerHTML = `<option value="">failed to load models</option>`;
+      }
+    }
+
+    async function agentLoadBootInfo() {
+      try {
+        const d = await fetchJSON("/api/agent/config");
+        if (d && d.ok !== false) {
+          agent.version = d.version || "";
+          agent.directory = d.directory || "";
+          agent.vcs = d.vcs || null;
+          const vt = agent.version ? "v" + agent.version.replace(/^v/, "") : "opencode";
+          if (elOcVer) elOcVer.textContent = agent.version ? "v" + agent.version.replace(/^v/, "") : "";
+          if (elOcVerSide) elOcVerSide.textContent = vt + " · tuxwall";
+          // refresh the boot screen if it is still on screen
+          const bv = document.getElementById("oc-boot-ver");
+          const bd = document.getElementById("oc-boot-dir");
+          if (bv) bv.textContent = vt;
+          if (bd) bd.textContent = agent.directory || "/";
+          ocRenderStatus();
+        }
+      } catch (_) { /* offline is shown by health check */ }
+    }
+
+    function agentSetEnabled() {
+      // opencode is the only AI assistant — always enabled
+      agent.enabled = true;
+      if (elAgentSide) elAgentSide.hidden = false;
+      if (elTerminal) elTerminal.hidden = false;
+      agentCheckHealth();
+      agentLoadModels();
+      agentUpdateStats();
+      ocRenderSuggestions();
+      if (!agent.booted) { agent.booted = true; ocBootScreen(); agentLoadBootInfo(); }
+      if (elOcInput) setTimeout(() => elOcInput.focus(), 50);
+    }
+
+    async function agentCheckHealth() {
+      if (!elAgentStatus) return;
+      try {
+        const d = await fetchJSON("/api/agent/status");
+        elAgentStatus.textContent = d.ok ? "● agent online" : "● agent offline: " + (d.error || "") + (d.status ? " (HTTP " + d.status + ")" : "");
+        elAgentStatus.title = d.detail || d.hint || "";
+        elAgentStatus.className = "agent-status" + (d.ok ? " agent-on" : " agent-off");
+      } catch (err) {
+        elAgentStatus.textContent = "● agent offline";
+        elAgentStatus.className = "agent-status agent-off";
+      }
+    }
+
+
+    // ── terminal render helpers ─────────────────────────────────────
+    function ocScroll() { if (elOcScreen) elOcScreen.scrollTop = elOcScreen.scrollHeight; }
+
+    function ocLine(text, cls) {
+      const el = document.createElement("div");
+      el.className = "oc-line" + (cls ? " " + cls : "");
+      el.textContent = text == null ? "" : String(text);
+      if (elOcScreen) elOcScreen.appendChild(el);
+      ocScroll();
+      return el;
+    }
+
+    function ocBlock(text, cls) {
+      const el = document.createElement("div");
+      el.className = "oc-tool-out" + (cls ? " " + cls : "");
+      el.textContent = text == null ? "" : String(text);
+      if (elOcScreen) elOcScreen.appendChild(el);
+      ocScroll();
+      return el;
+    }
+
+    function ocDiffBlock(diffText) {
+      const el = document.createElement("div");
+      el.className = "oc-tool-out oc-diff";
+      (String(diffText || "").split("\n")).forEach((ln) => {
+        const span = document.createElement("span");
+        if (/^\+/.test(ln) && !/^\+\+\+/.test(ln)) span.className = "oc-add";
+        else if (/^-/.test(ln) && !(/^---/.test(ln))) span.className = "oc-del";
+        else if (/^@@/.test(ln)) span.className = "oc-hunk";
+        span.textContent = ln || " ";
+        el.appendChild(span);
+      });
+      if (elOcScreen) elOcScreen.appendChild(el);
+      ocScroll();
+      return el;
+    }
+
+    function ocTime() {
+      const d = new Date();
+      return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+    }
+
+    function ocLogoHTML() {
+      // faithful to the TUI: "open" muted, "code" bright+bold,
+      // _ ^ ~ , rendered as their block equivalents
+      const fix = (s) => s.replace(/_/g, " ").replace(/\^/g, "▀").replace(/~/g, "▀").replace(/,/g, "▄");
+      let html = "";
+      for (let i = 0; i < OC_LOGO.left.length; i++) {
+        html += `<span class="oc-l">${esc(fix(OC_LOGO.left[i]))}</span><span class="oc-r">${esc(fix(OC_LOGO.right[i]))}</span>\n`;
+      }
+      return html;
+    }
+
+    function ocBootScreen(keepSession) {
+      if (!elOcScreen) return;
+      if (!keepSession) { agent.sessionID = null; agent.tokens = 0; agent.cost = 0; agent.msgs = 0; }
+      elOcScreen.innerHTML = "";
+      const boot = document.createElement("div");
+      boot.className = "oc-boot";
+      const vcsBit = agent.vcs && agent.vcs.branch ? ` <b>${esc(agent.vcs.branch)}</b>` : "";
+      boot.innerHTML = `
+        <div class="oc-logo">${ocLogoHTML()}</div>
+        <div class="oc-boot-meta">
+          <span class="oc-bootline">version   <b id="oc-boot-ver">${esc(agent.version ? "v" + agent.version.replace(/^v/, "") : "…")}</b></span>
+          <span class="oc-bootline">directory <b id="oc-boot-dir">${esc(agent.directory || "/")}</b>${vcsBit}</span>
+          <span class="oc-bootline">host      <b>tuxwall gateway</b> · agent mode · build</span>
+        </div>
+        <div class="oc-boot-tips">
+          <span class="oc-tip">type <b>/</b> for commands — <b>!</b> runs shell — <b>@</b> mentions files</span><br>
+          <span class="oc-tip"><b>/help</b> lists everything the terminal can do</span>
+        </div>`;
+      elOcScreen.appendChild(boot);
+      if (elOcState) { elOcState.textContent = "idle"; elOcState.className = "oc-term-badge"; }
+      agentUpdateStats();
+      ocStartPlaceholders();
+    }
+
+    function ocStartPlaceholders() {
+      if (agent.placeholderTimer) clearInterval(agent.placeholderTimer);
+      let idx = 0;
+      if (!elOcInput) return;
+      elOcInput.placeholder = OC_PLACEHOLDERS[0];
+      agent.placeholderTimer = setInterval(() => {
+        if (!agent.enabled || !elOcInput || document.activeElement === elOcInput) return;
+        idx = (idx + 1) % OC_PLACEHOLDERS.length;
+        elOcInput.placeholder = OC_PLACEHOLDERS[idx];
+      }, 4000);
+    }
+
+    function ocSetState(st) {
+      if (!elOcState) return;
+      elOcState.textContent = st;
+      elOcState.className = "oc-term-badge" + (st === "busy" ? " oc-busy" : st === "error" ? " oc-error" : "");
+      ocRenderStatus();
+    }
+
+    function ocRenderStatus() {
+      if (!elOcStatus) return;
+      const perms = document.querySelectorAll(".oc-perm:not(.oc-question):not(.oc-approved):not(.oc-denied)").length;
+      const dir = agent.directory || "/";
+      const git = agent.vcs && agent.vcs.branch ? " · git(" + agent.vcs.branch + ")" : "";
+      const model = (elAgentModel && elAgentModel.value) ? elAgentModel.value : agent.model || "";
+      elOcStatus.innerHTML =
+        `<span class="oc-sb-dir">${esc(dir)}${esc(git)}</span>` +
+        `<span class="oc-sb-right">` +
+        (perms ? `<span class="oc-sb-perms">${perms} Permission${perms > 1 ? "s" : ""}</span>` : "") +
+        (model ? `<span class="oc-sb-model">${esc(model)}</span>` : "") +
+        `<span class="oc-sb-tokens">${agent.tokens.toLocaleString()} tokens</span>` +
+        `<span class="oc-sb-ok">${agent.msgs} msg</span>` +
+        `</span>`;
+    }
+
+    function ocUserMsg(text) {
+      const el = document.createElement("div");
+      el.className = "oc-msg oc-msg-user";
+      el.innerHTML = `
+        <div class="oc-msg-head">
+          <span class="oc-msg-role">user</span>
+          <span class="oc-msg-time">${ocTime()}</span>
+        </div>
+        <div class="oc-msg-body"></div>`;
+      el.querySelector(".oc-msg-body").textContent = text;
+      if (elOcScreen) elOcScreen.appendChild(el);
+      ocScroll();
+      return el;
+    }
+
+    function ocAgentMsg(model) {
+      const el = document.createElement("div");
+      el.className = "oc-msg oc-msg-agent";
+      el.innerHTML = `
+        <div class="oc-msg-head">
+          <span class="oc-msg-role">opencode</span>
+          <span class="oc-msg-meta">${esc(model || "")}</span>
+          <span class="oc-msg-time">${ocTime()}</span>
+          <span class="oc-msg-tokens oc-msg-tok-v"></span>
+        </div>
+        <div class="oc-msg-body"></div>`;
+      if (elOcScreen) elOcScreen.appendChild(el);
+      ocScroll();
+      return el;
+    }
+
+    function ocToolInfo(part) {
+      const name = part.tool || (part.type || "").replace(/^tool\./, "") || "tool";
+      const st = part.state || {};
+      const input = st.input || part.input || {};
+      let detail = "";
+      if (input.command) detail = input.command;
+      else if (input.filePath) detail = input.filePath;
+      else if (input.path) detail = input.path;
+      else if (input.pattern) detail = input.pattern;
+      else if (input.query) detail = input.query;
+      else if (input.url) detail = input.url;
+      if (!detail && st.title) detail = st.title;
+      const pretty = {
+        bash: "Bash", shell: "Bash", read: "Read", edit: "Edit", write: "Write", glob: "Glob",
+        grep: "Grep", list: "List", webfetch: "Web Fetch", websearch: "Web Search",
+        todowrite: "Todo", "todo-write": "Todo", "todo-read": "Todo", task: "Task",
+        ask: "Ask", multiedit: "Multi Edit", question: "Question",
+      }[String(name).toLowerCase()] || name.charAt(0).toUpperCase() + name.slice(1);
+      return { name, pretty, detail, st };
+    }
+
+    // live tool rows keyed by part id — like the TUI's └─ tool lines
+    const ocToolEls = new Map();
+    const ocToolGroups = new Map();
+
+    function ocUpdateToolGroup(group) {
+      if (!group) return;
+      const entries = group.entries;
+      const counts = new Map();
+      let running = false, error = false;
+      entries.forEach((entry) => {
+        const nm = entry.pretty || "Tool";
+        counts.set(nm, (counts.get(nm) || 0) + 1);
+        if (["running", "streaming", "pending"].includes(entry.status)) running = true;
+        if (entry.status === "error") error = true;
+      });
+      const n = entries.length;
+      const state = running ? "running" : (error ? "error" : "done");
+      group.countEl.textContent = `${n} tool call${n === 1 ? "" : "s"}`;
+      const names = [...counts.entries()]
+        .map(([name, count]) => count > 1 ? `${name} ×${count}` : name);
+      const shown = names.slice(0, 4);
+      group.namesEl.textContent = shown.join(", ") + (names.length > 4 ? ` +${names.length - 4}` : "");
+      group.stateEl.textContent = state;
+      group.stateEl.className = "oc-tools-state " + (state === "running" ? "oc-running" : state === "error" ? "oc-error" : "oc-done");
+      group.head.setAttribute("aria-label", `${n} tool call${n === 1 ? "" : "s"}, ${state}`);
+    }
+
+    function ocToolGroupFor(beforeEl) {
+      let group = ocToolGroups.get(beforeEl);
+      if (group) return group;
+      const el = document.createElement("div");
+      el.className = "oc-tools";
+      const head = document.createElement("button");
+      head.type = "button";
+      head.className = "oc-tools-head";
+      head.setAttribute("aria-expanded", "false");
+      head.innerHTML = `<span class="oc-tools-caret" aria-hidden="true">▸</span><span class="oc-tools-count"></span><span class="oc-tools-names"></span><span class="oc-tools-state"></span>`;
+      const body = document.createElement("div");
+      body.className = "oc-tools-body";
+      body.hidden = true;
+      head.addEventListener("click", () => {
+        body.hidden = !body.hidden;
+        head.setAttribute("aria-expanded", body.hidden ? "false" : "true");
+        const caret = head.querySelector(".oc-tools-caret");
+        if (caret) caret.textContent = body.hidden ? "▸" : "▾";
+        ocScroll();
+      });
+      el.appendChild(head);
+      el.appendChild(body);
+      if (elOcScreen) elOcScreen.insertBefore(el, beforeEl);
+      group = {
+        el, head, body, entries: [],
+        countEl: head.querySelector(".oc-tools-count"),
+        namesEl: head.querySelector(".oc-tools-names"),
+        stateEl: head.querySelector(".oc-tools-state"),
+      };
+      ocToolGroups.set(beforeEl, group);
+      return group;
+    }
+
+    function ocToolRow(part, afterEl, beforeEl) {
+      // Key stability matters: one row per TOOL CALL, updated in place
+      // across its lifecycle phases. Without part.id, include the name
+      // (stable across phases) in the fallback key, or each lifecycle
+      // event renders as a fresh stacked row.
+      const key = part.id || (part.type + ":" + (part.name || "") + ":" + JSON.stringify(part.input || {}).slice(0, 60));
+      let entry = ocToolEls.get(key);
+      if (!entry) {
+        const info = ocToolInfo(part);
+        const wrap = document.createElement("div");
+        wrap.className = "oc-tool";
+        const row = document.createElement("div");
+        row.className = "oc-tool-row";
+        row.innerHTML = `<span class="oc-tool-name"></span><span class="oc-tool-detail"></span><span class="oc-tool-state"></span>`;
+        const out = document.createElement("div");
+        out.className = "oc-tool-out";
+        out.hidden = true;
+        row.addEventListener("click", () => { out.hidden = !out.hidden; ocScroll(); });
+        wrap.appendChild(row);
+        wrap.appendChild(out);
+        entry = { wrap, row, out, key, pretty: info.pretty, status: "pending", group: null };
+        if (elOcScreen) {
+          // beforeEl: keep the collapsed tool group ABOVE the assistant
+          // message so the summary always renders last (bottom), like the
+          // opencode TUI.
+          if (beforeEl && beforeEl.parentNode === elOcScreen) {
+            const group = ocToolGroupFor(beforeEl);
+            group.body.appendChild(wrap);
+            group.entries.push(entry);
+            entry.group = group;
+          } else if (afterEl && afterEl.parentNode === elOcScreen) {
+            elOcScreen.insertBefore(wrap, afterEl.nextSibling);
+          } else {
+            elOcScreen.appendChild(wrap);
+          }
+        }
+        ocToolEls.set(key, entry);
+      }
+      ocToolUpdate(entry, part);
+      ocScroll();
+      return entry;
+    }
+
+    function ocToolUpdate(entry, part) {
+      const info = ocToolInfo(part);
+      const nameEl = entry.row.querySelector(".oc-tool-name");
+      const detailEl = entry.row.querySelector(".oc-tool-detail");
+      const stateEl = entry.row.querySelector(".oc-tool-state");
+      nameEl.textContent = info.pretty;
+      detailEl.textContent = info.detail ? info.detail.slice(0, 120) : "";
+      const status = (info.st.status || "pending").toLowerCase();
+      entry.pretty = info.pretty;
+      entry.status = status;
+      if (status === "running" || status === "streaming") {
+        stateEl.className = "oc-tool-state oc-running";
+        stateEl.innerHTML = `<span class="oc-spinner">⠋</span> running`;
+      } else if (status === "completed" || status === "done") {
+        stateEl.className = "oc-tool-state oc-done";
+        stateEl.textContent = "done";
+      } else if (status === "error") {
+        stateEl.className = "oc-tool-state oc-error";
+        stateEl.textContent = "error";
+      } else {
+        stateEl.className = "oc-tool-state oc-pending";
+        stateEl.textContent = "pending";
+      }
+      const diff = (info.st.meta && info.st.meta.diff) || info.st.diff ||
+        (info.st.output && info.st.output.diff);
+      const output = info.st.output != null && typeof info.st.output !== "object" ? info.st.output : "";
+      const err = info.st.error || "";
+      if (diff) {
+        entry.out.classList.add("oc-diff");
+        entry.out.innerHTML = "";
+        String(diff).split("\n").forEach((ln) => {
+          const span = document.createElement("span");
+          if (/^\+/.test(ln) && !/^\+\+\+/.test(ln)) span.className = "oc-add";
+          else if (/^-/.test(ln) && !(/^---/.test(ln))) span.className = "oc-del";
+          else if (/^@@/.test(ln)) span.className = "oc-hunk";
+          span.textContent = ln || " ";
+          entry.out.appendChild(span);
+        });
+        entry.out.hidden = false;
+      } else if (err) {
+        entry.out.classList.remove("oc-diff");
+        entry.out.textContent = err;
+        entry.out.hidden = false;
+      } else if (output) {
+        entry.out.classList.remove("oc-diff");
+        entry.out.textContent = String(output).slice(0, 8000);
+        // Keep successful tool output collapsed so a long agent turn stays a
+        // compact list of calls; click the row to expand it.
+        entry.out.hidden = true;
+        entry.row.title = "Click to show tool output";
+      }
+      ocUpdateToolGroup(entry.group);
+    }
+
+    // ── permission cards (TUI style: y / a / n) ─────────────────────
+    async function agentReply(requestID, response, btn) {
+      btn.disabled = true;
+      try {
+        await postJSON("/api/agent/permission/reply", { requestID, response });
+        const card = btn.closest(".oc-perm");
+        if (card) ocPermResolve(card, response === "reject" ? "denied" : "approved");
+      } catch (err) {
+        // The request was already resolved server-side (duplicate card from
+        // a re-render, or auto-allowed by an earlier "always"): settle the
+        // card instead of erroring so the turn can move on.
+        if (/not found|already/i.test(err.message || "")) {
+          const card = btn.closest(".oc-perm");
+          if (card) ocPermResolve(card, "already answered");
+          return;
+        }
+        btn.disabled = false;
+        btn.textContent = "Error: " + err.message;
+      }
+    }
+
+    // collapse a resolved permission card to a one-line note, then remove it
+    // so resolved cards don't pile up and bury the agent's response
+    // opencode's TUI asks one thing at a time. The web terminal appended every
+    // pending request full-size, so a turn with ten questions buried the
+    // console. Only the front request stays interactive; the rest collapse to
+    // one-line placeholders and promote as each is answered.
+    function ocPermPending() {
+      return [...document.querySelectorAll(".oc-perm")].filter(
+        (c) => !c.dataset.resolved &&
+               !c.classList.contains("oc-approved") &&
+               !c.classList.contains("oc-denied"));
+    }
+
+    function ocPermQueueUpdate() {
+      const pending = ocPermPending();
+      pending.forEach((card, i) => {
+        card.classList.toggle("oc-perm-active", i === 0);
+        card.classList.toggle("oc-perm-queued", i > 0);
+      });
+      document.querySelectorAll(".oc-perm-badge").forEach((b) => b.remove());
+      const active = pending[0];
+      const waiting = pending.length - 1;
+      if (active && waiting > 0) {
+        const head = active.querySelector(".oc-perm-head");
+        if (head) {
+          const badge = document.createElement("span");
+          badge.className = "oc-perm-badge";
+          badge.textContent = `+${waiting} waiting`;
+          head.appendChild(badge);
+        }
+      }
+    }
+
+    function ocPermResolve(card, note) {
+      if (!card || card.dataset.resolved) return;
+      card.dataset.resolved = "1";
+      card.classList.add(note === "denied" || note === "cancelled" ? "oc-denied" : "oc-approved");
+      const head = card.querySelector(".oc-perm-head");
+      if (head) card.innerHTML = `<div class="oc-perm-head oc-perm-done">${head.textContent} — ${esc(note)}</div>`;
+      card.classList.add("oc-perm-collapse");
+      card.classList.remove("oc-perm-active", "oc-perm-queued");
+      ocPermQueueUpdate();                 // promote the next request now
+      ocRenderStatus();
+      setTimeout(() => { card.remove(); ocPermQueueUpdate(); ocRenderStatus(); }, 1500);
+    }
+
+    // A permission card is a decision prompt, not a file viewer. Long diffs
+    // collapse behind a one-line summary so the Allow/Reject buttons stay on
+    // screen - on a 1366x768 laptop the old card filled 72% of the terminal.
+    const OC_DIFF_INLINE_MAX = 12;      // lines shown without asking
+
+    function ocPermDiffBlock(diffText) {
+      const lines = String(diffText || "").split("\n");
+      let adds = 0, dels = 0, file = "";
+      for (const ln of lines) {
+        if (/^\+\+\+\s/.test(ln)) { file = ln.replace(/^\+\+\+\s+b?\/?/, "").trim() || file; continue; }
+        if (/^---\s/.test(ln)) { if (!file) file = ln.replace(/^---\s+a?\/?/, "").trim(); continue; }
+        if (/^\+/.test(ln)) adds++;
+        else if (/^-/.test(ln)) dels++;
+      }
+      const body = document.createElement("div");
+      body.className = "oc-tool-out oc-diff";
+      lines.forEach((ln) => {
+        const span = document.createElement("span");
+        if (/^\+/.test(ln) && !/^\+\+\+/.test(ln)) span.className = "oc-add";
+        else if (/^-/.test(ln) && !/^---/.test(ln)) span.className = "oc-del";
+        else if (/^@@/.test(ln)) span.className = "oc-hunk";
+        span.textContent = ln || " ";
+        body.appendChild(span);
+      });
+
+      const wrap = document.createElement("div");
+      wrap.className = "oc-perm-diff";
+      const long = lines.length > OC_DIFF_INLINE_MAX;
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "oc-perm-diff-toggle";
+      toggle.innerHTML =
+        `<span class="oc-perm-caret"></span>` +
+        `<span class="oc-perm-file">${esc(file || "changes")}</span>` +
+        `<span class="oc-perm-stat">` +
+          (adds ? `<b class="oc-stat-add">+${adds}</b>` : "") +
+          (dels ? `<b class="oc-stat-del">\u2212${dels}</b>` : "") +
+        `</span>` +
+        `<span class="oc-perm-lines">${lines.length} line${lines.length === 1 ? "" : "s"}</span>`;
+      wrap.appendChild(toggle);
+      wrap.appendChild(body);
+
+      const setOpen = (open) => {
+        wrap.classList.toggle("oc-open", open);
+        toggle.setAttribute("aria-expanded", String(open));
+        body.hidden = !open;
+      };
+      setOpen(!long);
+      toggle.addEventListener("click", () => setOpen(body.hidden));
+      return wrap;
+    }
+
+    function ocPermCard(r) {
+      const rid = r.id || r.requestID;
+      const permType = r.permission || r.tool || "tool";
+      const patterns = (r.patterns && r.patterns.length) ? r.patterns : [];
+      const meta = r.metadata || {};
+      const body = patterns.join("\n") || meta.title || "";
+      const card = document.createElement("div");
+      card.className = "oc-perm";
+      card.dataset.permId = rid;
+      card.innerHTML = `
+        <div class="oc-perm-head">△ ${esc(permType)} permission</div>
+        <div class="oc-perm-body">
+          ${meta.description ? `<p class="oc-perm-desc">${esc(meta.description)}</p>` : ""}
+        </div>`;
+      const bodyBox = card.querySelector(".oc-perm-body");
+      if (meta.diff) {
+        bodyBox.appendChild(ocPermDiffBlock(meta.diff));
+      } else if (body) {
+        const pre = document.createElement("div");
+        pre.className = "oc-tool-out oc-perm-cmd";
+        pre.textContent = body;
+        bodyBox.appendChild(pre);
+      }
+      const btns = document.createElement("div");
+      btns.className = "oc-perm-btns";
+      [["once", "y", "allow once", "oc-yes"], ["always", "a", "always this session", "oc-yes"], ["reject", "n", "reject", "oc-no"]].forEach(([resp, key, label, cls]) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "oc-perm-btn " + cls;
+        b.innerHTML = `<b>${key})</b>${esc(label)}`;
+        b.addEventListener("click", () => agentReply(rid, resp, b));
+        btns.appendChild(b);
+      });
+      bodyBox.appendChild(btns);
+      if (elOcScreen) elOcScreen.appendChild(card);
+      ocPermQueueUpdate();
+      ocScroll();
+      ocRenderStatus();
+      return card;
+    }
+
+    async function agentPollPermissions() {
+      if (!agent.enabled || !agent.sessionID) return;
+      try {
+        const d = await fetchJSON("/api/agent/permission");
+        const reqs = Array.isArray(d) ? d : (d.requests || []);
+        // include subagent sessions — their permission requests belong to
+        // this turn too and must be approvable from here
+        reqs.forEach((r) => {
+          const rid = r.id || r.requestID;
+          if (!rid || document.querySelector(`.oc-perm[data-perm-id="${rid}"]`)) return;
+          ocPermCard(r);
+        });
+      } catch (_) { /* agent server may be mid-restart */ }
+    }
+
+    // ── agent question cards (opencode question tool) ───────────────
+    function ocQuestionCard(r) {
+      const rid = r.id || r.requestID;
+      if (!rid || document.querySelector(`.oc-question[data-qid="${rid}"]`)) return null;
+      const questions = r.questions || [];
+      if (!questions.length) return null;
+      const card = document.createElement("div");
+      card.className = "oc-perm oc-question";
+      card.dataset.qid = rid;
+      card.innerHTML = `<div class="oc-perm-head">? agent question</div>`;
+      const box = document.createElement("div");
+      box.className = "oc-perm-body";
+      const answers = questions.map(() => []);
+      const blocks = [];
+      let sent = false;
+
+      const allAnswered = () => answers.every((a) => a.length > 0);
+
+      const submit = async () => {
+        if (sent || !allAnswered()) return;
+        sent = true;
+        try {
+          await postJSON("/api/agent/question/reply", { requestID: rid, answers });
+          ocPermResolve(card, "answered");
+        } catch (err) {
+          sent = false;
+          const errEl = card.querySelector(".oc-q-err");
+          if (errEl) errEl.textContent = "reply failed: " + err.message;
+        }
+      };
+
+      questions.forEach((q, qi) => {
+        const blk = document.createElement("div");
+        blk.className = "oc-q-block";
+        const head = questions.length > 1 ? `<div class="oc-q-head">${esc(q.header || "Question " + (qi + 1))}</div>` : "";
+        blk.innerHTML = `${head}<p class="oc-q-text">${esc(q.question || "")}</p>`;
+        const opts = q.options || [];
+        opts.forEach((o) => {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "oc-q-opt";
+          b.innerHTML = `<b>${esc(o.label)}</b>${o.description ? `<span class="oc-q-desc">${esc(o.description)}</span>` : ""}`;
+          b.addEventListener("click", () => {
+            blk.querySelectorAll(".oc-q-opt.oc-sel").forEach((x) => x.classList.remove("oc-sel"));
+            if (!q.multiple && answers[qi][0] === o.label) { answers[qi] = []; return; }
+            if (q.multiple && answers[qi].includes(o.label)) {
+              answers[qi] = answers[qi].filter((l) => l !== o.label);
+              b.classList.remove("oc-sel");
+            } else {
+              answers[qi] = q.multiple ? answers[qi].concat([o.label]) : [o.label];
+              b.classList.add("oc-sel");
+            }
+            if (!q.multiple && q.custom === false) submit();
+          });
+          blk.appendChild(b);
+        });
+        if (q.custom !== false) {
+          const row = document.createElement("div");
+          row.className = "oc-q-custom";
+          const inp = document.createElement("input");
+          inp.type = "text";
+          inp.placeholder = "type your own answer…";
+          inp.autocomplete = "off";
+          const go = () => {
+            const v = inp.value.trim();
+            if (!v) return;
+            blk.querySelectorAll(".oc-q-opt.oc-sel").forEach((x) => x.classList.remove("oc-sel"));
+            answers[qi] = [v];
+            submit();
+          };
+          inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "oc-q-send";
+          b.textContent = "send";
+          b.addEventListener("click", go);
+          row.appendChild(inp);
+          row.appendChild(b);
+          blk.appendChild(row);
+        }
+        box.appendChild(blk);
+        blocks.push(blk);
+      });
+
+      const btns = document.createElement("div");
+      btns.className = "oc-perm-btns";
+      const answerBtn = document.createElement("button");
+      answerBtn.type = "button";
+      answerBtn.className = "oc-perm-btn oc-yes";
+      answerBtn.innerHTML = "<b>↵)</b>answer";
+      answerBtn.addEventListener("click", submit);
+      const skipBtn = document.createElement("button");
+      skipBtn.type = "button";
+      skipBtn.className = "oc-perm-btn oc-no";
+      skipBtn.innerHTML = "<b>x)</b>skip question";
+      skipBtn.addEventListener("click", async () => {
+        if (sent) return;
+        sent = true;
+        try {
+          await postJSON("/api/agent/question/reject", { requestID: rid });
+          ocPermResolve(card, "skipped");
+        } catch (err) {
+          sent = false;
+          const errEl = card.querySelector(".oc-q-err");
+          if (errEl) errEl.textContent = "reject failed: " + err.message;
+        }
+      });
+      btns.appendChild(answerBtn);
+      btns.appendChild(skipBtn);
+      box.appendChild(btns);
+      const errEl = document.createElement("div");
+      errEl.className = "oc-q-err";
+      box.appendChild(errEl);
+      card.appendChild(box);
+      if (elOcScreen) elOcScreen.appendChild(card);
+      ocPermQueueUpdate();
+      ocScroll();
+      ocRenderStatus();
+      return card;
+    }
+
+    async function ocPollQuestions() {
+      if (!agent.enabled || !agent.sessionID) return;
+      try {
+        const d = await fetchJSON("/api/agent/question");
+        const reqs = Array.isArray(d) ? d : (d.requests || []);
+        // only surface questions for the ACTIVE session — stale questions
+        // from old sessions stay on the agent server, untouched
+        reqs.forEach((r) => {
+          if ((r.sessionID || "") !== agent.sessionID) return;
+          ocQuestionCard(r);
+        });
+      } catch (_) { /* agent server may be mid-restart */ }
+    }
+
+    async function agentEnsureSession() {
+      if (agent.sessionID) return agent.sessionID;
+      const d = await postJSON("/api/agent/session/new", {});
+      const sid = d.id;
+      if (!sid) throw new Error(d.error || "could not create agent session");
+      agent.sessionID = sid;
+      // start permission polling while a session is active
+      if (!agent.pollTimer) {
+          agent.pollTimer = setInterval(() => {
+            if (agent.busy) { agentPollPermissions(); ocPollQuestions(); }
+          }, 2000);
+        }
+      return sid;
+    }
+
+    // ── live event stream (SSE) from opencode ──────────────────────
+    agent.es = null;
+    agent.onEvent = null;
+
+    function agentEvents() {
+      if (agent.es) return agent.es;
+      try {
+        const es = new EventSource("/api/agent/events");
+        es.onmessage = (ev) => {
+          if (!agent.onEvent) return;
+          let d = null;
+          try { d = JSON.parse(ev.data); } catch (_) { return; }
+          agent.onEvent(d);
+        };
+        es.onerror = () => { /* EventSource auto-reconnects */ };
+        agent.es = es;
+      } catch (_) { agent.es = null; }
+      return agent.es;
+    }
+
+    // ── agent prompt pipeline (terminal) ────────────────────────────
+    function ocClearInput() {
+      if (elOcInput) { elOcInput.value = ""; elOcInput.style.height = "auto"; }
+      ocUpdateModeNote("");
+      ocPopupHide();
+    }
+
+    function ocUpdateModeNote(val) {
+      const v = (val != null ? val : (elOcInput ? elOcInput.value : "")).trim();
+      if (!elOcNote || !elOcMark) return;
+      if (v.startsWith("/")) { elOcNote.textContent = "command"; elOcNote.className = "oc-mode-note"; elOcMark.textContent = "/"; }
+      else if (v.startsWith("!")) { elOcNote.textContent = "shell"; elOcNote.className = "oc-mode-note oc-shell"; elOcMark.textContent = "!"; }
+      else { elOcNote.textContent = "build"; elOcNote.className = "oc-mode-note"; elOcMark.textContent = "❯"; }
+    }
+
+    async function ocShell(command) {
+      if (!command) return;
+      if (agent.busy) { ocLine("a task is already running — press esc to abort", "oc-muted"); return; }
+      ocLine(command, "oc-echo");
+      try {
+        const sid = await agentEnsureSession();
+        agent.busy = true;
+        ocSetState("busy");
+        const d = await postJSON("/api/agent/shell", { sessionID: sid, command });
+        const res = d.result || {};
+        const parts = res.parts || [];
+        let out = "";
+        parts.forEach((p) => {
+          const t = p.type || "";
+          if (t === "tool" || t.startsWith("tool")) {
+            const st = p.state || {};
+            if (st.output != null && typeof st.output !== "object") out += st.output;
+            if (st.error) out += (out ? "\n" : "") + st.error;
+          } else if (t === "text" && p.text) {
+            out += (out ? "\n" : "") + p.text;
+          }
+        });
+        if (String(out).trim()) ocBlock(out);
+        else ocLine("(no output)", "oc-muted");
+      } catch (err) {
+        ocLine("shell error: " + err.message, "oc-error");
+        ocSetState("error");
+      } finally {
+        agent.busy = false;
+        if (!document.querySelector(".oc-perm:not(.oc-approved):not(.oc-denied)")) ocSetState("idle");
+        ocRenderStatus();
+      }
+    }
+
+    async function ocAbort() {
+      if (!agent.sessionID) { ocLine("no active session", "oc-muted"); return; }
+      if (!agent.busy) { ocLine("nothing running", "oc-muted"); return; }
+      // detach the live event handlers immediately so the UI stops waiting
+      agent.onEvent = null;
+      try {
+        await postJSON("/api/agent/session/abort", { sessionID: agent.sessionID });
+        ocLine("aborted", "oc-warn");
+      } catch (err) {
+        ocLine("abort failed: " + err.message, "oc-error");
+      }
+      // force-finish the pending turn locally even if the server is slow
+      // to confirm: clear any open permission cards and reset the state
+      document.querySelectorAll(".oc-perm:not(.oc-approved):not(.oc-denied)").forEach((el) => {
+        if (el.classList.contains("oc-question") && el.dataset.qid) {
+          postJSON("/api/agent/question/reject", { requestID: el.dataset.qid }).catch(() => {});
+        }
+        ocPermResolve(el, "cancelled");
+      });
+      agent.busy = false;
+      ocSetState("idle");
+      agentUpdateStats();
+    }
+
+    async function ocRunCommand(raw) {
+      const trimmed = raw.trim();
+      const sp = trimmed.indexOf(" ");
+      const cmd = (sp === -1 ? trimmed : trimmed.slice(0, sp)).toLowerCase();
+      ocLine(trimmed, "oc-echo");
+      const model = elAgentModel ? elAgentModel.value : "";
+      const need = () => agent.sessionID || agentEnsureSession();
+      try {
+        switch (cmd) {
+          case "/help":
+            ocHelpModal();
+            break;
+          case "/new":
+          case "/clear":
+            ocToolEls.clear(); ocToolGroups.clear();
+            ocBootScreen(false);
+            ocLine("new session — type a prompt to begin", "oc-info");
+            break;
+          case "/sessions":
+          case "/resume":
+          case "/continue":
+            ocSessionsModal();
+            break;
+          case "/undo": {
+            const d = await postJSON("/api/agent/session/revert", { sessionID: await need() });
+            ocLine("undid last message — file changes reverted (git)", "oc-ok");
+            break;
+          }
+          case "/redo": {
+            await postJSON("/api/agent/session/unrevert", { sessionID: await need() });
+            ocLine("redone", "oc-ok");
+            break;
+          }
+          case "/compact":
+          case "/summarize": {
+            ocLine("compacting session context…", "oc-info");
+            await postJSON("/api/agent/session/summarize", { sessionID: await need(), model });
+            ocLine("session compacted", "oc-ok");
+            break;
+          }
+          case "/share": {
+            const d = await postJSON("/api/agent/session/share", { sessionID: await need() });
+            const s = d.session || {};
+            const url = s.share || (s.share && s.share.url) || "";
+            ocLine("shared: " + (url || "(no url returned — is sharing configured?)"), "oc-ok");
+            break;
+          }
+          case "/unshare": {
+            await postJSON("/api/agent/session/unshare", { sessionID: await need() });
+            ocLine("session unshared", "oc-ok");
+            break;
+          }
+          case "/init": {
+            ocLine("analyzing project, writing AGENTS.md…", "oc-info");
+            await postJSON("/api/agent/session/init", { sessionID: await need(), model });
+            ocLine("AGENTS.md created", "oc-ok");
+            break;
+          }
+          case "/abort":
+            await ocAbort();
+            break;
+          case "/models":
+            if (elAgentModel) {
+              elAgentModel.focus();
+              ocLine("model picker focused in the side panel — it applies to the next message", "oc-info");
+            }
+            break;
+          case "/exit":
+          case "/quit":
+          case "/q":
+            ocLine("opencode is the only assistant — nothing to exit to", "oc-muted");
+            break;
+          default:
+            ocLine("unknown command: " + cmd + " — try /help", "oc-error");
+        }
+      } catch (err) {
+        ocLine("error: " + err.message, "oc-error");
+      }
+    }
+
+    // ── modals (sessions, help) ─────────────────────────────────────
+    function ocModalOpen(title, bodyEl) {
+      if (!elOcOverlay || !elOcModal) return;
+      elOcModal.innerHTML = "";
+      const head = document.createElement("div");
+      head.className = "oc-modal-head";
+      head.innerHTML = `<span>${esc(title)}</span><button class="oc-modal-x" type="button">✕</button>`;
+      head.querySelector(".oc-modal-x").addEventListener("click", ocModalClose);
+      const body = document.createElement("div");
+      body.className = "oc-modal-body";
+      if (bodyEl) body.appendChild(bodyEl);
+      elOcModal.appendChild(head);
+      elOcModal.appendChild(body);
+      elOcOverlay.hidden = false;
+    }
+
+    function ocModalClose() { if (elOcOverlay) elOcOverlay.hidden = true; }
+
+    function ocHelpModal() {
+      const wrap = document.createElement("div");
+      wrap.style.padding = "6px 4px";
+      const head = document.createElement("div");
+      head.className = "oc-help-cmd";
+      head.innerHTML = `<b>command</b><span>what it does</span>`;
+      head.style.opacity = "0.5";
+      wrap.appendChild(head);
+      OC_COMMANDS.forEach((c) => {
+        const row = document.createElement("div");
+        row.className = "oc-help-cmd";
+        row.innerHTML = `<b>${esc(c.cmd)}${c.alias ? ` <i style="color:var(--oc-muted)">${esc(c.alias)}</i>` : ""}</b><span>${esc(c.desc)}</span>`;
+        wrap.appendChild(row);
+      });
+      const extra = document.createElement("div");
+      extra.className = "oc-help-cmd";
+      extra.style.marginTop = "10px";
+      extra.innerHTML = `<b>@file</b><span>fuzzy-search files and attach to the prompt</span>`;
+      wrap.appendChild(extra);
+      const extra2 = document.createElement("div");
+      extra2.className = "oc-help-cmd";
+      extra2.innerHTML = `<b>!command</b><span>run a shell command on the gateway</span>`;
+      wrap.appendChild(extra2);
+      ocModalOpen("opencode — help", wrap);
+    }
+
+    async function ocSessionsModal() {
+      const wrap = document.createElement("div");
+      wrap.innerHTML = `<div class="oc-modal-empty">loading sessions…</div>`;
+      ocModalOpen("sessions — click to continue one", wrap);
+      try {
+        const d = await fetchJSON("/api/agent/session");
+        const sessions = Array.isArray(d) ? d : (d.sessions || []);
+        wrap.innerHTML = "";
+        if (!sessions.length) {
+          wrap.innerHTML = `<div class="oc-modal-empty">no sessions yet — send a prompt first</div>`;
+          return;
+        }
+        sessions.sort((a, b) => {
+          const at = (a.time && (a.time.updated || a.time.created)) || 0;
+          const bt = (b.time && (b.time.updated || b.time.created)) || 0;
+          return bt - at;
+        });
+        sessions.forEach((s) => {
+          const row = document.createElement("div");
+          row.className = "oc-sess" + (s.id === agent.sessionID ? " oc-sel" : "");
+          const raw = (s.time && (s.time.updated || s.time.created)) || null;
+          let when = "";
+          if (raw) {
+            const ms = typeof raw === "number" && String(raw).length === 10 ? raw * 1000 : raw;
+            when = new Date(typeof ms === "number" ? ms : Date.parse(ms)).toLocaleString();
+          }
+          const title = s.title || s.id;
+          row.innerHTML = `
+            <span class="oc-sess-title">${s.id === agent.sessionID ? "<b>● </b>" : ""}${esc(String(title).slice(0, 70))}</span>
+            <span class="oc-sess-time">${esc(when)}</span>`;
+          const del = document.createElement("button");
+          del.type = "button";
+          del.className = "oc-sess-act";
+          del.textContent = "delete";
+          del.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            if (!window.confirm("Delete this agent session?")) return;
+            try {
+              await postJSON("/api/agent/session/delete", { sessionID: s.id });
+              row.remove();
+              if (s.id === agent.sessionID) agent.sessionID = null;
+            } catch (err) { ocLine("delete failed: " + err.message, "oc-error"); }
+          });
+          row.appendChild(del);
+          row.addEventListener("click", () => { ocModalClose(); ocLoadSession(s.id); });
+          wrap.appendChild(row);
+        });
+      } catch (err) {
+        wrap.innerHTML = `<div class="oc-modal-empty">${esc(err.message || "failed to load sessions")}</div>`;
+      }
+    }
+
+    async function ocLoadSession(sid) {
+      ocToolEls.clear(); ocToolGroups.clear();
+      if (elOcScreen) elOcScreen.innerHTML = "";
+      agent.sessionID = sid;
+      try {
+        const d = await fetchJSON("/api/agent/session/messages?id=" + encodeURIComponent(sid));
+        const msgs = d.messages || [];
+        if (elOcScreen) elOcScreen.innerHTML = "";
+        if (!msgs.length) { ocLine("(empty session)", "oc-muted"); return; }
+        msgs.forEach((m) => ocRenderHistoryMsg(m.info, m.parts));
+        ocLine("— session restored · " + msgs.length + " messages —", "oc-muted");
+        ocScroll();
+      } catch (err) {
+        ocLine("failed to load session: " + err.message, "oc-error");
+      }
+    }
+
+    function ocRenderHistoryMsg(info, parts) {
+      const role = info && info.role;
+      if (role === "user") {
+        const text = (parts || []).filter((p) => p.type === "text").map((p) => p.text).join("\n");
+        if (text) ocUserMsg(text);
+        return;
+      }
+      if (role !== "assistant") return;
+      const modelLabel = (info && (info.modelID || (info.model && info.model.modelID))) || "";
+      const el = ocAgentMsg(modelLabel);
+      const body = el.querySelector(".oc-msg-body");
+      let anchor = el;
+      (parts || []).forEach((p) => {
+        const t = p.type || "";
+        if (t === "text" && p.text) {
+          body.appendChild(document.createTextNode(p.text));
+        } else if (t === "reasoning") {
+          const rtext = (p.state && p.state.text) || p.text || "";
+          if (rtext) {
+            const th = document.createElement("div");
+            th.className = "oc-thinking";
+            th.textContent = rtext;
+            body.appendChild(th);
+          }
+        } else if (t === "tool" || t.startsWith("tool")) {
+          const entry = ocToolRow(p, null, el);
+          anchor = entry.wrap;
+        }
+      });
+      const tok = (info && info.tokens) || {};
+      const totalTok = (tok.input || 0) + (tok.output || 0) + (tok.reasoning || 0);
+      const tokEl = el.querySelector(".oc-msg-tok-v");
+      if (tokEl && totalTok) tokEl.textContent = totalTok.toLocaleString() + " tokens";
+      if (!body.childNodes.length && anchor === el) el.remove();
+      ocScroll();
+    }
+
+    // ── autocomplete popup (/ commands · @ files) ────────────────────
+    let ocPopupItems = [];
+    let ocPopupSel = 0;
+    let ocPopupKind = null; // "cmd" | "file"
+    let ocPopupToken = "";
+
+    function ocPopupShow(kind, items, token) {
+      if (!elOcPopup || !items.length) { ocPopupHide(); return; }
+      ocPopupItems = items;
+      ocPopupKind = kind;
+      ocPopupToken = token || "";
+      ocPopupSel = 0;
+      ocPopupRender();
+      elOcPopup.hidden = false;
+    }
+
+    function ocPopupRender() {
+      if (!elOcPopup) return;
+      elOcPopup.innerHTML = "";
+      ocPopupItems.forEach((it, i) => {
+        const row = document.createElement("div");
+        row.className = "oc-popup-item" + (i === ocPopupSel ? " oc-sel" : "");
+        if (ocPopupKind === "cmd") {
+          row.innerHTML = `<span class="oc-pop-cmd">${esc(it.cmd)}</span><span class="oc-pop-desc">${esc(it.desc)}</span>` +
+            (it.alias ? `<span class="oc-pop-hint">${esc(it.alias)}</span>` : "");
+        } else {
+          row.innerHTML = `<span class="oc-pop-desc" style="color:var(--oc-text)">${esc(it)}</span>`;
+        }
+        row.addEventListener("mousedown", (e) => { e.preventDefault(); ocPopupPick(i); });
+        elOcPopup.appendChild(row);
+      });
+    }
+
+    function ocPopupHide() {
+      if (!elOcPopup) return;
+      elOcPopup.hidden = true;
+      ocPopupItems = [];
+      ocPopupKind = null;
+      ocPopupToken = "";
+    }
+
+    function ocPopupPick(i) {
+      const it = ocPopupItems[i != null ? i : ocPopupSel];
+      if (!it || !elOcInput) { ocPopupHide(); return; }
+      const val = elOcInput.value;
+      if (ocPopupKind === "cmd") {
+        elOcInput.value = it.cmd + " ";
+      } else {
+        // replace the @token with @path
+        const atIdx = val.lastIndexOf("@");
+        if (atIdx >= 0) elOcInput.value = val.slice(0, atIdx) + "@" + it + " " + val.slice(atIdx + 1 + ocPopupToken.length);
+      }
+      ocPopupHide();
+      elOcInput.focus();
+      ocUpdateModeNote();
+    }
+
+    async function ocMaybePopup() {
+      if (!elOcInput) return;
+      const val = elOcInput.value;
+      if (val.startsWith("/")) {
+        const word = val.split(" ")[0].toLowerCase();
+        const matches = OC_COMMANDS.filter((c) => c.cmd.startsWith(word));
+        ocPopupShow("cmd", matches, word);
+        return;
+      }
+      const atIdx = val.lastIndexOf("@");
+      if (atIdx >= 0) {
+        const after = val.slice(atIdx + 1);
+        if (!after.includes(" ") && after.length <= 60) {
+          if (!after) { ocPopupShow("file", [], ""); return; }
+          try {
+            const d = await fetchJSON("/api/agent/find/file?q=" + encodeURIComponent(after));
+            if (d && d.ok !== false) ocPopupShow("file", d.files || [], after);
+          } catch (_) { ocPopupHide(); }
+          return;
+        }
+      }
+      ocPopupHide();
+    }
+
+    // ── submit ──────────────────────────────────────────────────────
+    function ocSubmit() {
+      if (!elOcInput) return;
+      const text = elOcInput.value.trim();
+      if (!text) return;
+      if (!elOcPopup.hidden) {
+        if (ocPopupKind === "cmd" && OC_COMMANDS.some((c) => c.cmd === text)) {
+          ocPopupHide(); // exact match — run it right away
+        } else {
+          ocPopupPick();
+          return;
+        }
+      }
+      ocClearInput();
+      sendAgentMessage(text);
+    }
+
+    async function sendAgentMessage(text) {
+      text = (text || "").trim();
+      if (!text) return;
+      if (text.startsWith("/")) return ocRunCommand(text);
+      if (text.startsWith("!")) return ocShell(text.slice(1).trim());
+      if (agent.busy) { ocLine("a task is already running — press esc to abort", "oc-muted"); return; }
+
+      ocUserMsg(text);
+      agent.busy = true;
+      ocSetState("busy");
+      const model = elAgentModel ? elAgentModel.value : "";
+
+      let msgEl = null, bodyEl = null, cursorEl = null, fullText = "", lastInfo = null;
+      let watchdog = null;
+      let assistantMsgID = null;
+      let sid = null;
+
+      const ensureMsg = () => {
+        if (msgEl) return;
+        msgEl = ocAgentMsg(model);
+        bodyEl = msgEl.querySelector(".oc-msg-body");
+        cursorEl = document.createElement("span");
+        cursorEl.className = "oc-cursor";
+        bodyEl.appendChild(cursorEl);
+      };
+      const setText = (t) => {
+        ensureMsg();
+        fullText = t || "";
+        while (bodyEl.firstChild && bodyEl.firstChild !== cursorEl) bodyEl.removeChild(bodyEl.firstChild);
+        bodyEl.insertBefore(document.createTextNode(fullText), cursorEl);
+        ocScroll();
+      };
+      const finish = (err) => {
+        agent.onEvent = null;
+        clearTimeout(watchdog);
+        if (cursorEl) cursorEl.remove();
+        if (err) {
+          if (msgEl && !fullText) msgEl.remove();
+          ocLine(String(err), "oc-error");
+          ocSetState("error");
+        } else {
+          if (msgEl && lastInfo) {
+            const tok = lastInfo.tokens || {};
+            const total = (tok.input || 0) + (tok.output || 0) + (tok.reasoning || 0);
+            const tokEl = msgEl.querySelector(".oc-msg-tok-v");
+            if (tokEl && total) tokEl.textContent = total.toLocaleString() + " tokens";
+          }
+          if (!msgEl && ocToolEls.size === 0) ocLine("(agent finished)", "oc-muted");
+          ocSetState("idle");
+          agent.msgs += 1;
+          // authoritative usage: opencode tracks cumulative session totals
+          if (sid) {
+            fetchJSON("/api/agent/session?id=" + encodeURIComponent(sid)).then((s) => {
+              const t = s.tokens || {};
+              agent.tokens = (t.input || 0) + (t.output || 0) + (t.reasoning || 0)
+                + (t.cache && (t.cache.read || 0) || 0) + (t.cache && (t.cache.write || 0) || 0);
+              agent.cost = s.cost || 0;
+              agentUpdateStats();
+            }).catch(() => {
+              // fallback: accumulate from the last event we saw
+              const tok = (lastInfo && lastInfo.tokens) || {};
+              agent.tokens += (tok.input || 0) + (tok.output || 0) + (tok.reasoning || 0);
+              agent.cost += (lastInfo && lastInfo.cost) || 0;
+              agentUpdateStats();
+            });
+          } else {
+            const tok = (lastInfo && lastInfo.tokens) || {};
+            agent.tokens += (tok.input || 0) + (tok.output || 0) + (tok.reasoning || 0);
+            agent.cost += (lastInfo && lastInfo.cost) || 0;
+            agentUpdateStats();
+          }
+        }
+        agent.busy = false;
+        agentUpdateStats();
+      };
+
+      bumpWatchdog();
+      function bumpWatchdog() {
+        clearTimeout(watchdog);
+        watchdog = setTimeout(async () => {
+          if (!agent.busy) return;
+          // a pending permission request means the agent is waiting on the
+          // user, not stuck — keep waiting as long as approvals are pending
+          // (any session: subagent requests count too)
+          try {
+            // recover any permission card lost to an SSE gap: re-render
+            // pending requests that have no card in the terminal yet
+            await agentPollPermissions();
+            const d = await fetchJSON("/api/agent/permission");
+            const pending = (Array.isArray(d) ? d : (d.requests || []))
+              .filter((r) => !document.querySelector(`.oc-perm[data-perm-id="${r.id}"].oc-denied, .oc-perm[data-perm-id="${r.id}"].oc-approved`));
+            if (pending.length) { bumpWatchdog(); return; }
+          } catch (_) { /* proceed to timeout */ }
+          // an unanswered question card also means the agent is waiting
+          // on the user, not stuck — keep waiting while it is on screen
+          try {
+            await ocPollQuestions();
+            if (document.querySelector(".oc-question:not(.oc-approved):not(.oc-denied)")) { bumpWatchdog(); return; }
+          } catch (_) { /* proceed to timeout */ }
+          finish("Timed out waiting for agent events (is tuxwall-agent.service healthy?). Check: journalctl -u tuxwall.service -t -n 50 | grep agent");
+        }, 180000);
+      }
+
+      try {
+        sid = await agentEnsureSession();
+        agentEvents();
+        agent.onEvent = (ev) => {
+          if (!agent.busy) return; // aborted — ignore stale events
+          const props = ev.properties || {};
+          const type = ev.type;
+          if (type === "permission.asked") {
+            // permission requests always render, even from subagent
+            // sessions (they carry their own sessionID) — filtering on
+            // sessionID here made prompts invisible and hung the turn
+            bumpWatchdog();
+            const r = props;
+            const rid = r.id || r.requestID;
+            if (rid && !document.querySelector(`.oc-perm[data-perm-id="${rid}"]`)) ocPermCard(r);
+            return;
+          }
+          if (type === "question.asked" || type === "question.v2.asked") {
+            bumpWatchdog();
+            ocQuestionCard(props);
+            return;
+          }
+          if (type === "question.replied" || type === "question.v2.replied") {
+            const qc = document.querySelector(`.oc-question[data-qid="${props.requestID}"]`);
+            if (qc) ocPermResolve(qc, "answered");
+            return;
+          }
+          if (type === "question.rejected" || type === "question.v2.rejected") {
+            const qc = document.querySelector(`.oc-question[data-qid="${props.requestID}"]`);
+            if (qc) ocPermResolve(qc, "skipped");
+            return;
+          }
+          if (props.sessionID !== sid) return;
+          if (type === "message.updated") {
+            const info = props.info || {};
+            if (info.role === "assistant") { lastInfo = info; assistantMsgID = info.id; }
+            if (info.error) finish("Agent error: " + (info.error.message || JSON.stringify(info.error)));
+          } else if (type === "message.part.updated") {
+            const part = props.part || {};
+            if (part.messageID && assistantMsgID && part.messageID !== assistantMsgID) return;
+            const pt = part.type || "";
+            if (pt === "text") {
+              bumpWatchdog();
+              setText(part.text || "");
+            } else if (pt === "reasoning") {
+              bumpWatchdog();
+            } else if (pt === "tool" || pt.startsWith("tool")) {
+              bumpWatchdog();
+              // Make the assistant message early so the collapsed tool
+              // summary has a stable anchor even when the model emits tools
+              // before its first text delta.
+              ensureMsg();
+              ocToolRow(part, null, msgEl);
+            }
+          } else if (type === "message.part.delta") {
+            if (props.messageID && assistantMsgID && props.messageID !== assistantMsgID) return;
+            bumpWatchdog();
+            if (props.field === "text" && props.delta) setText(fullText + props.delta);
+          } else if (type === "session.idle") {
+            finish();
+          }
+        };
+
+        const d = await postJSON("/api/agent/message", { sessionID: sid, text, model });
+        if (!d.async) {
+          // server fell back to blocking mode: response is the final message
+          agent.onEvent = null;
+          clearTimeout(watchdog);
+          if (msgEl) msgEl.remove();
+          const parts = d.parts || [];
+          const el = ocAgentMsg(model);
+          const body = el.querySelector(".oc-msg-body");
+          let anchor = el;
+          parts.forEach((p) => {
+            const pt = p.type || "";
+            if (pt === "text" && p.text) body.appendChild(document.createTextNode(p.text));
+            else if (pt === "tool" || pt.startsWith("tool")) anchor = ocToolRow(p, null, el).wrap;
+          });
+          const tok = d.tokens || {};
+          const total = (tok.input || 0) + (tok.output || 0) + (tok.reasoning || 0);
+          const tokEl = el.querySelector(".oc-msg-tok-v");
+          if (tokEl && total) tokEl.textContent = total.toLocaleString() + " tokens";
+          agent.tokens += total;
+          agent.cost += d.cost || 0;
+          agent.msgs += 1;
+          agent.busy = false;
+          ocSetState("idle");
+          agentUpdateStats();
+        }
+      } catch (err) {
+        finish(err.message + (err.detail ? "\n" + err.detail : ""));
+      }
+    }
+
+    // ── terminal event bindings ─────────────────────────────────────
+    if (elAgentNewSess) {
+      elAgentNewSess.addEventListener("click", () => {
+        ocToolEls.clear(); ocToolGroups.clear();
+        ocBootScreen(false);
+        ocLine("new session — type a prompt to begin", "oc-info");
+        if (elOcInput) elOcInput.focus();
+      });
+    }
+    if (elAgentSessBtn) elAgentSessBtn.addEventListener("click", () => ocSessionsModal());
+    if (elOcSend) elOcSend.addEventListener("click", ocSubmit);
+    if (elOcOverlay) elOcOverlay.addEventListener("click", (e) => { if (e.target === elOcOverlay) ocModalClose(); });
+    if (elAgentModel) {
+      elAgentModel.addEventListener("change", () => {
+        agent.model = elAgentModel.value;
+        try { localStorage.setItem("tuxwall.agent.model", elAgentModel.value); } catch (_) {}
+        ocLine("model → " + (elAgentModel.value || "default"), "oc-muted");
+        ocRenderStatus();
+      });
+    }
+    if (elOcInput) {
+      elOcInput.addEventListener("keydown", (e) => {
+        if (!elOcPopup || !elOcPopup.hidden) {
+          if (e.key === "ArrowDown") { e.preventDefault(); ocPopupSel = Math.min(ocPopupSel + 1, ocPopupItems.length - 1); ocPopupRender(); return; }
+          if (e.key === "ArrowUp") { e.preventDefault(); ocPopupSel = Math.max(ocPopupSel - 1, 0); ocPopupRender(); return; }
+          if (e.key === "Tab") { e.preventDefault(); ocPopupPick(); return; }
+          if (e.key === "Escape") { e.preventDefault(); ocPopupHide(); return; }
+        }
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          ocSubmit();
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          if (!elOcOverlay || elOcOverlay.hidden) {
+            if (agent.busy) ocAbort();
+          } else {
+            ocModalClose();
+          }
+          return;
+        }
+        if (e.key === "c" && e.ctrlKey) { e.preventDefault(); ocPopupHide(); return; }
+      });
+      elOcInput.addEventListener("input", () => {
+        elOcInput.style.height = "auto";
+        elOcInput.style.height = Math.min(elOcInput.scrollHeight, 180) + "px";
+        ocUpdateModeNote();
+        ocMaybePopup();
+      });
+    }
+
+    // opencode is the only AI assistant — expose enable hook for switchView()
+    window.__tuxwallAgentEnable = agentSetEnabled;
+  })();
+
+  function init() {
+    els.search.addEventListener("input", (e) => {
+      state.filter = e.target.value;
+      render();
+    });
+
+    els.secSuricataTabs.addEventListener("click", (e) => {
+      const btn = e.target.closest(".seg-btn");
+      if (!btn || !btn.dataset.sev) return;
+      if (btn.dataset.sev === state.suricataSev) return;
+      state.suricataSev = btn.dataset.sev;
+      els.secSuricataTabs.querySelectorAll(".seg-btn").forEach((b) =>
+        b.classList.toggle("active", b.dataset.sev === state.suricataSev));
+      refreshSuricata();
+    });
+
+    els.refresh.addEventListener("click", () => {
+      refresh();
+      refreshDns();
+      refreshDomains();
+      refreshFirewall();
+      refreshSecurity();
+      refreshSuricata();
+      refreshZeek();
+      refreshZeekQuic();
+      refreshAide();
+      refreshHoneypot();
+      refreshCanary();
+      refreshCrowdsec();
+      refreshCustomBlocklist();
+      refreshBandwidth();
+      refreshBlocklists();
+      refreshSystem();
+      refreshWireguard();
+      refreshOverview();
+    });
+
+    els.auto.addEventListener("change", (e) => {
+      if (e.target.checked) schedule();
+      else if (state.timer) clearInterval(state.timer);
+    });
+
+    document.querySelectorAll("th.sortable").forEach((th) => {
+      th.addEventListener("click", () => {
+        const key = th.dataset.sort;
+        if (state.sortKey === key) {
+          state.sortDir *= -1;
+        } else {
+          state.sortKey = key;
+          state.sortDir = 1;
+        }
+        render();
+      });
+    });
+
+    els.body.addEventListener("click", async (e) => {
+      const btn = e.target.closest(".ban-btn, .unban-btn");
+      if (!btn) return;
+      const banning = btn.classList.contains("ban-btn");
+      const label = btn.dataset.hostname || btn.dataset.ip;
+      if (!window.confirm(
+        banning
+          ? `Ban ${label}? This blocks all internet access (firewall + DNS).`
+          : `Unban ${label}?`
+      )) return;
+      btn.disabled = true;
+      try {
+        await postJSON(banning ? "/api/leases/ban" : "/api/leases/unban", {
+          ip: btn.dataset.ip,
+          hostname: btn.dataset.hostname,
+          mac: btn.dataset.mac,
+        });
+        await refresh();
+      } catch (err) {
+        showBanner(true, (banning ? "Ban: " : "Unban: ") + err.message);
+        btn.disabled = false;
+      }
+    });
+
+    const ovIssueList = document.getElementById("ov-health-issues");
+    if (ovIssueList) {
+      const openIssue = (li) => {
+        if (!li || !li.dataset.view) return;
+        switchView(li.dataset.view);
+        if (history.replaceState) history.replaceState(null, "", "#" + li.dataset.view);
+      };
+      ovIssueList.addEventListener("click", (e) => openIssue(e.target.closest(".ov-issue")));
+      ovIssueList.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        const li = e.target.closest(".ov-issue");
+        if (!li || !li.dataset.view) return;
+        e.preventDefault();
+        openIssue(li);
+      });
+    }
+
+    document.querySelectorAll(".ov-post-link").forEach((link) => {
+      link.addEventListener("click", (e) => {
+        e.preventDefault();
+        switchView(link.dataset.view);
+        if (history.replaceState) history.replaceState(null, "", "#" + link.dataset.view);
+      });
+    });
+
+    document.querySelectorAll(".nav-item").forEach((item) => {
+      item.addEventListener("click", (e) => {
+        e.preventDefault();
+        switchView(item.dataset.view);
+        if (history.replaceState) history.replaceState(null, "", "#" + item.dataset.view);
+      });
+    });
+
+    window.addEventListener("resize", () => {
+      if (state.activeView === "bandwidth" && state.bwData) {
+        renderBandwidth(state.bwData);
+      }
+      if (state.activeView === "overview") {
+        if (state.ovData) renderOverview(state.ovData);
+        if (ovMap) ovMap.map.invalidateSize();
+      }
+      if (state.activeView === "security" && secMap) {
+        secMap.map.invalidateSize();
+      }
+    });
+
+    const initial = (location.hash || "#overview").replace("#", "");
+    switchView(VIEW_TITLES[initial] ? initial : "overview");
+
+    bindBlocklistActions();
+    bindRpzActions();
+    bindBlocklistCatalog();
+    bindDomainActions();
+    bindHostEdit();
+    bindConfigEdit();
+    bindSqm();
+    bindUpdates();
+    bindLogs();
+    bindSystemBackups();
+    bindWireguardActions();
+    bindFirewallActions();
+    bindSecurityBans();
+    bindAideActions();
+    bindCanaryActions();
+    bindHoneypotActions();
+    bindCustomBlocklist();
+    bindCsBanModal();
+    bindCommunityBans();
+    bindSettings();
+
+    let cachedTheme = null;
+    try {
+      cachedTheme = JSON.parse(localStorage.getItem(THEME_STORAGE_KEY) || "null");
+    } catch (err) {
+      cachedTheme = null;
+    }
+    if (cachedTheme && cachedTheme.theme && cachedTheme.theme.colors) {
+      state.allThemes = [Object.assign({ builtin: false }, cachedTheme.theme)];
+      applyTheme(cachedTheme.id, { persist: false, repaint: false });
+      state.themeBootstrapped = true;
+    }
+
+    bindAuthActions();
+    bindTotpActions();
+    bindUsersActions();
+    observeSizeRecovery();
+    bootstrapAuth();
+
+    // Online / Offline status indicator
+    const brandStatusText = document.getElementById("brand-status-text");
+    const brandStatusDot  = document.getElementById("brand-status-dot");
+    function updateNetStatus() {
+      const online = navigator.onLine;
+      if (brandStatusText) brandStatusText.textContent = online ? "Online" : "Offline";
+      if (brandStatusDot)  brandStatusDot.dataset.status = online ? "online" : "offline";
+    }
+    updateNetStatus();
+    window.addEventListener("online",  updateNetStatus);
+    window.addEventListener("offline", updateNetStatus);
+
+    // Sidebar version badge (shown on login-independent init too)
+    const brandVersion = document.getElementById("brand-version");
+    if (brandVersion && !brandVersion.textContent) {
+      fetchJSON("/api/system")
+        .then((d) => {
+          if (d && d.tuxwall_version) brandVersion.textContent = "v" + d.tuxwall_version;
+        })
+        .catch(() => {});
+    }
+  }
+
+  function setLoginError(msg) {
+    els.loginError.hidden = !msg;
+    els.loginError.textContent = msg || "";
+  }
+
+  function showLoginGate(setupMode, errmsg) {
+    state.loginSetupMode = !!setupMode;
+    els.loginHeading.textContent = setupMode ? "Welcome to TuxWall" : "TuxWall";
+    els.loginSub.textContent = setupMode
+      ? "Create the administrator account to secure this dashboard."
+      : "Enter your credentials to manage this network";
+    els.loginBtn.textContent = setupMode ? "Create & sign in" : "Sign in";
+    els.loginTotpLabel.hidden = true;
+    els.loginTotp.hidden = true;
+    els.loginTotp.value = "";
+    setLoginError(errmsg || "");
+    document.body.classList.add("locked");
+    els.loginGate.hidden = false;
+    setTimeout(() => {
+      try { (setupMode ? els.loginUser : els.loginPass).focus(); } catch (err) { }
+    }, 60);
+  }
+
+  function hideLoginGate() {
+    els.loginGate.hidden = true;
+    document.body.classList.remove("locked");
+    // Two frames: one for the browser to apply the class removal, one for it
+    // to lay the dashboard out. Measuring any earlier just reads zeros again.
+    requestAnimationFrame(() => requestAnimationFrame(remeasureLayout));
+  }
+
+  function applyDefaultPasswordWarning(flag) {
+    if (!flag) return;
+    els.usersMsg.textContent = "You are signed in with the default password (admin / tuxwall) - change it with the Change password button.";
+  }
+
+  function roleLabel() {
+    if (state.isOwner) return "primary admin";
+    return state.role === "admin" ? "admin" : "read-only";
+  }
+
+  function applyRoleUI() {
+    const isAdmin = state.role === "admin";
+    // The AI Assistant reaches the opencode agent, which runs shell commands
+    // and holds sudo, so it is admin-only server-side. Hide it for viewers
+    // rather than leaving a panel that only returns 403.
+    document.querySelectorAll('.nav-item[data-view="settings"], .nav-item[data-view="ai"]')
+      .forEach((el) => { el.hidden = !isAdmin; });
+    const pluginTab = document.querySelector('#sys-subtabs [data-sys-pane="plugins"]');
+    if (pluginTab) pluginTab.hidden = !isAdmin;
+    if (!isAdmin && pluginTab && pluginTab.classList.contains("active")) setSysTab("status");
+    els.usersCard.hidden = false;
+    updateTotpCard();
+    els.usersAdmin.hidden = !state.canManageUsers;
+    els.userMenuName.textContent = state.username || "";
+    els.userMenuRole.textContent = roleLabel();
+    if (els.userMenu) els.userMenu.hidden = false;
+    if (els.userMenuBtn) {
+      els.userMenuBtn.setAttribute("aria-label", "Account menu for " + (state.username || "user"));
+    }
+    startIncidentPolling();
+    if (els.incidentSettings) els.incidentSettings.hidden = !isAdmin;
+    if (isAdmin) loadPluginHost(); else clearPluginHost();
+    refreshAvatarUI();
+    if (!isAdmin && (state.activeView === "settings" || state.activeView === "ai" ||
+                     (state.activeView || "").startsWith("plugin:"))) {
+      switchView("overview");
+    }
+    if (state.data) render();
+    if (state.svcData) renderServices();
+  }
+
+  async function loadUsers() {
+    if (!state.canManageUsers) return;
+    try {
+      const d = await fetchJSON("/api/auth/users");
+      state.users = d.users || [];
+      renderUsers();
+      els.usersMsg.textContent = "";
+    } catch (err) {
+      els.usersMsg.textContent = err.message;
+    }
+  }
+
+  const SVG_OPEN = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">`;
+  const ICONS = {
+    edit: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L9 17l-4 1 1-4Z"/></svg>`,
+    power: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v10"/><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/></svg>`,
+    delete: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 15H6L5 6"/><path d="M10 10v7M14 10v7"/></svg>`,
+    ban: `${SVG_OPEN}<circle cx="12" cy="12" r="9"/><path d="M5.64 5.64 18.36 18.36"/></svg>`,
+    active: `${SVG_OPEN}<circle cx="12" cy="12" r="9"/><path d="m7.5 12 3 3 6-6"/></svg>`,
+    enable: `${SVG_OPEN}<path d="M12 2v10"/><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/></svg>`,
+    disable: `${SVG_OPEN}<circle cx="12" cy="12" r="9"/><path d="m6 6 12 12"/></svg>`,
+    config: `${SVG_OPEN}<path d="M12 2.5 14 3l.8 2.2 2 1.1 2.3-.5 1.5 2.6-1.5 1.8v2.3l1.5 1.8-1.5 2.6-2.3-.5-2 1.1L14 20l-2 .5-2-.5-.8-2.2-2-1.1-2.3.5-1.5-2.6 1.5-1.8v-2.3L3.4 8.7l1.5-2.6 2.3.5 2-1.1L10 3Z" transform="translate(0 0.75)"/><circle cx="12" cy="12" r="3"/></svg>`,
+    import: `${SVG_OPEN}<path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10l-7-7Z"/><path d="M13 3v7h7"/><path d="M2 15h11m-4-4 4 4-4 4"/></svg>`,
+    backup: `${SVG_OPEN}<ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v7c0 1.7 3.1 3 7 3h1"/><path d="M19 6v5"/><path d="M5 10c0 1.7 3.1 3 7 3"/><path d="M16 17h6m-3-3-3 3 3 3"/></svg>`,
+    updates: `${SVG_OPEN}<path d="M20 11a8 8 0 0 0-14-5L4 8"/><path d="M4 3v5h5"/><path d="M4 13a8 8 0 0 0 14 5l2-2"/><path d="M20 21v-5h-5"/><path d="M12 7v5l3 2"/></svg>`,
+    exposed: `${SVG_OPEN}<path d="M12 3 3.5 7v5c0 5 3.5 8 8.5 9 5-1 8.5-4 8.5-9V7L12 3Z"/><path d="M12 8v5"/><circle cx="12" cy="17" r=".8" fill="currentColor" stroke="none"/></svg>`,
+    lock: `${SVG_OPEN}<rect x="4.5" y="10.5" width="15" height="11" rx="2.2"/><path d="M7.5 10.5V7a4.5 4.5 0 0 1 9 0v3.5"/><circle cx="12" cy="15.1" r="1"/><path d="M12 16.1v2"/></svg>`,
+    download: `${SVG_OPEN}<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>`,
+    export: `${SVG_OPEN}<path d="M13 4h6a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-5"/><path d="M10 14 20 4"/><path d="M14 4h6v6"/></svg>`,
+    browse: `${SVG_OPEN}<rect x="1.5" y="1.5" width="21" height="21" rx="3"/><path d="M4.5 9V7a2 2 0 0 1 2-2h3l2 2h6a2 2 0 0 1 2 2v1"/><path d="M4.5 10.5h15v2.5M4.5 10.5v6a2 2 0 0 0 2 2h5"/><circle cx="15.2" cy="15.1" r="3.1"/><path d="m17.5 17.4 2.4 2.4"/></svg>`,
+    up: `${SVG_OPEN}<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>`,
+    down: `${SVG_OPEN}<path d="M12 5v14"/><path d="m5 12 7 7 7-7"/></svg>`,
+  };
+  ICONS.trash = ICONS.delete;
+  ICONS.unban = ICONS.active;
+
+  function actBtn(kind, title, attrs, extra) {
+    const k = kind === "trash" ? "delete" : kind;
+    const cls = "act-btn act-" + k + (extra ? " " + extra : "");
+    return `<button class="${cls}" type="button" title="${esc(title)}" aria-label="${esc(title)}" ${attrs || ""}>${ICONS[k]}</button>`;
+  }
+
+  function iconBtn(icon, title, attrs) {
+    const k = icon === "trash" ? "delete" : icon;
+    return actBtn(k, title, attrs, k === "delete" ? "act-danger" : "");
+  }
+
+  function setBtnIcon(btn, kind, label, on) {
+    btn.classList.add("btn-act");
+    btn.innerHTML = `${ICONS[kind] || ""}<span>${esc(label)}</span>`;
+    btn.dataset.on = on ? "1" : "0";
+  }
+
+  function renderUsers() {
+    const me = state.username;
+    const q = (els.usersSearch.value || "").trim().toLowerCase();
+    const users = (state.users || []).filter((u) =>
+      !q || u.username.toLowerCase().includes(q) || (u.fullname || "").toLowerCase().includes(q)
+    );
+    els.usersCount.textContent = `${users.length} of ${(state.users || []).length} users`;
+    els.usersTbody.innerHTML = users.map((u) => {
+      const badge = u.owner
+        ? `<span class="badge badge-static">Primary admin</span>`
+        : u.role === "admin"
+          ? `<span class="badge badge-ok">Admin</span>`
+          : `<span class="badge">Viewer</span>`;
+      // Everyone being "Enabled" was visual noise that made the one account
+      // that *is* disabled no easier to spot. A quiet dot for the normal case
+      // lets the exception carry the weight instead.
+      const status = `<span class="u-state"><span class="status-dot" data-status="${u.disabled ? "inactive" : "active"}"></span>` +
+        `${u.disabled ? "Disabled" : "Enabled"}</span>`;
+      // /api/auth/users already returns these two; neither was ever shown.
+      const twofa = u.totp
+        ? `<span class="u-2fa on" title="Two-factor authentication is enabled">ON</span>`
+        : `<span class="u-2fa off" title="Password only - no second factor">OFF</span>`;
+      const created = u.created
+        ? `<span class="u-created" title="${esc(new Date(u.created * 1000).toLocaleString())}">${esc(formatRelative(u.created))}</span>`
+        : `<span class="muted">—</span>`;
+      const actions = u.owner
+        ? (
+          iconBtn("edit", "Edit", `data-edit="${esc(u.username)}"`) +
+          iconBtn(u.disabled ? "enable" : "disable", u.disabled ? "Enable" : "Disable", `data-toggle="${esc(u.username)}" data-enabled="${u.disabled ? "0" : "1"}"`)
+        )
+        : (
+          iconBtn("edit", "Edit", `data-edit="${esc(u.username)}"`) +
+          iconBtn(u.disabled ? "enable" : "disable", u.disabled ? "Enable" : "Disable", `data-toggle="${esc(u.username)}" data-enabled="${u.disabled ? "0" : "1"}"`) +
+          iconBtn("trash", "Remove", `data-del="${esc(u.username)}"`)
+        );
+      return `
+        <tr class="${u.disabled ? "u-row-off" : ""}">
+          <td><b>${esc(u.username)}</b>${u.username === me ? ` <span class="u-you">you</span>` : ""}</td>
+          <td>${u.fullname ? esc(u.fullname) : '<span class="muted">—</span>'}</td>
+          <td>${badge}</td>
+          <td>${status}</td>
+          <td>${twofa}</td>
+          <td>${created}</td>
+          <td class="wg-actions td-right">${actions}</td>
+        </tr>`;
+    }).join("");
+  }
+
+  function closeUserModal() {
+    els.userModal.hidden = true;
+    els.umMsg.textContent = "";
+  }
+
+  function openUserModal(user) {
+    els.umMsg.textContent = "";
+    els.umSave.disabled = false;
+    els.umName.readOnly = !!user;
+    els.umName.value = user ? user.username : "";
+    els.umFullname.value = user ? (user.fullname || "") : "";
+    els.umCurrent.value = "";
+    els.umPass.value = "";
+    els.umPass2.value = "";
+    const isSelf = !!(user && user.username === state.username);
+    const canEditProfile = !user || state.canManageUsers;
+    els.umCurrentField.hidden = !isSelf;
+    els.umPassField.hidden = false;
+    els.umPass2Field.hidden = false;
+    els.umPassLabel.textContent = user ? "New password (blank = keep current)" : "Password (min 8)";
+    els.umPass.placeholder = user ? "leave blank to keep current" : "min 8 characters";
+    els.umFullname.parentElement.hidden = !canEditProfile;
+    els.umRoleField.hidden = isSelf || !!(user && user.owner);
+    els.umEnabledField.hidden = isSelf || !!(user && user.owner);
+    if (user) {
+      els.umRole.value = user.role || "viewer";
+      els.umEnabled.checked = !user.disabled;
+    } else {
+      els.umRole.value = "viewer";
+      els.umEnabled.checked = true;
+    }
+    els.userModalTitle.textContent = isSelf
+      ? "Change your password"
+      : user ? `Edit user — ${user.username}` : "Add user";
+    els.userModal.hidden = false;
+    setTimeout(() => {
+      try { (isSelf ? els.umCurrent : (user ? els.umFullname : els.umName)).focus(); } catch (err) { }
+    }, 60);
+  }
+
+  function bindUsersActions() {
+    els.nuOpen.addEventListener("click", () => openUserModal(null));
+    els.userModalClose.addEventListener("click", closeUserModal);
+    els.umCancel.addEventListener("click", closeUserModal);
+    els.userModal.addEventListener("click", (e) => {
+      if (e.target === els.userModal) closeUserModal();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !els.userModal.hidden) closeUserModal();
+    });
+    els.usersSearch.addEventListener("input", renderUsers);
+
+    els.umSave.addEventListener("click", async () => {
+      const editing = els.umName.readOnly;
+      const isSelf = els.umCurrentField.hidden === false;
+      const username = els.umName.value.trim();
+      const fullname = els.umFullname.value.trim();
+      const current = els.umCurrent.value;
+      const password = els.umPass.value;
+      els.umMsg.textContent = "";
+      if (!username) {
+        els.umMsg.textContent = "Enter a username.";
+        return;
+      }
+      if (!editing && !password) {
+        els.umMsg.textContent = "Enter a password (min 8 characters).";
+        return;
+      }
+      if (password && password !== els.umPass2.value) {
+        els.umMsg.textContent = "Passwords do not match.";
+        return;
+      }
+      if (isSelf && password && !current) {
+        els.umMsg.textContent = "Enter your current password.";
+        return;
+      }
+      if (isSelf && !password) {
+        els.umMsg.textContent = "Enter a new password.";
+        return;
+      }
+      els.umSave.disabled = true;
+      try {
+        if (isSelf) {
+          if (!els.umFullname.parentElement.hidden) {
+            await postJSON("/api/auth/users/update", { username, fullname });
+          }
+          await postJSON("/api/auth/password", { current, new: password });
+          els.usersMsg.textContent = "Your password has been updated.";
+        } else if (editing) {
+          const body = { username, fullname };
+          if (password) body.password = password;
+          if (!els.umRoleField.hidden) body.role = els.umRole.value;
+          if (!els.umEnabledField.hidden) body.enabled = els.umEnabled.checked;
+          await postJSON("/api/auth/users/update", body);
+          els.usersMsg.textContent = `Updated ${username}.`;
+        } else {
+          await postJSON("/api/auth/users/add", {
+            username, password, fullname,
+            role: els.umRole.value,
+            enabled: els.umEnabled.checked,
+          });
+          els.usersMsg.textContent = `Added ${username}.`;
+        }
+        closeUserModal();
+        await loadUsers();
+      } catch (err) {
+        els.umMsg.textContent = err.message;
+      } finally {
+        els.umSave.disabled = false;
+      }
+    });
+
+    els.usersTbody.addEventListener("click", async (e) => {
+      const del = e.target.closest("[data-del]");
+      const tog = e.target.closest("[data-toggle]");
+      const edt = e.target.closest("[data-edit]");
+      if (!del && !tog && !edt) return;
+      try {
+        if (del) {
+          const username = del.dataset.del;
+          if (!window.confirm(`Remove user "${username}"? Their session ends immediately.`)) return;
+          await postJSON("/api/auth/users/delete", { username });
+          els.usersMsg.textContent = `Removed ${username}.`;
+          await loadUsers();
+        } else if (tog) {
+          const username = tog.dataset.toggle;
+          const enabled = tog.dataset.enabled === "1";
+          if (enabled) {
+            const self = username === state.username;
+            const msg = self
+              ? `Disable user "${username}"? This is YOUR account - your session ends immediately and you must sign in as another admin.`
+              : `Disable user "${username}"? Their session ends immediately.`;
+            if (!window.confirm(msg)) return;
+          }
+          await postJSON("/api/auth/users/enabled", { username, enabled: !enabled });
+          els.usersMsg.textContent = `${username} ${enabled ? "disabled" : "enabled"}.`;
+          await loadUsers();
+        } else if (edt) {
+          const user = (state.users || []).find((u) => u.username === edt.dataset.edit);
+          if (user) openUserModal(user);
+        }
+      } catch (err) {
+        els.usersMsg.textContent = err.message;
+      }
+    });
+  }
+
+  function handleSessionExpired() {
+    if (!state.authed) return;
+    state.authed = false;
+    state.role = "viewer";
+    state.isOwner = false;
+    state.canManageUsers = false;
+    els.logoutBtn.hidden = true;
+    if (els.userMenu) els.userMenu.hidden = true;
+    if (els.userMenuPop) els.userMenuPop.hidden = true;
+    if (els.userMenuBtn) els.userMenuBtn.setAttribute("aria-expanded", "false");
+    stopIncidentPolling();
+    els.userMenuName.textContent = "";
+    els.userMenuRole.textContent = "";
+    els.loginPass.value = "";
+    showLoginGate(false, "Session expired. Sign in again.");
+    updateTotpCard();
+  }
+
+  const INCIDENT_SEV_LABEL = { critical: "Critical", warning: "Warning", info: "Info" };
+
+  function isAdminUser() {
+    return state.role === "admin" || state.isOwner;
+  }
+
+  function setIncidentPanel(open) {
+    if (!els.incidentPanel || !els.incidentBell) return;
+    els.incidentPanel.hidden = !open;
+    els.incidentBell.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  function incidentItemHtml(inc) {
+    const sev = (inc.severity || "info").toLowerCase();
+    const resolved = inc.status !== "active";
+    let ackBtn = "";
+    if (isAdminUser()) {
+      if (resolved) {
+        ackBtn = `<button class="incident-ack incident-dismiss" type="button" data-id="${esc(inc.id)}" data-dismiss="1" title="Dismiss from history" aria-label="Dismiss incident from history">&times;</button>`;
+      } else if (!inc.acknowledged) {
+        ackBtn = `<button class="incident-ack incident-dismiss" type="button" data-id="${esc(inc.id)}" title="Confirm incident" aria-label="Confirm incident">&times;</button>`;
+      }
+    }
+    const meta = resolved
+      ? `Resolved ${formatRelative(inc.resolved_at || inc.last_seen)}`
+      : `${INCIDENT_SEV_LABEL[sev] || "Info"} · ${formatRelative(inc.last_seen)}${inc.acknowledged ? " · acknowledged" : ""}`;
+    return `<div class="incident-item${resolved ? " is-resolved" : ""}" data-sev="${esc(sev)}" data-id="${esc(inc.id)}">
+      <span class="incident-dot" aria-hidden="true"></span>
+      <div class="incident-item-copy">
+        <div class="incident-item-title">${esc(inc.title || "Incident")}</div>
+        <div class="incident-item-detail">${esc(inc.detail || "")}</div>
+        <div class="incident-item-meta">${esc(meta)}</div>
+      </div>
+      ${ackBtn}
+    </div>`;
+  }
+
+  function renderIncidents(d) {
+    state.incidents = d;
+    const items = d.incidents || [];
+    const active = items.filter((i) => i.status === "active");
+    const resolved = items.filter((i) => i.status !== "active").slice(0, 12);
+    const unack = d.unacknowledged || 0;
+
+    if (els.incidentBadge) {
+      els.incidentBadge.textContent = unack > 99 ? "99+" : String(unack);
+      els.incidentBadge.hidden = unack === 0;
+    }
+    if (els.incidentSummary) {
+      els.incidentSummary.textContent = active.length
+        ? `${active.length} active${d.critical ? ` · ${d.critical} critical` : ""}`
+        : "All clear";
+    }
+    if (els.incidentAckAll) {
+      els.incidentAckAll.hidden = !isAdminUser() || unack === 0;
+    }
+    if (els.incidentUpdated) {
+      els.incidentUpdated.textContent = "Updated " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    }
+
+    if (!els.incidentList) return;
+    if (!active.length && !resolved.length) {
+      els.incidentList.innerHTML = '<div class="incident-empty"><b>All clear</b><br>No active incidents or recent history.</div>';
+      return;
+    }
+    let html = "";
+    html += active.length
+      ? active.map(incidentItemHtml).join("")
+      : '<div class="incident-empty">No active incidents.</div>';
+    if (resolved.length) {
+      html += '<div class="incident-history-label">Recent history</div>';
+      html += resolved.map(incidentItemHtml).join("");
+    }
+    els.incidentList.innerHTML = html;
+  }
+
+  async function refreshIncidents() {
+    if (!state.authed) return;
+    try {
+      const d = await fetchJSON("/api/incidents?limit=120");
+      renderIncidents(d);
+    } catch (err) {
+      /* Keep the last timeline visible if the poll fails. */
+    }
+  }
+
+  function startIncidentPolling() {
+    if (!state.authed) return;
+    if (els.incidentWrap) els.incidentWrap.hidden = false;
+    if (state.incidentTimer) clearInterval(state.incidentTimer);
+    refreshIncidents();
+    state.incidentTimer = setInterval(refreshIncidents, 20000);
+  }
+
+  function stopIncidentPolling() {
+    if (state.incidentTimer) {
+      clearInterval(state.incidentTimer);
+      state.incidentTimer = null;
+    }
+    if (els.incidentWrap) els.incidentWrap.hidden = true;
+    setIncidentPanel(false);
+    state.incidents = null;
+  }
+
+  function bindIncidents() {
+    if (!els.incidentBell || !els.incidentPanel) return;
+    els.incidentBell.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = els.incidentPanel.hidden;
+      setIncidentPanel(open);
+      if (open) refreshIncidents();
+    });
+    document.addEventListener("click", (e) => {
+      if (els.incidentWrap && !els.incidentWrap.contains(e.target)) setIncidentPanel(false);
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") setIncidentPanel(false);
+    });
+    if (els.incidentAckAll) {
+      els.incidentAckAll.addEventListener("click", async () => {
+        try {
+          await postJSON("/api/incidents/ack-all", {});
+          await refreshIncidents();
+        } catch (err) {
+          if (els.incidentSummary) els.incidentSummary.textContent = err.message;
+        }
+      });
+    }
+    if (els.incidentList) {
+      els.incidentList.addEventListener("click", async (e) => {
+        const btn = e.target.closest(".incident-ack");
+        if (!btn) return;
+        btn.disabled = true;
+        try {
+          const endpoint = btn.dataset.dismiss ? "/api/incidents/dismiss" : "/api/incidents/ack";
+          await postJSON(endpoint, { id: btn.dataset.id });
+          await refreshIncidents();
+        } catch (err) {
+          btn.disabled = false;
+          if (els.incidentSummary) els.incidentSummary.textContent = err.message;
+        }
+      });
+    }
+    if (els.incidentSettings) {
+      els.incidentSettings.addEventListener("click", () => {
+        setIncidentPanel(false);
+        switchView("settings");
+        setSettingsTab("alerts");
+        loadAlertConfig();
+      });
+    }
+  }
+
+  async function loadAlertConfig() {
+    if (!els.alertsSave) return;
+    try {
+      const d = await fetchJSON("/api/alerts/config");
+      const c = d.config || {};
+      els.alertsEnabled.checked = !!c.enabled;
+      els.alertsWebhook.value = c.webhook_url || "";
+      els.alertsNtfy.value = c.ntfy_url || "";
+      els.alertsSeverity.value = c.min_severity || "warning";
+      els.alertsResolved.checked = c.notify_resolved !== false;
+      if (els.alertsHint) {
+        els.alertsHint.textContent = (c.webhook_url || c.ntfy_url)
+          ? "External notifications configured"
+          : "No external channel configured — in-app timeline is on";
+      }
+      if (els.alertsMsg) els.alertsMsg.textContent = "";
+    } catch (err) {
+      if (els.alertsMsg) els.alertsMsg.textContent = err.message;
+    }
+  }
+
+  async function saveAlertConfig() {
+    if (!els.alertsSave) return;
+    els.alertsSave.disabled = true;
+    if (els.alertsMsg) els.alertsMsg.textContent = "Saving…";
+    try {
+      const d = await postJSON("/api/alerts/config", {
+        enabled: !!els.alertsEnabled.checked,
+        webhook_url: els.alertsWebhook.value.trim(),
+        ntfy_url: els.alertsNtfy.value.trim(),
+        min_severity: els.alertsSeverity.value,
+        notify_resolved: !!els.alertsResolved.checked,
+      });
+      if (!d.ok) throw new Error(d.error || "Save failed");
+      if (els.alertsHint) {
+        els.alertsHint.textContent = (d.config.webhook_url || d.config.ntfy_url)
+          ? "External notifications configured"
+          : "No external channel configured — in-app timeline is on";
+      }
+      if (els.alertsMsg) els.alertsMsg.textContent = "Saved.";
+    } catch (err) {
+      if (els.alertsMsg) els.alertsMsg.textContent = err.message;
+    } finally {
+      els.alertsSave.disabled = false;
+    }
+  }
+
+  async function testAlertConfig() {
+    if (!els.alertsTest) return;
+    els.alertsTest.disabled = true;
+    if (els.alertsMsg) els.alertsMsg.textContent = "Sending test…";
+    try {
+      const d = await postJSON("/api/alerts/test", {});
+      if (els.alertsMsg) els.alertsMsg.textContent = d.ok ? (d.message || "Test sent.") : (d.error || "Test failed.");
+    } catch (err) {
+      if (els.alertsMsg) els.alertsMsg.textContent = err.message;
+    } finally {
+      els.alertsTest.disabled = false;
+    }
+  }
+
+  function bindAlertSettings() {
+    if (els.alertsSave) els.alertsSave.addEventListener("click", saveAlertConfig);
+    if (els.alertsTest) els.alertsTest.addEventListener("click", testAlertConfig);
+  }
+
+  function bindUserMenu() {
+    const menu = els.userMenu, btn = els.userMenuBtn, pop = els.userMenuPop;
+    if (!menu || !btn || !pop) return;
+    const close = () => {
+      pop.hidden = true;
+      btn.setAttribute("aria-expanded", "false");
+    };
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = pop.hidden;
+      pop.hidden = !open;
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open) {
+        const first = pop.querySelector(".user-menu-item:not([hidden])");
+        if (first) first.focus();
+      }
+    });
+    document.addEventListener("click", (e) => {
+      if (!menu.contains(e.target)) close();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") close();
+    });
+  }
+
+  function bindAuthActions() {
+    bindUserMenu();
+    bindIncidents();
+    bindPluginInstall();
+    bindPluginCatalogInstalls();
+
+    els.loginForm.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const username = els.loginUser.value.trim();
+      const password = els.loginPass.value;
+      if (!username || !password) {
+        setLoginError("Enter a username and password.");
+        return;
+      }
+      els.loginBtn.disabled = true;
+      setLoginError("");
+      try {
+        const payload = { username, password };
+        if (!els.loginTotp.hidden) payload.totp_code = els.loginTotp.value.trim();
+        const d = await postJSON(state.loginSetupMode ? "/api/auth/setup" : "/api/auth/login", payload);
+        if (d.totp_required) {
+          els.loginTotpLabel.hidden = false;
+          els.loginTotp.hidden = false;
+          els.loginBtn.textContent = "Verify & sign in";
+          setLoginError("Enter the 6-digit code from your authenticator app.");
+          try { els.loginTotp.focus(); } catch (err) { }
+          return;
+        }
+        els.loginTotpLabel.hidden = true;
+        els.loginTotp.hidden = true;
+        els.loginTotp.value = "";
+        els.loginBtn.textContent = "Sign in";
+        els.loginPass.value = "";
+        state.authed = true;
+        state.role = d.role || "viewer";
+        state.isOwner = !!d.is_owner;
+        state.canManageUsers = !!d.can_manage_users;
+        state.totpEnabled = !!d.totp_enabled;
+        els.logoutBtn.hidden = false;
+        state.username = d.username || username;
+        els.acctHint.textContent = `Signed in as ${d.username || username} (${roleLabel()})`;
+        applyDefaultPasswordWarning(d.default_password);
+        applyRoleUI();
+        if (state.canManageUsers && state.activeView === "settings") loadUsers();
+        hideLoginGate();
+        startDashboard();
+        refreshReservations();
+      } catch (err) {
+        setLoginError(err.message);
+      } finally {
+        els.loginBtn.disabled = false;
+      }
+    });
+
+    els.logoutBtn.addEventListener("click", async () => {
+      try {
+        await postJSON("/api/auth/logout", {});
+      } catch (err) { }
+      location.reload();
+    });
+
+    els.pwOpen.addEventListener("click", () => {
+      const me = (state.users || []).find((u) => u.username === state.username);
+      openUserModal(me || { username: state.username, owner: state.isOwner });
+    });
+  }
+
+  function totpMsg(msg) {
+    els.totpMsg.hidden = !msg;
+    els.totpMsg.textContent = msg || "";
+  }
+
+  function updateTotpCard() {
+    if (!els.totpCard) return;
+    els.totpCard.hidden = !state.authed;
+    const on = !!state.totpEnabled;
+    els.totpBadge.textContent = on ? "2FA enabled" : "Not enabled";
+    els.totpBadge.className = "badge" + (on ? " badge-ok" : "");
+    els.totpStartBtn.hidden = on;
+    els.totpEnroll.hidden = true;
+    els.totpDisableRow.hidden = !on;
+    els.totpCode.value = "";
+    els.totpDisablePass.value = "";
+    els.totpDisableCode.value = "";
+    totpMsg("");
+  }
+
+  function renderTotpQr(uri) {
+    const qr = (typeof qrcode !== "undefined") && qrcode(0, "M");
+    if (!qr) return;
+    qr.addData(uri);
+    qr.make();
+    els.totpQr.width = 240;
+    els.totpQr.height = 240;
+    const ctx = els.totpQr.getContext("2d");
+    const img = qr.createDataURL(8, 4);
+    const im = new Image();
+    im.onload = () => {
+      ctx.clearRect(0, 0, 240, 240);
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, 240, 240);
+      ctx.drawImage(im, 0, 0, 240, 240);
+    };
+    im.src = img;
+  }
+
+  function bindTotpActions() {
+    els.totpStartBtn.addEventListener("click", async () => {
+      totpMsg("");
+      els.totpStartBtn.disabled = true;
+      try {
+        const d = await postJSON("/api/auth/totp/setup", {});
+        els.totpSecret.textContent = d.secret;
+        renderTotpQr(d.uri);
+        els.totpEnroll.hidden = false;
+        try { els.totpCode.focus(); } catch (err) { }
+      } catch (err) {
+        totpMsg(err.message);
+      } finally {
+        els.totpStartBtn.disabled = false;
+      }
+    });
+
+    els.totpCancelBtn.addEventListener("click", () => {
+      els.totpEnroll.hidden = true;
+      els.totpCode.value = "";
+      totpMsg("");
+    });
+
+    els.totpConfirmBtn.addEventListener("click", async () => {
+      const code = els.totpCode.value.trim();
+      if (!/^\d{6}$/.test(code)) { totpMsg("Enter the 6-digit code from your app."); return; }
+      els.totpConfirmBtn.disabled = true;
+      totpMsg("");
+      try {
+        await postJSON("/api/auth/totp/confirm", { code });
+        state.totpEnabled = true;
+        updateTotpCard();
+        if (state.canManageUsers) loadUsers();
+      } catch (err) {
+        totpMsg(err.message);
+      } finally {
+        els.totpConfirmBtn.disabled = false;
+      }
+    });
+
+    els.totpDisableBtn.addEventListener("click", async () => {
+      const current = els.totpDisablePass.value;
+      const code = els.totpDisableCode.value.trim();
+      if (!current) { totpMsg("Enter your current password."); return; }
+      if (!/^\d{6}$/.test(code)) { totpMsg("Enter a 6-digit code."); return; }
+      els.totpDisableBtn.disabled = true;
+      totpMsg("");
+      try {
+        await postJSON("/api/auth/totp/disable", { current, code });
+        state.totpEnabled = false;
+        updateTotpCard();
+        if (state.canManageUsers) loadUsers();
+      } catch (err) {
+        totpMsg(err.message);
+      } finally {
+        els.totpDisableBtn.disabled = false;
+      }
+    });
+  }
+
+  async function bootstrapAuth() {
+    let d;
+    try {
+      d = await fetchJSON("/api/auth/session");
+    } catch (err) {
+      showLoginGate(false, "Cannot reach the dashboard API (" + err.message + ").");
+      return;
+    }
+    if (!state.themeBootstrapped && d.active_theme && d.active_theme.colors) {
+      state.allThemes = [Object.assign({ builtin: true }, d.active_theme)];
+      applyTheme(d.active_theme.id, { persist: false, repaint: false });
+    }
+    if (!d.authenticated) {
+      showLoginGate(!!d.setup_required);
+      return;
+    }
+    state.authed = true;
+    state.role = d.role || "viewer";
+    state.isOwner = !!d.is_owner;
+    state.canManageUsers = !!d.can_manage_users;
+    state.totpEnabled = !!d.totp_enabled;
+    state.routerLat = (d.router_lat != null) ? Number(d.router_lat) : null;
+    state.routerLon = (d.router_lon != null) ? Number(d.router_lon) : null;
+    els.logoutBtn.hidden = false;
+    if (d.username) {
+      state.username = d.username;
+      els.acctHint.textContent = `Signed in as ${d.username} (${roleLabel()})`;
+    }
+    applyDefaultPasswordWarning(d.default_password);
+    applyRoleUI();
+    if (state.canManageUsers && state.activeView === "settings") loadUsers();
+    startDashboard();
+  }
+
+  function startDashboard() {
+    schedule();
+    refresh();
+    refreshDns();
+    loadDnsUpstream();
+    refreshDomains();
+    refreshFirewall();
+    refreshSecurity();
+    refreshSuricata();
+    refreshZeek();
+    refreshZeekQuic();
+    refreshCrowdsec();
+    refreshCustomBlocklist();
+    refreshBandwidth();
+    refreshBlocklists();
+    refreshSystem();
+    refreshServices();
+    refreshWireguard();
+    refreshOverview();
+    loadThemes();
+    setInterval(refreshSystem, 60000);
+    startLiveGraphs();
+    // On a fresh login (no persisted session bootstrap) the router location is
+    // not yet on state; fetch it so the attack map centers on the saved location.
+    if (state.routerLat == null) {
+      fetchJSON("/api/auth/session")
+        .then((d) => {
+          if (d.router_lat != null && d.router_lon != null) {
+            state.routerLat = Number(d.router_lat);
+            state.routerLon = Number(d.router_lon);
+            if (els.routerLat) els.routerLat.value = state.routerLat;
+            if (els.routerLon) els.routerLon.value = state.routerLon;
+            applyRouterTarget();
+          }
+        })
+        .catch(() => {});
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", init);
+})();
+
+/* =========================================================================
+   Table row caps (appended 2026-09-24)
+   -------------------------------------------------------------------------
+   Long list cards (CrowdSec alerts, custom blocklist, DHCP leases, firewall
+   events…) used to render every row, so a single card could stretch a page
+   to several screens. Each registered table now shows the first N rows and
+   offers an inline "Show all / Show less" control.
+
+   Implemented as a self-contained observer rather than by editing each
+   renderer: every table here is re-rendered by writing tbody.innerHTML (and
+   the search/chip filters re-render too), so a MutationObserver re-applies
+   the cap automatically after any refresh, filter or poll — no render
+   function needs to know this exists.
+
+   Expanded state is keyed by table id and survives re-renders, so a table a
+   user expanded stays expanded across the 30s auto-refresh.
+   ========================================================================= */
+(() => {
+  "use strict";
+
+  const DEFAULT_CAP = 25;
+
+  // Tables that own a long, homogeneous list. Deliberately excluded:
+  //   sec-countries-table / sec-ips-table → already capped at 25 by the
+  //   renderer with their own "Show more" modal, and
+  //   tm-table → lives in a fixed-height scroller (.tm-scroll).
+  const CAPPED = [
+    "cs-decisions-table",
+    "cs-alerts-table",
+    "cbl-table",
+    "leases-table",
+    "res-table",
+    "bl-table",
+    "wl-table",
+    "dm-table",
+    "vlan-table",
+    "pol-table",
+    "fw-rules-table",
+    "fw-events",
+    "pf-table",
+    "dmz-table",
+    "wg-peers-table",
+    "bw-clients-table",
+    "sys-services",
+    "sec-countries-table",
+    "sec-ips-table",
+    "tm-table",
+    "cs-bouncers-table",
+    "sec-zeek-table",
+    "sec-zeek-dev-table",
+    "sec-quic-table",
+    "sec-aide-table",
+    "sec-honey-table",
+    "sec-canary-table",
+  ];
+
+  const expanded = new Map();   // tableId -> bool
+  const scheduled = new WeakSet();
+
+  function rowsOf(tbody) {
+    return Array.from(tbody.rows);
+  }
+
+  function apply(table, cap) {
+    const tbody = table.tBodies[0];
+    if (!tbody) return;
+
+    const id = table.id;
+    const rows = rowsOf(tbody);
+    const isOpen = expanded.get(id) === true;
+    const bar = ensureBar(table);
+    if (!bar) return;
+
+    if (rows.length <= cap) {
+      rows.forEach((r) => r.classList.remove("tw-row-capped"));
+      bar.hidden = true;
+      return;
+    }
+
+    bar.hidden = false;
+    rows.forEach((r, i) => {
+      r.classList.toggle("tw-row-capped", !isOpen && i >= cap);
+    });
+
+    const btn = bar.querySelector(".tw-more-btn");
+    btn.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    btn.querySelector(".tw-more-label").textContent = isOpen ? "Show less" : "Show all";
+    btn.querySelector(".tw-more-count").textContent = isOpen
+      ? `${rows.length} shown`
+      : `${cap} of ${rows.length}`;
+  }
+
+  function ensureBar(table) {
+    const wrap = table.closest(".table-wrap");
+    if (!wrap || !wrap.parentNode) return null;
+
+    let bar = wrap.parentNode.querySelector(`:scope > .show-more-bar[data-tw-for="${table.id}"]`);
+    if (bar) return bar;
+
+    bar = document.createElement("div");
+    bar.className = "show-more-bar";
+    bar.dataset.twFor = table.id;
+    bar.hidden = true;
+    bar.innerHTML =
+      '<button type="button" class="btn btn-ghost btn-sm tw-more-btn" aria-expanded="false">' +
+      '<span class="tw-more-label">Show all</span>' +
+      '<span class="tw-more-count"></span>' +
+      '<span class="tw-more-chevron" aria-hidden="true"></span>' +
+      "</button>";
+
+    bar.querySelector(".tw-more-btn").addEventListener("click", () => {
+      const open = expanded.get(table.id) === true;
+      expanded.set(table.id, !open);
+      if (!open) markReveal(table);
+      apply(table, capFor(table));
+    });
+
+    wrap.insertAdjacentElement("afterend", bar);
+    return bar;
+  }
+
+  // Stagger the rows that are about to appear (cap the delay so expanding a
+  // 2000-row table doesn't animate for a minute).
+  function markReveal(table) {
+    const tbody = table.tBodies[0];
+    if (!tbody) return;
+    const cap = capFor(table);
+    rowsOf(tbody).slice(cap).forEach((r, i) => {
+      if (i > 24) return;
+      r.style.setProperty("--tw-delay", `${Math.min(i * 18, 420)}ms`);
+      r.classList.add("tw-row-reveal");
+      r.addEventListener("animationend", () => {
+        r.classList.remove("tw-row-reveal");
+        r.style.removeProperty("--tw-delay");
+      }, { once: true });
+    });
+  }
+
+  function capFor(table) {
+    const attr = parseInt(table.dataset.twCap || "", 10);
+    return Number.isFinite(attr) && attr > 0 ? attr : DEFAULT_CAP;
+  }
+
+  function schedule(table) {
+    if (scheduled.has(table)) return;
+    scheduled.add(table);
+    requestAnimationFrame(() => {
+      scheduled.delete(table);
+      apply(table, capFor(table));
+    });
+  }
+
+  function attach(table) {
+    if (!table.tBodies[0] || table.dataset.twCapped === "1") return;
+    table.dataset.twCapped = "1";
+
+    // Observed on the table with subtree:true rather than on the tbody, so the
+    // cap survives a renderer that swaps the whole <tbody> out. Only childList
+    // is watched — apply() changes classes/styles (attributes) and writes the
+    // bar outside the table, so this can never re-trigger itself.
+    new MutationObserver(() => schedule(table))
+      .observe(table, { childList: true, subtree: true });
+    schedule(table);
+  }
+
+  function init() {
+    CAPPED.forEach((id) => {
+      const el = document.getElementById(id);
+      if (el && el.tagName === "TABLE") attach(el);
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();
+
+/* Topbar elevation: add .is-stuck once the page is scrolled so the frosted
+   sticky header gains its bottom hairline. Passive + rAF-throttled. */
+(function () {
+  const bar = document.querySelector(".topbar");
+  if (!bar) return;
+  let queued = false;
+  function sync() {
+    queued = false;
+    bar.classList.toggle("is-stuck", window.scrollY > 4);
+  }
+  window.addEventListener("scroll", () => {
+    if (!queued) { queued = true; requestAnimationFrame(sync); }
+  }, { passive: true });
+  sync();
+})();
+
+/* Live tables: mirror each <th> heading onto its cells as data-label, so the
+   responsive card layouts in polish.css can print field names without
+   hard-coding them per table. Re-runs after every live render; only childList
+   is observed, and labelling itself only writes attributes, so it can't loop. */
+(function () {
+  const views = ["view-security", "view-crowdsec", "view-firewall"]
+    .map((id) => document.getElementById(id))
+    .filter(Boolean);
+  if (!views.length) return;
+  const queued = new Map();
+
+  function labelTables(view) {
+    queued.set(view, false);
+    view.querySelectorAll(".table-wrap table").forEach((table) => {
+      const heads = Array.from(table.querySelectorAll("thead th"), (th) => th.textContent.trim());
+      if (!heads.length) return;
+      table.querySelectorAll("tbody td").forEach((td) => {
+        const label = td.hasAttribute("colspan") ? "" : (heads[td.cellIndex] || "");
+        if (label) {
+          if (td.getAttribute("data-label") !== label) td.setAttribute("data-label", label);
+        } else if (td.hasAttribute("data-label")) {
+          td.removeAttribute("data-label");
+        }
+      });
+    });
+  }
+
+  function schedule(view) {
+    if (queued.get(view)) return;
+    queued.set(view, true);
+    requestAnimationFrame(() => labelTables(view));
+  }
+
+  views.forEach((view) => {
+    new MutationObserver(() => schedule(view)).observe(view, { childList: true, subtree: true });
+    schedule(view);
+  });
+})();
+
+/* ── Animated top glow on every dashboard card ───────────────────────────── */
+(function cardTopGlow() {
+  "use strict";
+  const SELECTOR = ".card, .ov-mon, .stat-card, .fw-card";
+  let scheduled = false;
+
+  function ensure() {
+    document.querySelectorAll(SELECTOR).forEach((el) => {
+      if (el.querySelector(":scope > .card-topglow")) return;
+      el.classList.add("card-topglow-host");
+      const glow = document.createElement("span");
+      glow.className = "card-topglow";
+      glow.setAttribute("aria-hidden", "true");
+      if (el.children.length > 1) {
+        el.insertBefore(glow, el.lastElementChild);
+      } else {
+        el.appendChild(glow);
+      }
+    });
+  }
+
+  function schedule() {
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(() => {
+      scheduled = false;
+      ensure();
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", ensure, { once: true });
+  } else {
+    ensure();
+  }
+  new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
+})();
