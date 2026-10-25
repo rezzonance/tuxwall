@@ -10055,6 +10055,63 @@
   // arrow-key support on top without touching any of that.
   function ocSubtabStrips() { return document.querySelectorAll(".fw-subtabs"); }
 
+  const SUBTAB_STORAGE_KEY = "tuxwall.subtabs";
+
+  function tabPaneValue(tab) {
+    if (!tab) return "";
+    for (const [key, value] of Object.entries(tab.dataset)) {
+      if (/Pane$/.test(key) && value) return value;
+    }
+    return "";
+  }
+
+  function tabStoreKey(strip) {
+    const viewEl = strip.closest(".view");
+    let view = viewEl ? viewEl.id.replace(/^view-/, "") : "global";
+    if (viewEl && viewEl.dataset.pluginView) view = "plugin:" + viewEl.dataset.pluginView;
+    return view + "::" + (strip.id || "tabs");
+  }
+
+  function readTabState() {
+    try { return JSON.parse(localStorage.getItem(SUBTAB_STORAGE_KEY) || "{}") || {}; }
+    catch (_) { return {}; }
+  }
+
+  function saveTabState(strip) {
+    if (!strip) return;
+    const pane = tabPaneValue(strip.querySelector(".fw-subtab.active"));
+    if (!pane) return;
+    try {
+      const all = readTabState();
+      all[tabStoreKey(strip)] = pane;
+      localStorage.setItem(SUBTAB_STORAGE_KEY, JSON.stringify(all));
+    } catch (_) { /* storage unavailable */ }
+  }
+
+  function restoreTabState(root) {
+    const scope = root || document;
+    const all = readTabState();
+    scope.querySelectorAll(".fw-subtabs").forEach((strip) => {
+      if (strip.closest("[hidden]") || strip.offsetParent === null) return;
+      const wanted = all[tabStoreKey(strip)];
+      if (!wanted) return;
+      const tabs = [...strip.querySelectorAll(".fw-subtab")];
+      const active = strip.querySelector(".fw-subtab.active");
+      if (active && tabPaneValue(active) === wanted) return;
+      const target = tabs.find((tab) => tabPaneValue(tab) === wanted);
+      if (target) target.click();
+    });
+  }
+
+  // Remember the active sub-tab whenever one is clicked (the page's own
+  // handler runs first, then this bubble listener stores the resulting state).
+  document.addEventListener("click", (e) => {
+    const tab = e.target.closest(".fw-subtab");
+    if (!tab) return;
+    const strip = tab.closest(".fw-subtabs");
+    if (strip) setTimeout(() => saveTabState(strip), 0);
+  });
+
   function syncSubtabState() {
     ocSubtabStrips().forEach((strip) => {
       const tabs = [...strip.querySelectorAll(".fw-subtab")];
@@ -10257,6 +10314,7 @@
     "File Integrity (AIDE)": "shield", "Traffic Monitor": "activity",
     "Diagnose Blocked Traffic": "search", "WireGuard VPN": "lock", "Clients": "users",
     "Active Decisions": "shield", "Bouncers (Remediation Components)": "server",
+    "Installed Plugins": "layers", "Available Plugins": "download",
     "Recent Alerts": "bell", "Custom Banlist": "ban", "Top Downloaders": "download",
     "System Info": "cpu", "Network Interfaces": "network", "DHCP Pools per Interface": "server",
     "System Services": "server", "Reboot": "power", "System Configuration Backup": "archive",
@@ -10373,6 +10431,16 @@
     mounted: new Set(), loaded: new Set()
   };
 
+  function pluginActionIcon(name) {
+    if (name === "trash") {
+      return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6l1 2h4v2H4V5h4l1-2Zm-3 6h12l-1 12H7L6 9Zm4 2v8h2v-8h-2Zm4 0v8h2v-8h-2Z"/></svg>';
+    }
+    if (name === "power") {
+      return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 3h-2v10h2V3Zm4.83 2.17-1.42 1.42A6.92 6.92 0 0 1 19 12c0 3.87-3.13 7-7 7a6.995 6.995 0 0 1-4.42-12.42L6.17 5.17A8.932 8.932 0 0 0 3 12a9 9 0 0 0 18 0c0-2.74-1.23-5.18-3.17-6.83Z"/></svg>';
+    }
+    return "";
+  }
+
   function pluginNavSvg(name) {
     const body = PLUGIN_NAV_ICONS[name] || PLUGIN_NAV_ICONS.plug;
     return `<svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
@@ -10463,7 +10531,8 @@
     });
     if (state.activeView && state.activeView.startsWith("plugin:")) {
       const id = state.activeView.slice(7);
-      if (pluginHost.meta.has(id)) mountPlugin(id);
+      if (pluginHost.meta.has(id)) switchView(state.activeView);
+      else switchView("overview");
     }
   }
 
@@ -10556,7 +10625,6 @@
       return;
     }
     listEl.innerHTML = pluginHost.list.map((p) => {
-      const canOpen = !!(p.enabled && p.nav && p.nav.label);
       return `<div class="plugin-item${p.error ? " is-error" : ""}">
         <div class="plugin-item-main">
           <div class="plugin-item-title">${esc(p.name || p.id)} <span class="plugin-version">${esc(p.version || "")}</span></div>
@@ -10564,8 +10632,8 @@
           <div class="plugin-item-meta"><code>${esc(p.id)}</code> · ${p.enabled ? "enabled" : "disabled"}${p.web ? " · web view" : ""}</div>
         </div>
         <div class="plugin-item-actions">
-          ${canOpen ? `<button class="btn btn-sm" data-plugin-open="${esc(p.id)}" type="button">Open</button>` : ""}
-          <button class="btn btn-sm ${p.enabled ? "btn-ghost" : ""}" data-plugin-toggle="${esc(p.id)}" data-enabled="${p.enabled ? "1" : "0"}" type="button"${p.error ? " disabled" : ""}>${p.enabled ? "Disable" : "Enable"}</button>
+          <button class="icon-btn icon-btn-danger" data-plugin-uninstall="${esc(p.id)}" type="button" title="Uninstall plugin" aria-label="Uninstall ${esc(p.name || p.id)}">${pluginActionIcon("trash")}</button>
+          <button class="icon-btn plugin-power${p.enabled ? " is-on" : " is-off"}" data-plugin-toggle="${esc(p.id)}" data-enabled="${p.enabled ? "1" : "0"}" type="button" title="${p.enabled ? "Disable" : "Enable"} plugin" aria-label="${p.enabled ? "Disable" : "Enable"} ${esc(p.name || p.id)}"${p.error ? " disabled" : ""}>${pluginActionIcon("power")}</button>
         </div>
       </div>`;
     }).join("");
@@ -10582,55 +10650,24 @@
         }
       });
     });
-    listEl.querySelectorAll("[data-plugin-open]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const viewName = "plugin:" + btn.dataset.pluginOpen;
-        switchView(viewName);
-        if (history.replaceState) history.replaceState(null, "", "#" + viewName);
+    listEl.querySelectorAll("[data-plugin-uninstall]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const pid = btn.dataset.pluginUninstall;
+        if (!window.confirm(`Uninstall ${pid}? This removes the plugin, its settings and any stored credentials. The plugin's nav entry disappears after the list reloads.`)) return;
+        btn.disabled = true;
+        try {
+          const d = await postJSON("/api/plugins/" + encodeURIComponent(pid) + "/uninstall", {});
+          if (!d.ok) throw new Error(d.error || "Uninstall failed");
+          // leave the plugin view if we're on it
+          if (state.activeView === "plugin:" + pid) switchView("system");
+          await loadPluginsView();
+          await loadAvailablePlugins();
+          await loadPluginHost();
+        } catch (err) {
+          btn.disabled = false;
+          alert("Uninstall failed: " + err.message);
+        }
       });
-    });
-  }
-
-  function bindPluginInstall() {
-    const open = document.getElementById("plugin-install-open");
-    const modal = document.getElementById("plugin-install-modal");
-    const url = document.getElementById("plugin-install-url");
-    const run = document.getElementById("plugin-install-run");
-    const msg = document.getElementById("plugin-install-msg");
-    if (!open || !modal || !url || !run || !msg) return;
-    const close = () => { modal.hidden = true; };
-    const showError = (text) => {
-      msg.textContent = text || "";
-      msg.hidden = !text;
-    };
-    open.addEventListener("click", () => {
-      showError("");
-      modal.hidden = false;
-      setTimeout(() => url.focus(), 30);
-    });
-    document.getElementById("plugin-install-close").addEventListener("click", close);
-    document.getElementById("plugin-install-cancel").addEventListener("click", close);
-    modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && !modal.hidden) close();
-    });
-    run.addEventListener("click", async () => {
-      const value = url.value.trim();
-      if (!value) { showError("Paste a GitHub folder URL."); return; }
-      run.disabled = true;
-      showError("");
-      try {
-        const d = await postJSON("/api/plugins/install", { url: value });
-        if (!d.ok) throw new Error(d.error || "Install failed");
-        url.value = "";
-        close();
-        await loadPluginsView();
-        await loadPluginHost();
-      } catch (err) {
-        showError(err.message);
-      } finally {
-        run.disabled = false;
-      }
     });
   }
 
@@ -10638,7 +10675,11 @@
     register(id, def) {
       if (!id || !def) return;
       pluginHost.registry.set(id, def);
-      if (state.activeView === "plugin:" + id) mountPlugin(id);
+      if (state.activeView === "plugin:" + id) {
+        mountPlugin(id);
+        const viewEl = document.getElementById("view-plugin-" + id);
+        setTimeout(() => restoreTabState(viewEl), 0);
+      }
     },
     api: pluginApi
   };
@@ -10722,6 +10763,8 @@
       }
       if (pluginId) mountPlugin(pluginId);
       els.soon.hidden = true;
+      try { localStorage.setItem("tuxwall.view", view); } catch (_) { }
+      setTimeout(() => restoreTabState(viewEl), 0);
       if (view === "ai" && window.__tuxwallAgentEnable) {
         window.__tuxwallAgentEnable();
       }
@@ -12338,8 +12381,12 @@
       }
     });
 
-    const initial = (location.hash || "#overview").replace("#", "");
-    switchView(VIEW_TITLES[initial] ? initial : "overview");
+    let initial = (location.hash || "").replace("#", "");
+    let storedView = "";
+    try { storedView = localStorage.getItem("tuxwall.view") || ""; } catch (_) { }
+    if (!initial) initial = storedView || "overview";
+    const viewKnown = (name) => !!name && (VIEW_TITLES[name] || name.startsWith("plugin:"));
+    switchView(viewKnown(initial) ? initial : (viewKnown(storedView) ? storedView : "overview"));
 
     bindBlocklistActions();
     bindRpzActions();
@@ -12988,7 +13035,6 @@
   function bindAuthActions() {
     bindUserMenu();
     bindIncidents();
-    bindPluginInstall();
     bindPluginCatalogInstalls();
 
     els.loginForm.addEventListener("submit", async (ev) => {

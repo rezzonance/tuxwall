@@ -12368,7 +12368,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, {"ok": False, "error": str(exc)})
 
         elif path.startswith("/api/plugins/"):
-            m = re.match(r"^/api/plugins/([a-z][a-z0-9-]{1,31})/(enable|config|action)$", path)
+            m = re.match(r"^/api/plugins/([a-z][a-z0-9-]{1,31})/(enable|config|action|uninstall)$", path)
             if not m:
                 self._send(404, {"ok": False, "error": "plugin route not found"})
                 return
@@ -12378,6 +12378,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, _plugin_save_config(pid, {"enabled": bool(body.get("enabled"))}))
                 elif action == "config":
                     self._send(200, _plugin_save_config(pid, body))
+                elif action == "uninstall":
+                    self._send(200, uninstall_plugin(pid))
                 else:
                     result = plugin_action(pid, body.get("action") or "", body.get("payload") or {})
                     self._send(200, result)
@@ -14537,6 +14539,23 @@ def plugin_action(pid, action, payload):
     if not isinstance(out, dict):
         out = {"ok": True, "data": out}
     return out
+
+
+def uninstall_plugin(pid):
+    """Remove an installed plugin entirely.
+
+    Deletes the plugin's directory - code, web assets, and its config.json
+    (including any credentials the plugin stored). Plugin workers are
+    spawned per request (nothing persistent to stop), so removal is
+    immediate; the install lock prevents racing a concurrent install."""
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", pid or ""):
+        raise ValueError("invalid plugin id")
+    pdir = os.path.join(PLUGINS_DIR, pid)
+    if not os.path.isdir(pdir):
+        raise ValueError("plugin %s is not installed" % pid)
+    with _PLUGIN_INSTALL_LOCK:
+        shutil.rmtree(pdir)
+    return {"ok": True, "removed": pid}
 
 
 def plugin_asset_path(pid, rel):

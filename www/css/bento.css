@@ -3590,3 +3590,76 @@ body.light-theme .card-topglow::before { opacity: .26; }
   border-color: color-mix(in srgb, var(--red) 45%, var(--border));
   background: color-mix(in srgb, var(--red) 9%, var(--card));
 }
+
+/* Plugins page — distinct installed/available card heads and icon actions */
+.plugins-manager .plugins-head {
+  --plugins-tone: #38bdf8;
+  --page-tab: var(--plugins-tone);
+  border-bottom: 1px solid color-mix(in srgb, var(--plugins-tone) 26%, var(--border));
+  background: linear-gradient(100deg,
+    color-mix(in srgb, var(--plugins-tone) 15%, var(--card)) 0%,
+    color-mix(in srgb, var(--plugins-tone) 5%, var(--card)) 46%,
+    var(--card) 100%) !important;
+}
+.plugins-manager .plugins-head::before {
+  display: block !important;
+  width: 3px;
+  background: linear-gradient(180deg,
+    var(--plugins-tone),
+    color-mix(in srgb, var(--plugins-tone) 24%, transparent));
+  opacity: 1;
+  box-shadow: 0 0 14px color-mix(in srgb, var(--plugins-tone) 35%, transparent);
+}
+.plugins-manager .plugins-head .card-head-copy h2 {
+  background: none;
+  -webkit-text-fill-color: currentColor;
+  color: color-mix(in srgb, var(--plugins-tone) 55%, var(--text));
+}
+.plugins-manager .plugins-head .card-head-copy .muted {
+  color: color-mix(in srgb, var(--plugins-tone) 48%, var(--muted));
+}
+.plugins-manager .plugins-head-installed { --plugins-tone: #38bdf8; }
+.plugins-manager .plugins-head-available { --plugins-tone: #bc8cff; }
+body.light-theme .plugins-manager .plugins-head {
+  background: linear-gradient(100deg,
+    color-mix(in srgb, var(--plugins-tone) 12%, var(--card)) 0%,
+    color-mix(in srgb, var(--plugins-tone) 4%, var(--card)) 46%,
+    var(--card) 100%) !important;
+}
+body.light-theme .plugins-manager .plugins-head .card-head-copy .muted {
+  color: color-mix(in srgb, var(--plugins-tone) 38%, var(--muted));
+}
+.plugin-item-actions { gap: 8px; }
+.plugin-item-actions .icon-btn { flex: 0 0 auto; }
+.plugin-power.is-on { color: color-mix(in srgb, var(--amber) 35%, var(--text)); }
+.plugin-power.is-on:not(.btn) {
+  border-color: color-mix(in srgb, var(--amber) 35%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--amber) 20%, transparent),
+              inset 0 1px 0 rgba(255, 255, 255, .1);
+}
+.plugin-power.is-on:not(.btn):hover {
+  border-color: var(--amber);
+  color: #fff;
+  box-shadow: 0 0 8px var(--amber),
+              0 0 20px color-mix(in srgb, var(--amber) 40%, transparent),
+              inset 0 1px 0 rgba(255, 255, 255, .18);
+}
+.plugin-power.is-on:not(.btn):hover svg { filter: drop-shadow(0 0 4px var(--amber)); }
+.plugin-power.is-off { color: color-mix(in srgb, var(--green) 40%, var(--text)); }
+.plugin-power.is-off:not(.btn) {
+  border-color: color-mix(in srgb, var(--green) 38%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--green) 22%, transparent),
+              inset 0 1px 0 rgba(255, 255, 255, .1);
+}
+.plugin-power.is-off:not(.btn):hover {
+  border-color: var(--green);
+  color: #fff;
+  box-shadow: 0 0 8px var(--green),
+              0 0 20px color-mix(in srgb, var(--green) 40%, transparent),
+              inset 0 1px 0 rgba(255, 255, 255, .18);
+}
+.plugin-power.is-off:not(.btn):hover svg { filter: drop-shadow(0 0 4px var(--green)); }
+@media (max-width: 640px) {
+  .plugin-item-actions { justify-content: flex-end; }
+  .plugin-item-actions .icon-btn { width: 34px; height: 34px; }
+}
