@@ -1,17 +1,17 @@
 Package: tuxwall
 Architecture: all
-Version: 3.1.3
+Version: 3.1.4
 Priority: optional
 Section: admin
 Maintainer: jeff <jeff@localhost>
 Depends: python3, nginx, unbound, unbound-anchor, kea-dhcp4-server, kea-common, radvd, avahi-daemon, suricata, suricata-update, wireguard-tools, ufw, iptables, nftables, curl, jq, gzip, ieee-data, iproute2, rsync, aide
 Suggests: crowdsec, crowdsec-firewall-bouncer-iptables, python3-maxminddb, speedtest, zeek
-Filename: pool/main/t/tuxwall/tuxwall_3.1.3_all.deb
-Size: 7297984
-MD5sum: 5eb98bbfa280f987f0b2c0a1390febb0
-SHA1: 547f795116c28111f610ef583c73795cdb954226
-SHA256: bf7e6f4bcb6269556a0b099161fb7ed700c46e7bb14d0068159b0239bf9553cd
-SHA512: 6f709372d5b3cbd4eebe54f8aaf6496e12121faf9248b00ac8d8ab71da9c719189831ed5beb15179066f471030ece8c1a2f421b0b6d22c0521a3ec79fa39ff92
+Filename: pool/main/t/tuxwall/tuxwall_3.1.4_all.deb
+Size: 7298016
+MD5sum: 6cb4fe99c025947e53717d42d383405a
+SHA1: 4e71c3ad822c5bfcc341e8607693e0fe23cf7aa5
+SHA256: 29a131c7e3aac6a3182f9ac3842ae8b26f704dee8f7cafb09a22cae51086279e
+SHA512: f2a3b422654cb2912fdf00a5b0e48bd81c6cfb0b926d2bfa38c11bda6092b5f77ab62b889790b2091d68c23a56a586634dbdf192898a0c169d417881155a0829
 Description: TuxWall Network Firewall Dashboard
  Modern web dashboard for a home/edge router featuring DHCP lease management,
  Unbound DNS and blocklist control, UFW firewall rules, WireGuard VPN status,
