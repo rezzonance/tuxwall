@@ -1,0 +1,43 @@
+name: Publish plugin catalog
+
+# Regenerates plugins/catalog.json from the plugin source folders and
+# publishes it to the gh-pages site whenever plugins/ changes on main -
+# so dashboards' "Available plugins" list populates as plugins are
+# created, with no release/tag dependency. Plugin code itself is NEVER
+# published here: install-from-GitHub fetches source archives straight
+# from github.com/codeload using the URLs in the catalog.
+
+on:
+  push:
+    branches: [main]
+    paths: ["plugins/**", "tools/build-plugin-catalog.py"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+
+      - name: Regenerate catalog
+        run: python3 tools/build-plugin-catalog.py .
+
+      - name: Publish to gh-pages
+        run: |
+          # stash the generated catalog outside the tree first:
+          # checking out gh-pages would otherwise clobber it
+          cp plugins/catalog.json /tmp/catalog.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin gh-pages
+          git checkout --force gh-pages
+          mkdir -p plugins
+          cp /tmp/catalog.json plugins/catalog.json
+          git add plugins/catalog.json
+          git diff --cached --quiet && echo "catalog unchanged" && exit 0
+          git commit -m "plugins: refresh catalog"
+          git push origin gh-pages

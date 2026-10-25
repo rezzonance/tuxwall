@@ -2889,6 +2889,15 @@
         </div>
         <div id="plugins-list" class="plugins-list"></div>
       </div>
+
+      <div class="card card-mt plugins-manager" id="plugins-available-card" hidden>
+        <div class="card-head">
+          <h2>Available Plugins</h2>
+          <span class="muted" id="plugins-available-status">Loading…</span>
+        </div>
+        <p class="muted">Published by the TuxWall project — installing fetches the plugin source directly from GitHub and runs it as the same isolated worker. Only install code you trust.</p>
+        <div id="plugins-available-list" class="plugins-list"></div>
+      </div>
       </div>
 
     </section>
@@ -3587,7 +3596,7 @@
     <p class="muted" id="cs-ban-status" style="margin-top:10px"></p>
   </div>
 </div>
-<script src="/scripts/dashboard.js?v=202610250425"></script>
+<script src="/scripts/dashboard.js?v=202610251200"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>
