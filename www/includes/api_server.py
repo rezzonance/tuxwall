@@ -11609,6 +11609,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_crowdsec_ban_state())
         elif path == "/api/plugins":
             self._send(200, list_plugins())
+        elif path == "/api/plugins/available":
+            # NOTE: GET route (the dashboard fetches this); the twin
+            # registration lives in do_POST next to install_plugin_from_github
+            # - registering it there only made it 404 here (the generic
+            # /api/plugins/ pattern swallowed it). Keep this one canonical.
+            try:
+                catalog = build_plugin_catalog()
+                installed = set()
+                for p in list_plugins():
+                    installed.add(p.get("id"))
+                for entry in (catalog.get("plugins") or []):
+                    entry["installed"] = entry.get("id") in installed
+                self._send(200, catalog)
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
         elif path.startswith("/api/plugins/"):
             rest = path[len("/api/plugins/"):]
             parts = rest.split("/")
