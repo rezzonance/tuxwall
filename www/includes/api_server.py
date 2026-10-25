@@ -3290,14 +3290,18 @@ def set_canary_enabled(enabled):
                         if "{}:{}".format(wan_ip, p) in line:
                             _ufw(["allow", "in", "on", HONEY_WAN_IFACE, "to", "any",
                                   "port", str(p), "proto", "tcp",
-                                  "comment", "tuxwall canary"])
+                                  "comment", "tuxwall-canary"])
                             opened.append(p)
             except Exception:
                 pass
         if os.popen("ss -uln 2>/dev/null | grep ':161 '").read().strip():
+            # ufw comments must be a single token in argv form: a
+            # multi-word value passes as separate args and ufw rejects the
+            # stray words ("Invalid token 'canary'") - which killed this
+            # route's response (nginx 502 HTML -> browser JSON error).
             _ufw(["allow", "in", "on", HONEY_WAN_IFACE, "to", "any",
                   "port", str(CANARY_SNMP_PORT), "proto", "udp",
-                  "comment", "tuxwall canary snmp"])
+                  "comment", "tuxwall-canary-snmp"])
             opened.append(CANARY_SNMP_PORT)
         _honey_log("canary enabled (ports {})".format(opened))
         return {"ok": True, "enabled": True, "ports": opened}
