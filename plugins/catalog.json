@@ -1,6 +1,6 @@
 {
   "ok": true,
-  "generated": 1792922537,
+  "generated": 1792923177,
   "plugins": [
     {
       "id": "cert-watch",
@@ -13,6 +13,18 @@
         "order": 81
       },
       "url": "https://github.com/rezzonance/tuxwall/tree/main/plugins/cert-watch-plugin"
+    },
+    {
+      "id": "perimeter-watch",
+      "name": "Perimeter Watch",
+      "version": "0.1.0",
+      "description": "External security audit of your WAN: what Shodan observes open on your IP (compared against what you intend, including honeypot and canary traps), plus CrowdSec CTI reputation. Keyless.",
+      "nav": {
+        "label": "Perimeter",
+        "icon": "globe",
+        "order": 82
+      },
+      "url": "https://github.com/rezzonance/tuxwall/tree/main/plugins/perimeter-watch-plugin"
     },
     {
       "id": "unifi",
