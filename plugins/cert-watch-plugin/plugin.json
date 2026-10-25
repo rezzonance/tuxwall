@@ -1,0 +1,22 @@
+{
+  "id": "cert-watch",
+  "name": "Certificate Watch",
+  "version": "0.1.0",
+  "api": 1,
+  "description": "TLS certificate expiry monitoring: scans the certificates your services actually present, raises incidents as they age, and includes renewal guidance.",
+  "enabled": true,
+  "alerts": true,
+  "nav": { "label": "Certs", "icon": "globe", "order": 81 },
+  "settings": [
+    { "key": "endpoints", "label": "Endpoints to watch", "type": "text",
+      "placeholder": "127.0.0.1:443, nas.lan:443",
+      "default": "127.0.0.1:443",
+      "help": "host:port entries, comma or newline separated. The plugin connects and reads the certificate the service actually presents - no file access or privileges needed." },
+    { "key": "warning_days", "label": "Warning threshold (days)", "type": "text", "default": "14" },
+    { "key": "critical_days", "label": "Critical threshold (days)", "type": "text", "default": "7" },
+    { "key": "renewal_hint", "label": "Renewal hint", "type": "text",
+      "placeholder": "sudo certbot renew && sudo systemctl reload nginx",
+      "default": "",
+      "help": "Shown with every expiry incident. For Let's Encrypt certs a certbot command is added automatically." }
+  ]
+}

@@ -441,12 +441,15 @@ and credentials stay on the router in `/etc/tuxwall/plugins/<id>/config.json`
 (never committed). Plugin UI assets are served read-only via
 `/api/plugins/<id>/asset/...`.
 
-To install a plugin, open **Settings → Plugins → Install from GitHub** and
-paste the plugin's folder URL. Example (the bundled UniFi WiFi plugin):
+To install a plugin, open **Settings → Plugins** and use the **Available
+Plugins** card: the project catalog lists every published plugin, and
+installing fetches the plugin source directly from GitHub and runs it as
+the same isolated worker. The catalog is regenerated automatically whenever
+a plugin folder changes in the repository.
 
-```
-https://github.com/rezzonance/tuxwall/tree/main/plugins/wifi-unifi-plugin
-```
+The backend install endpoint still accepts any public GitHub folder URL
+(`plugin.json` + `main.py` + optional `web/`), so third-party plugins can
+be installed with a direct API call if ever needed.
 
 A plugin folder needs:
 
@@ -460,6 +463,7 @@ A plugin folder needs:
 | Plugin | Description |
 | --- | --- |
 | [wifi-unifi-plugin](plugins/wifi-unifi-plugin) | Read-only UniFi controller view: access points, clients, signal and roaming context. Supports classic Network Application, UniFi OS (UDM / Cloud Key), local login or API key. |
+| [cert-watch-plugin](plugins/cert-watch-plugin) | TLS certificate expiry monitoring: connects to each configured endpoint and reads the certificate the service actually presents, raises incidents on a severity ladder (info at 30 days, warning, critical near expiry — critical also fires webhook alerts), and includes renewal guidance (certbot command auto-detected for Let's Encrypt). No file access or credentials needed. |
 
 ---
 
