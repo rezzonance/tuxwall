@@ -118,11 +118,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin gh-pages
+          # stash the built apt tree outside the worktree first: the
+          # checkout + clean below must also purge OTHER untracked build
+          # artifacts (pkg/ from the www sync, the built .deb at root) or
+          # git add -A sweeps them onto gh-pages
+          rm -rf /tmp/apt-tree && cp -a apt /tmp/apt-tree
           git checkout --force gh-pages
           git reset --hard origin/gh-pages
-          # the built apt/ tree is untracked and survives the checkout
-          cp -a apt/. .
-          rm -rf apt
+          git clean -fdx
+          cp -a /tmp/apt-tree/. .
           git add -A
           git diff --cached --quiet && echo "apt tree unchanged" && exit 0
           git commit -m "apt: publish tuxwall ${{ steps.ver.outputs.version }}"
