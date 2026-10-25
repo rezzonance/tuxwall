@@ -11617,7 +11617,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 catalog = build_plugin_catalog()
                 installed = set()
-                for p in list_plugins():
+                for p in ((list_plugins() or {}).get("plugins") or []):
                     installed.add(p.get("id"))
                 for entry in (catalog.get("plugins") or []):
                     entry["installed"] = entry.get("id") in installed
@@ -12359,7 +12359,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 catalog = build_plugin_catalog()
                 installed = set()
-                for p in list_plugins():
+                for p in ((list_plugins() or {}).get("plugins") or []):
                     installed.add(p.get("id"))
                 for entry in (catalog.get("plugins") or []):
                     entry["installed"] = entry.get("id") in installed

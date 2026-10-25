@@ -109,10 +109,28 @@ jobs:
           find . -type f | sort
 
       - name: Publish to GitHub Pages (gh-pages branch)
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_branch: gh-pages
-          publish_dir: ./apt
-          force_orphan: true
-          commit_message: "apt: publish tuxwall ${{ steps.ver.outputs.version }}"
+        run: |
+          # Overlay the apt tree onto the EXISTING gh-pages branch.
+          # The previous force-orphan publish rebuilt the branch from the
+          # apt tree alone, which wiped plugins/catalog.json (the plugin
+          # catalog workflow publishes there too) - the two publishers
+          # must coexist on one branch.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin gh-pages
+          git checkout --force gh-pages
+          git reset --hard origin/gh-pages
+          # the built apt/ tree is untracked and survives the checkout
+          cp -a apt/. .
+          rm -rf apt
+          git add -A
+          git diff --cached --quiet && echo "apt tree unchanged" && exit 0
+          git commit -m "apt: publish tuxwall ${{ steps.ver.outputs.version }}"
+          # the catalog workflow pushes to gh-pages concurrently: retry
+          # with rebase when we lose that race
+          for i in 1 2 3; do
+            if git push origin gh-pages; then break; fi
+            echo "push failed (attempt $i) - rebasing onto remote"
+            git fetch origin gh-pages
+            git rebase origin/gh-pages
+          done
