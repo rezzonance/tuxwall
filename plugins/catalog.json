@@ -1,29 +1,21 @@
 {
   "ok": true,
-  "generated": 1792923177,
+  "generated": 1792984621,
   "plugins": [
     {
       "id": "cert-watch",
       "name": "Certificate Watch",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "description": "TLS certificate expiry monitoring: scans the certificates your services actually present, raises incidents as they age, and includes renewal guidance.",
-      "nav": {
-        "label": "Certs",
-        "icon": "globe",
-        "order": 81
-      },
+      "nav": {},
       "url": "https://github.com/rezzonance/tuxwall/tree/main/plugins/cert-watch-plugin"
     },
     {
       "id": "perimeter-watch",
       "name": "Perimeter Watch",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "description": "External security audit of your WAN: what Shodan observes open on your IP (compared against what you intend, including honeypot and canary traps), plus CrowdSec CTI reputation. Keyless.",
-      "nav": {
-        "label": "Perimeter",
-        "icon": "globe",
-        "order": 82
-      },
+      "nav": {},
       "url": "https://github.com/rezzonance/tuxwall/tree/main/plugins/perimeter-watch-plugin"
     },
     {
