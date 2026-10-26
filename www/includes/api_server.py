@@ -11620,11 +11620,24 @@ class Handler(BaseHTTPRequestHandler):
             # /api/plugins/ pattern swallowed it). Keep this one canonical.
             try:
                 catalog = build_plugin_catalog()
-                installed = set()
+                installed = {}
                 for p in ((list_plugins() or {}).get("plugins") or []):
-                    installed.add(p.get("id"))
+                    if p.get("id"):
+                        installed[p["id"]] = str(p.get("version") or "")
                 for entry in (catalog.get("plugins") or []):
-                    entry["installed"] = entry.get("id") in installed
+                    pid = entry.get("id")
+                    entry["installed"] = pid in installed
+                    if entry["installed"] and installed[pid]:
+                        # semver-ish: "Update" when the catalog version
+                        # is newer than what's on the box
+                        try:
+                            def vt(v):
+                                return [int(x) for x in str(v).split(".")]
+                            entry["update"] = vt(entry.get("version") or "0") > vt(installed[pid])
+                        except (ValueError, TypeError):
+                            entry["update"] = str(entry.get("version") or "") != installed[pid]
+                    else:
+                        entry["update"] = False
                 self._send(200, catalog)
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
@@ -12362,11 +12375,24 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/plugins/available":
             try:
                 catalog = build_plugin_catalog()
-                installed = set()
+                installed = {}
                 for p in ((list_plugins() or {}).get("plugins") or []):
-                    installed.add(p.get("id"))
+                    if p.get("id"):
+                        installed[p["id"]] = str(p.get("version") or "")
                 for entry in (catalog.get("plugins") or []):
-                    entry["installed"] = entry.get("id") in installed
+                    pid = entry.get("id")
+                    entry["installed"] = pid in installed
+                    if entry["installed"] and installed[pid]:
+                        # semver-ish: "Update" when the catalog version
+                        # is newer than what's on the box
+                        try:
+                            def vt(v):
+                                return [int(x) for x in str(v).split(".")]
+                            entry["update"] = vt(entry.get("version") or "0") > vt(installed[pid])
+                        except (ValueError, TypeError):
+                            entry["update"] = str(entry.get("version") or "") != installed[pid]
+                    else:
+                        entry["update"] = False
                 self._send(200, catalog)
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})

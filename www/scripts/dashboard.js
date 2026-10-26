@@ -10574,7 +10574,7 @@
         </div>
         <div class="plugin-item-actions">
           ${p.installed
-            ? '<span class="badge badge-ok">Installed</span>'
+            ? (p.update ? `<button class="btn btn-sm btn-primary" type="button" data-plugin-url="${esc(p.url || "")}" data-plugin-catalog-install="1">Update</button>` : '<span class="badge badge-ok">Installed</span>')
             : `<button class="btn btn-sm btn-primary" type="button" data-plugin-url="${esc(p.url || "")}" data-plugin-catalog-install="1">Install</button>`}
         </div>
       </div>`).join("");
