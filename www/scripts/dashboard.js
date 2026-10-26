@@ -10632,6 +10632,7 @@
           <div class="plugin-item-meta"><code>${esc(p.id)}</code> · ${p.enabled ? "enabled" : "disabled"}${p.web ? " · web view" : ""}</div>
         </div>
         <div class="plugin-item-actions">
+          ${(p.settings || []).length ? `<button class="icon-btn" data-plugin-settings="${esc(p.id)}" type="button" title="Settings" aria-label="Settings for ${esc(p.name || p.id)}">${pluginActionIcon("config")}</button>` : ""}
           <button class="icon-btn icon-btn-danger" data-plugin-uninstall="${esc(p.id)}" type="button" title="Uninstall plugin" aria-label="Uninstall ${esc(p.name || p.id)}">${pluginActionIcon("trash")}</button>
           <button class="icon-btn plugin-power${p.enabled ? " is-on" : " is-off"}" data-plugin-toggle="${esc(p.id)}" data-enabled="${p.enabled ? "1" : "0"}" type="button" title="${p.enabled ? "Disable" : "Enable"} plugin" aria-label="${p.enabled ? "Disable" : "Enable"} ${esc(p.name || p.id)}"${p.error ? " disabled" : ""}>${pluginActionIcon("power")}</button>
         </div>
@@ -10668,6 +10669,120 @@
           alert("Uninstall failed: " + err.message);
         }
       });
+    });
+  }
+
+  // ── Generic plugin settings dialog (manifest-schema driven) ───────
+  // Lets ANY plugin be configured from Settings -> Plugins without
+  // needing its own view - the signal-source archetype (no nav, no
+  // web/) depends on this for configuration.
+  function pluginSettingsFieldHtml(f, value, secretConfigured) {
+    const key = esc(f.key || "");
+    const label = esc(f.label || f.key || "");
+    const help = f.help ? `<span class="muted" style="font-size:11px">${esc(f.help)}</span>` : "";
+    if (f.type === "bool") {
+      return `<label class="fw-field"><span>${label}</span>
+        <span class="log-ctl" style="display:flex;align-items:center;gap:8px">
+          <input type="checkbox" data-psf="${key}" ${value ? "checked" : ""}>
+          <span class="muted">${help ? "enabled" : ""}</span>
+        </span>${help}</label>`;
+    }
+    if (f.type === "select") {
+      const opts = (f.options || []).map((o) =>
+        `<option value="${esc(o.value)}" ${String(value) === String(o.value) ? "selected" : ""}>${esc(o.label || o.value)}</option>`).join("");
+      return `<label class="fw-field"><span>${label}</span>
+        <select data-psf="${key}">${opts}</select>${help}</label>`;
+    }
+    const type = f.type === "password" ? "password" : "text";
+    const ph = f.secret && secretConfigured
+      ? (f.placeholder || "configured - leave empty to keep")
+      : (f.placeholder || "");
+    return `<label class="fw-field"><span>${label}</span>
+      <input type="${type}" data-psf="${key}" value="${esc(value || "")}"
+        placeholder="${esc(ph)}" autocomplete="off" spellcheck="false">${help}</label>`;
+  }
+
+  async function openPluginSettings(pid) {
+    const modal = document.getElementById("plugin-settings-modal");
+    const box = document.getElementById("plugin-settings-fields");
+    const title = document.getElementById("plugin-settings-title");
+    const note = document.getElementById("plugin-settings-note");
+    const msg = document.getElementById("plugin-settings-msg");
+    if (!modal || !box) return;
+    const p = (pluginHost.list || []).find((x) => x.id === pid);
+    if (!p) return;
+    title.textContent = (p.name || pid) + " — settings";
+    note.textContent = p.description || "";
+    msg.hidden = true; msg.textContent = "";
+    box.innerHTML = '<div class="muted" style="padding:12px 0">Loading…</div>';
+    modal.hidden = false;
+    let cfg = { config: {}, secret_configured: {} };
+    try {
+      cfg = await fetchJSON("/api/plugins/" + encodeURIComponent(pid) + "/config");
+      if (!cfg.ok) throw new Error(cfg.error || "config unavailable");
+    } catch (err) {
+      box.innerHTML = `<div class="login-error">${esc(err.message)}</div>`;
+      return;
+    }
+    const fields = (p.settings || []).filter((f) => f && f.key);
+    if (!fields.length) {
+      box.innerHTML = '<p class="muted">This plugin has no settings.</p>';
+      return;
+    }
+    box.innerHTML = fields.map((f) =>
+      pluginSettingsFieldHtml(f, (cfg.config || {})[f.key], (cfg.secret_configured || {})[f.key])
+    ).join("");
+    box.dataset.pid = pid;
+  }
+
+  function bindPluginSettings() {
+    const modal = document.getElementById("plugin-settings-modal");
+    const box = document.getElementById("plugin-settings-fields");
+    const msg = document.getElementById("plugin-settings-msg");
+    const save = document.getElementById("plugin-settings-save");
+    if (!modal || !box) return;
+    const close = () => { modal.hidden = true; };
+    document.getElementById("plugin-settings-close").addEventListener("click", close);
+    document.getElementById("plugin-settings-cancel").addEventListener("click", close);
+    modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !modal.hidden) close();
+    });
+    // settings buttons on installed rows (delegated)
+    const listEl = document.getElementById("plugins-list");
+    if (listEl) {
+      listEl.addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-plugin-settings]");
+        if (!btn) return;
+        openPluginSettings(btn.dataset.pluginSettings);
+      });
+    }
+    save.addEventListener("click", async () => {
+      const pid = box.dataset.pid;
+      if (!pid) return;
+      const fields = [...box.querySelectorAll("[data-psf]")];
+      const config = {};
+      fields.forEach((el) => {
+        const key = el.dataset.psf;
+        if (el.type === "checkbox") config[key] = el.checked;
+        else config[key] = el.value;
+      });
+      save.disabled = true;
+      msg.hidden = true;
+      try {
+        const d = await postJSON("/api/plugins/" + encodeURIComponent(pid) + "/config",
+                                { config });
+        if (!d.ok) throw new Error(d.error || "save failed");
+        close();
+        await loadPluginsView();
+        await loadAvailablePlugins();
+        await loadPluginHost();
+      } catch (err) {
+        msg.hidden = false;
+        msg.textContent = err.message;
+      } finally {
+        save.disabled = false;
+      }
     });
   }
 
@@ -13036,6 +13151,7 @@
     bindUserMenu();
     bindIncidents();
     bindPluginCatalogInstalls();
+    bindPluginSettings();
 
     els.loginForm.addEventListener("submit", async (ev) => {
       ev.preventDefault();

@@ -463,8 +463,8 @@ A plugin folder needs:
 | Plugin | Description |
 | --- | --- |
 | [wifi-unifi-plugin](plugins/wifi-unifi-plugin) | Read-only UniFi controller view: access points, clients, signal and roaming context. Supports classic Network Application, UniFi OS (UDM / Cloud Key), local login or API key. |
-| [cert-watch-plugin](plugins/cert-watch-plugin) | TLS certificate expiry monitoring: connects to each configured endpoint and reads the certificate the service actually presents, raises incidents on a severity ladder (info at 30 days, warning, critical near expiry — critical also fires webhook alerts), and includes renewal guidance (certbot command auto-detected for Let's Encrypt). No file access or credentials needed. |
-| [perimeter-watch-plugin](plugins/perimeter-watch-plugin) | External security audit of your WAN: Shodan InternetDB (keyless) reports what the internet observes open on your IP — checked against your intentional exposure (services + honeypot + canary traps are baked into the defaults), with anything unexpected raising a critical incident and known CVEs on exposed services flagged. CrowdSec CTI reputation (keyless) reports whether your IP is listed as an attacker, degrading gracefully to a view-only note on networks whose DNS blocks it. |
+| [cert-watch-plugin](plugins/cert-watch-plugin) | **Signal-source plugin** (no sidebar entry, no view — alerts through the incident bell only): TLS certificate expiry monitoring, reading the certificate each endpoint actually presents. Severity ladder (info 30d / warning 14d / critical 7d + expired) with renewal guidance (certbot auto-detected for Let's Encrypt + configurable hint). Configure from Settings → Plugins. |
+| [perimeter-watch-plugin](plugins/perimeter-watch-plugin) | **Signal-source plugin** (no sidebar entry, no view — alerts through the incident bell only): Shodan InternetDB exposure audit (observed ports vs expected incl. honeypot/canary defaults, CVEs on exposed services) + CrowdSec CTI reputation. Keyless. Configure from Settings → Plugins. |
 
 ---
 

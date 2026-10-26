@@ -2903,6 +2903,21 @@
 
     </section>
 
+    <!-- Plugin settings (generic, manifest-schema driven) -->
+    <div class="modal" id="plugin-settings-modal" hidden>
+      <div class="modal-box">
+        <button type="button" class="modal-close" id="plugin-settings-close">&times;</button>
+        <h3 id="plugin-settings-title">Plugin settings</h3>
+        <p class="muted" id="plugin-settings-note"></p>
+        <div id="plugin-settings-fields" class="fw-modal-grid"></div>
+        <p class="login-error" id="plugin-settings-msg" hidden></p>
+        <div class="wg-modal-actions">
+          <button class="btn btn-ghost" type="button" id="plugin-settings-cancel">Cancel</button>
+          <button class="btn btn-primary" type="button" id="plugin-settings-save">Save</button>
+        </div>
+      </div>
+    </div>
+
     <div id="bl-browse-modal" class="modal" hidden>
       <div class="modal-box modal-box-wide">
         <button class="modal-close" id="bl-browse-close" type="button">&times;</button>
