@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="/css/style.css?v=202610241659">
   <link rel="stylesheet" href="/css/polish.css?v=202610241659">
   <link rel="stylesheet" href="/css/firewall.css?v=202610241659">
-  <link rel="stylesheet" href="/css/bento.css?v=202610260230">
+  <link rel="stylesheet" href="/css/bento.css?v=202610260405">
   <link rel="stylesheet" href="/css/heroes.css?v=202610241659">
   <link rel="stylesheet" href="/css/sidebar.css?v=202610241659">
   <link rel="stylesheet" href="/css/action-icons.css?v=202610241659">
@@ -1120,21 +1120,40 @@
       <div class="fw-pane" data-fw-pane="traffic" hidden>
         <div class="fw-grid fw-grid-3">
 
-          <article class="fw-card" data-accent="purple">
-            <span class="fw-kicker">Traffic Split</span>
-            <div class="fw-chart">
+          <article class="fw-card fw-split-card" data-accent="purple">
+            <div class="fw-split-head">
+              <div class="fw-split-heading">
+                <span class="fw-kicker">Traffic Split</span>
+                <p>Blocked versus allowed</p>
+              </div>
+              <span class="fw-split-total"><b id="fw-split-total">—</b><small>events</small></span>
+            </div>
+            <div class="fw-chart fw-split-chart">
               <div class="fw-donut" id="fw-donut">
-                <svg width="132" height="132" viewBox="0 0 132 132">
-                  <circle class="ring-bg" cx="66" cy="66" r="54" fill="none" stroke-width="12"></circle>
-                  <circle class="ring-val" id="fw-donut-ring" cx="66" cy="66" r="54" fill="none" stroke-width="12"
-                          stroke-dasharray="339.292" stroke-dashoffset="339.292"></circle>
+                <svg width="150" height="150" viewBox="0 0 150 150">
+                  <circle class="ring-bg" cx="75" cy="75" r="60" fill="none" stroke-width="13"></circle>
+                  <circle class="ring-allow" cx="75" cy="75" r="60" fill="none" stroke-width="13"></circle>
+                  <circle class="ring-val" id="fw-donut-ring" cx="75" cy="75" r="60" fill="none" stroke-width="13"
+                          stroke-dasharray="376.991" stroke-dashoffset="376.991"></circle>
                 </svg>
                 <div class="fw-donut-mid"><b id="fw-block-ratio">—</b><small>blocked</small></div>
               </div>
-              <div class="fw-legend">
-                <div class="row"><span class="sw" style="background:#f85149"></span>Blocked<b id="fw-split-block">—</b></div>
-                <div class="row"><span class="sw" style="background:#3fb950"></span>Allowed<b id="fw-split-allow">—</b></div>
+              <div class="fw-legend fw-split-legend">
+                <div class="fw-legend-row is-blocked">
+                  <span class="fw-legend-dot"></span>
+                  <span class="fw-legend-copy"><small>Blocked</small><b id="fw-split-block">—</b></span>
+                  <span class="fw-legend-pct" id="fw-split-block-pct">—</span>
+                </div>
+                <div class="fw-legend-row is-allowed">
+                  <span class="fw-legend-dot"></span>
+                  <span class="fw-legend-copy"><small>Allowed</small><b id="fw-split-allow">—</b></span>
+                  <span class="fw-legend-pct" id="fw-split-allow-pct">—</span>
+                </div>
               </div>
+            </div>
+            <div class="fw-split-ratio" aria-hidden="true">
+              <span class="fw-split-ratio-block" id="fw-split-ratio-block"></span>
+              <span class="fw-split-ratio-allow" id="fw-split-ratio-allow"></span>
             </div>
           </article>
 
@@ -3499,16 +3518,27 @@
     var ratio = document.getElementById("fw-block-ratio");
     var sb = document.getElementById("fw-split-block");
     var sa = document.getElementById("fw-split-allow");
+    var st = document.getElementById("fw-split-total");
+    var bp = document.getElementById("fw-split-block-pct");
+    var ap = document.getElementById("fw-split-allow-pct");
+    var rb = document.getElementById("fw-split-ratio-block");
+    var ra = document.getElementById("fw-split-ratio-allow");
     var total = (block || 0) + (allow || 0);
     if (sb) sb.textContent = fmt(block || 0);
     if (sa) sa.textContent = fmt(allow || 0);
+    if (st) st.textContent = fmt(total);
     if (!ring) return;
     var frac = total > 0 ? (block || 0) / total : 0;
-    ring.style.strokeDashoffset = String(339.292 * (1 - frac));
-    if (ratio) {
-      var pct = total > 0 ? Math.round(frac * 100) : 0;
-      countUp(ratio, pct, 700, "%");
-    }
+    var pct = total > 0 ? Math.round(frac * 100) : 0;
+    var radius = parseFloat(ring.getAttribute("r")) || 60;
+    var circ = 2 * Math.PI * radius;
+    ring.style.strokeDasharray = String(circ);
+    ring.style.strokeDashoffset = String(circ * (1 - frac));
+    if (ratio) countUp(ratio, pct, 700, "%");
+    if (bp) bp.textContent = total > 0 ? pct + "%" : "0%";
+    if (ap) ap.textContent = total > 0 ? (100 - pct) + "%" : "0%";
+    if (rb) rb.style.width = total > 0 ? pct + "%" : "0%";
+    if (ra) ra.style.width = total > 0 ? (100 - pct) + "%" : "0%";
   }
   function render(d) {
     if (!d || !d.ok) return;
@@ -3592,7 +3622,7 @@
     <p class="muted" id="cs-ban-status" style="margin-top:10px"></p>
   </div>
 </div>
-<script src="/scripts/dashboard.js?v=202610260520"></script>
+<script src="/scripts/dashboard.js?v=202610260405"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>

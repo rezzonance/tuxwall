@@ -861,10 +861,6 @@ body.locked > .layout { display: none; }
   fill: currentColor; flex-shrink: 0;
   transition: transform var(--transition);
 }
-/* Stroke-style SVGs (fill="none" on the element, like the gear) keep their
-   outline rendering - the fill:currentColor above would otherwise fill them
-   solid, turning a gear into a blob. */
-.icon-btn svg[fill="none"] { fill: none; stroke: currentColor; }
 .icon-btn:hover svg { transform: scale(1.2); }
 .icon-btn:hover {
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
