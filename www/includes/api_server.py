@@ -14334,8 +14334,32 @@ def install_plugin_from_github(body):
             if not os.path.isfile(os.path.join(src, "main.py")):
                 raise ValueError("Plugin package is missing main.py")
             dest = os.path.join(PLUGINS_DIR, pid)
+            # Update path: when the plugin is already installed, back up
+            # its config.json (credentials/settings), remove the old
+            # directory, and install the new version in place. This is how
+            # the "Update" button in the Available Plugins card works.
             if os.path.exists(dest):
-                raise ValueError("Plugin %r is already installed" % pid)
+                saved_config = None
+                try:
+                    with open(os.path.join(dest, "config.json"), "r") as f:
+                        saved_config = f.read()
+                except (OSError, ValueError):
+                    pass
+                shutil.rmtree(dest)
+                shutil.copytree(src, dest, ignore=shutil.ignore_patterns(
+                    ".git", "__pycache__", "*.pyc", "config.json"))
+                if saved_config is not None:
+                    try:
+                        with open(os.path.join(dest, "config.json"), "w") as f:
+                            f.write(saved_config)
+                    except OSError:
+                        pass
+                _plugin_write_perms(dest)
+                return {"ok": True, "updated": True, "plugin": {
+                    "id": pid,
+                    "name": manifest.get("name") or pid,
+                    "version": manifest.get("version") or "",
+                }}
             os.makedirs(PLUGINS_DIR, exist_ok=True)
             shutil.copytree(src, dest, ignore=shutil.ignore_patterns(
                 ".git", "__pycache__", "*.pyc", "config.json"))
