@@ -814,8 +814,10 @@
     ["crowdsec.service", "crowdsec"],
     ["crowdsec-firewall-bouncer.service", "firewall bouncer"],
     ["tuxwall.service", "dashboard API"],
-    ["tuxwall-collector.service", "ban collector"],
-    ["php8.5-fpm.service", "php-fpm"],
+    // NOTE: tuxwall-collector.service and php8.5-fpm.service are
+    // maintainer-only (tuxwall.org infrastructure and PHP pages) and do
+    // NOT ship in the package. They must not appear here or every clean
+    // install shows a permanent "CORE SERVICE DOWN" banner.
     ["wg-quick@wg0.service", "wireguard"],
     ["ufw.service", "ufw firewall"],
   ];
@@ -9377,8 +9379,6 @@
     ["wg-quick@wg0.service", "WireGuard"],
     ["tuxwall.service", "tuxwall"],
     ["tuxwall-agent.service", "tuxwall-agent"],
-    ["tuxwall-collector.service", "tuxwall-collector"],
-    ["tuxwall-nat.service", "tuxwall-nat"],
     ["tuxwall-sqm.service", "tuxwall-sqm"],
   ];
   const OV_PROTECTED_SERVICES = { "nginx.service": "it serves this dashboard" };
@@ -9432,7 +9432,6 @@
     "radvd.service": 4,
     "tuxwall-sqm.service": 2,
     "tuxwall-agent.service": 1,
-    "tuxwall-collector.service": 1,
   };
 
   let _ovSvcBound = false;
