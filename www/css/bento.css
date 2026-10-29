@@ -2083,13 +2083,6 @@ body.light-theme #view-security .card::after { opacity: .35; }
   #view-security #sec-canary-table tbody tr.tw-row-capped { display: none; }
 }
 
-@media (max-width: 700px) {
-  /* Honeypot has five stats: let Auto-banned use the full last row. */
-  #view-security .fw-pane[data-sec-pane="deception"] .dec-honey #sec-honey-summary .honey-stat:last-child {
-    grid-column: 1 / -1;
-  }
-}
-
 /* ============================================================================
    Security ▸ Attacks — Top Countries, Top Attackers, Hits Over Time
    ========================================================================= */
@@ -3776,3 +3769,500 @@ body.light-theme .is-allowed .fw-legend-pct { color: #18762b; }
 
 /* All three Traffic cards share the full row height */
 #view-firewall .fw-grid-3 { align-items: stretch; }
+
+/* ============================================================================
+   Security ▸ Deception — detail layer
+   Coverage rail, armed-port chips, top sources and a per-card meta strip.
+   Additive and scoped to the Deception pane; no other view is affected.
+   ========================================================================= */
+
+/* --- Coverage rail ------------------------------------------------------- */
+#view-security .fw-pane[data-sec-pane="deception"] .dec-rail {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 12px 0 0;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-rail-item {
+  --rail-c: var(--accent);
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 13px 11px 14px;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--rail-c) 20%, var(--border));
+  background: linear-gradient(160deg,
+    color-mix(in srgb, var(--rail-c) 7%, var(--card)) 0%,
+    var(--card) 82%);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 5%, transparent);
+  transition: border-color var(--transition), transform var(--transition);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-rail-item::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--rail-c);
+  opacity: .8;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-rail-item:hover {
+  border-color: color-mix(in srgb, var(--rail-c) 42%, var(--border));
+  transform: translateY(-1px);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-rail-item[data-layer="tarpit"] { --rail-c: var(--amber); }
+#view-security .fw-pane[data-sec-pane="deception"] .dec-rail-item[data-layer="canary"] { --rail-c: #bc8cff; }
+#view-security .fw-pane[data-sec-pane="deception"] .dec-rail-item[data-layer="policy"] { --rail-c: #39c5cf; }
+
+#view-security .fw-pane[data-sec-pane="deception"] .dec-rail-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--green);
+  box-shadow: 0 0 8px var(--green);
+  animation: status-dot-pulse 2s ease-in-out infinite;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-rail-dot[data-status="inactive"] {
+  background: var(--muted);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--muted) 50%, transparent);
+  animation: none;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-rail-copy {
+  display: flex; flex-direction: column; gap: 1px;
+  min-width: 0; flex: 1 1 auto;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-rail-label {
+  font-size: 9.5px; font-weight: 700;
+  letter-spacing: .09em; text-transform: uppercase;
+  color: var(--muted);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-rail-value {
+  font-size: 12.5px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-rail-tag {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: 9.5px; font-weight: 700;
+  letter-spacing: .07em; text-transform: uppercase;
+  color: var(--rail-c);
+  background: color-mix(in srgb, var(--rail-c) 11%, transparent);
+  border: 1px solid color-mix(in srgb, var(--rail-c) 28%, transparent);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-rail-tag[data-on="1"] {
+  color: color-mix(in srgb, var(--rail-c) 92%, #fff);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--rail-c) 22%, transparent);
+}
+
+/* --- Armed-port / emulator chips ---------------------------------------- */
+#view-security .fw-pane[data-sec-pane="deception"] .dec-chips {
+  --dec-accent: var(--amber);
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 8px;
+  padding: 7px 16px 15px;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-canary .dec-chips {
+  --dec-accent: #bc8cff;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-chips-label {
+  margin-right: 4px;
+  font-size: 9.5px; font-weight: 700;
+  letter-spacing: .08em; text-transform: uppercase;
+  color: var(--muted);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-chip {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-family: var(--mono); font-size: 11px;
+  color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--dec-accent) 26%, var(--border));
+  background: color-mix(in srgb, var(--dec-accent) 7%, transparent);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-chip b {
+  color: var(--dec-accent); font-weight: 700;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-chip .dec-chip-svc {
+  font-family: var(--font);
+  font-size: 9.5px; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--muted);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-chip.is-off {
+  opacity: .55; border-style: dashed;
+}
+
+/* --- Per-card meta strip ------------------------------------------------- */
+#view-security .fw-pane[data-sec-pane="deception"] .dec-meta {
+  display: flex; flex-wrap: wrap;
+  gap: 7px 16px;
+  padding: 10px 16px 14px;
+  border-top: 1px dashed color-mix(in srgb, var(--dec-accent) 16%, var(--border));
+  font-size: 11px;
+  color: var(--muted);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-meta-item {
+  display: inline-flex; align-items: center; gap: 6px;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-meta-item::before {
+  content: "";
+  width: 5px; height: 5px; border-radius: 50%; flex: none;
+  background: color-mix(in srgb, var(--dec-accent) 55%, var(--muted));
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-meta-item b {
+  color: var(--text); font-weight: 600;
+}
+
+/* --- Stat-tile sub line -------------------------------------------------- */
+#view-security .fw-pane[data-sec-pane="deception"] .honey-stat-sub {
+  margin-top: 3px;
+  font-size: 10px; letter-spacing: .03em;
+  color: var(--muted);
+}
+
+/* --- Notice legend ------------------------------------------------------- */
+#view-security .fw-pane[data-sec-pane="deception"] .dec-legend {
+  display: flex; flex-wrap: wrap;
+  gap: 6px 18px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed color-mix(in srgb, var(--amber) 24%, transparent);
+  font-size: 11px;
+  color: var(--muted);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-legend > span {
+  display: inline-flex; align-items: center; gap: 6px;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-legend > span::before {
+  content: "✓";
+  color: var(--amber); font-weight: 800; font-size: 11px;
+}
+
+/* --- Table polish -------------------------------------------------------- */
+#view-security .fw-pane[data-sec-pane="deception"] .dec-card > .table-wrap thead th {
+  position: sticky; top: 0; z-index: 1;
+  font-size: 10px; letter-spacing: .08em;
+  background: color-mix(in srgb, var(--card) 94%, var(--bg));
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-card > .table-wrap tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--text) 1.6%, transparent);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-card > .table-wrap tbody tr:hover {
+  background: color-mix(in srgb, var(--dec-accent) 7%, transparent);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-card > .table-wrap td {
+  padding: 9px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-card > .table-wrap tbody tr:last-child td {
+  border-bottom: 0;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-card > .table-wrap td.mono {
+  font-variant-numeric: tabular-nums;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .dec-card > .table-wrap td .badge {
+  font-size: 10px; letter-spacing: .05em;
+}
+
+/* --- Responsive ---------------------------------------------------------- */
+@media (max-width: 1100px) {
+  #view-security .fw-pane[data-sec-pane="deception"] .dec-rail {
+    grid-template-columns: 1fr 1fr;
+  }
+  #view-security .fw-pane[data-sec-pane="deception"] .dec-rail-item[data-layer="policy"] {
+    grid-column: 1 / -1;
+  }
+}
+@media (max-width: 700px) {
+  #view-security .fw-pane[data-sec-pane="deception"] .dec-rail {
+    grid-template-columns: 1fr;
+  }
+  #view-security .fw-pane[data-sec-pane="deception"] .dec-chips {
+    padding: 7px 12px 13px;
+  }
+  #view-security .fw-pane[data-sec-pane="deception"] .dec-meta {
+    padding: 10px 12px 12px;
+  }
+}
+
+/* ============================================================================
+   Security ▸ Deception — telemetry consoles
+   Replaces the generic stat tiles with two purpose-built instruments that
+   share one component (.trap-console), each in its own identity colour:
+   - honeypot: accent-blue hero (traps) + held/time-wasted/auto-banned rows
+   - canary:   purple hero (24h events) + sources/creds/bans rows
+   Scoped to the Deception pane; the shared .stat-card row is untouched.
+   ========================================================================= */
+
+/* --- Honeypot console ---------------------------------------------------- */
+#view-security .fw-pane[data-sec-pane="deception"] .trap-console {
+  --trap-c: var(--accent);
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  margin: 2px 16px 16px;
+  border: 1px solid color-mix(in srgb, var(--trap-c) 20%, var(--border));
+  border-radius: 12px;
+  overflow: hidden;
+  background:
+    radial-gradient(90% 150% at 0% 0%,
+      color-mix(in srgb, var(--trap-c) 9%, transparent), transparent 62%),
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--text) 2.4%, transparent) 0%,
+      transparent 72%);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 5%, transparent),
+              0 8px 24px color-mix(in srgb, #000 16%, transparent);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-console.is-empty {
+  display: block;
+  padding: 14px 18px;
+  border-style: dashed;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-console.is-empty .muted {
+  font-size: 12px;
+}
+
+/* Hero: the one number that matters, with a radar sweep behind it. */
+#view-security .fw-pane[data-sec-pane="deception"] .trap-hero {
+  position: relative;
+  padding: 16px 20px 15px;
+  border-right: 1px solid color-mix(in srgb, var(--trap-c) 12%, var(--border));
+  overflow: hidden;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-hero > *:not(.trap-radar) {
+  position: relative;
+  z-index: 1;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-kicker {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-kicker::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 1px;
+  transform: rotate(45deg);
+  background: var(--trap-c);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--trap-c) 65%, transparent);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-big {
+  margin: 7px 0 3px;
+  font-family: var(--mono);
+  font-size: 40px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: -.035em;
+  color: var(--trap-c);
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 28px color-mix(in srgb, var(--trap-c) 32%, transparent);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-hero-sub {
+  font-size: 11px;
+  color: var(--muted);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-ratio {
+  position: relative;
+  height: 4px;
+  max-width: 320px;
+  margin: 13px 0 6px;
+  border-radius: 99px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--muted) 22%, transparent);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-ratio > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--trap-c) 62%, #fff) 0%,
+    var(--trap-c) 100%);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--trap-c) 55%, transparent);
+  transition: width .5s cubic-bezier(.4, 0, .2, 1);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-ratio-cap {
+  font-size: 10px;
+  letter-spacing: .02em;
+  color: var(--muted);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-ratio-cap b {
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Radar: faint concentric rings + slow sweep, masked so it never fights text. */
+#view-security .fw-pane[data-sec-pane="deception"] .trap-radar {
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  width: 150px;
+  height: 150px;
+  margin-top: -75px;
+  border-radius: 50%;
+  opacity: .26;
+  pointer-events: none;
+  background: repeating-radial-gradient(circle at 50% 50%,
+    transparent 0 13px,
+    color-mix(in srgb, var(--trap-c) 42%, transparent) 13px 14px);
+  -webkit-mask-image: radial-gradient(circle at 50% 50%, #000 26%, transparent 72%);
+  mask-image: radial-gradient(circle at 50% 50%, #000 26%, transparent 72%);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-radar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg,
+    transparent 0 74%,
+    color-mix(in srgb, var(--trap-c) 60%, transparent) 91%,
+    transparent 100%);
+  animation: dec-radar-sweep 9s linear infinite;
+}
+@keyframes dec-radar-sweep {
+  to { transform: rotate(360deg); }
+}
+
+/* Right column: three aligned readouts, console rows (not cards). */
+#view-security .fw-pane[data-sec-pane="deception"] .trap-grid {
+  display: grid;
+  grid-template-rows: repeat(3, 1fr);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-cell {
+  --tone: var(--trap-c);
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto;
+  align-content: center;
+  column-gap: 12px;
+  padding: 9px 16px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  transition: background var(--transition);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-cell:last-child {
+  border-bottom: 0;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-cell::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 2px;
+  height: 0;
+  transform: translateY(-50%);
+  background: var(--tone);
+  opacity: .7;
+  transition: height var(--transition);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-cell:hover {
+  background: color-mix(in srgb, var(--tone) 5%, transparent);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-cell:hover::before {
+  height: 62%;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-cell[data-tone="accent"] { --tone: var(--trap-c); }
+#view-security .fw-pane[data-sec-pane="deception"] .trap-cell[data-tone="teal"]   { --tone: #39c5cf; }
+#view-security .fw-pane[data-sec-pane="deception"] .trap-cell[data-tone="red"]    { --tone: var(--red); }
+#view-security .fw-pane[data-sec-pane="deception"] .trap-cell-label {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-cell-sub {
+  grid-column: 1;
+  font-size: 10px;
+  color: color-mix(in srgb, var(--muted) 78%, transparent);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-cell-value {
+  grid-column: 2;
+  grid-row: 1 / 3;
+  align-self: center;
+  font-family: var(--mono);
+  font-size: 23px;
+  line-height: 1;
+  font-weight: 600;
+  color: var(--tone);
+  font-variant-numeric: tabular-nums;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-cell-value em {
+  font-style: normal;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  margin-left: 1px;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-cell-meter {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  height: 3px;
+  margin-top: 4px;
+  border-radius: 99px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--muted) 20%, transparent);
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-cell-meter > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--tone);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--tone) 50%, transparent);
+  transition: width .5s cubic-bezier(.4, 0, .2, 1);
+}
+
+/* --- Canary console ------------------------------------------------------ */
+/* The canary reuses the honeypot’s instrument, dressed in its own purple. */
+#view-security .fw-pane[data-sec-pane="deception"] .trap-console.dec-funnel {
+  --trap-c: #bc8cff;
+}
+#view-security .fw-pane[data-sec-pane="deception"] .trap-cell[data-tone="purple"] { --tone: #bc8cff; }
+
+@media (prefers-reduced-motion: reduce) {
+  #view-security .fw-pane[data-sec-pane="deception"] .trap-radar::after {
+    animation: none;
+  }
+}
+
+/* Narrow: hero stacks above the readouts. */
+@media (max-width: 760px) {
+  #view-security .fw-pane[data-sec-pane="deception"] .trap-console {
+    grid-template-columns: 1fr;
+    margin: 2px 12px 14px;
+  }
+  #view-security .fw-pane[data-sec-pane="deception"] .trap-hero {
+    border-right: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--trap-c) 12%, var(--border));
+    padding-right: 20px;
+  }
+  #view-security .fw-pane[data-sec-pane="deception"] .trap-big {
+    font-size: 36px;
+  }
+  #view-security .fw-pane[data-sec-pane="deception"] .trap-radar {
+    right: -36px;
+    top: 50%;
+    width: 128px;
+    height: 128px;
+    margin-top: -64px;
+    opacity: .22;
+  }
+  #view-security .fw-pane[data-sec-pane="deception"] .trap-grid {
+    grid-template-rows: none;
+  }
+  #view-security .fw-pane[data-sec-pane="deception"] .trap-console.dec-funnel {
+    margin: 2px 12px 12px;
+  }
+}
+
+/* Community bans: a list fed by one install has no corroboration - say it
+   quietly rather than implying a crowd. */
+#view-crowdsec .fw-pane[data-cs-pane="community"] .cban-head-copy .muted[data-single="1"] {
+  color: color-mix(in srgb, var(--amber) 78%, var(--muted));
+}

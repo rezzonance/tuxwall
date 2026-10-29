@@ -6,14 +6,14 @@
   <title>TuxWall - Network Dashboard</title>
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
-  <link rel="stylesheet" href="/css/style.css?v=202610241659">
-  <link rel="stylesheet" href="/css/polish.css?v=202610241659">
-  <link rel="stylesheet" href="/css/firewall.css?v=202610241659">
-  <link rel="stylesheet" href="/css/bento.css?v=202610260405">
-  <link rel="stylesheet" href="/css/heroes.css?v=202610241659">
-  <link rel="stylesheet" href="/css/sidebar.css?v=202610241659">
-  <link rel="stylesheet" href="/css/action-icons.css?v=202610241659">
-  <link rel="stylesheet" href="/css/subtab-icons.css?v=202610241659">
+  <link rel="stylesheet" href="/css/style.css?v=202610290106">
+  <link rel="stylesheet" href="/css/polish.css?v=202610290106">
+  <link rel="stylesheet" href="/css/firewall.css?v=202610290106">
+  <link rel="stylesheet" href="/css/bento.css?v=202610290106">
+  <link rel="stylesheet" href="/css/heroes.css?v=202610290106">
+  <link rel="stylesheet" href="/css/sidebar.css?v=202610290106">
+  <link rel="stylesheet" href="/css/action-icons.css?v=202610290106">
+  <link rel="stylesheet" href="/css/subtab-icons.css?v=202610290106">
 </head>
 <body>
 <div id="login-gate" class="login-gate" hidden>
@@ -1737,11 +1737,49 @@
       <div class="fw-pane" data-sec-pane="deception" hidden>
 
       <div class="deception-notice">
-        <b>Trap catches are shared with the tuxwall.org community ban list.</b>
+        <b>Trap catches feed the tuxwall.org community ban list.</b>
         Every IP caught here attacked a decoy — a verified threat, zero false positives.
-        Only attacker IPs and evidence are shared; none of your information is saved.
-        <b>The trade-off: no research, no report buttons — the traps do it for you.</b>
-        If you don't want threats caught here shared, don't enable the deception layer.
+        Only the attacker IP and deception evidence are shared; configurations, logs and
+        personal data never leave the box. Sharing follows the deception layer itself:
+        each install reports under an anonymous key, and the first catch auto-registers it,
+        starting a <b>7-day trust clock</b>. Register up front in
+        <b>CrowdSec ▸ Community Bans ▸ Community Sharing</b> to start that clock at setup
+        instead of at the first catch. The list is consumed separately — enable
+        <b>Automatic mode</b> there to block every community IP locally.
+        Manual and engine bans are never reported.
+        <span class="dec-legend">
+          <span>Anonymous install key</span>
+          <span>IP + evidence only</span>
+          <span>7-day trust window</span>
+          <span>365-day local bans</span>
+        </span>
+      </div>
+
+      <div class="dec-rail" id="dec-rail">
+        <div class="dec-rail-item" data-layer="tarpit">
+          <span class="dec-rail-dot" id="dec-rail-honey-dot" data-status="inactive"></span>
+          <div class="dec-rail-copy">
+            <span class="dec-rail-label">Port-garden Tarpit</span>
+            <span class="dec-rail-value" id="dec-rail-honey-value">Stopped</span>
+          </div>
+          <span class="dec-rail-tag" id="dec-rail-honey-tag">off</span>
+        </div>
+        <div class="dec-rail-item" data-layer="canary">
+          <span class="dec-rail-dot" id="dec-rail-canary-dot" data-status="inactive"></span>
+          <div class="dec-rail-copy">
+            <span class="dec-rail-label">OpenCanary Emulators</span>
+            <span class="dec-rail-value" id="dec-rail-canary-value">Stopped</span>
+          </div>
+          <span class="dec-rail-tag" id="dec-rail-canary-tag">off</span>
+        </div>
+        <div class="dec-rail-item" data-layer="policy">
+          <span class="dec-rail-dot" data-status="active"></span>
+          <div class="dec-rail-copy">
+            <span class="dec-rail-label">Ban policy</span>
+            <span class="dec-rail-value">Auto-ban · 365 days</span>
+          </div>
+          <span class="dec-rail-tag">CrowdSec</span>
+        </div>
       </div>
 
       <div class="card card-mt dec-card dec-honey">
@@ -1766,13 +1804,15 @@
           <span class="muted dec-unit">hits → ban</span>
           <button id="sec-honey-apply" class="btn btn-primary" type="button">Save &amp; Apply</button>
         </div>
-        <div id="sec-honey-summary" class="honey-stats"></div>
+        <div class="dec-chips" id="sec-honey-chips" hidden></div>
+        <div id="sec-honey-summary" class="trap-console"></div>
         <div class="table-wrap">
           <table id="sec-honey-table" data-tw-cap="10">
             <thead><tr><th style="width:100px">Status</th><th>IP</th><th style="width:90px">Port</th><th>Held</th><th style="width:110px">First seen</th></tr></thead>
             <tbody id="sec-honey-body"></tbody>
           </table>
         </div>
+        <div class="dec-meta" id="sec-honey-meta" hidden></div>
         <p class="muted bl-note">A <b>port-garden tarpit</b>: classic scan ports (telnet, RDP, SMB, adb…) are bound on the <b>WAN addresses only (IPv4 + IPv6)</b> — every connection is held open with a clamped TCP window while the scanner waits forever for data that never comes. Any connection here is hostile by definition, so sources are <b>auto-banned via CrowdSec (1 year)</b> — no manual banning, no AbuseIPDB cross-checking needed, and the catch is shared with the community list above. LAN/WireGuard sources are closed immediately and never counted. Overflow connections beyond the safety caps (256 total / 8 per IP) are dropped, not trapped, so a botnet flood can't exhaust the router. <b>Keep the threshold at 1</b>: nothing legitimate ever connects to these ports, so a single completed handshake is hostile by definition — only raise it (to 3–5) if you add a port that could plausibly see innocent traffic (e.g. 80/443).</p>
       </div>
 
@@ -1785,19 +1825,15 @@
           </div>
           <button id="sec-canary-toggle" class="btn btn-sm btn-act" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v10"/><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/></svg><span>Enable</span></button>
         </div>
-        <div class="honey-stats">
-          <div class="honey-stat trapped"><div class="honey-stat-value" id="sec-canary-events">—</div><div class="honey-stat-label">Events (24h)</div></div>
-          <div class="honey-stat unique"><div class="honey-stat-value" id="sec-canary-sources">—</div><div class="honey-stat-label">Sources (24h)</div></div>
-          <div class="honey-stat held"><div class="honey-stat-value" id="sec-canary-creds">—</div><div class="honey-stat-label">Creds Captured</div></div>
-          <div class="honey-stat banned"><div class="honey-stat-value" id="sec-canary-bans">—</div><div class="honey-stat-label">Canary Bans</div></div>
-        </div>
-        <div id="sec-canary-summary" class="muted" style="padding:0 16px 8px;"></div>
+        <div class="dec-chips" id="sec-canary-chips" hidden></div>
+        <div id="sec-canary-summary" class="trap-console dec-funnel" role="group" aria-label="Canary activity over the last 24 hours"></div>
         <div class="table-wrap">
           <table id="sec-canary-table" data-tw-cap="10">
             <thead><tr><th style="width:110px">Time</th><th>Source</th><th style="width:170px">Service</th><th style="width:70px">Port</th><th>Detail</th></tr></thead>
             <tbody id="sec-canary-body"></tbody>
           </table>
         </div>
+        <div class="dec-meta" id="sec-canary-meta" hidden></div>
         <p class="muted bl-note">The <b>OpenCanary</b> deception emulators — SSH, VNC, MSSQL, Redis, SNMP — bound on the <b>WAN address only</b>, running as a sandboxed service user. Any interaction is hostile by definition (nothing legitimate connects to services that do not exist), so sources are <b>auto-banned via CrowdSec (1 year)</b> and the catch is shared with the community list above. The SSH canary on port 22 <b>captures the credentials bruteforcers spray</b> — usernames and passwords appear in the Detail column; they are attacker-submitted guesses at your router, not real credentials. <b>Enable</b> starts the service and opens WAN rules only for the ports it actually bound; <b>Disable</b> stops it and closes exactly its ports. The full record lives at <code>/var/log/opencanary/opencanary.log</code>.</p>
       </div>
 
@@ -2121,7 +2157,7 @@
           <span class="cban-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3Z"/></svg></span>
           <div class="cban-head-copy">
             <h2>Community Bans <span class="muted">— tuxwall.org</span></h2>
-            <span class="muted">Deception-verified IPs from the community list</span>
+            <span class="muted" id="cban-sub">Deception-verified IPs from the community list</span>
           </div>
           <span class="cban-chip" id="cban-generated">—</span>
         </div>
@@ -3622,7 +3658,7 @@
     <p class="muted" id="cs-ban-status" style="margin-top:10px"></p>
   </div>
 </div>
-<script src="/scripts/dashboard.js?v=202610280100"></script>
+<script src="/scripts/dashboard.js?v=202610290106"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>

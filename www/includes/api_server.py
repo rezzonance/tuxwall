@@ -2119,6 +2119,30 @@ COMMUNITY_BANS_CACHE = {"ts": 0.0, "data": None}
 COMMUNITY_BANS_LOCK = threading.Lock()
 
 
+def _community_stats_url():
+    """Aggregate counters endpoint that sits beside the public ban list."""
+    base = COMMUNITY_BANS_URL.split("?", 1)[0].rstrip("/")
+    return base.rsplit("/", 1)[0] + "/stats"
+
+
+def _community_reporters():
+    """Distinct installs feeding the published list, or None if unknown.
+
+    Display-only aggregate: a stats outage must never take the ban list (or
+    the pane) down with it, so every failure degrades to "unknown".
+    """
+    try:
+        req = urllib.request.Request(_community_stats_url(), headers={
+            "User-Agent": "tuxwall-community-bans/1.0",
+        })
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            payload = json.loads(resp.read(65536).decode("utf-8", errors="replace"))
+        count = int(payload.get("reporters"))
+        return count if count >= 0 else None
+    except Exception:
+        return None
+
+
 def build_community_bans():
     now = time.time()
     with COMMUNITY_BANS_LOCK:
@@ -2146,6 +2170,7 @@ def build_community_bans():
             "ok": True,
             "generated": payload.get("generated") or "",
             "total": payload.get("total", len(bans)),
+            "reporters": _community_reporters(),
             "bans": bans,
         }
     except Exception as exc:
@@ -3229,15 +3254,24 @@ def build_canary():
 
     ban_count = 0
     last_ban_ip = None
+    newest_ban_id = -1
     try:
+        # --limit 0 is required: cscli silently caps the list at 100 rows, and
+        # the canary's decisions are far past that point in a busy blocklist.
         proc = subprocess.run(
-            [CROWDSEC_BIN, "decisions", "list", "-o", "raw"],
+            [CROWDSEC_BIN, "decisions", "list", "-o", "raw", "--limit", "0"],
             capture_output=True, text=True, timeout=CROWDSEC_TIMEOUT)
         for line in (proc.stdout or "").splitlines()[1:]:
             parts = line.strip().split(",")
             if len(parts) > 3 and parts[3].startswith(CANARY_BAN_PREFIX):
                 ban_count += 1
-                last_ban_ip = parts[2].replace("Ip:", "") or last_ban_ip
+                try:
+                    decision_id = int(parts[0])
+                except (TypeError, ValueError):
+                    decision_id = -1
+                if decision_id > newest_ban_id:
+                    newest_ban_id = decision_id
+                    last_ban_ip = parts[2].replace("Ip:", "") or last_ban_ip
     except Exception:
         pass
 
