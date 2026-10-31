@@ -416,6 +416,12 @@ PY
     systemctl daemon-reload
     systemctl enable tuxwall.service >/dev/null 2>&1 || true
     systemctl enable tuxwall-blocklist-update.timer >/dev/null 2>&1 || true
+    # Kea lease mirror (client hostnames for WiFi plugins): enable only when
+    # this box actually runs Kea DHCP; the unit is a harmless no-op without it.
+    if [[ -f /var/lib/kea/kea-leases4.csv ]]; then
+        systemctl enable tuxwall-kea-mirror.timer >/dev/null 2>&1 || true
+        systemctl start tuxwall-kea-mirror.service >/dev/null 2>&1 || true
+    fi
     systemctl restart tuxwall.service || true
 
     step 8 "Triggering initial blocklist download (background)..."

@@ -1,0 +1,24 @@
+{
+  "id": "openwrt",
+  "name": "OpenWrt Access Points",
+  "version": "0.4.0",
+  "api": 1,
+  "description": "OpenWrt AP view and management: access points, clients, signal, roaming events, RF channel advisor, and SSID management across all APs (opt-in).",
+  "enabled": true,
+  "alerts": true,
+  "nav": { "label": "WiFi", "icon": "wifi", "order": 80 },
+  "settings": [
+    { "key": "hosts", "label": "Access points", "type": "text", "placeholder": "192.168.1.43, 192.168.1.73 (comma, space or newline separated)", "default": "" },
+    { "key": "username", "label": "SSH username", "type": "text", "default": "root" },
+    { "key": "port", "label": "SSH port", "type": "text", "default": "22" },
+    { "key": "auth_mode", "label": "Authentication", "type": "select", "default": "key",
+      "options": [
+        { "value": "key", "label": "SSH private key (recommended)" },
+        { "value": "password", "label": "Password (requires sshpass on the firewall)" }
+      ] },
+    { "key": "ssh_key", "label": "SSH private key", "type": "password", "secret": true, "placeholder": "Paste the OpenSSH private key (-----BEGIN ... KEY-----)" },
+    { "key": "password", "label": "SSH password", "type": "password", "secret": true },
+    { "key": "connect_timeout", "label": "Connect timeout (seconds)", "type": "text", "default": "6" },
+    { "key": "manage_enabled", "label": "Enable AP management (write access)", "type": "bool", "default": false }
+  ]
+}

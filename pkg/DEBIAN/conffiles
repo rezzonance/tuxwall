@@ -9,3 +9,5 @@
 /etc/systemd/system/suricata-update.service
 /etc/systemd/system/suricata-update.timer
 /etc/aide/aide.conf.d/61_tuxwall_appliance
+/etc/systemd/system/tuxwall-kea-mirror.service
+/etc/systemd/system/tuxwall-kea-mirror.timer

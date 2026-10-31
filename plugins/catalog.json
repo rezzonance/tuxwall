@@ -1,6 +1,6 @@
 {
   "ok": true,
-  "generated": 1792984571,
+  "generated": 1793483985,
   "plugins": [
     {
       "id": "cert-watch",
@@ -17,6 +17,18 @@
       "description": "External security audit of your WAN: what Shodan observes open on your IP (compared against what you intend, including honeypot and canary traps), plus CrowdSec CTI reputation. Keyless.",
       "nav": {},
       "url": "https://github.com/rezzonance/tuxwall/tree/main/plugins/perimeter-watch-plugin"
+    },
+    {
+      "id": "openwrt",
+      "name": "OpenWrt Access Points",
+      "version": "0.4.0",
+      "description": "OpenWrt AP view and management: access points, clients, signal, roaming events, RF channel advisor, and SSID management across all APs (opt-in).",
+      "nav": {
+        "label": "WiFi",
+        "icon": "wifi",
+        "order": 80
+      },
+      "url": "https://github.com/rezzonance/tuxwall/tree/main/plugins/wifi-openwrt-plugin"
     },
     {
       "id": "unifi",

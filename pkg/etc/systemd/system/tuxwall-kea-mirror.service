@@ -1,0 +1,6 @@
+[Unit]
+Description=Mirror Kea lease file for TuxWall plugins (client hostnames)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'mkdir -p /var/lib/tuxwall; umask 022; cp /var/lib/kea/kea-leases4.csv /var/lib/tuxwall/kea-leases.csv 2>/dev/null && chmod 644 /var/lib/tuxwall/kea-leases.csv || true'

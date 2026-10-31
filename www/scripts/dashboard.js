@@ -4043,7 +4043,7 @@
       : `<div class="trap-hero">
            <span class="trap-kicker">Events · 24h</span>
            <div class="trap-big">${formatNumber(ev)}</div>
-           <div class="trap-hero-sub">${modCount} emulator${modCount === 1 ? "" : "s"} bound · ${lastBan && ev ? `last banned ${esc(lastBan)}` : "no hits yet"}</div>
+           <div class="trap-hero-sub">${modCount} emulator${modCount === 1 ? "" : "s"} bound · ${lastBan ? `last banned ${esc(lastBan)}` : (ev ? "no bans yet" : "no hits yet")}</div>
            <div class="trap-ratio" title="${uniqPct}% of events came from unique sources"><i style="width:${uniqPct}%"></i></div>
            <div class="trap-ratio-cap"><b>${uniqPct}%</b> of events from unique sources</div>
            <span class="trap-radar" aria-hidden="true"></span>
@@ -4078,7 +4078,17 @@
   async function refreshCanary() {
     try {
       renderCanary(await fetchJSON("/api/security/canary"));
-    } catch (err) { /* passive card */ }
+    } catch (err) {
+      // A failed/slow status read must not leave the card silently stuck on
+      // its static "Enable"/off markup - that reads as "canary disabled".
+      if (els.secCanaryHint) {
+        els.secCanaryHint.textContent = "status unavailable — retrying";
+      }
+      if (els.decRailCanaryValue) {
+        els.decRailCanaryValue.textContent = "unavailable";
+      }
+      console.warn("canary status:", err);
+    }
   }
 
   function bindCanaryActions() {

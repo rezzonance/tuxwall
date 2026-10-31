@@ -3086,6 +3086,63 @@ CANARY_LOGTYPES = {
     13001: "snmp command",
     17001: "redis command",
 }
+# Canary ban counts must not scan the whole decision table: with a few
+# thousand decisions `cscli decisions list --limit 0` takes 10-15s, which
+# blocked every dashboard poll (the card appeared stuck/disabled). Decisions
+# carry a scenario (canary/<event>), so one cheap filtered query per known
+# canary scenario is exact enough and returns in milliseconds. The result is
+# display-only, so a short cache is fine.
+CANARY_BAN_SCENARIOS = tuple(sorted({
+    "canary/" + str(v).replace(" ", "-")
+    for v in CANARY_LOGTYPES.values()
+}))
+CANARY_BAN_TTL = 60
+CANARY_BAN_CACHE = {"ts": 0.0, "count": 0, "last_ip": None}
+CANARY_BAN_LOCK = threading.Lock()
+
+
+def _canary_ban_snapshot():
+    """(active canary decisions, newest banned IP), cached for CANARY_BAN_TTL."""
+    now = time.time()
+    with CANARY_BAN_LOCK:
+        if now - CANARY_BAN_CACHE["ts"] < CANARY_BAN_TTL:
+            return CANARY_BAN_CACHE["count"], CANARY_BAN_CACHE["last_ip"]
+
+    count, failed = 0, False
+    newest, last_ip = -1, None
+    for scenario in CANARY_BAN_SCENARIOS:
+        try:
+            proc = subprocess.run(
+                [CROWDSEC_BIN, "decisions", "list", "-o", "raw",
+                 "--limit", "0", "-s", scenario],
+                capture_output=True, text=True,
+                timeout=min(CROWDSEC_TIMEOUT, 5))
+            if proc.returncode != 0:
+                failed = True
+                continue
+        except Exception:
+            failed = True
+            continue
+        for line in (proc.stdout or "").splitlines()[1:]:
+            parts = line.strip().split(",")
+            if len(parts) > 3 and parts[3] == scenario:
+                count += 1
+                try:
+                    decision_id = int(parts[0])
+                except (TypeError, ValueError):
+                    decision_id = -1
+                if decision_id > newest:
+                    newest = decision_id
+                    last_ip = parts[2].replace("Ip:", "") or last_ip
+
+    with CANARY_BAN_LOCK:
+        # A partial failure must not overwrite a good cached count with a low one.
+        if not failed:
+            CANARY_BAN_CACHE.update(ts=time.time(), count=count,
+                                    last_ip=last_ip)
+        return CANARY_BAN_CACHE["count"], CANARY_BAN_CACHE["last_ip"]
+
+
 CANARY_RECENT = {}
 CANARY_RECENT_TTL = 3600
 CANARY_LOCK = threading.Lock()
@@ -3252,28 +3309,7 @@ def build_canary():
     events.sort(key=lambda e: -e["ts"])
     events = events[:25]
 
-    ban_count = 0
-    last_ban_ip = None
-    newest_ban_id = -1
-    try:
-        # --limit 0 is required: cscli silently caps the list at 100 rows, and
-        # the canary's decisions are far past that point in a busy blocklist.
-        proc = subprocess.run(
-            [CROWDSEC_BIN, "decisions", "list", "-o", "raw", "--limit", "0"],
-            capture_output=True, text=True, timeout=CROWDSEC_TIMEOUT)
-        for line in (proc.stdout or "").splitlines()[1:]:
-            parts = line.strip().split(",")
-            if len(parts) > 3 and parts[3].startswith(CANARY_BAN_PREFIX):
-                ban_count += 1
-                try:
-                    decision_id = int(parts[0])
-                except (TypeError, ValueError):
-                    decision_id = -1
-                if decision_id > newest_ban_id:
-                    newest_ban_id = decision_id
-                    last_ban_ip = parts[2].replace("Ip:", "") or last_ban_ip
-    except Exception:
-        pass
+    ban_count, last_ban_ip = _canary_ban_snapshot()
 
     return {
         "ok": True,
