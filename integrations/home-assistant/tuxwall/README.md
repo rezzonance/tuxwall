@@ -87,7 +87,7 @@ Presence-hardening example — everyone away, ban the guest device:
 alias: Lockdown when away
 trigger:
   - platform: zone
-    entity_id: person.jeff
+    entity_id: person.jane
     zone: zone.home
     event: leave
 action:
