@@ -1016,9 +1016,13 @@ def _kea_names():
         out = {}
         for line in lines:
             parts = line.split(",")
-            if len(parts) < 8 or parts[0] == "address":
+            # Kea lease CSV: address,hwaddr,client_id,valid_lifetime,expire,
+            # subnet_id,fqdn_fwd,fqdn_rev,hostname,state,user_context,pool_id
+            # hostname is column 8 — parts[7] is the fqdn_rev 0/1 flag, which
+            # is how every client ended up with hostname "0".
+            if len(parts) < 9 or parts[0] == "address":
                 continue
-            ip, mac, hostname = parts[0].strip(), parts[1].strip().upper(), parts[7].strip()
+            ip, mac, hostname = parts[0].strip(), parts[1].strip().upper(), parts[8].strip()
             if mac and hostname:
                 out[mac] = {"ip": ip, "hostname": hostname}
         if out:
