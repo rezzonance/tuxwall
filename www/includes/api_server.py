@@ -1724,7 +1724,7 @@ def _fetch_crowdsec_active_decisions():
             # dashboard saw only the newest 100 - every older banlist entry
             # then wrongly showed as "not active".
             [CROWDSEC_BIN, "decisions", "list", "-o", "json", "--limit", "0"],
-            capture_output=True, text=True, timeout=CROWDSEC_LIST_TIMEOUT,
+            capture_output=True, text=True, timeout=_CROWDSEC_LIST_TIMEOUT,
         )
         if proc.returncode != 0:
             raise RuntimeError((proc.stderr or "cscli failed").strip())
