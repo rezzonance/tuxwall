@@ -29,5 +29,5 @@
 # Ephemeral runtime + dev state
 !/tmp
 !/run/snapd
-!/home/jeff/.cache
-!/home/jeff/.local
+!/home/*/.cache
+!/home/*/.local

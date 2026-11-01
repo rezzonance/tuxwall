@@ -1144,7 +1144,7 @@
     state.domEditId = null;
     state.domEditSource = null;
     els.dmDomain.value = "";
-    els.dmIp.value = "192.168.1.12";
+    els.dmIp.value = "";
     els.dmPort.value = "";
     els.dmNote.value = "";
     els.dmAdd.textContent = "Add Domain";
