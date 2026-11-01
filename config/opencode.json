@@ -1,59 +1,69 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "ollama/qwen2.5:14b-instruct-q4_K_M",
-  "small_model": "ollama/qwen3:8b",
-  "provider": {
-    "ollama": {
-      "baseURL": "http://192.168.1.12:11434",
-      "models": {
-        "qwen3.5:9b": {
-          "name": "Qwen3.5 9B"
-        },
-        "qwen3:8b": {
-          "name": "Qwen3 8B"
-        },
-        "qwen2.5-coder-custom:latest": {
-          "name": "Qwen2.5 Coder Custom"
-        },
-        "hf.co/unsloth/Seed-Coder-8B-Instruct-GGUF:Q4_K_M": {
-          "name": "Seed Coder 8B (Q4_K_M)"
-        },
-        "qwen2.5:14b-instruct-q4_K_M": {
-          "name": "Qwen2.5 14B Instruct (Q4_K_M)"
-        },
-        "llama3.2:latest": {
-          "name": "Llama 3.2"
-        },
-        "qwen2.5-coder:7b-instruct-q4_K_M": {
-          "name": "Qwen2.5 Coder 7B (Q4_K_M)"
-        }
-      }
-    }
-  },
+  "model": "opencode/deepseek-v4-flash-free",
+  "small_model": "opencode/ling-3.0-flash-free",
   "permission": {
     "edit": "ask",
     "bash": {
       "*": "ask",
       "systemctl status *": "allow",
       "systemctl is-active *": "allow",
+      "systemctl show *": "allow",
+      "systemctl list-units *": "allow",
+      "systemctl list-timers *": "allow",
       "journalctl *": "allow",
       "ufw status*": "allow",
       "ip *": "allow",
       "ip -s link": "allow",
       "ss *": "allow",
       "cat /var/log/*": "allow",
+      "cat /etc/tuxwall/*": "allow",
+      "cat /etc/crowdsec/*": "allow",
+      "cat /etc/nginx/*": "allow",
       "tail *": "allow",
       "head *": "allow",
       "grep *": "allow",
       "ls *": "allow",
+      "wc *": "allow",
+      "find *": "allow",
+      "stat *": "allow",
+      "file *": "allow",
+      "sha256sum *": "allow",
       "df *": "allow",
       "free *": "allow",
       "uptime": "allow",
+      "hostname*": "allow",
+      "uname *": "allow",
+      "uname": "allow",
+      "date*": "allow",
+      "id*": "allow",
+      "which *": "allow",
+      "dpkg -l*": "allow",
+      "dpkg -s *": "allow",
+      "apt list*": "allow",
+      "apt-cache *": "allow",
+      "opencode --version": "allow",
+      "opencode version": "allow",
+      "ping *": "allow",
+      "curl 127.0.0.1:*": "allow",
+      "curl -* 127.0.0.1:*": "allow",
+      "curl localhost:*": "allow",
+      "curl -* localhost:*": "allow",
+      "curl tuxwall.org*": "allow",
+      "curl -* tuxwall.org*": "allow",
       "unbound-control status": "allow",
       "unbound-control stats_noreset": "allow",
       "cscli decisions list": "allow",
       "cscli alerts list": "allow",
       "wg show": "allow",
+      "sudo systemctl status *": "allow",
+      "sudo systemctl is-active *": "allow",
+      "sudo journalctl *": "allow",
+      "sudo nft list *": "allow",
+      "sudo iptables-save": "allow",
+      "sudo wg show*": "allow",
+      "sudo ufw status*": "allow",
+      "sudo cscli *": "allow",
       "sudo systemctl restart tuxwall": "allow",
       "sudo systemctl restart unbound": "allow",
       "sudo systemctl restart kea-dhcp4-server": "allow",
