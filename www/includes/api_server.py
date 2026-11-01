@@ -1689,9 +1689,18 @@ def _parse_iso(ts):
         return None
 
 
-_CROWDSEC_DEC_CACHE = {"at": 0.0, "data": None}
+_CROWDSEC_DEC_CACHE = {"at": 0.0, "data": None, "refreshing": False}
 _CROWDSEC_DEC_LOCK = threading.Lock()
-_CROWDSEC_DEC_TTL = 20.0
+# The full-list fetch is far heavier than the per-call cscli probes: with
+# >10k active decisions `cscli decisions list --limit 0` needs 15-20s just
+# to serialize, so a 20s cache with a 15s timeout meant every dashboard
+# poll re-ran a query that could never finish - the CrowdSec panel hung
+# on "Command timed out after 15 seconds" until the decision count was
+# brought down. Instead: the list gets its own generous timeout, a
+# refresh runs in the background when the cache ages out, and callers
+# are served the last good snapshot (flagged stale) instead of an error.
+_CROWDSEC_DEC_TTL = 60.0
+_CROWDSEC_LIST_TIMEOUT = 90  # full `decisions list --limit 0` only
 
 
 def _invalidate_crowdsec_decisions_cache():
@@ -1715,7 +1724,7 @@ def _fetch_crowdsec_active_decisions():
             # dashboard saw only the newest 100 - every older banlist entry
             # then wrongly showed as "not active".
             [CROWDSEC_BIN, "decisions", "list", "-o", "json", "--limit", "0"],
-            capture_output=True, text=True, timeout=CROWDSEC_TIMEOUT,
+            capture_output=True, text=True, timeout=CROWDSEC_LIST_TIMEOUT,
         )
         if proc.returncode != 0:
             raise RuntimeError((proc.stderr or "cscli failed").strip())
@@ -1757,18 +1766,53 @@ def _fetch_crowdsec_active_decisions():
     return {"ok": True, "decisions": active}
 
 
+def _start_crowdsec_dec_refresh():
+    """Refresh the decision snapshot in a background thread (single-flight)."""
+    with _CROWDSEC_DEC_LOCK:
+        if _CROWDSEC_DEC_CACHE["refreshing"]:
+            return
+        _CROWDSEC_DEC_CACHE["refreshing"] = True
+
+    def _run():
+        try:
+            result = _fetch_crowdsec_active_decisions()
+            if result.get("ok"):
+                with _CROWDSEC_DEC_LOCK:
+                    _CROWDSEC_DEC_CACHE["data"] = result
+                    _CROWDSEC_DEC_CACHE["at"] = time.time()
+        finally:
+            with _CROWDSEC_DEC_LOCK:
+                _CROWDSEC_DEC_CACHE["refreshing"] = False
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _crowdsec_active_decisions():
-    """Return active decisions, cached for 20s to avoid repeated 3s cscli runs."""
+    """Active decisions, cached; stale snapshots are served, never errors.
+
+    Fresh: returned directly. Aged out but present: a background refresh
+    is started and the last good snapshot is returned flagged stale - a
+    slow or failing cscli must not blank the CrowdSec panel on every poll.
+    Only a cold start (no snapshot yet, e.g. first call after boot) does a
+    synchronous fetch, which may take a while on installs with many
+    thousands of decisions.
+    """
     now = time.time()
     with _CROWDSEC_DEC_LOCK:
         cached = _CROWDSEC_DEC_CACHE["data"]
         if cached is not None and now - _CROWDSEC_DEC_CACHE["at"] < _CROWDSEC_DEC_TTL:
             return cached
+    if cached is None:
         result = _fetch_crowdsec_active_decisions()
         if result.get("ok"):
-            _CROWDSEC_DEC_CACHE["data"] = result
-            _CROWDSEC_DEC_CACHE["at"] = time.time()
+            with _CROWDSEC_DEC_LOCK:
+                _CROWDSEC_DEC_CACHE["data"] = result
+                _CROWDSEC_DEC_CACHE["at"] = time.time()
         return result
+    _start_crowdsec_dec_refresh()
+    out = dict(cached)
+    out["stale"] = True
+    return out
 
 
 def build_crowdsec():
