@@ -1,250 +1,196 @@
-
 <p align="center">
-  <img src="images/tux-logo-big.png" width="500" alt="Logo">
+  <img src="www/images/tuxwall-banner.png" width="700" alt="TuxWall">
 </p>
 
-# TuxWall
+<p align="center">
+  <strong>Turn any Ubuntu server into an open-source Linux firewall and router.</strong><br>
+  DHCP, DNS filtering, firewall rules, WireGuard, intrusion detection, deception and an AI assistant — in one browser tab on hardware you own.
+</p>
 
-https://tuxwall.org
-
-A Linux network dashboard providing a web UI for managing DHCP leases, DNS, firewall rules, VPN (WireGuard), and security — designed to run on a dedicated Linux gateway/router.
-
-> **Note:** TuxWall may not work out of the box. It is a dashboard that sits on top of a carefully assembled stack of Linux networking services. Getting everything working together — especially IPv6 — requires time and patience. This README documents a known-working configuration. I have added a APT package to make installation easier. There are multiple factors that go into configuration of Ubuntu Server to run as a router/firewall, every case will be different depending on your ISP and system hardware, you can try the config generator on tuxwall.org it should get you close. To support the project please share your suggestions and your support is always welcome.
-
-[![Donate with PayPal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/ncp/payment/GY6799FZ4ZPB2)
-
+<p align="center">
+  <a href="https://github.com/rezzonance/tuxwall/releases"><img src="https://img.shields.io/github/v/release/rezzonance/tuxwall?style=flat-square&color=39ff14&label=release" alt="Latest release"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT-39ff14?style=flat-square" alt="MIT License"></a>
+  <a href="#requirements"><img src="https://img.shields.io/badge/platform-Ubuntu%2024.04%2B-E95420?style=flat-square&logo=ubuntu&logoColor=white" alt="Ubuntu 24.04+"></a>
+  <a href="https://tuxwall.org"><img src="https://img.shields.io/badge/website-tuxwall.org-39ff14?style=flat-square" alt="tuxwall.org"></a>
+  <a href="https://forum.tuxwall.org"><img src="https://img.shields.io/badge/forum-community-39ff14?style=flat-square" alt="Forum"></a>
+</p>
 
 ---
 
+TuxWall is a web-based network dashboard for a **dedicated Linux gateway or router** — a headless machine sitting between your modem and your LAN switch, doing the real work.
+
+It does not replace your networking services. It **reads from and controls** Kea, Unbound, UFW, WireGuard, Suricata, CrowdSec and radvd through one unified interface, while every setting remains a standard, inspectable file on disk.
+
+The base is stock Ubuntu. `apt`, `systemd`, `journalctl` and every tool you already know keep working. Install TuxWall, and your gateway keeps routing; remove it, and the underlying services keep running.
+
+**[Website](https://tuxwall.org) · [Feature guide](https://tuxwall.org/help.html) · [Config reference](https://tuxwall.org/configs.html) · [Community forum](https://forum.tuxwall.org) · [Community bans](https://tuxwall.org/bans)**
+
 ## Table of Contents
 
-- [Overview](#overview)
-- [Tested Environment](#tested-environment)
-- [Dependencies](#dependencies)
-- [IPv6 Notes](#ipv6-notes)
+- [Why TuxWall](#why-tuxwall)
+- [Screenshots](#screenshots)
+- [Features](#features)
+- [How it fits together](#how-it-fits-together)
+- [Requirements](#requirements)
 - [Installation](#installation)
-- [Service Configuration](#service-configuration)
-- [SQM / Traffic Shaping](#sqm--traffic-shaping)
-- [Nginx Configuration](#nginx-configuration)
+- [First login](#first-login)
+- [Configuration](#configuration)
 - [Plugins](#plugins)
+- [AI assistant](#ai-assistant)
+- [Security and community data](#security-and-community-data)
+- [Updating and removing](#updating-and-removing)
 - [Troubleshooting](#troubleshooting)
+- [Support the project](#support-the-project)
 - [Contributing](#contributing)
 - [License](#license)
 
 ---
 
-## Overview
+## Why TuxWall
 
-tuxwall is a web-based network dashboard that provides visibility and control over:
+- **No custom distro.** Stock Ubuntu LTS underneath. No appliance image to learn, no vendor kernel, no locked bootloader.
+- **No lock-in.** TuxWall drives standard services with their standard configs. Uninstall the dashboard and your gateway is still a Linux gateway.
+- **Safe to experiment.** Firewall baselines can be restored atomically, so a bad rule does not lock you out of your own network.
+- **One pane of glass.** DHCP, DNS, firewall, VPN, IDS, traffic shaping, users and backups share a single UI and a single login.
+- **Works from first boot.** The package writes working defaults for Kea, Unbound, radvd, forwarding/NAT and UFW on a fresh install. Hand-tuned configs are never clobbered on upgrade.
 
-- **DHCP leases** (via Kea)
-- **DNS filtering and local domains** (via Unbound)
-- **Firewall rules** (via UFW / iptables)
-- **Intrusion detection** (via Suricata + CrowdSec)
-- **WireGuard VPN** management
-- **IPv6 router advertisements** (via radvd)
-- **SQM / traffic shaping** (via CAKE qdisc)
-- **User accounts** (OPNsense-style User Manager: add/edit/disable users, per-user admin rights)
-- **Two-factor authentication** (TOTP — works with Google Authenticator, Aegis, 1Password; QR-code enrollment, replay protection)
-- **AI assistant** (built-in [opencode](https://opencode.ai) agent with shell + file access, permission-gated, local or hosted models)
+## Screenshots
 
----
+![TuxWall overview dashboard showing live health, traffic and security posture](images/screenshots/latest-overview.png)
 
-## Tested Environment
+<p align="center"><em>Overview — live health, traffic, services and security posture at a glance.</em></p>
 
-- **OS:** Ubuntu 25.04 (plucky)
-- **Kernel:** 6.x
-- **Architecture:** x86_64
-- **Role:** Dedicated gateway/router (not a desktop — a headless server connected between your modem and LAN switch)
+<p align="center">
+  <a href="images/screenshots/latest-firewall.png"><img src="images/screenshots/latest-firewall.png" width="49%" alt="Firewall rules with interface filters and colour-coded rules"></a>
+  <a href="images/screenshots/latest-deception.png"><img src="images/screenshots/latest-deception.png" width="49%" alt="Deception page with honeypot and canary traps"></a>
+</p>
+<p align="center"><em>Firewall — interface filters and colour-coded rules. &nbsp;·&nbsp; Deception — honeypot and canary traps.</em></p>
 
----
+<p align="center">
+  <a href="images/screenshots/latest-ai.png"><img src="images/screenshots/latest-ai.png" width="49%" alt="AI Assistant running the opencode agent with a local model"></a>
+  <a href="images/screenshots/latest-settings.png"><img src="images/screenshots/latest-settings.png" width="49%" alt="Settings page with themes, avatar, users and 2FA"></a>
+</p>
+<p align="center"><em>AI Assistant — the opencode agent on your gateway. &nbsp;·&nbsp; Settings — themes, users and two-factor authentication.</em></p>
 
-## Dependencies
+## Features
 
-All of the following must be installed and working **before** tuxwall will function correctly. tuxwall is a dashboard — it reads from and controls these services but does not replace them.
+### Routing and firewall
 
-### Core Networking
-
-| Package | Version | Purpose |
+| Feature | What it does | Under the hood |
 |---|---|---|
-| `ufw` | 0.36+ | Firewall rule management |
-| `iptables` | 1.8+ | Underlying packet filtering |
-| `nftables` | 1.1+ | Modern netfilter backend |
-| `iproute2` | 6.x | Interface and routing management |
+| **Firewall rules** | View, add, remove and reorder rules; inspect the live backend. | UFW, nftables, iptables |
+| **VLANs and DMZ** | Create segmented networks and inter-VLAN policies from the UI. | UFW route rules, netplan |
+| **NAT and forwarding** | Persisted WAN masquerade and LAN-to-WAN forwarding on a default-deny posture. | UFW, sysctl |
+| **Traffic shaping** | CAKE qdisc for bufferbloat reduction and per-host fairness, with a guided speed test. | `tc`, CAKE |
+| **Restore baselines** | Save and restore known-good firewall rulesets with atomic rollback. | `iptables-restore` |
 
-### DHCP
+### Addressing and DNS
 
-| Package | Version | Purpose |
+| Feature | What it does | Under the hood |
 |---|---|---|
-| `kea-dhcp4-server` | 3.0+ | IPv4 DHCP server |
-| `kea-common` | 3.0+ | Shared Kea libraries |
+| **DHCP leases and reservations** | Live active/expired leases, static reservations and per-interface pools. | Kea DHCPv4 |
+| **IPv6 router advertisements** | Advertise prefixes and DNS to the LAN; track ISP prefix delegation. | radvd, DHCPv6-PD, SLAAC |
+| **DNS filtering** | Recursive resolution, local domains, blocklists and RPZ policies with hot reload. | Unbound |
+| **DNS upstreams** | Eleven presets plus custom LAN resolvers, with DNS-over-TLS support. | Unbound `forward-zone` |
+| **Threat feeds** | Subscribe to blocklist and RPZ feeds with automatic refresh. | Unbound, RPZ |
 
-> **Note:** tuxwall reads Kea lease files directly. ISC DHCP (`isc-dhcp-server`) is **not** supported.
+### Security and visibility
 
-### DNS
-
-| Package | Version | Purpose |
+| Feature | What it does | Under the hood |
 |---|---|---|
-| `unbound` | 1.24+ | Recursive DNS resolver and local filtering |
-| `unbound-anchor` | 1.24+ | DNSSEC trust anchor management |
+| **Intrusion detection** | Network threat detection on WAN and LAN with daily rule updates. | Suricata IDS/IPS |
+| **Collaborative blocking** | Local decisions and community threat intelligence with automatic bans. | CrowdSec |
+| **Honeypot tarpit** | WAN-only port garden that holds scanners open and auto-bans completed handshakes. | Built into the dashboard |
+| **Deception canaries** | SSH, VNC, MSSQL, Redis and SNMP emulators that capture credential sprays. | OpenCanary |
+| **File integrity** | Baseline and nightly AIDE checks with section-aware change reporting. | AIDE |
+| **Attack map and bandwidth** | Live attacker geography, per-client traffic and top talkers. | Leaflet, nftables counters |
+| **Community bans** | Trap catches are shared as verified threat evidence and consumed as a public ban list. | tuxwall.org collector |
 
-> **Important:** `systemd-resolved` conflicts with unbound. Both will bind to port 53 on `127.0.0.1` and `::1`, causing DNS queries to be randomly split between them. This leads to inconsistent resolution and broken local zone lookups. You **must** disable `systemd-resolved` and point `/etc/resolv.conf` directly to unbound:
->
-> ```bash
-> sudo systemctl disable --now systemd-resolved
-> sudo systemctl disable systemd-resolved-varlink.socket systemd-resolved-monitor.socket
-> sudo rm /etc/resolv.conf
-> echo -e "nameserver 127.0.0.1\nnameserver ::1\nsearch housenetwork.site" | sudo tee /etc/resolv.conf
-> ```
->
-> Verify no other process is on port 53:
-> ```bash
-> ss -ulnp | grep ':53 '
-> ```
->
-> Only unbound should be listening. If `systemd-resolved` reappears, check that its sockets are disabled:
-> ```bash
-> systemctl is-enabled systemd-resolved-varlink.socket systemd-resolved-monitor.socket
-> ```
+### Management
 
-### IPv6
-
-| Package | Version | Purpose |
+| Feature | What it does | Under the hood |
 |---|---|---|
-| `radvd` | 2.20+ | IPv6 Router Advertisement daemon |
+| **AI assistant** | An embedded agent that can inspect the box, audit rules and edit configs — with approval for every action. | opencode |
+| **Users and 2FA** | Per-user admin rights, TOTP enrollment with QR codes and replay protection. | Built into the dashboard |
+| **Backups and restore** | Full-system archives, include/exclude lists, single-file restore and sanitized exports. | rsync, tar, systemd |
+| **Themes** | Twelve built-in themes plus custom JSON themes and a profile avatar. | Built into the dashboard |
+| **Plugins** | Isolated extensions for access points, certificates and external exposure checks. | Sandboxed worker processes |
+| **System info and updates** | Platform, CPU, memory, storage, network, service controls and package updates. | systemd, apt, `/api/system` |
+| **Diagnostics** | Connectivity checks, service status, logs and firewall safety tools. | Built into the dashboard |
 
-> **This is the most difficult part of the setup.** See [IPv6 Notes](#ipv6-notes) below.
+## How it fits together
 
-### VPN
-
-| Package | Version | Purpose |
-|---|---|---|
-| `wireguard` | 1.0+ | WireGuard kernel module |
-| `wireguard-tools` | 1.0+ | `wg` and `wg-quick` CLI tools |
-
-### Intrusion Detection / Threat Intelligence
-
-| Package | Version | Purpose |
-|---|---|---|
-| `suricata` | 8.0+ | IDS/IPS — network threat detection |
-| `suricata-update` | 1.3+ | Rule set updater for Suricata |
-| `crowdsec` | 1.7+ | Collaborative threat intelligence agent |
-| `crowdsec-firewall-bouncer-iptables` | 0.0.36+ | Applies CrowdSec bans via iptables |
-
-### Deception Services (OpenCanary)
-
-The WAN port-garden: a tarpit (built into the dashboard) plus OpenCanary
-emulators — SSH 22, VNC 5900, MSSQL 1433, Redis 6379, SNMP 161/udp — bound on
-the WAN address only, running as a sandboxed system user. Any event with a
-globally routable source IP is, by definition, hostile (nothing legitimate
-connects to services that do not exist), so sources are auto-banned via
-CrowdSec (1 year) and community-reported through the same pipeline as the
-tarpit. Deployed by `scripts/opencanary/deploy-opencanary.sh`.
-
-| Package | Source | Purpose |
-|---|---|---|
-| `python3-venv` | Ubuntu archives | The canary runs from a venv at `/opt/opencanary` (its deps are pip-only, so the system Python stays clean) |
-| `opencanary` | PyPI (not in Ubuntu archives) | The deception honeypot itself — SSH/VNC/MSSQL/Redis/SNMP emulators on Twisted |
-| `scapy` | PyPI (**not** a default dependency of `opencanary`) | Required by the SNMP canary module; must be installed explicitly or the service fails to start (all modules load together) |
-
-Runtime requirements handled by the deploy script: a dedicated `opencanary`
-system user, `CAP_NET_BIND_SERVICE` (ports 22/161) in a sandboxed systemd
-unit, `AF_NETLINK` in `RestrictAddressFamilies` (scapy route lookups), and a
-webhook token shared with the dashboard receiver
-(`/api/canary/hit`, loopback-only).
-
-### Web Server
-
-| Package | Version | Purpose |
-|---|---|---|
-| `nginx` | 1.28+ | Reverse proxy serving the tuxwall dashboard |
-
-### Runtime
-
-| Package | Version | Purpose |
-|---|---|---|
-| `python3` | 3.12+ | Required to run `api_server.py` |
-| `curl` | 8.x | Used by blocklist update service and GeoIP database download |
-| `jq` | 1.8+ | JSON processing in scripts |
-| `gzip` | 1.12+ | Decompression for blocklist and GeoIP database updates |
-
-### Optional
-
-| Package | Purpose |
-|---|---|
-| `tcpdump` | Packet capture for debugging |
-| `python3-netifaces` | Enhanced network interface detection |
-| `python3-maxminddb` | GeoIP lookups in the dashboard (installed by `geoip-setup.sh`) |
-| `python3-pip` | Fallback installer for `maxminddb` if the deb package is unavailable |
-| `speedtest` (Ookla) | Guided line-speed test behind the System → Traffic Shaping "Run speedtest" button. **Not in the Ubuntu archives** (and Ookla's packagecloud repo ends at jammy, so it 404s on noble+) — auto-installed from the official Ookla tarball by `setup.sh` / the `.deb` postinst via `scripts/install-speedtest.sh` (no snap needed). Without it the button is disabled with an install hint; manual caps still work. |
-
-> **Note:** Node.js and Java are **not** required by tuxwall. If you have them installed for other purposes, they will not interfere.
-
----
-
-## IPv6 Notes
-
-IPv6 was by far the hardest part of getting tuxwall working on a live internet connection. If your ISP provides native IPv6 (e.g. via DHCPv6-PD or SLAAC), you need to be extremely careful about how you configure `radvd`, `unbound`, and your kernel forwarding settings — getting any of it wrong will drop your internet connection.
-
-**Key lessons learned:**
-
-- **Do not disable IPv6 on the WAN interface.** Even if you don't use it internally, disabling it can break routing.
-- **`radvd` must be configured to match your ISP's prefix delegation.** If your ISP hands you a `/64` or `/56`, `radvd` needs to advertise the correct subnet to your LAN.
-- **Unbound needs to listen on both IPv4 and IPv6** (`interface: 0.0.0.0` and `interface: ::0`) or DNS will fail for IPv6 clients.
-- **Kernel forwarding must be enabled for both IPv4 and IPv6:**
-  ```bash
-  sysctl -w net.ipv4.ip_forward=1
-  sysctl -w net.ipv6.conf.all.forwarding=1
-  ```
-  Make these permanent in `/etc/sysctl.conf`.
-- **UFW IPv6 support** must be enabled — set `IPV6=yes` in `/etc/default/ufw`.
-- **CrowdSec and Suricata** can interfere with IPv6 traffic if not configured to allow it. Check your bouncer rules carefully.
-- **WireGuard and IPv6** require explicit AllowedIPs entries for IPv6 ranges if you want VPN clients to use IPv6.
-- **`systemd-networkd` and DHCPv6 clients conflict on port 546.** If both are active, they will fight over the DHCPv6 client port (`UDP 546`), causing intermittent IPv6 connectivity drops. This is extremely difficult to diagnose because IPv6 will appear to work for a while then silently fail. Check with:
-  ```bash
-  ss -ulnp | grep ':546 '
-  ```
-  If you see two processes bound to port 546, disable the one you don't need. On a dedicated gateway/router, you likely want `systemd-networkd` handling DHCPv6 — disable any standalone DHCPv6 client (e.g., `kea-dhcp6-server`, `wide-dhcpv6-client`, `dibbler-client`):
-  ```bash
-  sudo systemctl disable --now <dhcpv6-client-service>
-  ```
-  If you need `systemd-networkd` for DHCPv6, ensure its `.network` file has `DHCP=ipv6` or `DHCP=yes` on the WAN interface. If you don't need `systemd-networkd` at all, disable it:
-  ```bash
-  sudo systemctl disable --now systemd-networkd
-  ```
-
-If your internet drops after starting any of these services, check your IPv6 routing table first:
-```bash
-ip -6 route show
+```text
+Browser (LAN or VPN)
+        │  HTTP :80
+        ▼
+      nginx ──► tuxwall API (Python, loopback :8008)
+                    │
+                    ├── Kea DHCPv4 / radvd
+                    ├── Unbound  (DNS, blocklists, RPZ)
+                    ├── UFW / nftables / iptables
+                    ├── WireGuard
+                    ├── Suricata + CrowdSec
+                    └── opencode agent (loopback :4096)
 ```
 
----
+The dashboard is served by nginx from `/var/www/html`; the Python API runs as `tuxwall.service` on `127.0.0.1:8008`. nginx is configured to allow loopback, RFC1918 and `fd00::/8` clients only, so the dashboard is reachable from your LAN and WireGuard network, not from the WAN.
+
+## Requirements
+
+- **Ubuntu 24.04 LTS or newer** on x86_64. Ubuntu **26.04 LTS** is the current recommendation. A stock server install is enough; no custom ISO is required.
+- **Two network interfaces:** one for **WAN** (modem/ONT) and one for **LAN** (switch/access points). A VM with two virtual NICs also works for testing.
+- **Root or sudo access** and an internet connection during installation.
+- The machine should be your network's gateway. For a typical setup, put the ISP modem in bridge mode and give the WAN interface a DHCP or static address.
+
+TuxWall is designed for a dedicated gateway. Running it on your desktop or on a machine that is not the default gateway will work as a dashboard, but routing, DHCP and DNS features will not apply to your network as intended.
 
 ## Installation
 
-### Appliance installer (fresh gateway with first-boot wizard)
+There are four supported paths. They all install the same dashboard; they differ in how much of the host the installer configures.
 
-The `install.sh` script stages the appliance payload and installs a first-boot
-autologin mechanism: on your next login the WAN/LAN setup wizard
-(`firstboot/tuxwall-firstboot.sh`) runs once interactively, then normal login
-is restored. Use this on a freshly-installed stock Ubuntu (server) machine
-you want to turn into a TuxWall gateway.
+### 1. APT repository — recommended
+
+Adds the signed TuxWall repository and installs the package in one step:
 
 ```bash
-git clone https://github.com/rezzonance/tuxwall.git
-cd tuxwall
-sudo bash install.sh
+curl -fsSL https://rezzonance.github.io/tuxwall/install-repo.sh | sudo bash
 ```
 
-After it finishes, log out (or reboot) — the next login drops you into the
-one-time WAN/LAN wizard, which installs packages, writes the network config,
-and enables services.
+Future updates are normal APT updates:
 
-### Full provisioning on an existing host
+```bash
+sudo apt update && sudo apt upgrade tuxwall
+```
 
-The `setup.sh` script handles everything on the current machine: installs
-dependencies, disables conflicting services, configures Unbound/nginx,
-installs the dashboard files and systemd units, and starts all services.
+The package installs the dashboard, enables its services, and writes basic working configs for the gateway stack (Kea DHCP, Unbound with DNSSEC, radvd, IPv4/IPv6 forwarding, WAN NAT and a default-deny UFW posture). It does not overwrite configs you have already hand-tuned.
+
+> **Optional packages:** CrowdSec, its firewall bouncer, GeoIP and the Ookla speedtest are shipped as `Suggests`, so a bare APT install does not pull them in. Install them explicitly if you want those integrations:
+>
+> ```bash
+> sudo apt install crowdsec crowdsec-firewall-bouncer-iptables python3-maxminddb
+> ```
+>
+> `setup.sh` installs CrowdSec and the bouncer for you, and tries the official Ookla tarball.
+
+<details>
+<summary>Manual APT setup (if you prefer not to pipe a script)</summary>
+
+```bash
+curl -fsSL https://rezzonance.github.io/tuxwall/public.asc \
+  | sudo gpg --dearmor -o /usr/share/keyrings/tuxwall.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/tuxwall.gpg] https://rezzonance.github.io/tuxwall stable main" \
+  | sudo tee /etc/apt/sources.list.d/tuxwall.list
+
+sudo apt update
+sudo apt install tuxwall
+```
+</details>
+
+### 2. Full provisioning from source — `setup.sh`
+
+Use this on an existing Ubuntu machine when you want the repository's installer to configure the host end to end. It installs dependencies, retires `systemd-resolved`, enables forwarding, configures Unbound/nginx/UFW/Avahi, installs the dashboard and systemd units, starts the services, and registers the APT repository for future updates.
 
 ```bash
 git clone https://github.com/rezzonance/tuxwall.git
@@ -252,328 +198,244 @@ cd tuxwall
 sudo bash setup.sh
 ```
 
-The script will:
-- Install all system packages
-- Disable `systemd-resolved` and fix `/etc/resolv.conf`
-- Check for DHCPv6 port 546 conflicts
-- Enable IPv4 + IPv6 forwarding
-- Download and install the TuxWall `.deb` package
-- Configure nginx, Unbound, and systemd services
-- Fix hardcoded paths and set file permissions
-- Print a status summary with next steps
+### 3. Appliance wizard — `install.sh`
 
-After the installer finishes, you still need to configure your network services (Kea, Unbound, radvd) for your specific setup. See the manual steps below or edit the config files directly.
-
-### Manual installation
-
-If you prefer to install step by step:
-
-#### 1. Install all dependencies
+Use this on a freshly installed stock Ubuntu server you want to turn into a TuxWall gateway. It stages the appliance payload and installs a one-time first-boot autologin. On your next login, a guided WAN/LAN wizard asks which interface is WAN and which is LAN, then configures the full stack.
 
 ```bash
-sudo apt update
-sudo apt install -y \
-  ufw iptables nftables iproute2 \
-  kea-dhcp4-server kea-common \
-  unbound unbound-anchor \
-  radvd \
-  wireguard wireguard-tools \
-  suricata suricata-update \
-  crowdsec crowdsec-firewall-bouncer-iptables \
-  nginx \
-  python3 curl jq
+git clone https://github.com/rezzonance/tuxwall.git
+cd tuxwall
+sudo bash install.sh
 ```
 
-### 2. Install tuxwall
+After it finishes, **log out or reboot**. The wizard runs once on the next login and restores normal login afterwards. This is the only path that uses the first-boot wizard; APT and `setup.sh` installs are ready immediately.
 
-Install the provided `.deb` package:
+### 4. Manual `.deb`
+
+Download the current package from [Releases](https://github.com/rezzonance/tuxwall/releases), then:
 
 ```bash
-sudo dpkg -i tuxwall_2.5.2_all.deb
-```
-
-If you encounter dependency errors:
-```bash
+sudo dpkg -i tuxwall_3.1.9_all.deb
 sudo apt -f install
-sudo dpkg -i tuxwall_2.5.2_all.deb
 ```
 
-#### APT repository (recommended)
+The second command resolves any missing dependencies. Replace the filename with the version you downloaded.
 
-The project publishes a signed APT repository via GitHub Pages, so installed
-routers receive updates with a plain `apt update && apt upgrade`. One-line
-install on any Debian/Ubuntu box:
+### Verify the install
 
 ```bash
-curl -fsSL https://rezzonance.github.io/tuxwall/install-repo.sh | sudo bash
+systemctl --no-pager -l status \
+  tuxwall nginx unbound kea-dhcp4-server radvd suricata
 ```
 
-Or the equivalent manual steps (one-time setup on each router):
+If CrowdSec is installed, include it as well:
 
 ```bash
-curl -fsSL https://rezzonance.github.io/tuxwall/public.asc \
-  | sudo gpg --dearmor -o /usr/share/keyrings/tuxwall.gpg
-echo "deb [signed-by=/usr/share/keyrings/tuxwall.gpg] https://rezzonance.github.io/tuxwall stable main" \
-  | sudo tee /etc/apt/sources.list.d/tuxwall.list
-sudo apt update
-sudo apt install tuxwall
+systemctl status crowdsec
 ```
 
-Ongoing updates:
+Then open the dashboard from a device on your LAN or VPN:
+
+```text
+http://<gateway-lan-ip>/
+```
+
+### Optional configuration
+
+The dashboard covers day-to-day changes. For a complete reference of every config file TuxWall touches — netplan, sysctl, UFW, Kea, Unbound, radvd, WireGuard, nginx, systemd and the opencode agent — see **[tuxwall.org/configs.html](https://tuxwall.org/configs.html)**. The site also includes a gateway config generator if you prefer to build the files yourself.
+
+## First login
+
+There are **no default credentials**. On a fresh install, the dashboard opens a one-time administrator setup page:
+
+1. Create the first administrator account with a strong password.
+2. Sign in and open **Settings → Users** to add any additional admins or read-only viewers.
+3. Enroll TOTP in **Settings** if you want two-factor authentication.
+4. Review **Settings → Plugins** to enable optional integrations.
+
+The dashboard is restricted to your LAN/VPN by nginx. If you cannot reach it, confirm the LAN interface has an address and that nginx is running:
+
+```bash
+ip -br address
+systemctl status nginx
+```
+
+## Configuration
+
+Most settings are available from the dashboard and are written directly to the underlying service's standard config file. You can hand-edit those files at any time; TuxWall reads the result on the next reload.
+
+| Path | Purpose |
+|---|---|
+| `/etc/tuxwall/` | Dashboard settings, `opencode.json`, `llm.json`, `sqm.conf` |
+| `/etc/unbound/unbound.conf.d/` | DNS, local domains, blocklists and RPZ zones |
+| `/etc/kea/kea-dhcp4.conf` | DHCP subnets, pools and reservations |
+| `/etc/radvd.conf` | IPv6 router advertisements |
+| `/etc/ufw/` | Firewall and NAT rules |
+| `/etc/wireguard/wg0.conf` | WireGuard interface and peers |
+| `/etc/suricata/suricata.yaml` | IDS/IPS interfaces and HOME_NET |
+| `/etc/nginx/sites-available/tuxwall` | Dashboard vhost and LAN/VPN access lists |
+
+Useful service commands:
+
+```bash
+sudo systemctl restart tuxwall          # dashboard API
+sudo systemctl reload nginx             # dashboard vhost
+sudo systemctl restart kea-dhcp4-server # DHCP
+sudo systemctl restart unbound          # DNS
+sudo systemctl restart radvd            # IPv6 RAs
+```
+
+For traffic shaping, set the WAN interface and rates from **System → Traffic Shaping**, or edit `/etc/tuxwall/sqm.conf` and run:
+
+```bash
+sudo systemctl enable --now tuxwall-sqm
+```
+
+## Plugins
+
+Plugins add a view, an API surface, or an alert source without changing the core dashboard. Each backend runs as an isolated unprivileged worker; credentials stay on the router in `/etc/tuxwall/plugins/<id>/config.json` and are never committed.
+
+Install and update plugins from **Settings → Plugins → Available Plugins**, or browse the source in [`plugins/`](plugins).
+
+| Plugin | Description |
+|---|---|
+| [UniFi Access Points](plugins/wifi-unifi-plugin) | Read-only UniFi controller view: access points, clients, signal and roaming context. Supports classic Network Application, UniFi OS (UDM / Cloud Key), local login or API key. |
+| [OpenWrt Access Points](plugins/wifi-openwrt-plugin) | OpenWrt AP view and optional management: access points, clients, signal, roaming events, RF channel advisor and SSID management over SSH. |
+| [Certificate Watch](plugins/cert-watch-plugin) | TLS certificate expiry monitoring. Reads the certificate each endpoint actually presents and raises incidents through the dashboard's alert bell, with renewal guidance. |
+| [Perimeter Watch](plugins/perimeter-watch-plugin) | Keyless external exposure audit: what Shodan observes open on your WAN versus what you intend, plus CrowdSec CTI reputation. Alerts through the dashboard's alert bell. |
+
+Third-party plugins can be installed from any public GitHub folder containing `plugin.json`, `main.py` and an optional `web/` directory. Browse the [bundled plugin source](plugins) for working examples of the worker contract.
+
+## AI assistant
+
+The **AI Assistant** page embeds an [opencode](https://opencode.ai) agent running on the gateway as `tuxwall-agent.service` on `127.0.0.1:4096`.
+
+It can inspect the system, audit firewall rules, tune DNS, read logs and edit config files — but **every command and file change requires your approval in the dashboard before it runs**. The agent runs with a deliberately narrow sudo allowlist for named service actions, not blanket root access.
+
+A fresh install ships a working `opencode.json` that uses opencode's free hosted models with a conservative read-only permission set, so the assistant works with zero setup. For a fully local deployment, point it at Ollama. Models and permissions live in:
+
+```text
+/etc/tuxwall/opencode.json
+```
+
+Existing installs keep their configured copy on upgrade.
+
+## Security and community data
+
+TuxWall is a security appliance, so a few defaults matter:
+
+- **No default password.** The first administrator is created interactively; the setup endpoint refuses to run once any user exists.
+- **Dashboard is LAN/VPN only.** nginx allows loopback, RFC1918 and `fd00::/8` clients. Do not expose port 80/443 to the WAN.
+- **Use 2FA.** TOTP works with Google Authenticator, Aegis, 1Password and any standard authenticator. Replay protection is built in.
+- **Backups contain secrets.** Full backups include `auth.json`, WireGuard private keys and service credentials. Use the sanitized export when sharing a backup.
+- **The deception layer is deliberate exposure.** The honeypot tarpit and OpenCanary emulators bind WAN-only ports that no legitimate client should use. They can be disabled from the Deception page.
+- **Community reporting is deception-only and always on.** When a trap catches a completed connection, the attacker IP and evidence are reported to the tuxwall.org community ban list. Configs, logs and personal data are never shared. If you do not want catches from your gateway shared, do not enable the deception layer. Full details are shown on the Deception page.
+
+Read-only viewers cannot change firewall rules, restart services, read backups or drive the AI agent; admin rights are required for every destructive action, and the check is enforced server-side.
+
+## Updating and removing
+
+Update an APT install:
 
 ```bash
 sudo apt update && sudo apt upgrade tuxwall
 ```
 
-Releases are published by the `Publish APT repository` GitHub Actions
-workflow: bump `Version:` in `pkg/DEBIAN/control`, commit to `main`, then tag
-the release (`git tag v2.5.2 && git push origin v2.5.2`). The tag must match
-the package version or the build fails. Signing uses the GPG keypair
-committed as `apt-public.asc` (private key lives in the repository secret
-`APT_GPG_PRIVATE_KEY`).
+The dashboard itself can also check for package updates from the **System** page.
 
-### 3. Disable systemd-resolved and configure DNS
-
-`systemd-resolved` conflicts with unbound on port 53. Disable it and point `/etc/resolv.conf` to unbound:
+Remove the dashboard:
 
 ```bash
-sudo systemctl disable --now systemd-resolved
-sudo systemctl disable systemd-resolved-varlink.socket systemd-resolved-monitor.socket
-sudo rm /etc/resolv.conf
-echo -e "nameserver 127.0.0.1\nnameserver ::1\nsearch housenetwork.site" | sudo tee /etc/resolv.conf
+sudo apt remove tuxwall
 ```
 
-### 4. Enable and start services
+Purge package configuration and TuxWall state as well:
 
 ```bash
-sudo systemctl enable --now kea-dhcp4-server
-sudo systemctl enable --now unbound
-sudo systemctl enable --now radvd
-sudo systemctl enable --now suricata
-sudo systemctl enable --now crowdsec
-sudo systemctl enable --now nginx
-sudo systemctl enable --now tuxwall
-sudo systemctl enable --now tuxwall-blocklist-update.timer
+sudo apt purge tuxwall
 ```
 
-### 5. Enable SQM (optional)
-
-If you want CAKE-based traffic shaping, edit `scripts/tuxwall-sqm.sh` with your WAN interface and speeds, then:
-
-```bash
-sudo cp scripts/tuxwall-sqm.sh /usr/local/sbin/tuxwall-sqm.sh
-sudo chmod +x /usr/local/sbin/tuxwall-sqm.sh
-sudo cp systemd/tuxwall-sqm.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now tuxwall-sqm
-```
-
-### 6. Enable GeoIP mapping (optional)
-
-To show attacker locations on the Security page map, run the GeoIP setup script:
-
-```bash
-sudo bash www/scripts/geoip-setup.sh
-```
-
-This downloads the free DB-IP City Lite database and installs the `maxminddb` Python package.
-
----
-
-## Service Configuration
-
-### Nginx
-
-Copy the nginx site config and enable it:
-
-```bash
-sudo cp nginx/tuxwall.conf /etc/nginx/sites-available/tuxwall
-sudo ln -s /etc/nginx/sites-available/tuxwall /etc/nginx/sites-enabled/tuxwall
-sudo nginx -t && sudo systemctl reload nginx
-```
-
-If you want the dashboard accessible by your gateway's LAN IP directly, uncomment and edit the optional `listen` directives at the top of `nginx/tuxwall.conf`.
-
-### tuxwall config directory
-
-```bash
-sudo mkdir -p /etc/tuxwall
-sudo cp config/llm.json.example /etc/tuxwall/llm.json
-sudo cp config/custom-blocklist.txt /etc/tuxwall/custom-blocklist.txt
-```
-
-Edit `/etc/tuxwall/llm.json` if you want to enable AI security summaries (requires an OpenAI-compatible API key or a local LLM endpoint).
-
-### AI assistant (opencode agent)
-
-The dashboard's AI Assistant page is powered by an embedded **opencode** agent
-(`tuxwall-agent.service` on `127.0.0.1:4096`). The installer sets it up
-automatically via `scripts/setup-opencode-agent.sh` — it also works standalone:
-
-```bash
-sudo bash scripts/setup-opencode-agent.sh config/opencode.json systemd/tuxwall-agent.service
-```
-
-Models and the bash permission allowlist live in `/etc/tuxwall/opencode.json`
-(local Ollama models are preconfigured — adjust the `baseURL` to your network).
-Every command or file edit requires your approval in the dashboard before it runs.
-
----
-
-## SQM / Traffic Shaping
-
-The `scripts/tuxwall-sqm.sh` script applies CAKE qdisc to your WAN interface for bufferbloat reduction and per-host fairness. Before using it:
-
-1. Set `WAN` to your actual WAN interface name (find it with `ip link show`)
-2. Set `UP_RATE` to ~95% of your provisioned upload speed
-3. Set `DOWN_RATE` to ~92% of your provisioned download speed
-
-Using a slightly lower percentage than your rated speed prevents your modem's queue from filling up, which is what causes bufferbloat.
-
----
-
-## Plugins
-
-The dashboard supports optional plugins — isolated extensions that add a view
-and backend worker without touching the core. Each plugin backend runs in a
-separate unprivileged worker process (`main.py` exposing `handle(request)`),
-and credentials stay on the router in `/etc/tuxwall/plugins/<id>/config.json`
-(never committed). Plugin UI assets are served read-only via
-`/api/plugins/<id>/asset/...`.
-
-To install a plugin, open **Settings → Plugins** and use the **Available
-Plugins** card: the project catalog lists every published plugin, and
-installing fetches the plugin source directly from GitHub and runs it as
-the same isolated worker. The catalog is regenerated automatically whenever
-a plugin folder changes in the repository.
-
-The backend install endpoint still accepts any public GitHub folder URL
-(`plugin.json` + `main.py` + optional `web/`), so third-party plugins can
-be installed with a direct API call if ever needed.
-
-A plugin folder needs:
-
-- `plugin.json` — manifest (`id`, `name`, `version`, `api: 1`, optional
-  `nav` entry and `settings` schema)
-- `main.py` — backend worker entry point with `handle(request)`
-- `web/` — optional UI assets (`plugin.js`, `plugin.css`, images)
-
-### Bundled plugins
-
-| Plugin | Description |
-| --- | --- |
-| [wifi-unifi-plugin](plugins/wifi-unifi-plugin) | Read-only UniFi controller view: access points, clients, signal and roaming context. Supports classic Network Application, UniFi OS (UDM / Cloud Key), local login or API key. |
-| [cert-watch-plugin](plugins/cert-watch-plugin) | **Signal-source plugin** (no sidebar entry, no view — alerts through the incident bell only): TLS certificate expiry monitoring, reading the certificate each endpoint actually presents. Severity ladder (info 30d / warning 14d / critical 7d + expired) with renewal guidance (certbot auto-detected for Let's Encrypt + configurable hint). Configure from Settings → Plugins. |
-| [perimeter-watch-plugin](plugins/perimeter-watch-plugin) | **Signal-source plugin** (no sidebar entry, no view — alerts through the incident bell only): Shodan InternetDB exposure audit (observed ports vs expected incl. honeypot/canary defaults, CVEs on exposed services) + CrowdSec CTI reputation. Keyless. Configure from Settings → Plugins. |
-
----
+Removing TuxWall stops the dashboard. The networking services it was managing — Kea, Unbound, UFW, WireGuard, Suricata, CrowdSec — keep running with their existing configs, so your gateway keeps routing.
 
 ## Troubleshooting
 
-### Dashboard not loading
+Start with the service and log checks:
 
 ```bash
-sudo systemctl status tuxwall
-sudo systemctl status nginx
-sudo journalctl -u tuxwall -n 50
+systemctl --no-pager -l status tuxwall nginx unbound kea-dhcp4-server radvd
+sudo journalctl -u tuxwall -n 100 --no-pager
+sudo nginx -t
+sudo unbound-checkconf
 ```
 
-### Internet drops after enabling a service
+**Dashboard not loading**
 
-Check your IPv6 routing first — this was the most common cause:
 ```bash
-ip -6 route show
-ip route show
-sudo ufw status verbose
+systemctl status tuxwall nginx
+sudo journalctl -u nginx -n 50 --no-pager
 ```
 
-Also check for port 546 conflicts between `systemd-networkd` and a DHCPv6 client — both binding to the same port causes intermittent IPv6 drops:
-```bash
-ss -ulnp | grep ':546 '
-```
-If two processes appear, disable the DHCPv6 client you don't need (see [IPv6 Notes](#ipv6-notes)).
+Confirm you are connecting from the LAN/VPN and not from the WAN, and that the LAN interface has an address (`ip -br address`).
 
-### DNS not resolving
+**DNS not resolving**
 
 ```bash
-sudo systemctl status unbound
-sudo unbound-control status
-dig @127.0.0.1 google.com
-```
-
-Check if `systemd-resolved` is still running and conflicting with unbound:
-```bash
-systemctl is-active systemd-resolved
+systemctl status unbound
 ss -ulnp | grep ':53 '
-cat /etc/resolv.conf
+dig @127.0.0.1 example.com
 ```
 
-If `systemd-resolved` is active, disable it:
-```bash
-sudo systemctl disable --now systemd-resolved
-sudo systemctl disable systemd-resolved-varlink.socket systemd-resolved-monitor.socket
-sudo rm /etc/resolv.conf
-echo -e "nameserver 127.0.0.1\nnameserver ::1\nsearch housenetwork.site" | sudo tee /etc/resolv.conf
-```
+Only Unbound should be listening on port 53. If `systemd-resolved` is active, it is fighting Unbound for the same socket; the installer retires it on supported paths.
 
-### DHCP leases not appearing in dashboard
+**DHCP leases not appearing**
 
-Confirm Kea is running and writing its lease file:
 ```bash
-sudo systemctl status kea-dhcp4-server
+systemctl status kea-dhcp4-server
 ls -lh /var/lib/kea/kea-leases4.csv
 ```
 
-### CrowdSec bans blocking legitimate traffic
+**CrowdSec is blocking something legitimate**
 
 ```bash
 sudo cscli decisions list
-sudo cscli decisions delete --ip <ip>
+sudo cscli decisions delete --ip <address>
 ```
 
-### WireGuard not routing traffic
+**A firewall change locked you out**
 
-```bash
-sudo wg show
-sudo ufw status
-ip route show table main
-```
+Restore the last saved baseline from **Firewall → Baselines**, or from the console reset UFW and re-add your management rule.
 
-### Checking all tuxwall-related services at once
+More detail is available in the [TuxWall feature guide](https://tuxwall.org/help.html). If you are still stuck, open an issue with the output of the service checks above and a description of your WAN/LAN setup.
 
-```bash
-systemctl status tuxwall tuxwall-sqm kea-dhcp4-server unbound radvd suricata crowdsec nginx
-```
+## Support the project
 
----
+TuxWall is built and maintained on minimal hardware with limited resources. If it saves you time or runs your gateway, consider supporting development:
 
-## Screenshots
-<p align="center">
-  <img src="images/screenshots/1.png" width="500" alt="Screenshot">
-</p>
-<p align="center">
-  <img src="images/screenshots/2.png" width="500" alt="Screenshot">
-</p>
-<p align="center">
-  <img src="images/screenshots/3.png" width="500" alt="Screenshot">
-</p>
-<p align="center">
-  <img src="images/screenshots/4.png" width="500" alt="Screenshot">
-</p>
-<p align="center">
-  <img src="images/screenshots/5.png" width="500" alt="Screenshot">
-</p>
+- [Donate via PayPal](https://www.paypal.com/ncp/payment/GY6799FZ4ZPB2)
+- [Join the community forum](https://forum.tuxwall.org)
+- [Report an issue](https://github.com/rezzonance/tuxwall/issues)
+- Star the repository or share it with someone building a home gateway
 
 ## Contributing
 
-1. Fork the repository
+1. Fork the repository.
 2. Create a feature branch: `git checkout -b feature/my-feature`
-3. Commit your changes: `git commit -m "Add my feature"`
-4. Push to the branch: `git push origin feature/my-feature`
-5. Open a Pull Request
+3. Make your change and test it on a live gateway where possible.
+4. Commit with a clear message: `git commit -m "Add my feature"`
+5. Push the branch: `git push origin feature/my-feature`
+6. Open a pull request describing the problem and the change.
 
----
+For larger changes, open an issue first so the approach can be discussed. Please keep pull requests focused, preserve the standard config-file model, and include the service checks you ran when the change affects networking or firewall behaviour.
 
 ## License
 
-This project is licensed under the MIT License.
+TuxWall is released under the **MIT License**.
+
+---
+
+<p align="center">
+  <a href="https://tuxwall.org">tuxwall.org</a> ·
+  <a href="https://forum.tuxwall.org">Forum</a> ·
+  <a href="https://github.com/rezzonance/tuxwall">GitHub</a> ·
+  <a href="https://tuxwall.org/bans">Community bans</a>
+</p>
