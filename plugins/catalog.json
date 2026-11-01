@@ -1,6 +1,6 @@
 {
   "ok": true,
-  "generated": 1793484045,
+  "generated": 1793567422,
   "plugins": [
     {
       "id": "cert-watch",
@@ -21,7 +21,7 @@
     {
       "id": "openwrt",
       "name": "OpenWrt Access Points",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "description": "OpenWrt AP view and management: access points, clients, signal, roaming events, RF channel advisor, and SSID management across all APs (opt-in).",
       "nav": {
         "label": "WiFi",
