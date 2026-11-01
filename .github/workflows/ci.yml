@@ -1,0 +1,59 @@
+name: CI
+
+# Gates for the shipped dashboard code. Two bug classes motivated this:
+#   1. Module-level use-before-define (the original crash loop) - caught
+#      by tools/py-name-check.py, kept running here.
+#   2. An identifier that compiles but never resolves at RUNTIME - the
+#      3.2.0 release shipped a definition/usage name mismatch that made
+#      every install's CrowdSec panel raise NameError. Syntax checks and
+#      the module-level gate both passed it. Caught two ways here:
+#      ruff F821 (undefined names in ANY scope) and an import-time smoke
+#      test that actually executes the code paths (tools/api_server_smoke.py).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  api-server:
+    name: api_server.py gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Match the runtime: Ubuntu 26.04 LTS ships python3.14.
+          python-version: "3.14"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Byte-compile
+        run: python3 -m py_compile www/includes/api_server.py
+
+      - name: Module-level name order (existing gate)
+        run: python3 tools/py-name-check.py www/includes/api_server.py
+
+      - name: Undefined names, all scopes (the 3.2.0 bug class)
+        # F821 only, isolated config: pre-existing style findings must not
+        # fail this gate - an undefined name is always a release blocker.
+        run: ruff check --select F821 --isolated www/includes/api_server.py plugins/*/main.py
+
+      - name: Import + behavior smoke test
+        run: python3 tools/api_server_smoke.py
+
+  dashboard:
+    name: dashboard.js gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Syntax check
+        run: node --check www/scripts/dashboard.js
