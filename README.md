@@ -215,7 +215,7 @@ After it finishes, **log out or reboot**. The wizard runs once on the next login
 Download the current package from [Releases](https://github.com/rezzonance/tuxwall/releases), then:
 
 ```bash
-sudo dpkg -i tuxwall_3.1.9_all.deb
+sudo dpkg -i tuxwall_3.2.0_all.deb
 sudo apt -f install
 ```
 

@@ -3914,7 +3914,13 @@ def _honey_wan6():
 
 
 def _honey_ban(ip):
-    """CrowdSec decision + community report for a trapped scanner."""
+    """Best-effort local CrowdSec ban for a trapped scanner.
+
+    Deliberately does NOT report to tuxwall.org: community reporting for
+    honeypot catches happens at the catch site (see the accept loop), so
+    a missing or failing CrowdSec binary never silently drops a consented
+    deception-layer report.
+    """
     try:
         subprocess.run(
             [CROWDSEC_BIN, "decisions", "add", "--ip", ip,
@@ -3922,11 +3928,12 @@ def _honey_ban(ip):
             capture_output=True, text=True, timeout=CROWDSEC_TIMEOUT,
         )
     except Exception:
+        _honey_log("caught {} (CrowdSec unavailable - not banned locally)"
+                   .format(ip))
         return
     with HONEY_APPLY_LOCK:
         HONEY_STATE["stats"]["banned"] += 1
     _honey_log("auto-banned {} (CrowdSec 1y)".format(ip))
-    _spawn_report(ip, "trapped by honeypot", "honeypot", "honeypot")
 
 
 def _honey_tarpit(conn, ip, port):
@@ -4025,8 +4032,7 @@ def _honey_listener(sock, port):
                     st["stats"]["unique"] += 1
                 conf_auto = None  # decide outside lock below
             conf = _honey_load_conf()
-            should_ban = (conf.get("auto_ban")
-                          and hits == int(conf.get("ban_threshold") or 1))
+            threshold_hit = hits == int(conf.get("ban_threshold") or 1)
             if active_total >= HONEY_MAX_TOTAL or active_ip >= HONEY_MAX_PER_IP:
                 # over capacity: drop instead of trap so memory stays bounded
                 try:
@@ -4038,8 +4044,21 @@ def _honey_listener(sock, port):
                 HONEY_STATE["active"][(ip, port)] = {
                     "ip": ip, "port": port, "connected_at": time.time(),
                 }
-            if should_ban:
-                threading.Thread(target=_honey_ban, args=(ip,), daemon=True).start()
+            if threshold_hit:
+                # Local ban is opt-in via auto_ban and best-effort (CrowdSec
+                # may not be installed) - but the community report is
+                # unconditional: enabling the deception layer IS the opt-in
+                # consent to share trap catches, and a missing CrowdSec
+                # binary or auto_ban=False must never silently drop that
+                # consented evidence.
+                if conf.get("auto_ban"):
+                    threading.Thread(target=_honey_ban, args=(ip,),
+                                     daemon=True).start()
+                threading.Thread(
+                    target=lambda: _spawn_report(ip, "trapped by honeypot",
+                                                 "honeypot", "honeypot"),
+                    daemon=True,
+                ).start()
             threading.Thread(
                 target=_honey_tarpit, args=(conn, ip, port), daemon=True,
             ).start()
