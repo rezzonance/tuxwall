@@ -38,3 +38,14 @@ on_success: break
 ```
 
 Then `sudo systemctl reload crowdsec`.
+
+## Idempotency (added 2026-11-03)
+
+The re-apply design stacks duplicate decisions on every restart/reload
+(~330 per pass; on the reference install this grew the store to 21k rows /
+17k alerts and cost crowdsec a constant ~26% CPU). `crowdsec-dedupe.timer`
+now runs `/usr/local/sbin/crowdsec_dedupe.py` every 6 hours: it collapses
+duplicate active decisions (keeping the longest expiry per
+value+scenario+type+origin) and prunes decision-less alerts older than 7
+days. The re-apply behavior is unchanged - bans still survive restarts - it
+is just idempotent now.

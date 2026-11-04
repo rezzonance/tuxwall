@@ -22,6 +22,17 @@ while getopts "o:i:" opt; do
   esac
 done
 
+# 2026-11-03 audit: this archive contains WireGuard private keys, tuxwall
+# auth.json and the cloudflared tunnel secret. The output directory must be
+# an operator-storage path - never web-served, user-writable or /tmp.
+case "$OUTDIR" in
+  /var/lib/tuxwall/backups/*|/var/backups/*|/root/*|/mnt/*|/media/*|/opt/backups/*) ;;
+  *)
+    echo "ERROR: refusing unsafe output directory: $OUTDIR" >&2
+    echo "       (use /var/lib/tuxwall/backups, /var/backups, /root, /mnt or /media)" >&2
+    exit 2 ;;
+esac
+
 TS="$(date +%Y%m%d-%H%M%S)"
 NAME="system-backup-${TS}.tar.gz"
 STAGE="$(mktemp -d /tmp/sysbackup.XXXXXX)"

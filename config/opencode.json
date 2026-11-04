@@ -63,7 +63,8 @@
       "sudo iptables-save": "allow",
       "sudo wg show*": "allow",
       "sudo ufw status*": "allow",
-      "sudo cscli *": "allow",
+      "sudo cscli decisions list": "allow",
+      "sudo cscli alerts list": "allow",
       "sudo systemctl restart tuxwall": "allow",
       "sudo systemctl restart unbound": "allow",
       "sudo systemctl restart kea-dhcp4-server": "allow",
@@ -73,10 +74,8 @@
       "sudo systemctl reload *": "allow",
       "sudo systemctl reload-or-restart *": "allow",
       "sudo systemctl daemon-reload": "allow",
-      "sudo tc *": "allow",
       "sudo speedtest *": "allow",
-      "sudo /usr/local/sbin/tuxwall-sqm.sh": "allow",
-      "sudo /usr/local/sbin/system-backup.sh *": "allow"
+      "sudo /usr/local/sbin/tuxwall-sqm.sh": "allow"
     }
   }
 }

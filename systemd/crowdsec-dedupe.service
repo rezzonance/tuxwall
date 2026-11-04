@@ -1,0 +1,7 @@
+[Unit]
+Description=TuxWall CrowdSec decision dedupe (idempotent blocklist re-apply)
+After=crowdsec.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/crowdsec_dedupe.py

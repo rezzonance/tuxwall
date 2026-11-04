@@ -5,5 +5,5 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/curl --fail --silent --show-error -X POST http://127.0.0.1:8008/api/blocklists/update
+ExecStart=/bin/sh -c 'curl --fail --silent --show-error -X POST -H "X-Tuxwall-Token: $(cat /etc/tuxwall/internal-token)" http://127.0.0.1:8008/api/blocklists/update'
 TimeoutStartSec=60

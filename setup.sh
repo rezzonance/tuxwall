@@ -253,7 +253,18 @@ cp "$REPO_DIR/systemd/suricata-update.timer"              /etc/systemd/system/su
 # SQM service (optional — installed but not enabled by default)
 cp "$REPO_DIR/systemd/tuxwall-sqm.service"               /etc/systemd/system/tuxwall-sqm.service
 
+# CrowdSec store housekeeping + unbound syslog noise suppression
+# (2026-11-03 audit - see pkg/etc/crowdsec/README-custom-blocklist.md)
+cp "$REPO_DIR/pkg/usr/local/sbin/crowdsec_dedupe.py"     /usr/local/sbin/crowdsec_dedupe.py
+install -m 644 "$REPO_DIR/pkg/etc/rsyslog.d/45-tuxwall-unbound.conf" /etc/rsyslog.d/45-tuxwall-unbound.conf
+chmod 750 /usr/local/sbin/crowdsec_dedupe.py
+cp "$REPO_DIR/systemd/crowdsec-dedupe.service"           /etc/systemd/system/crowdsec-dedupe.service
+cp "$REPO_DIR/systemd/crowdsec-dedupe.timer"             /etc/systemd/system/crowdsec-dedupe.timer
+
 systemctl daemon-reload
+systemctl enable --now crowdsec-dedupe.timer 2>/dev/null \
+    && ok "housekeeping timer enabled (crowdsec-dedupe)" \
+    || warn "crowdsec-dedupe timer could not be enabled - enable manually"
 
 ok "Systemd units installed"
 

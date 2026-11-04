@@ -1699,11 +1699,24 @@ _CROWDSEC_DEC_LOCK = threading.Lock()
 # brought down. Instead: the list gets its own generous timeout, a
 # refresh runs in the background when the cache ages out, and callers
 # are served the last good snapshot (flagged stale) instead of an error.
-_CROWDSEC_DEC_TTL = 60.0
+_CROWDSEC_DEC_TTL = 300.0  # 2026-11-03 audit: was 60s; full-list refresh is the most expensive call
 _CROWDSEC_LIST_TIMEOUT = 90  # full `decisions list --limit 0` only
 
 
+_CROWDSEC_PANEL_TTL = 30.0  # 2026-11-03 audit: cache cscli-heavy panel payloads
+_CROWDSEC_PANEL_LOCK = threading.Lock()
+_CROWDSEC_PANEL_CACHE = {"crowdsec": None, "ban_state": None, "at": 0.0}
+
+
+def _invalidate_crowdsec_panel_cache():
+    with _CROWDSEC_PANEL_LOCK:
+        _CROWDSEC_PANEL_CACHE["at"] = 0.0
+        _CROWDSEC_PANEL_CACHE["crowdsec"] = None
+        _CROWDSEC_PANEL_CACHE["ban_state"] = None
+
+
 def _invalidate_crowdsec_decisions_cache():
+    _invalidate_crowdsec_panel_cache()
     with _CROWDSEC_DEC_LOCK:
         _CROWDSEC_DEC_CACHE["at"] = 0.0
         _CROWDSEC_DEC_CACHE["data"] = None
@@ -1816,11 +1829,18 @@ def _crowdsec_active_decisions():
 
 
 def build_crowdsec():
+    # 2026-11-03 audit: cached - every cscli call costs a fresh LAPI login
+    # (bcrypt hash) plus SQLite scans, and the dashboard polls ~every 10s.
+    now = time.time()
+    with _CROWDSEC_PANEL_LOCK:
+        cached = _CROWDSEC_PANEL_CACHE["crowdsec"]
+        if cached is not None and now - _CROWDSEC_PANEL_CACHE["at"] < _CROWDSEC_PANEL_TTL:
+            return cached
     core = _crowdsec_active_decisions()
     if not core.get("ok"):
         return core
     active = core["decisions"]
-    return {
+    out = {
         "ok": True,
         "decisions": active,
         "active_count": len(active),
@@ -1828,6 +1848,10 @@ def build_crowdsec():
         "bouncers": _cscli(["bouncers", "list", "-o", "json"], []) or [],
         "alerts": _cscli(["alerts", "list", "-o", "json"], []) or [],
     }
+    with _CROWDSEC_PANEL_LOCK:
+        _CROWDSEC_PANEL_CACHE["crowdsec"] = out
+        _CROWDSEC_PANEL_CACHE["at"] = now
+    return out
 
 
 def build_crowdsec_ban_state():
@@ -1837,6 +1861,11 @@ def build_crowdsec_ban_state():
     a small list of IPs. This replaces fetching the full ~700 KB CrowdSec
     payload and the full blocklist just to label the action buttons.
     """
+    now = time.time()
+    with _CROWDSEC_PANEL_LOCK:
+        cached = _CROWDSEC_PANEL_CACHE["ban_state"]
+        if cached is not None and now - _CROWDSEC_PANEL_CACHE["at"] < _CROWDSEC_PANEL_TTL:
+            return cached
     core = _crowdsec_active_decisions()
     if not core.get("ok"):
         return {"ok": False, "error": core.get("error") or "CrowdSec unavailable"}
@@ -1849,7 +1878,11 @@ def build_crowdsec_ban_state():
         if d.get("ip") and d.get("type") != "unban":
             banned.add(d["ip"])
     ips = sorted(banned)
-    return {"ok": True, "ips": ips, "count": len(ips)}
+    out = {"ok": True, "ips": ips, "count": len(ips)}
+    with _CROWDSEC_PANEL_LOCK:
+        _CROWDSEC_PANEL_CACHE["ban_state"] = out
+        _CROWDSEC_PANEL_CACHE["at"] = now
+    return out
 
 
 BAN_DURATION_RE = re.compile(r"^\d+[mhd]$")
@@ -5604,6 +5637,14 @@ def setup_wireguard(body):
     if os.path.exists(WG_CONF):
         return {"ok": True, "already": True}
     address = (body.get("address") or WG_DEFAULT_ADDRESS).strip()
+    # 2026-11-03 audit: this value is written into wg0.conf, which wg-quick
+    # executes (PostUp/PostDown run through a root shell) - a newline or
+    # metacharacter here is directive injection. Anchor to IP/CIDR syntax.
+    try:
+        for part in address.split(","):
+            ipaddress.ip_network(part.strip(), strict=False)
+    except ValueError:
+        raise RuntimeError("Invalid WireGuard address (IP or CIDR only)")
     try:
         listen_port = int(body.get("listen_port") or WG_DEFAULT_PORT)
     except (TypeError, ValueError):
@@ -7810,17 +7851,83 @@ def _client_key(handler):
     return direct
 
 
+# 2026-11-03 audit: loopback peer-IP trust was a hole - any local process
+# (SSRF from the co-hosted public forum, malware) reached the loopback-exempt
+# endpoints unauthenticated and could forge X-Real-IP to rotate login
+# rate-limit buckets. Loopback exemptions now require a shared secret that
+# lives in a root-only file, unreadable by other local users.
+INTERNAL_TOKEN_FILE = "/etc/tuxwall/internal-token"
+INTERNAL_TOKEN_HEADER = "X-Tuxwall-Token"
+
+
+def _ensure_internal_token():
+    """Root-only shared secret for loopback-exempt endpoints; created on
+    first use. Returns "" when unavailable (exemptions then fail closed)."""
+    try:
+        with open(INTERNAL_TOKEN_FILE, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        tok = secrets.token_hex(32)
+        try:
+            with open(INTERNAL_TOKEN_FILE, "w") as f:
+                f.write(tok)
+            os.chmod(INTERNAL_TOKEN_FILE, 0o600)
+            return tok
+        except Exception:
+            return ""
+    except Exception:
+        return ""
+
+
+def _valid_internal_token(handler):
+    tok = _ensure_internal_token()
+    if not tok:
+        return False
+    supplied = handler.headers.get(INTERNAL_TOKEN_HEADER) or ""
+    return hmac.compare_digest(supplied, tok)
+
+
+def _is_trusted_local(handler):
+    """Loopback peer AND the internal-token handshake. Only tuxwall's own
+    units (which read the root-only token) qualify; a plain loopback
+    connection - SSRF, local malware - does not."""
+    try:
+        direct = handler.client_address[0]
+    except Exception:
+        return False
+    if direct not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        return False
+    return _valid_internal_token(handler)
+
+
+# 2026-11-03 audit: global failure cap. The per-source lockout was
+# bypassable by rotating the source key - a DIRECT loopback connection
+# (SSRF from the co-hosted public service, local malware) controls
+# X-Real-IP, which _client_key honors for loopback peers, so every attempt
+# got a fresh bucket. A global windowed cap makes rotation useless. Normal
+# households never come near LOGIN_GLOBAL_MAX.
+_LOGIN_FAIL_GLOBAL = []
+LOGIN_GLOBAL_WINDOW = 600   # seconds
+LOGIN_GLOBAL_MAX = 40       # failures across all sources within the window
+
+
 def _login_lock_remaining(ip):
+    now = time.time()
+    while _LOGIN_FAIL_GLOBAL and now - _LOGIN_FAIL_GLOBAL[0] >= LOGIN_GLOBAL_WINDOW:
+        _LOGIN_FAIL_GLOBAL.pop(0)
+    if len(_LOGIN_FAIL_GLOBAL) >= LOGIN_GLOBAL_MAX:
+        return int(_LOGIN_FAIL_GLOBAL[0] + LOGIN_GLOBAL_WINDOW - now) + 1
     entry = _login_fails.get(ip)
     if not entry:
         return 0
     _, locked_until = entry
-    if locked_until <= time.time():
+    if locked_until <= now:
         return 0
-    return int(locked_until - time.time()) + 1
+    return int(locked_until - now) + 1
 
 
 def _record_login_failure(ip):
+    _LOGIN_FAIL_GLOBAL.append(time.time())
     count, _ = _login_fails.get(ip, (0, 0.0))
     count += 1
     lockout = min(30 * (2 ** max(0, count - 5)), 900) if count >= 5 else 0
@@ -12057,21 +12164,20 @@ class Handler(BaseHTTPRequestHandler):
             if _client_key(self) not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
                 self._send(403, {"ok": False, "error": "Forbidden"})
                 return
-            if (qs.get("token", [""])[0] or "") != ensure_canary_token():
+            if not hmac.compare_digest(qs.get("token", [""])[0] or "",
+                                       ensure_canary_token()):
                 self._send(403, {"ok": False, "error": "Forbidden"})
                 return
             self._send(200, handle_canary_hit(body))
             return
 
-        # Internal self-restart: localhost only, no auth required
+        # Internal self-restart: trusted-local (loopback + internal token)
+        # or an admin session. 2026-11-03 audit: the old check trusted the
+        # peer IP alone, so any local process (SSRF from the co-hosted
+        # public forum, malware) reached this unauthenticated.
         if path == "/api/system/self-restart":
-            # Must use _client_key, not client_address: every request arrives
-            # through nginx's proxy_pass, so client_address is ALWAYS
-            # 127.0.0.1 and the old check passed for any LAN/VPN caller,
-            # leaving this unauthenticated. _client_key resolves the real
-            # peer from nginx's X-Real-IP (which nginx overwrites, so it
-            # cannot be spoofed) and only trusts it on a loopback connection.
-            if _client_key(self) not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+            ident_sr = _session_identity(self.headers)
+            if not _is_trusted_local(self) and not _is_admin(ident_sr):
                 self._send(403, {"ok": False, "error": "Forbidden"})
                 return
             try:
@@ -12086,9 +12192,9 @@ class Handler(BaseHTTPRequestHandler):
         identity = _session_identity(self.headers) if path.startswith("/api/") else None
         if path.startswith("/api/") and identity is None:
             # local-only exemption so the systemd timer can trigger updates
-            # without a browser session (loopback callers only)
-            if path == "/api/blocklists/update" and \
-                    _client_key(self) in ("127.0.0.1", "::1"):
+            # without a browser session. 2026-11-03 audit: requires the
+            # internal token, not just a loopback peer (SSRF defense).
+            if path == "/api/blocklists/update" and _is_trusted_local(self):
                 identity = {"username": "system-timer", "role": "admin", "owner": False}
             else:
                 self._send(401, {"ok": False, "error": "Authentication required"})
@@ -13326,17 +13432,44 @@ def _ensure_service_reload():
     except Exception:
         pass
 
+UNBOUND_RSYSLOG_RULE = "/etc/rsyslog.d/45-tuxwall-unbound.conf"
+UNBOUND_RSYSLOG_CONTENT = (
+    "# TuxWall 2026-11-03: unbound's always_nxdomain block notifications feed\n"
+    "# the dashboard Traffic Monitor via JOURNALD (journalctl -u unbound), not\n"
+    "# from this file. Duplicating them into /var/log/syslog wrote ~583k\n"
+    "# lines/day of noise for nothing. Drop them here; journald is unaffected\n"
+    "# (and rate/size-capped by systemd).\n"
+    "if $programname == 'unbound' and $msg contains 'always_nxdomain' then stop\n"
+)
+
+
 def _ensure_unbound_local_actions():
-    """Write log-local-actions conf if missing, reload unbound."""
-    if os.path.exists(UNBOUND_LOCAL_ACTIONS_CONF):
-        return
-    try:
-        with open(UNBOUND_LOCAL_ACTIONS_CONF, "w") as f:
-            f.write("server:\n    log-local-actions: yes\n")
-        subprocess.run(["unbound-control", "reload"],
-                       capture_output=True, text=True, timeout=10)
-    except Exception:
-        pass
+    """Keep log-local-actions on (the Traffic Monitor reads block events from
+    journald) while keeping the resulting syslog noise suppressed via an
+    rsyslog drop rule. Idempotent: only writes/reloads what is missing."""
+    wrote_conf = False
+    if not os.path.exists(UNBOUND_LOCAL_ACTIONS_CONF):
+        try:
+            with open(UNBOUND_LOCAL_ACTIONS_CONF, "w") as f:
+                f.write("server:\n    log-local-actions: yes\n")
+            wrote_conf = True
+        except Exception:
+            pass
+    if not os.path.exists(UNBOUND_RSYSLOG_RULE):
+        try:
+            os.makedirs(os.path.dirname(UNBOUND_RSYSLOG_RULE), exist_ok=True)
+            with open(UNBOUND_RSYSLOG_RULE, "w") as f:
+                f.write(UNBOUND_RSYSLOG_CONTENT)
+            subprocess.run(["systemctl", "restart", "rsyslog"],
+                           capture_output=True, text=True, timeout=10)
+        except Exception:
+            pass
+    if wrote_conf:
+        try:
+            subprocess.run(["unbound-control", "reload"],
+                           capture_output=True, text=True, timeout=10)
+        except Exception:
+            pass
 
 _TRAFFIC_CACHE = {"ts": 0, "data": None}
 _TRAFFIC_CACHE_TTL = 5  # seconds; one snapshot shared by all tabs/pollers
