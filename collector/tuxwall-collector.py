@@ -75,11 +75,12 @@ PROTECTED_NETS = tuple(ipaddress.ip_network(n) for n in (
     "2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
 ))
 
-# Minimum reporter version (3.2.3: CF-edge ingest refusal + consumer-side
-# CF exclusion shipped together). Older clients keep their local canary
+# Minimum reporter version (3.2.4: version-gated reporting, CF/Anthropic
+# ingest refusal, consumer-side exclusion and the managed whitelist
+# shipped together). Older clients keep their local canary
 # bans but their reports are refused until they upgrade - their dashboard
 # reporting status shows the upgrade message, so it is not a silent drop.
-MIN_REPORTER_VERSION = "3.2.3"
+MIN_REPORTER_VERSION = "3.2.4"
 
 
 def _is_protected_addr(addr):

@@ -2397,8 +2397,8 @@ def set_community_auto(enabled):
 # every CF-fronted SaaS (opencode.ai included) or the model API. Locally
 # OBSERVED attacks from these ranges are still handled by the normal
 # canary/honeypot path - only remote feed enforcement skips them.
-# 3.2.4 plan: consumers read the collector-published list instead - see
-# docs/whitelist-design.md.
+# 3.2.4: consumers also honor the collector-published list
+# (docs/whitelist-design.md) - protection updates need no client release.
 PROTECTED_NETS = tuple(ipaddress.ip_network(n) for n in (
     "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "104.16.0.0/13",
     "104.24.0.0/14", "108.162.192.0/18", "131.0.72.0/22", "141.101.64.0/18",
@@ -2909,10 +2909,10 @@ def save_llm_conf(body):
 REPORTING_CONF_FILE = "/etc/tuxwall/reporting.json"
 REPORTING_DEFAULT_URL = "https://tuxwall.org/report"
 # Tuxwall version sent with every community report/registration. tuxwall.org
-# refuses reports from below MIN_REPORTER_VERSION (3.2.3) - that release is
+# refuses reports from below MIN_REPORTER_VERSION (3.2.4) - that release is
 # the one that stops consumers from ever banning Cloudflare edge IPs.
 # Keep in sync with pkg/DEBIAN/control.
-TUXWALL_VERSION = "3.2.3"
+TUXWALL_VERSION = "3.2.4"
 REPORTING_TIMEOUT = 10
 _report_status_lock = threading.Lock()
 
