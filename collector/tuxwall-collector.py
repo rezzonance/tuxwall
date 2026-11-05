@@ -58,6 +58,51 @@ MAX_HITS = 1000000
 ADMIN_KEY_PATH = os.environ.get(
     "TUXWALL_COLLECTOR_ADMIN_KEY") or "/etc/tuxwall-collector/admin.key"
 
+# Protected infrastructure ranges (keep in sync with api_server.py). Reports
+# naming these IPs are refused at ingest: community-auto bans every listed
+# IP regardless of tier, so a single reporter could otherwise cut the whole
+# community off from shared infrastructure (Cloudflare edges = tuxwall.org
+# itself and every CF-fronted SaaS; Anthropic = model API). This hardcoded
+# floor becomes a managed whitelist in 3.2.4 - see
+# docs/whitelist-design.md.
+PROTECTED_NETS = tuple(ipaddress.ip_network(n) for n in (
+    "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "104.16.0.0/13",
+    "104.24.0.0/14", "108.162.192.0/18", "131.0.72.0/22", "141.101.64.0/18",
+    "162.158.0.0/15", "172.64.0.0/13", "173.245.48.0/20", "188.114.96.0/20",
+    "190.93.240.0/20", "197.234.240.0/22", "198.41.128.0/17",
+    "160.79.104.0/24",     # Anthropic api.anthropic.com (not CF-fronted)
+    "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
+    "2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+))
+
+# Minimum reporter version (3.2.3: CF-edge ingest refusal + consumer-side
+# CF exclusion shipped together). Older clients keep their local canary
+# bans but their reports are refused until they upgrade - their dashboard
+# reporting status shows the upgrade message, so it is not a silent drop.
+MIN_REPORTER_VERSION = "3.2.3"
+
+
+def _is_protected_addr(addr):
+    return any(addr in net for net in PROTECTED_NETS)
+
+
+def _version_tuple(value):
+    parts = []
+    for piece in str(value or "").split("."):
+        digits = ""
+        for ch in piece:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        parts.append(int(digits or 0))
+    return tuple(parts[:3]) or (0,)
+
+
+def _reporter_version_ok(header_value):
+    return _version_tuple(header_value) >= _version_tuple(MIN_REPORTER_VERSION)
+
+
 SEVERITY_LOW = "low"
 SEVERITY_MEDIUM = "medium"
 SEVERITY_HIGH = "high"
@@ -966,6 +1011,10 @@ class Handler(BaseHTTPRequestHandler):
             if len(key) < 16:
                 self._json(400, {"ok": False, "error": "Missing or invalid key"})
                 return
+            if not _reporter_version_ok(self.headers.get("X-Tuxwall-Version")):
+                self._json(426, {"ok": False, "error":
+                    "Tuxwall %s+ required for community reporting - upgrade to continue sharing" % MIN_REPORTER_VERSION})
+                return
             client = self.client_address[0] if self.client_address else ""
             if not RATE.allow(client, time.time()):
                 self._json(429, {"ok": False, "error": "Too many requests"})
@@ -1007,6 +1056,10 @@ class Handler(BaseHTTPRequestHandler):
         if len(key) < 16:
             self._json(400, {"ok": False, "error": "Missing or invalid report key"})
             return
+        if not _reporter_version_ok(self.headers.get("X-Tuxwall-Version")):
+            self._json(426, {"ok": False, "error":
+                "Tuxwall %s+ required for community reporting - upgrade to continue sharing" % MIN_REPORTER_VERSION})
+            return
 
         ip_raw = str(body.get("ip") or "").strip()
         try:
@@ -1016,6 +1069,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not addr.is_global:
             self._json(400, {"ok": False, "error": "Refusing private/reserved IP"})
+            return
+        if _is_protected_addr(addr):
+            self._json(400, {"ok": False, "error":
+                "Refusing protected infrastructure IP (Cloudflare edge / model API): publishing it would let one reporter cut the community off from shared infrastructure"})
             return
         ip = str(addr)
 

@@ -2324,9 +2324,10 @@ def community_reporting_register():
     try:
         req = urllib.request.Request(
             _reporting_register_url(),
-            data=json.dumps({"key": key}).encode("utf-8"),
+            data=json.dumps({"key": key, "version": TUXWALL_VERSION}).encode("utf-8"),
             headers={"Content-Type": "application/json",
-                     "User-Agent": "tuxwall-report/1.0"},
+                     "User-Agent": "tuxwall-report/1.0",
+                     "X-Tuxwall-Version": TUXWALL_VERSION},
             method="POST")
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8") or "{}")
@@ -2385,6 +2386,34 @@ def set_community_auto(enabled):
     return {"ok": True, "auto": state}
 
 
+# Protected infrastructure ranges (keep in sync with the collector and
+# nginx/tuxwall-org.conf for the CF part). Never locally banned from
+# COMMUNITY intel: community-auto bans every listed IP regardless of tier,
+# so a poisoned feed entry here would cut this box off from tuxwall.org,
+# every CF-fronted SaaS (opencode.ai included) or the model API. Locally
+# OBSERVED attacks from these ranges are still handled by the normal
+# canary/honeypot path - only remote feed enforcement skips them.
+# 3.2.4 plan: consumers read the collector-published list instead - see
+# docs/whitelist-design.md.
+PROTECTED_NETS = tuple(ipaddress.ip_network(n) for n in (
+    "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "104.16.0.0/13",
+    "104.24.0.0/14", "108.162.192.0/18", "131.0.72.0/22", "141.101.64.0/18",
+    "162.158.0.0/15", "172.64.0.0/13", "173.245.48.0/20", "188.114.96.0/20",
+    "190.93.240.0/20", "197.234.240.0/22", "198.41.128.0/17",
+    "160.79.104.0/24",     # Anthropic api.anthropic.com (not CF-fronted)
+    "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
+    "2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+))
+
+
+def _ip_in_protected(value):
+    try:
+        addr = ipaddress.ip_address(str(value))
+    except ValueError:
+        return False
+    return any(addr in net for net in PROTECTED_NETS)
+
+
 class CommunityAutoWorker(threading.Thread):
     """Keeps local 90d bans in sync with the community ban list."""
 
@@ -2410,8 +2439,16 @@ class CommunityAutoWorker(threading.Thread):
         for d in cs.get("decisions", []):
             if d.get("ip") and d.get("type") != "unban":
                 banned.add(d["ip"])
-        missing = [b["ip"] for b in data.get("bans", [])
-                   if isinstance(b, dict) and b.get("ip") and b["ip"] not in banned]
+        missing = []
+        skipped_cf = 0
+        for b in data.get("bans", []):
+            if not (isinstance(b, dict) and b.get("ip")):
+                continue
+            if _ip_in_protected(b["ip"]):
+                skipped_cf += 1     # never ban a CF edge from remote intel
+                continue
+            if b["ip"] not in banned:
+                missing.append(b["ip"])
         added = 0
         for ip in missing[:COMMUNITY_AUTO_BATCH]:
             result = ban_crowdsec_ip(ip, "90d")
@@ -2422,6 +2459,7 @@ class CommunityAutoWorker(threading.Thread):
             state["last_sync"] = time.time()
             state["last_pass_added"] = added
             state["added_total"] = (state.get("added_total") or 0) + added
+            state["skipped_cf"] = skipped_cf
             state["pending"] = max(0, len(missing) - added)
             _save_community_auto(state)
 
@@ -2848,6 +2886,11 @@ def save_llm_conf(body):
 # only ever sent over HTTPS and hashed server-side (never stored in plaintext).
 REPORTING_CONF_FILE = "/etc/tuxwall/reporting.json"
 REPORTING_DEFAULT_URL = "https://tuxwall.org/report"
+# Tuxwall version sent with every community report/registration. tuxwall.org
+# refuses reports from below MIN_REPORTER_VERSION (3.2.3) - that release is
+# the one that stops consumers from ever banning Cloudflare edge IPs.
+# Keep in sync with pkg/DEBIAN/control.
+TUXWALL_VERSION = "3.2.3"
 REPORTING_TIMEOUT = 10
 _report_status_lock = threading.Lock()
 
@@ -3007,7 +3050,8 @@ def report_ban_to_org(ip, hits=0, reason="", source="", category="",
             conf["url"],
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json",
-                     "User-Agent": "tuxwall-report/1.0"},
+                     "User-Agent": "tuxwall-report/1.0",
+                     "X-Tuxwall-Version": TUXWALL_VERSION},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=REPORTING_TIMEOUT) as resp:
