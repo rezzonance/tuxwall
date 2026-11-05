@@ -66,9 +66,21 @@ echo "   asset version set to $ASSET_V"
 
 echo "[5/6] Restarting dashboard API..."
 systemctl restart tuxwall
-sleep 1
-curl -fsS http://127.0.0.1:8008/api/auth/session | python3 -c \
-  'import sys,json; d=json.load(sys.stdin); print("api ok, authenticated:", d.get("authenticated"))'
+# The API binds after a few seconds (module load + geoip init) - retry the
+# health check for up to 30s instead of a fixed 1s sleep (which failed
+# cosmetically on every deploy).
+probe=""
+for _ in $(seq 1 30); do
+  sleep 1
+  if probe=$(curl -fsS -m 2 http://127.0.0.1:8008/api/auth/session 2>/dev/null); then
+    break
+  fi
+done
+if [[ -z "$probe" ]]; then
+  echo "dashboard API did not come up within 30s - check: journalctl -u tuxwall" >&2
+  exit 1
+fi
+python3 -c 'import sys,json; d=json.load(sys.stdin); print("api ok, authenticated:", d.get("authenticated"))' <<< "$probe"
 
 echo "[6/6] Installing db-ip ASN database (ISP column, best effort)..."
 if [[ -f /var/lib/tuxwall/dbip-asn-lite.mmdb ]]; then
