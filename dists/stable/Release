@@ -1,32 +1,32 @@
 Architectures: all amd64
 Codename: stable
 Components: main
-Date: Wed, 04 Nov 2026 06:03:43 +0000
+Date: Thu, 05 Nov 2026 00:14:18 +0000
 Description: TuxWall network firewall dashboard
 Label: TuxWall APT Repository
 Origin: TuxWall
 Suite: stable
 MD5Sum:
- 0928533db3fd034e752d05811b7c8f6e              205 Release
- 9801418cb6711d2df817cd4159fb943f            40238 main/binary-all/Packages
- 06e08050031252c5ac34cba599712e98            17006 main/binary-all/Packages.gz
- 9801418cb6711d2df817cd4159fb943f            40238 main/binary-amd64/Packages
- 06e08050031252c5ac34cba599712e98            17006 main/binary-amd64/Packages.gz
+ 843d88249a354e4b007a4ed5db54f38b              205 Release
+ 4d6da871c81ca695630d2959e5f43c90            40238 main/binary-all/Packages
+ 39531bfd3f1ae30e98f68de0e7f2c0b4            17002 main/binary-all/Packages.gz
+ 4d6da871c81ca695630d2959e5f43c90            40238 main/binary-amd64/Packages
+ 39531bfd3f1ae30e98f68de0e7f2c0b4            17002 main/binary-amd64/Packages.gz
 SHA1:
- 2813f66c85466582898c595e122fe0f0f62a318d              205 Release
- cd2e3eb01928165a0eae528775a55c3993ff4417            40238 main/binary-all/Packages
- cdd8c3fe9326b8721cba41577e56b543ffe4228a            17006 main/binary-all/Packages.gz
- cd2e3eb01928165a0eae528775a55c3993ff4417            40238 main/binary-amd64/Packages
- cdd8c3fe9326b8721cba41577e56b543ffe4228a            17006 main/binary-amd64/Packages.gz
+ c2380b669f21f0ad73cc7b619ac531277757aac6              205 Release
+ fa5c29a32942a8ef5e49b038f34645272e446ab5            40238 main/binary-all/Packages
+ be104c5fbd8b49c9e3905cc05ddd9d80bb5bca3f            17002 main/binary-all/Packages.gz
+ fa5c29a32942a8ef5e49b038f34645272e446ab5            40238 main/binary-amd64/Packages
+ be104c5fbd8b49c9e3905cc05ddd9d80bb5bca3f            17002 main/binary-amd64/Packages.gz
 SHA256:
- d5765129aad177670894a6c6a2760749a6c3c47f176ce6636a2385bdfb2659cd              205 Release
- 26d34cab560fe80e1a18723d3123fad9bfba0054ec1547caaec393f2a7744cbf            40238 main/binary-all/Packages
- 49d53b8eb0fb9e4540a383399029b745c1083901899dce12cb74163cdb3134f6            17006 main/binary-all/Packages.gz
- 26d34cab560fe80e1a18723d3123fad9bfba0054ec1547caaec393f2a7744cbf            40238 main/binary-amd64/Packages
- 49d53b8eb0fb9e4540a383399029b745c1083901899dce12cb74163cdb3134f6            17006 main/binary-amd64/Packages.gz
+ 71e878452c0ab33caa72c1188e4d83f4c07f938e76eab6f9b906ec41711a22e9              205 Release
+ c8f8cfcafb2dde93bfb4794c789a6deb23c54770b9968f0b8fa509ed57865d14            40238 main/binary-all/Packages
+ 71e01b95654f104594e5bf983caddaa8090b27e114a7bab088052ef7ce575bd5            17002 main/binary-all/Packages.gz
+ c8f8cfcafb2dde93bfb4794c789a6deb23c54770b9968f0b8fa509ed57865d14            40238 main/binary-amd64/Packages
+ 71e01b95654f104594e5bf983caddaa8090b27e114a7bab088052ef7ce575bd5            17002 main/binary-amd64/Packages.gz
 SHA512:
- 3f4fc95e9d963609530599d549da8d5858f11218b19896ee9a8cdecbd581253b68be150212ca3e7302887d6bb17d13ca75714e895158844234e76d329e0b3e45              205 Release
- 82533c2ece04fb802c39d1d622ba1a8c66055271bd216b480094320882a8d091c352dc333fafaaeb4df4198b3e97ceb047c856fc4065bdedb2959753bfec4eeb            40238 main/binary-all/Packages
- b0c01d1cf53a9434ee838ef78ee8afd23486fe0134531e5c6aa0634ab8b1ff1beb21c7fb8b058e794a8984c17bae036fe5b3bd66b79b0618c8a669c02d8a4359            17006 main/binary-all/Packages.gz
- 82533c2ece04fb802c39d1d622ba1a8c66055271bd216b480094320882a8d091c352dc333fafaaeb4df4198b3e97ceb047c856fc4065bdedb2959753bfec4eeb            40238 main/binary-amd64/Packages
- b0c01d1cf53a9434ee838ef78ee8afd23486fe0134531e5c6aa0634ab8b1ff1beb21c7fb8b058e794a8984c17bae036fe5b3bd66b79b0618c8a669c02d8a4359            17006 main/binary-amd64/Packages.gz
+ 3bc095f7e46aa20a21b36215c8ddfc6b5b0f48c32c7791d56c828e3a7d903ee94a205d6aa71c677aee58d6f81776fb2373616f4ff9297e8b1623bee80edb67a8              205 Release
+ 0f9acc5d8b8af6e695fddec4a632d6e1c27475e2e6fb98aa7009345dcbc0305fa999e64ff4115efda32f8508efb4319c8a838a30bdcad975bfe1ea50e35ea8fa            40238 main/binary-all/Packages
+ de128d330cca2bfcb3f8537f1ebe09390c322a749b269e5f5ea37654ec5a839db7a9cbba541a1c811871291feffe8c8a176963ae1639d4ffc2312c400404e30d            17002 main/binary-all/Packages.gz
+ 0f9acc5d8b8af6e695fddec4a632d6e1c27475e2e6fb98aa7009345dcbc0305fa999e64ff4115efda32f8508efb4319c8a838a30bdcad975bfe1ea50e35ea8fa            40238 main/binary-amd64/Packages
+ de128d330cca2bfcb3f8537f1ebe09390c322a749b269e5f5ea37654ec5a839db7a9cbba541a1c811871291feffe8c8a176963ae1639d4ffc2312c400404e30d            17002 main/binary-amd64/Packages.gz
