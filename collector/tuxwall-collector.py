@@ -99,6 +99,34 @@ def _version_tuple(value):
     return tuple(parts[:3]) or (0,)
 
 
+def _addr_in_net(ip, net):
+    try:
+        return ipaddress.ip_address(str(ip)) in net
+    except ValueError:
+        return False
+
+
+def _effective_whitelist():
+    """Built-in floor (code constants, not removable) + admin-managed
+    ranges. Consumers also read the published form so adding protection
+    never requires a client release."""
+    nets = [(n, "built-in") for n in PROTECTED_NETS]
+    try:
+        for row in _store().list_whitelist():
+            nets.append((ipaddress.ip_network(row["range"]),
+                         "managed:%s" % row["range"]))
+    except Exception:
+        pass
+    return nets
+
+
+def _protected_match(addr):
+    for net, origin in _effective_whitelist():
+        if addr in net:
+            return origin
+    return None
+
+
 def _reporter_version_ok(header_value):
     return _version_tuple(header_value) >= _version_tuple(MIN_REPORTER_VERSION)
 
@@ -307,6 +335,26 @@ CREATE TABLE IF NOT EXISTS suricata_evidence (
     PRIMARY KEY (ip, sig)
 );
 CREATE INDEX IF NOT EXISTS idx_suricata_evidence_ip ON suricata_evidence(ip);
+
+-- Admin-managed infrastructure whitelist (3.2.4, docs/whitelist-design.md).
+-- Layered over the hardcoded PROTECTED_NETS floor in code. Adding a range
+-- also retroactively scrubs every feed table of matching IPs.
+CREATE TABLE IF NOT EXISTS whitelist_ranges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    range TEXT NOT NULL UNIQUE,
+    note TEXT NOT NULL DEFAULT '',
+    created REAL NOT NULL
+);
+-- Audit of refused reports naming protected IPs: poisoning attempts become
+-- visible intel instead of silently vanishing.
+CREATE TABLE IF NOT EXISTS whitelist_hits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    reporter TEXT NOT NULL,
+    ip TEXT NOT NULL,
+    matched TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_whitelist_hits_ts ON whitelist_hits(ts);
 
 -- Registered reporter keys. Every reporting key is auto-registered on its
 -- first ingest (created = first sight), so long-standing installs are
@@ -671,6 +719,81 @@ class Store:
             } for r, t, c, s, h in events],
         }
 
+    # --- infrastructure whitelist (3.2.4) --------------------------------
+    def list_whitelist(self):
+        with self.lock:
+            rows = self._conn.execute(
+                "SELECT id, range, note, created FROM whitelist_ranges ORDER BY id"
+            ).fetchall()
+        return [{"id": r[0], "range": r[1], "note": r[2], "created": r[3]}
+                for r in rows]
+
+    def add_whitelist(self, range_str, note, now):
+        with self.lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO whitelist_ranges (range, note, created)"
+                " VALUES (?,?,?)", (range_str, note, now))
+            self._conn.commit()
+            if cur.rowcount != 1:
+                return None
+            return self._conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def remove_whitelist(self, wid):
+        with self.lock:
+            cur = self._conn.execute(
+                "DELETE FROM whitelist_ranges WHERE id=?", (wid,))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def record_whitelist_hit(self, reporter, ip, matched, now):
+        with self.lock:
+            self._conn.execute(
+                "INSERT INTO whitelist_hits (ts, reporter, ip, matched)"
+                " VALUES (?,?,?,?)", (now, reporter, ip, matched))
+            self._conn.commit()
+
+    def whitelist_hits(self, limit=100):
+        with self.lock:
+            recent = self._conn.execute(
+                "SELECT ts, reporter, ip, matched FROM whitelist_hits"
+                " ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
+            top = self._conn.execute(
+                "SELECT reporter, COUNT(*) AS n FROM whitelist_hits"
+                " GROUP BY reporter ORDER BY n DESC LIMIT 10").fetchall()
+            total = self._conn.execute(
+                "SELECT COUNT(*) FROM whitelist_hits").fetchone()[0]
+        return {"total": total,
+                "recent": [{"ts": r[0], "reporter": r[1][:12], "ip": r[2],
+                            "matched": r[3]} for r in recent],
+                "top_reporters": [{"reporter": t[0][:12], "attempts": t[1]}
+                                  for t in top]}
+
+    def scrub_range(self, net):
+        """Delete every feed row whose IP falls inside `net` (one
+        transaction). Refusing future reports is not enough - anything that
+        slipped in before the range was protected keeps poisoning consumers
+        forever."""
+        removed = {}
+        with self.lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                for table in ("reports", "report_reports", "report_events",
+                              "suricata_evidence"):
+                    ips = [r[0] for r in self._conn.execute(
+                        "SELECT DISTINCT ip FROM %s" % table).fetchall()]
+                    doomed = [ip for ip in ips
+                              if _addr_in_net(ip, net)]
+                    for ip in doomed:
+                        self._conn.execute("DELETE FROM %s WHERE ip=?" % table,
+                                           (ip,))
+                    if doomed:
+                        removed[table] = len(doomed)
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        return removed
+
     def stats(self):
         # Deception-evidence only: counters must describe the published ban
         # list, so unlisted (manual/engine-only) IPs are excluded here too.
@@ -873,7 +996,18 @@ class Handler(BaseHTTPRequestHandler):
                 "generated": datetime.now(timezone.utc).isoformat(),
                 "severity_filter": sev,
                 "total": len(bans),
+                "protected": [str(n) for n, _ in _effective_whitelist()],
                 "bans": bans,
+            })
+            return
+        if path == "/api/public/whitelist":
+            # Effective protected-infrastructure list (built-in floor +
+            # admin-managed). Consumers skip these ranges client-side, so
+            # adding protection never requires a client release.
+            self._json(200, {
+                "ok": True,
+                "generated": datetime.now(timezone.utc).isoformat(),
+                "ranges": [str(n) for n, _ in _effective_whitelist()],
             })
             return
         if path == "/api/public/stats":
@@ -958,6 +1092,22 @@ class Handler(BaseHTTPRequestHandler):
                 "bans": bans,
             })
             return
+        if path == "/api/admin/whitelist":
+            if not self._admin_authorized():
+                self._json(401, {"ok": False, "error": "Admin key required"})
+                return
+            self._json(200, {
+                "ok": True,
+                "floor": [str(n) for n in PROTECTED_NETS],
+                "managed": _store().list_whitelist(),
+            })
+            return
+        if path == "/api/admin/whitelist/hits":
+            if not self._admin_authorized():
+                self._json(401, {"ok": False, "error": "Admin key required"})
+                return
+            self._json(200, dict(_store().whitelist_hits(), ok=True))
+            return
         if path.startswith("/api/admin/bans/"):
             if not self._admin_authorized():
                 self._json(401, {"ok": False, "error": "Admin key required"})
@@ -1035,6 +1185,49 @@ class Handler(BaseHTTPRequestHandler):
                 "trusted_after": row["created"] + TRUST_SECONDS,
             })
             return
+        if path == "/api/admin/whitelist":
+            if not self._admin_authorized():
+                self._json(401, {"ok": False, "error": "Admin key required"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                length = 0
+            if length <= 0 or length > 65536:
+                self._json(413, {"ok": False, "error": "Payload too large or empty"})
+                return
+            try:
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                body = {}
+            if not isinstance(body, dict):
+                body = {}
+            range_raw = str(body.get("range") or "").strip()
+            try:
+                net = ipaddress.ip_network(range_raw, strict=False)
+            except ValueError:
+                self._json(400, {"ok": False,
+                                 "error": "Invalid range (use CIDR, e.g. 160.79.104.0/24)"})
+                return
+            if any(net.overlaps(floor) for floor in PROTECTED_NETS):
+                self._json(400, {"ok": False,
+                                 "error": "Range overlaps the built-in floor (already protected)"})
+                return
+            note = str(body.get("note") or "")[:200]
+            wid = _store().add_whitelist(str(net), note, time.time())
+            if wid is None:
+                self._json(200, {"ok": True, "already": True})
+                return
+            scrubbed = _store().scrub_range(net)
+            _log().put(json.dumps({
+                "ts": time.time(),
+                "client": self.client_address[0] if self.client_address else "",
+                "path": path,
+                "msg": "admin whitelist add: %s (%s) scrubbed=%s" % (net, note[:60], scrubbed),
+            }))
+            self._json(200, {"ok": True, "id": wid, "range": str(net),
+                             "scrubbed": scrubbed})
+            return
         if path != "/report":
             self._json(404, {"ok": False, "error": "Not found"})
             return
@@ -1070,7 +1263,14 @@ class Handler(BaseHTTPRequestHandler):
         if not addr.is_global:
             self._json(400, {"ok": False, "error": "Refusing private/reserved IP"})
             return
-        if _is_protected_addr(addr):
+        matched = _protected_match(addr)
+        if matched:
+            try:
+                _store().record_whitelist_hit(
+                    hashlib.sha256(key.encode("utf-8")).hexdigest(),
+                    str(addr), matched, time.time())
+            except Exception:
+                pass
             self._json(400, {"ok": False, "error":
                 "Refusing protected infrastructure IP (Cloudflare edge / model API): publishing it would let one reporter cut the community off from shared infrastructure"})
             return
@@ -1132,6 +1332,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         path = self.path.split("?")[0]
+        if path.startswith("/api/admin/whitelist/"):
+            if not self._admin_authorized():
+                self._json(401, {"ok": False, "error": "Admin key required"})
+                return
+            try:
+                wid = int(path[len("/api/admin/whitelist/"):])
+            except ValueError:
+                self._json(400, {"ok": False, "error": "Invalid whitelist entry id"})
+                return
+            if _store().remove_whitelist(wid):
+                self._json(200, {"ok": True, "removed": wid})
+            else:
+                self._json(404, {"ok": False, "error": "No such whitelist entry"})
+            return
         if path.startswith("/api/admin/keys/"):
             # Revoke a reporter key (admin): refused at ingest, never again
             # counted toward trusted floors.

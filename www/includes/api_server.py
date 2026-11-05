@@ -2248,6 +2248,10 @@ def build_community_bans():
             "generated": payload.get("generated") or "",
             "total": payload.get("total", len(bans)),
             "reporters": _community_reporters(),
+            # Collector-published protected-infrastructure ranges (3.2.4):
+            # consulted by CommunityAutoWorker so adding protection upstream
+            # never requires a client release. Old collectors omit it -> [].
+            "protected": payload.get("protected") or [],
             "bans": bans,
         }
     except Exception as exc:
@@ -2406,6 +2410,15 @@ PROTECTED_NETS = tuple(ipaddress.ip_network(n) for n in (
 ))
 
 
+def _ip_in_published(value, networks):
+    """True when `value` falls in a collector-published protected range."""
+    try:
+        addr = ipaddress.ip_address(str(value))
+    except ValueError:
+        return False
+    return any(addr in net for net in networks)
+
+
 def _ip_in_protected(value):
     try:
         addr = ipaddress.ip_address(str(value))
@@ -2439,13 +2452,22 @@ class CommunityAutoWorker(threading.Thread):
         for d in cs.get("decisions", []):
             if d.get("ip") and d.get("type") != "unban":
                 banned.add(d["ip"])
+        published = []
+        for r in data.get("protected") or []:
+            try:
+                published.append(ipaddress.ip_network(str(r)))
+            except ValueError:
+                continue
         missing = []
         skipped_cf = 0
         for b in data.get("bans", []):
             if not (isinstance(b, dict) and b.get("ip")):
                 continue
             if _ip_in_protected(b["ip"]):
-                skipped_cf += 1     # never ban a CF edge from remote intel
+                skipped_cf += 1     # never ban protected infra from remote intel
+                continue
+            if published and _ip_in_published(b["ip"], published):
+                skipped_cf += 1     # collector-published range (3.2.4)
                 continue
             if b["ip"] not in banned:
                 missing.append(b["ip"])

@@ -1,9 +1,19 @@
 # Community feed infrastructure whitelist — 3.2.4 design
 
-Status: design note, not implemented. The 3.2.3 minimal version (hardcoded
-`PROTECTED_NETS` floor: Cloudflare ranges + Anthropic's 160.79.104.0/24,
-refused at ingest and skipped by consumer community-auto) is the stopgap
-this document replaces.
+Status: IMPLEMENTED (collector + client). The 3.2.3 hardcoded
+`PROTECTED_NETS` floor (Cloudflare ranges + Anthropic's 160.79.104.0/24)
+remains as the non-removable base layer; everything below is built on top:
+
+- `whitelist_ranges` / `whitelist_hits` tables (schema auto-migrates)
+- GET/POST `/api/admin/whitelist`, GET `/api/admin/whitelist/hits`,
+  DELETE `/api/admin/whitelist/<id>` (loopback + X-Admin-Key, like /keys)
+- ingest refuses floor+managed matches and records every attempt
+- adding a managed range retroactively scrubs reports / report_reports /
+  report_events / suricata_evidence in one transaction
+- `GET /api/public/whitelist` + `protected` field in `/api/public/bans`
+- client CommunityAutoWorker skips both the hardcoded floor and the
+  published list (old collectors omit the field -> empty list, floor
+  still applies)
 
 ## Problem
 
