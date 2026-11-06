@@ -840,14 +840,23 @@
         return !s || s.active !== "active";
       });
       const names = down.map(([, label]) => label).join(", ");
-      if (down.length) {
+      // Known-conflict services (backend KNOWN_CONFLICT_SERVICES): things
+      // that must NOT run on a gateway - e.g. systemd-resolved binds ::1:53
+      // and breaks LAN IPv6 DNS against unbound. The backend sends each
+      // with a reason and the fix.
+      const warnings = (d.conflicts || []).map(
+        c => "WARNING: " + c.label + " is running — " + c.warning);
+      const msgs = [];
+      if (down.length)
+        msgs.push("CORE SERVICE DOWN: " + names + " — check System → Services");
+      msgs.push(...warnings);
+      if (msgs.length) {
         svcBannerEl.hidden = false;
-        svcBannerEl.textContent =
-          "CORE SERVICE DOWN: " + names + " — check System → Services";
-        if (names !== lastSvcDown) console.warn("core services down:", names);
+        svcBannerEl.textContent = msgs.join("  |  ");
       } else {
         svcBannerEl.hidden = true;
       }
+      if (names !== lastSvcDown) console.warn("core services down:", names);
       lastSvcDown = names;
     } catch (_) {
       // The generic dashboard-API banner already surfaces fetch failures.

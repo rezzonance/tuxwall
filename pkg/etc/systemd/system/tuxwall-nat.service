@@ -1,0 +1,12 @@
+[Unit]
+Description=TuxWall idempotent NAT masquerade setup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tuxwall-nat-ensure
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

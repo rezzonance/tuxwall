@@ -648,6 +648,27 @@ PROTECTED_SERVICES = {"nginx.service"}
 ALLOWED_SERVICE_ACTIONS = {"start", "stop", "restart", "reload"}
 
 
+# Services that conflict with Tuxwall's core stack and must NOT run on a
+# gateway. setup.sh disables them on fresh installs, but an apt upgrade or
+# a dependency package (libvirt pulls dnsmasq in, etc.) can quietly bring
+# them back. This table drives the dashboard banner warning; the backend
+# reports the live intersection so the client never hardcodes the list.
+KNOWN_CONFLICT_SERVICES = {
+    "systemd-resolved.service": (
+        "systemd-resolved",
+        "it binds ::1:53 and evicts unbound's IPv6 listener, breaking LAN "
+        "IPv6 DNS. Disable it: sudo systemctl disable --now systemd-resolved"),
+    "dnsmasq.service": (
+        "dnsmasq",
+        "it binds ports 53 and 67, conflicting with unbound (DNS) and kea "
+        "(DHCP). Disable it: sudo systemctl disable --now dnsmasq"),
+    "isc-dhcp-server.service": (
+        "isc-dhcp-server",
+        "it binds port 67, conflicting with kea (DHCP). Disable it: "
+        "sudo systemctl disable --now isc-dhcp-server"),
+}
+
+
 def list_system_services():
     proc = subprocess.run(
         ["systemctl", "list-units", "--type=service", "--all", "--no-legend", "--no-pager"],
@@ -672,7 +693,13 @@ def list_system_services():
         return (rank, s["unit"])
 
     services.sort(key=sort_key)
-    return {"ok": True, "services": services}
+    active_units = {s["unit"] for s in services if s["active"] == "active"}
+    conflicts = [
+        {"unit": unit, "label": label, "warning": msg}
+        for unit, (label, msg) in KNOWN_CONFLICT_SERVICES.items()
+        if unit in active_units
+    ]
+    return {"ok": True, "services": services, "conflicts": conflicts}
 
 
 def service_action(unit, action):
@@ -2912,7 +2939,7 @@ REPORTING_DEFAULT_URL = "https://tuxwall.org/report"
 # refuses reports from below MIN_REPORTER_VERSION (3.2.4) - that release is
 # the one that stops consumers from ever banning Cloudflare edge IPs.
 # Keep in sync with pkg/DEBIAN/control.
-TUXWALL_VERSION = "3.2.4"
+TUXWALL_VERSION = "3.2.5"
 REPORTING_TIMEOUT = 10
 _report_status_lock = threading.Lock()
 

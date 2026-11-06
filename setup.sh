@@ -266,6 +266,27 @@ systemctl enable --now crowdsec-dedupe.timer 2>/dev/null \
     && ok "housekeeping timer enabled (crowdsec-dedupe)" \
     || warn "crowdsec-dedupe timer could not be enabled - enable manually"
 
+# Idempotent NAT masquerade. tuxwall-nat owns the LAN->WAN POSTROUTING rule.
+# NEVER put NAT in /etc/ufw/before.rules: ufw reload APPENDS such stanzas
+# instead of replacing them, and duplicates accumulate per reload.
+if grep -q '^\*nat' /etc/ufw/before.rules 2>/dev/null; then
+    stanza="$(sed -n '/^\*nat$/,/^COMMIT$/p' /etc/ufw/before.rules)"
+    if echo "$stanza" | grep -qvE '^\*nat$|^:POSTROUTING|^-A POSTROUTING -o [^ ]+ -j MASQUERADE$|^COMMIT$|^$'; then
+        warn "before.rules has a *nat stanza with more than a simple masquerade -"
+        warn "left untouched; review manually and let tuxwall-nat own NAT"
+    else
+        sed -i '/^\*nat$/,/^COMMIT$/d' /etc/ufw/before.rules
+        ufw reload >/dev/null 2>&1 || true
+        ok "removed legacy NAT stanza from before.rules (tuxwall-nat owns it now)"
+    fi
+fi
+cp "$REPO_DIR/pkg/usr/local/sbin/tuxwall-nat-ensure"  /usr/local/sbin/tuxwall-nat-ensure
+chmod 755 /usr/local/sbin/tuxwall-nat-ensure
+cp "$REPO_DIR/systemd/tuxwall-nat.service"            /etc/systemd/system/tuxwall-nat.service
+systemctl enable --now tuxwall-nat.service >/dev/null 2>&1 \
+    && ok "NAT masquerade service enabled (tuxwall-nat)" \
+    || warn "tuxwall-nat could not be enabled - NAT may be missing after reboot"
+
 ok "Systemd units installed"
 
 # ============================================================================
