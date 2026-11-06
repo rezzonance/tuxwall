@@ -287,6 +287,44 @@ systemctl enable --now tuxwall-nat.service >/dev/null 2>&1 \
     && ok "NAT masquerade service enabled (tuxwall-nat)" \
     || warn "tuxwall-nat could not be enabled - NAT may be missing after reboot"
 
+# --- Canary egress containment (opencanary uid) -------------------------------
+# The deception layer must answer INBOUND attacker connections (covered by
+# the ESTABLISHED accept) and deliver its webhook to the local dashboard -
+# and nothing else. A compromised emulator cannot initiate connections to
+# anything: LAN, loopback services, or a public C2. Skipped on installs
+# without the canary (no opencanary user).
+if id opencanary >/dev/null 2>&1; then
+    if ! grep -q "Tuxwall canary egress" /etc/ufw/before.rules 2>/dev/null; then
+        python3 - <<'PYCANARY'
+def insert(path, chain_anchor, lines):
+    s = open(path).read()
+    if "Tuxwall canary egress" in s or s.count(chain_anchor) != 1:
+        return
+    open(path, "w").write(s.replace(chain_anchor, "\n".join(lines) + "\n" + chain_anchor))
+
+insert("/etc/ufw/before.rules", "-A ufw-before-output -o lo -j ACCEPT", [
+    "# --- Tuxwall canary (opencanary) egress containment ---",
+    "-A ufw-before-output -m owner --uid-owner opencanary -p tcp -d 127.0.0.1 --dport 8008 -j ACCEPT",
+    "-A ufw-before-output -m owner --uid-owner opencanary -p udp -d 127.0.0.1 --dport 53 -j ACCEPT",
+    "-A ufw-before-output -m owner --uid-owner opencanary -p tcp -d 127.0.0.1 --dport 53 -j ACCEPT",
+    "-A ufw-before-output -m owner --uid-owner opencanary -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+    "-A ufw-before-output -m owner --uid-owner opencanary -j REJECT",
+])
+insert("/etc/ufw/before6.rules", "-A ufw6-before-output -o lo -j ACCEPT", [
+    "# --- Tuxwall canary (opencanary) egress containment (IPv6) ---",
+    "-A ufw6-before-output -m owner --uid-owner opencanary -p udp -d ::1 --dport 53 -j ACCEPT",
+    "-A ufw6-before-output -m owner --uid-owner opencanary -p tcp -d ::1 --dport 53 -j ACCEPT",
+    "-A ufw6-before-output -m owner --uid-owner opencanary -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+    "-A ufw6-before-output -m owner --uid-owner opencanary -j REJECT",
+])
+PYCANARY
+        ufw reload >/dev/null 2>&1 || true
+        ok "canary egress containment applied (opencanary: webhook + DNS + ESTABLISHED only)"
+    fi
+else
+    info "opencanary user absent - skipping canary egress containment"
+fi
+
 ok "Systemd units installed"
 
 # ============================================================================
