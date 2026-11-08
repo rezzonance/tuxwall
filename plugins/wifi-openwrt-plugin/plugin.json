@@ -1,11 +1,12 @@
 {
   "id": "openwrt",
   "name": "OpenWrt Access Points",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "api": 1,
   "description": "OpenWrt AP view and management: access points, clients, signal, roaming events, RF channel advisor, and SSID management across all APs (opt-in).",
   "enabled": true,
   "alerts": true,
+  "uses-leases": true,
   "nav": { "label": "WiFi", "icon": "wifi", "order": 80 },
   "settings": [
     { "key": "hosts", "label": "Access points", "type": "text", "placeholder": "192.168.1.43, 192.168.1.73 (comma, space or newline separated)", "default": "" },

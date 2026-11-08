@@ -531,7 +531,13 @@ def _recommend(band, penalty, ours):
             "alternatives": alternatives}
 
 
-def _band_of_iface(ifname):
+def _band_of_iface(ifname, band_map=None):
+    """Band for a VAP interface. Prefer the AP's own radio config (phy0 is
+    2.4GHz on some platforms and 5GHz on others - the prefix alone has
+    produced swapped bands in the field); fall back to the prefix heuristic
+    only when the map has no entry."""
+    if band_map and ifname in band_map:
+        return band_map[ifname]
     return "5g" if ifname.startswith("phy0") else "2g"
 
 
@@ -548,6 +554,12 @@ def _rf(cfg):
         sec = _sections(res)
         parsed[host] = sec
         wireless = _json(sec.get("@@WIRELESS", "{}"))
+        ifname_band = {}
+        for _rn, _rd in (wireless or {}).items():
+            _b = _band_for((_rd or {}).get("config") or {})
+            for _if in (_rd or {}).get("interfaces") or []:
+                if _if.get("ifname"):
+                    ifname_band[_if["ifname"]] = _b
         for radio_name, radio in sorted(wireless.items()):
             radio_cfg = radio.get("config") or {}
             band = _band_for(radio_cfg)
@@ -572,12 +584,12 @@ def _rf(cfg):
         for key, text in sorted(sec.items()):
             if key.startswith("@@SCANFAIL:"):
                 entry["scan_errors"].append({
-                    "band": _band_of_iface(key.split(":", 1)[1]),
+                    "band": _band_of_iface(key.split(":", 1)[1], ifname_band),
                     "error": "scan failed after 3 attempts (common on live 5GHz AP interfaces)",
                 })
             elif key.startswith("@@SCAN:"):
                 ifname = key.split(":", 1)[1]
-                band = _band_of_iface(ifname)
+                band = _band_of_iface(ifname, ifname_band)
                 cells = _parse_scan(text)
                 pen = _penalty(cells)
                 ours = ours_by_band.setdefault(band, set())
@@ -840,6 +852,7 @@ def _build_ap(host, text):
                 row["ssid"] = iface_cfg.get("ssid") or row.get("ssid") or ""
                 row["ifname"] = ifname
                 row["network"] = (iface_cfg.get("network") or [""])[0] if iface_cfg.get("network") else ""
+                row["band"] = _band_for(radio_cfg)
                 row["ap"] = ap["name"]
                 clients[cmac] = row
                 radio_clients += 1
@@ -1005,8 +1018,58 @@ MDNS_TTL = 60
 KEA_LEASE_PATHS = ("/var/lib/tuxwall/kea-leases.csv", "/var/lib/kea/kea-leases4.csv")
 
 
+KEA_CTRL_SOCKET = "/run/kea/kea4-ctrl-socket"
+
+
+def _kea_names_socket():
+    """MAC -> {ip, hostname} straight from Kea's control socket.
+
+    The live lease store - every lease the daemon holds, including ones
+    whose rows have not yet been (re)written to the CSV. Preferred over
+    the CSV: Kea's LFC pass can leave the on-disk file nearly empty for
+    hours (observed in the field - a 65-lease store behind an 11-row
+    CSV) while the socket always tells the truth."""
+    import socket as _socket
+    try:
+        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        s.settimeout(5)
+        s.connect(KEA_CTRL_SOCKET)
+        s.sendall(json.dumps({"command": "lease4-get-all"}).encode())
+        data = b""
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        s.close()
+        resp = json.loads(data.decode())
+        if isinstance(resp, list):
+            resp = resp[0] if resp else {}
+        leases = ((resp.get("arguments") or {}).get("leases")) or []
+        out = {}
+        for l in leases:
+            mac = (l.get("hw-address") or "").strip().upper()
+            hostname = (l.get("hostname") or "").strip()
+            if mac and hostname:
+                out[mac] = {"ip": l.get("ip-address") or "",
+                            "hostname": hostname}
+        return out if out else None
+    except Exception:
+        return None
+
+
 def _kea_names():
-    """MAC -> {ip, hostname} from a Kea lease CSV, if readable."""
+    """MAC -> {ip, hostname} from Kea, best source first:
+    1. names handed over by the tuxwall parent (works in the demoted
+       worker where the Kea socket is unreachable),
+    2. the Kea control socket directly (root/dev context),
+    3. the lease CSV files (fallback; the on-disk file can lag Kea's
+       in-memory store for hours after an LFC pass)."""
+    if _PASSED_LEASES:
+        return _PASSED_LEASES
+    socket_names = _kea_names_socket()
+    if socket_names is not None:
+        return socket_names
     for path in KEA_LEASE_PATHS:
         try:
             with open(path) as f:
@@ -1807,7 +1870,15 @@ def _events(cfg, limit=100):
     return {"ok": True, "events": events[:limit], "source": "openwrt-logread"}
 
 
+# Lease names handed over by the tuxwall root parent (it queries Kea -
+# the demoted plugin worker cannot reach the control socket). Set per
+# request in handle(); takes priority over every local source.
+_PASSED_LEASES = {}
+
+
 def handle(req):
+    global _PASSED_LEASES
+    _PASSED_LEASES = req.get("leases") or {}
     cfg = _cfg(req)
     action = req.get("action") or ""
     try:

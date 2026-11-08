@@ -10,6 +10,7 @@ import json
 import mimetypes
 import os
 import pwd
+import glob
 import re
 import secrets
 import shutil
@@ -565,6 +566,13 @@ def build_leases():
         valid = int(lease.get("valid-lft") or lease.get("valid-lifetime") or 0)
         cltt = int(lease.get("cltt") or 0)
         expires = cltt + valid
+        # 2026-11-08: Kea's memfile flips a lease to expired-reclaimed
+        # (state 2) only lazily - a dead client's lease can sit at state 0
+        # long past its expiry and show as a live client forever. Judge by
+        # the lease's own clock: a lease past expiry is gone, whatever the
+        # state byte says. (Live clients renew at T1, long before expiry.)
+        if expires and expires <= now:
+            continue
         mac = lease.get("hw-address", "") or ""
         vendor = oui_vendor(mac)
         item = {
@@ -580,7 +588,9 @@ def build_leases():
             "remaining": max(0, expires - now),
             "banned": lease.get("ip-address", "") in banned_ips,
             "static": False,
-            "online": True,
+            # real ARP presence (cached 30s), not an assumption: a lease
+            # says "holds an address", not "is on the network right now"
+            "online": arp_online(lease.get("ip-address", "")),
         }
         leases.append(item)
         lease_map[item["ip"]] = item
@@ -2939,7 +2949,7 @@ REPORTING_DEFAULT_URL = "https://tuxwall.org/report"
 # refuses reports from below MIN_REPORTER_VERSION (3.2.4) - that release is
 # the one that stops consumers from ever banning Cloudflare edge IPs.
 # Keep in sync with pkg/DEBIAN/control.
-TUXWALL_VERSION = "3.2.6"
+TUXWALL_VERSION = "3.2.7"
 REPORTING_TIMEOUT = 10
 _report_status_lock = threading.Lock()
 
@@ -14903,6 +14913,28 @@ def list_plugins(include_config=False):
     return {"ok": True, "plugins": out}
 
 
+def _plugin_lease_names():
+    """MAC -> {ip, hostname} for plugins whose manifest declares
+    "uses-leases": true. The plugin worker runs demoted (nobody) and
+    cannot reach Kea's control socket - the root parent performs the
+    read and hands the result over with the request, so no privilege
+    is extended to plugin code (the worker only gets hostnames, never
+    lease commands)."""
+    try:
+        response = kea_command("lease4-get-all")
+        entry = response[0] if isinstance(response, list) and response else response
+        leases = ((entry.get("arguments") or {}).get("leases")) or []
+        out = {}
+        for l in leases:
+            mac = (l.get("hw-address") or "").strip().upper()
+            hostname = (l.get("hostname") or "").strip()
+            if mac and hostname:
+                out[mac] = {"ip": l.get("ip-address") or "", "hostname": hostname}
+        return out
+    except Exception:
+        return {}
+
+
 def _plugin_worker_identity():
     for name in ("tuxwall-plugin", "nobody"):
         try:
@@ -14926,6 +14958,9 @@ def plugin_action(pid, action, payload):
         "payload": payload if isinstance(payload, dict) else {},
         "config": cfg,
         "manifest": manifest,
+        # lease names for plugins that declare "uses-leases" (the demoted
+        # worker cannot query Kea itself; see _plugin_lease_names)
+        "leases": _plugin_lease_names() if manifest.get("uses-leases") else None,
     }
     uid, gid = _plugin_worker_identity()
     def demote():
@@ -15417,9 +15452,265 @@ def _incident_conditions():
     except Exception:
         pass
 
+    # --- Port ownership conflicts ------------------------------------------
+    # Every port Tuxwall depends on - DNS, DHCP, the web vhosts, the
+    # dashboard API, the agent, the deception layer - is claimed by a
+    # known service. Any OTHER process sitting on a claimed port (dnsmasq
+    # stealing 53/67 from unbound/kea, a stray daemon squatting on a
+    # dashboard port, unforeseen software reserving a core port) means a
+    # core service failed to bind or is about to. Detected with process
+    # attribution every cycle.
+    deception_ports = {}
     try:
-        for key, (severity, title, detail) in _plugin_incident_conditions().items():
-            desired[key] = (severity, title, detail)
+        conf_ports = []
+        try:
+            conf_ports = [int(p) for p in (_honey_load_conf().get("ports") or [])]
+        except Exception:
+            pass
+        with HONEY_APPLY_LOCK:
+            live_ports = [int(p) for p in (HONEY_STATE.get("ports") or [])]
+        for p in set(conf_ports) | set(live_ports):
+            deception_ports[int(p)] = "the deception layer (tarpit)"
+        for p in list(CANARY_PORTS) + [CANARY_SNMP_PORT]:
+            deception_ports.setdefault(int(p), "the deception layer (canary)")
+    except Exception:
+        pass
+
+    # claimed[(port, proto)] = the service that needs it
+    claimed = {}
+    for p, owner in deception_ports.items():
+        claimed[(p, "tcp")] = owner
+        claimed[(p, "udp")] = owner
+    claimed[(53, "tcp")] = "Unbound DNS"
+    claimed[(53, "udp")] = "Unbound DNS"
+    claimed[(67, "udp")] = "Kea DHCP"
+    claimed[(8008, "tcp")] = "the Tuxwall dashboard API"
+    claimed[(4096, "tcp")] = "the Tuxwall AI agent"
+    try:
+        nproc = subprocess.run(["nginx", "-T"], capture_output=True,
+                               text=True, timeout=10)
+        for m in re.finditer(r"^\s*listen\s+(?:\[?[^\]\s]*\]?:)?(\d+)\s*;",
+                             nproc.stdout, re.M):
+            claimed.setdefault((int(m.group(1)), "tcp"), "nginx")
+    except Exception:
+        pass
+
+    # expected owners: MainPIDs of the core units + well-known service names
+    expected_pids = set()
+    for unit in ("unbound.service", "kea-dhcp4-server.service", "nginx.service",
+                 "opencanary.service", "tuxwall.service", "tuxwall-agent.service",
+                 "tuxwall-collector.service"):
+        try:
+            proc = subprocess.run(
+                ["systemctl", "show", unit, "--property=MainPID", "--value"],
+                capture_output=True, text=True, timeout=5)
+            pid = int((proc.stdout or "0").strip() or 0)
+            if pid > 0:
+                expected_pids.add(pid)
+        except Exception:
+            pass
+    # sshd legitimately shares port 22 with the WAN-side canary SSH by
+    # design (real sshd: LAN/VPN addresses only; canary: WAN only). A
+    # dedicated check below catches the dangerous variant of that split.
+    expected_comms = {"unbound", "kea-dhcp4", "kea-ctrl-agent", "nginx",
+                      "twistd", "avahi-daemon", "chronyd", "dbus-daemon",
+                      "sshd"}
+
+    # one ss pass with process attribution, shared by every check below
+    listeners = []            # (proto, addr, port, pid, comm)
+    try:
+        for proto, sscmd in (("tcp", ["ss", "-tlnp"]), ("udp", ["ss", "-ulnp"])):
+            proc = subprocess.run(sscmd, capture_output=True, text=True,
+                                  timeout=10)
+            for line in proc.stdout.splitlines()[1:]:
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+                local = parts[3]
+                addr, _, port_s = local.rpartition(":")
+                if not port_s.isdigit():
+                    continue
+                pid = 0
+                m = re.search(r"pid=(\d+)", line)
+                if m:
+                    pid = int(m.group(1))
+                comm = ""
+                if pid:
+                    try:
+                        with open("/proc/%d/comm" % pid) as f:
+                            comm = f.read().strip()
+                    except OSError:
+                        pass
+                listeners.append((proto, addr, int(port_s), pid, comm))
+    except Exception:
+        pass
+
+    # Conflict 1: a stranger holds a port a Tuxwall service depends on
+    try:
+        holders = {}
+        for proto, addr, port, pid, comm in listeners:
+            if (port, proto) in claimed and pid:
+                holders.setdefault((port, proto), []).append((pid, comm))
+        for (port, proto), hl in holders.items():
+            strangers = [(pid, comm) for pid, comm in hl
+                         if pid not in expected_pids and comm not in expected_comms]
+            if not strangers:
+                continue
+            owner = claimed[(port, proto)]
+            expected_here = (len(hl) - len(strangers)) > 0
+            spid, scomm = strangers[0]
+            who = "%s (pid %d)" % (scomm or "an unknown process", spid)
+            if expected_here:
+                add("portowner:%d/%s" % (port, proto), "warning",
+                    "Port %d/%s is contested by %s" % (port, proto, who),
+                    "%s needs port %d/%s and is bound on one address, but %s "
+                    "holds another address on the same port - a partial "
+                    "conflict that will break one side. Stop or reconfigure "
+                    "%s, or move the Tuxwall service."
+                    % (owner, port, proto, who, scomm or "it"))
+            else:
+                add("portowner:%d/%s" % (port, proto), "critical",
+                    "Port %d/%s is held by %s" % (port, proto, who),
+                    "%s needs port %d/%s, but %s is bound there instead - "
+                    "the core service cannot use it. If %s is software you "
+                    "installed, stop or reconfigure it, or move the Tuxwall "
+                    "service." % (owner, port, proto, who, scomm or "it"))
+    except Exception:
+        pass
+
+    # sshd shares port 22 with the canary by design, but only on LAN/VPN
+    # addresses - the WAN address must belong to the canary alone.
+    try:
+        wan_ips = {ip for ip in (_honey_wan_ip(),
+                                 (HONEY_STATE.get("wan_ip6") or None)) if ip}
+        for proto, addr, port, pid, comm in listeners:
+            if comm == "sshd" and port == 22 and (
+                    addr in ("0.0.0.0", "*", "[::]", "") or addr in wan_ips):
+                add("sshd:wan", "critical",
+                    "Real sshd is bound on the WAN address",
+                    "sshd (pid %d) is listening on %s port 22 - the WAN "
+                    "should only expose the deception layer's fake SSH. "
+                    "Restrict sshd to the LAN/WireGuard addresses "
+                    "(ListenAddress in /etc/ssh/sshd_config)." % (pid, addr))
+                break
+    except Exception:
+        pass
+
+    # Conflict 2: a user configuration points at a deception-layer port -
+    # the honeypot owns the listener (or the forward DNATs past it), so the
+    # user's service is silently dead or the canary is bypassed.
+    try:
+        conf_claims = []
+        for r in (_load_pf() or []):
+            try:
+                conf_claims.append((int(r["ext_port"]),
+                                    "port-forward to %s" % (r.get("int_ip") or "?")))
+            except (KeyError, TypeError, ValueError):
+                pass
+        proc = subprocess.run(["ufw", "status"], capture_output=True,
+                              text=True, timeout=10)
+        wan_if = _wan_iface()
+        for line in proc.stdout.splitlines():
+            m = re.match(r"^(\d+)/(tcp|udp)(?: on (\S+))?\s+ALLOW IN\s", line)
+            if not m:
+                continue
+            if wan_if and m.group(3) and m.group(3) != wan_if:
+                continue          # not WAN-facing
+            if "tuxwall" in line.lower() or "canary" in line.lower():
+                continue          # the deception layer's own managed rules
+            try:
+                port = int(m.group(1))
+            except ValueError:
+                continue
+            if port in deception_ports:
+                conf_claims.append((port, "WAN firewall allow rule"))
+        seen = set()
+        for port, what in conf_claims:
+            if port in deception_ports and port not in seen:
+                seen.add(port)
+                add("portconflict:%d" % port, "warning",
+                    "Port %d conflicts with the deception layer" % port,
+                    "%s also uses port %d (%s): traffic there goes to the "
+                    "honeypot, not your service. Move the service to another "
+                    "port, or adjust the deception ports under Security."
+                    % (what, port, deception_ports[port]))
+    except Exception:
+        pass
+
+    # --- Unexpected WAN-reachable listeners --------------------------------
+    # Anything listening on 0.0.0.0/[::] (TCP: a deliberate act) or bound
+    # to the WAN address itself that is not an expected service is one
+    # fat-fingered firewall rule away from internet exposure. Expected:
+    # public web (80/443), DHCP (67), mDNS reflector (5353), WireGuard
+    # (51820) and the deception layer.
+    try:
+        approved = {80, 443, 67, 5353, 51820} | set(deception_ports)
+        wan_ips = {ip for ip in (_honey_wan_ip(),
+                                 (HONEY_STATE.get("wan_ip6") or None)) if ip}
+        flagged = {}
+        for proto, addr, port, pid, comm in listeners:
+            if port in approved or addr.startswith("127.") or addr.startswith("[::1]"):
+                continue
+            if (proto == "tcp" and addr in ("0.0.0.0", "*", "[::]", "")) \
+                    or addr in wan_ips:
+                flagged.setdefault((port, proto), comm or "a service")
+        for (port, proto), who in sorted(flagged.items()):
+            add("listener:%d/%s" % (port, proto), "warning",
+                "Unexpected service on port %d (%s)" % (port, proto),
+                "%s is bound on every interface - including the WAN - on "
+                "port %d/%s. If that is intentional, allow or forward it "
+                "deliberately; otherwise stop the service or rebind it to "
+                "the LAN address." % (who, port, proto))
+    except Exception:
+        pass
+
+    # --- AIDE integrity check freshness -------------------------------------
+    # The nightly AIDE run is the file-integrity tripwire; a silently
+    # stopped timer means nobody is watching the filesystem.
+    try:
+        st = os.stat("/var/log/aide/aide.log")
+        age_h = (now - st.st_mtime) / 3600.0
+        if age_h > 30:
+            add("aide:stale", "warning", "AIDE integrity check is stale",
+                "Last AIDE run was %.0f hours ago (expected daily). Check: "
+                "systemctl status dailyaidecheck.timer" % age_h)
+    except FileNotFoundError:
+        pass                       # AIDE not installed on this box
+    except Exception:
+        pass
+
+    # --- System backup freshness ---------------------------------------------
+    try:
+        backups = glob.glob("/var/lib/tuxwall/backups/system/system-backup-*.tar.gz")
+        latest = max((os.path.getmtime(b) for b in backups), default=0)
+        if not latest:
+            add("backup:never", "warning", "No system backup has been created",
+                "A gateway without a config backup turns every mistake into "
+                "a rebuild. Create one under System > Backups.")
+        elif now - latest > 8 * 86400:
+            add("backup:stale", "warning", "System backup is stale",
+                "Last system backup is %.0f days old." % ((now - latest) / 86400))
+    except Exception:
+        pass
+
+    # --- Duplicate NAT masquerade rules ---------------------------------------
+    # Hand-added NAT stanzas in /etc/ufw/before.rules survive as APPENDED
+    # copies on every ufw reload (observed in the field). tuxwall-nat owns
+    # the masquerade; duplicates are dead weight that grows over time.
+    try:
+        wan_if = _wan_iface()
+        if wan_if:
+            proc = subprocess.run(["iptables-save", "-t", "nat"],
+                                  capture_output=True, text=True, timeout=10)
+            n = proc.stdout.count(
+                "-A POSTROUTING -o %s -j MASQUERADE" % wan_if)
+            if n > 1:
+                add("nat:duplicates", "warning",
+                    "Duplicate NAT masquerade rules (%d)" % n,
+                    "Only one LAN->WAN masquerade is needed; %d copies exist. "
+                    "A legacy *nat stanza in /etc/ufw/before.rules is being "
+                    "re-appended on every ufw reload - remove it (the "
+                    "tuxwall-nat service owns NAT)." % n)
     except Exception:
         pass
 
