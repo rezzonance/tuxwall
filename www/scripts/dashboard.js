@@ -4101,6 +4101,21 @@
       return;
     }
 
+    if ((d.absorbed_events || 0) > 0) {
+      const la = d.last_absorbed || {};
+      msg.dataset.kind = "armed";
+      els.secTripMsgTitle.textContent = "Deception layer absorbed " + formatNumber(d.absorbed_events) + " trip-class event(s)";
+      els.secTripMsgMeta.textContent = "Delegated to the canary + ban pipeline - never contained, in any mode.";
+      els.secTripMsgReason.textContent = (la.class || "") + " hit a honeypot port and was absorbed by design.";
+      els.secTripMsgGrid.innerHTML = [
+        tripKv("Last class", la.class || "—"),
+        tripKv("Source", la.src && !String(la.src).startsWith("local:") ? String(la.src) : (la.src || "—")),
+        tripKv("Landed on", la.dst || "—", true),
+        tripKv("Absorbed", la.ts ? formatDateTime(la.ts) : "—"),
+      ].join("");
+      return;
+    }
+
     if (mode === "logonly" && (d.logonly_events || 0) > 0) {
       const last = d.last_logonly || {};
       msg.dataset.kind = "armed";
