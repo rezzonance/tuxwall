@@ -3449,6 +3449,7 @@ def tripwire_status():
             "tripped": bool(st.get("tripped")),
             "trip_mode": st.get("mode"), "since": st.get("since"),
             "reason": st.get("reason"), "class": st.get("class"),
+            "signature": st.get("signature") or "",
             "src_ip": st.get("src_ip"), "trips": st.get("trips") or 0,
             "rules_present": rules}
 

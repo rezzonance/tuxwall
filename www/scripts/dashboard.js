@@ -4033,11 +4033,20 @@
     if (els.secTripStatus) {
       if (d.tripped) {
         const mins = d.since ? Math.max(0, Math.round((Date.now() / 1000 - d.since) / 60)) : 0;
+        const TRIP_DESC = {
+          "successful-admin": "An attacker appears to have GAINED administrator access to a system",
+          "attempted-admin": "An attacker attempted to gain administrator privileges",
+          "trojan-activity": "Trojan or malware network activity was detected",
+          "web-application-attack": "An attack against a web application (injection / code execution attempt)",
+          "shellcode-detect": "Executable exploit code was detected in network traffic",
+          "canary-egress": "The honeypot process attempted an outbound connection - presumed deception-layer compromise",
+        };
+        const desc = TRIP_DESC[d.class] || d.class || "?";
         els.secTripStatus.hidden = false;
         els.secTripStatus.textContent =
-          "Contained for " + mins + " min - " + (d.class || "?") +
-          (d.src_ip ? " from " + d.src_ip : "") +
-          (d.reason ? " - " + d.reason : "") +
+          "Contained for " + mins + " min. " + desc +
+          (d.signature ? ' Signature: "' + d.signature + '"' : "") +
+          (d.src_ip && !String(d.src_ip).startsWith("local:") ? " from " + d.src_ip : "") +
           " (" + (d.trips || 1) + " trip event(s))";
       } else els.secTripStatus.hidden = true;
     }
@@ -4063,7 +4072,9 @@
   });
   if (els.secTripResolveBtn) els.secTripResolveBtn.addEventListener("click", async () => {
     if (!els.secTripPass.value) { els.secTripPass.focus(); return; }
-    if (!confirm("Restore WAN access now? Only resolve after investigating the trip.")) return;
+    if (!confirm("Restore WAN access now?\nTriggered by: " +
+        (els.secTripStatus && els.secTripStatus.textContent || "unknown") +
+        "\n\nOnly resolve after investigating.")) return;
     try {
       await postJSON("/api/security/tripwire/resolve", { password: els.secTripPass.value });
       els.secTripPass.value = "";
