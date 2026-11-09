@@ -15504,6 +15504,30 @@ def _incident_conditions():
     except Exception:
         pass
 
+    # Functional firewall check: the ufw systemd unit reports
+    # "active/finished" even when its ruleset failed to load (observed
+    # 2026-11-09: a failed boot left INPUT/FORWARD policy ACCEPT - the
+    # box failing OPEN - for 7 minutes with the unit green, and a failed
+    # reload can do the same live). Trust the packet filter's actual
+    # state, not the unit file. A tripwire lockdown never changes chain
+    # policies, so this cannot false-positive during containment.
+    try:
+        for ipt, fam in (("iptables", "IPv4"), ("ip6tables", "IPv6")):
+            out = subprocess.run([ipt, "-S", "INPUT", "FORWARD"],
+                                 capture_output=True, text=True, timeout=5).stdout
+            pols = [l.split() for l in out.splitlines() if l.startswith("-P ")]
+            enforcing = (len(pols) == 2 and all(p[-1] == "DROP" for p in pols))
+            if not enforcing:
+                state = ", ".join(" ".join(p[1:]) for p in pols) or "no policies"
+                add("fw:function-%s" % fam.lower(), "critical",
+                    "Firewall is NOT enforcing (%s)" % fam,
+                    "INPUT/FORWARD are not DROP (%s) - the packet filter is "
+                    "failing OPEN. Usually a broken /etc/ufw/before.rules; "
+                    "validate with: tuxwall-fw-reload (tests before applying)."
+                    % state)
+    except Exception:
+        pass
+
     # Unbound functional probe: the service can be 'active' while
     # SERVFAILing everything (observed after a long WAN blackout - the
     # daemon never recovered its upstream state and liveness checks
