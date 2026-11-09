@@ -15513,18 +15513,24 @@ def _incident_conditions():
     # policies, so this cannot false-positive during containment.
     try:
         for ipt, fam in (("iptables", "IPv4"), ("ip6tables", "IPv6")):
-            out = subprocess.run([ipt, "-S", "INPUT", "FORWARD"],
-                                 capture_output=True, text=True, timeout=5).stdout
-            pols = [l.split() for l in out.splitlines() if l.startswith("-P ")]
-            enforcing = (len(pols) == 2 and all(p[-1] == "DROP" for p in pols))
+            state = []
+            enforcing = True
+            for chain in ("INPUT", "FORWARD"):
+                # iptables -S takes ONE chain; first line is "-P <chain> <pol>"
+                out = subprocess.run([ipt, "-S", chain],
+                                     capture_output=True, text=True, timeout=5).stdout
+                first = out.splitlines()[0].split() if out.splitlines() else []
+                pol = first[3] if len(first) >= 4 and first[0] == "-P" else "unknown"
+                state.append("%s=%s" % (chain, pol))
+                if pol != "DROP":
+                    enforcing = False
             if not enforcing:
-                state = ", ".join(" ".join(p[1:]) for p in pols) or "no policies"
                 add("fw:function-%s" % fam.lower(), "critical",
                     "Firewall is NOT enforcing (%s)" % fam,
                     "INPUT/FORWARD are not DROP (%s) - the packet filter is "
                     "failing OPEN. Usually a broken /etc/ufw/before.rules; "
                     "validate with: tuxwall-fw-reload (tests before applying)."
-                    % state)
+                    % ", ".join(state))
     except Exception:
         pass
 
