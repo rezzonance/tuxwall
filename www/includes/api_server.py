@@ -15520,7 +15520,7 @@ def _incident_conditions():
                 out = subprocess.run([ipt, "-S", chain],
                                      capture_output=True, text=True, timeout=5).stdout
                 first = out.splitlines()[0].split() if out.splitlines() else []
-                pol = first[3] if len(first) >= 4 and first[0] == "-P" else "unknown"
+                pol = first[2] if len(first) >= 3 and first[0] == "-P" else "unknown"
                 state.append("%s=%s" % (chain, pol))
                 if pol != "DROP":
                     enforcing = False
