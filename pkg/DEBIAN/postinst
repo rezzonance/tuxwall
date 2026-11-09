@@ -250,21 +250,22 @@ RADVD
     fi
     echo "   IP forwarding enabled (v4 + v6, route: $LAN_IF_D -> $WAN_IF_D)"
 
-    # 3. WAN masquerade, persisted the ufw-native way: a *nat block at the
-    #    top of before.rules, which ufw itself applies on every boot and
-    #    reload - survives reboots without any extra restore mechanism.
+    # 3. WAN masquerade: owned by the tuxwall-nat service (idempotent:
+    #    -C before -A, WAN auto-detected). NEVER install a *nat stanza in
+    #    ufw before.rules - ufw reload APPENDS stanzas instead of replacing
+    #    them, so duplicates accumulate per reload (observed repeatedly in
+    #    the field, most recently re-introduced by this very postinst on
+    #    3.2.7 upgrades). Remove any legacy stanza instead.
     if [[ -n "$WAN_IF" && -f /etc/ufw/before.rules ]] \
-       && ! grep -q '^\*nat' /etc/ufw/before.rules; then
+       && grep -q '^\*nat' /etc/ufw/before.rules; then
       cp -a /etc/ufw/before.rules /etc/ufw/before.rules.tuxwall-bak 2>/dev/null || true
-      sed -i '1i\
-*nat\
-:POSTROUTING ACCEPT [0:0]\
--A POSTROUTING -o '"$WAN_IF"' -j MASQUERADE\
-COMMIT\
-' /etc/ufw/before.rules
+      sed -i '/^\*nat$/,/^COMMIT$/d' /etc/ufw/before.rules
       ufw reload >/dev/null 2>&1 || true
-      echo "   WAN masquerade added to ufw before.rules ($WAN_IF)"
+      echo "   legacy *nat stanza removed from before.rules (tuxwall-nat owns NAT)"
     fi
+    systemctl enable --now tuxwall-nat.service >/dev/null 2>&1 || true
+    systemctl restart tuxwall-nat.service >/dev/null 2>&1 || true
+    echo "   WAN masquerade: tuxwall-nat service ($WAN_IF)"
 
     # Forwarder for fresh installs only. Never touch an existing
     # router-dns.conf - it may hold a full hand-tuned server config.

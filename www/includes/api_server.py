@@ -2949,7 +2949,7 @@ REPORTING_DEFAULT_URL = "https://tuxwall.org/report"
 # refuses reports from below MIN_REPORTER_VERSION (3.2.4) - that release is
 # the one that stops consumers from ever banning Cloudflare edge IPs.
 # Keep in sync with pkg/DEBIAN/control.
-TUXWALL_VERSION = "3.2.7"
+TUXWALL_VERSION = "3.2.8"
 REPORTING_TIMEOUT = 10
 _report_status_lock = threading.Lock()
 
@@ -15428,6 +15428,30 @@ def _incident_conditions():
             elif pct >= 92:
                 add("memory:root", "warning", "Memory usage is high",
                     "%.1f%% used." % pct)
+    except Exception:
+        pass
+
+    # Unbound functional probe: the service can be 'active' while
+    # SERVFAILing everything (observed after a long WAN blackout - the
+    # daemon never recovered its upstream state and liveness checks
+    # missed it for hours). Compare a query THROUGH unbound with one
+    # DIRECT to an upstream: fire only when the WAN path works but the
+    # local resolver does not - during an intentional WAN containment
+    # (tripwire) the direct query fails too and this stays silent.
+    try:
+        local = subprocess.run(
+            ["dig", "+time=2", "+tries=1", "+short", "@127.0.0.1", "cloudflare.com"],
+            capture_output=True, text=True, timeout=5)
+        if not (local.stdout or "").strip():
+            direct = subprocess.run(
+                ["dig", "+time=2", "+tries=1", "+short", "@1.1.1.1", "cloudflare.com"],
+                capture_output=True, text=True, timeout=5)
+            if (direct.stdout or "").strip():
+                add("service:unbound-function", "critical",
+                    "Unbound is running but not resolving",
+                    "The DNS service answers but returns no results while the "
+                    "WAN path is working - queries from every LAN client are "
+                    "failing. Restart it: sudo systemctl restart unbound")
     except Exception:
         pass
 
