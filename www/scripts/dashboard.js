@@ -4078,6 +4078,7 @@
       els.secTripMsgGrid.innerHTML = [
         tripKv("Class", d.class || "—"),
         tripKv("Source", src || "—"),
+        tripKv("Destination", d.dst || "—", true),
         tripKv("Containment", d.rules_present ? "FORWARD drop active" : "rules not present"),
         tripKv("Tripped", d.since ? formatDateTime(d.since) : "—"),
         tripKv("Signature", d.signature || "—", true),
@@ -4094,7 +4095,23 @@
       els.secTripMsgGrid.innerHTML = [
         tripKv("Class", d.class || "—"),
         tripKv("Source", src || "—"),
+        tripKv("Destination", d.dst || "—", true),
         tripKv("Signature", d.signature || "—", true),
+      ].join("");
+      return;
+    }
+
+    if (mode === "logonly" && (d.logonly_events || 0) > 0) {
+      const last = d.last_logonly || {};
+      msg.dataset.kind = "armed";
+      els.secTripMsgTitle.textContent = "Armed (log only) — " + formatNumber(d.logonly_events) + " event(s) recorded";
+      els.secTripMsgMeta.textContent = "Nothing contained — trip-class events are recorded for review.";
+      els.secTripMsgReason.textContent = (last.reason || "") + (last.class ? " [" + last.class + "]" : "");
+      els.secTripMsgGrid.innerHTML = [
+        tripKv("Last class", last.class || "—"),
+        tripKv("Source", last.src && !String(last.src).startsWith("local:") ? String(last.src) : (last.src || "—")),
+        tripKv("Destination", last.dst || "—", true),
+        tripKv("Recorded", last.ts ? formatDateTime(last.ts) : "—"),
       ].join("");
       return;
     }
