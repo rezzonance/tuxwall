@@ -263,6 +263,12 @@ RADVD
       ufw reload >/dev/null 2>&1 || true
       echo "   legacy *nat stanza removed from before.rules (tuxwall-nat owns NAT)"
     fi
+    # exec-bit insurance: a shipped script without the git +x bit installs
+    # non-executable via dpkg and its unit dies with 203/EXEC on the next
+    # reboot (tuxwall-nat-ensure shipped 644 from 3.2.5 through 3.2.8 -
+    # every reboot on those versions silently lost LAN NAT until this fix)
+    chmod 755 /usr/local/sbin/tuxwall-nat-ensure /usr/local/sbin/crowdsec_dedupe.py \
+              /usr/local/sbin/system-backup.sh 2>/dev/null || true
     systemctl enable --now tuxwall-nat.service >/dev/null 2>&1 || true
     systemctl restart tuxwall-nat.service >/dev/null 2>&1 || true
     echo "   WAN masquerade: tuxwall-nat service ($WAN_IF)"

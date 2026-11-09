@@ -2949,7 +2949,7 @@ REPORTING_DEFAULT_URL = "https://tuxwall.org/report"
 # refuses reports from below MIN_REPORTER_VERSION (3.2.4) - that release is
 # the one that stops consumers from ever banning Cloudflare edge IPs.
 # Keep in sync with pkg/DEBIAN/control.
-TUXWALL_VERSION = "3.2.8"
+TUXWALL_VERSION = "3.2.9"
 REPORTING_TIMEOUT = 10
 _report_status_lock = threading.Lock()
 
