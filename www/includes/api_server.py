@@ -3423,7 +3423,7 @@ def _canary_event_detail(logtype, logdata):
 # --- Tripwire (WAN containment on confirmed intrusion) ---------------------
 TRIPWIRE_CONF = "/etc/tuxwall/tripwire.json"
 TRIPWIRE_STATE = "/etc/tuxwall/tripwire-state.json"
-TRIPWIRE_MODES = ("disabled", "medium", "high")
+TRIPWIRE_MODES = ("disabled", "logonly", "medium", "high")
 
 
 def tripwire_status():
@@ -3457,7 +3457,7 @@ def tripwire_status():
 def tripwire_set_mode(body):
     mode = str(body.get("mode") or "").strip().lower()
     if mode not in TRIPWIRE_MODES:
-        raise ValueError("mode must be disabled, medium or high")
+        raise ValueError("mode must be disabled, logonly, medium or high")
     tmp = TRIPWIRE_CONF + ".tmp"
     with open(tmp, "w") as f:
         json.dump({"mode": mode}, f, indent=2)
