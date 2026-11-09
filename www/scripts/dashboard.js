@@ -4025,10 +4025,11 @@
     renderHoneyDetail(conf, st);
   }
 
-  const TRIP_MODES = ["disabled", "medium", "high"];
-  const TRIP_MODE_LABEL = { disabled: "Disabled", medium: "Medium", high: "High" };
+  const TRIP_MODES = ["disabled", "logonly", "medium", "high"];
+  const TRIP_MODE_LABEL = { disabled: "Disabled", logonly: "Log only", medium: "Medium", high: "High" };
   const TRIP_MODE_DESC = {
     disabled: "Off — the WAN is never contained automatically.",
+    logonly: "Detection armed, blade sheathed — trip-class events are recorded and pushed, but nothing is ever contained. The away-from-home mode.",
     medium: "Cuts LAN↔WAN forwarding but keeps WireGuard 51820 open as the emergency admin door.",
     high: "Cuts all WAN access — the router is reachable from the LAN only.",
   };
