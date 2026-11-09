@@ -176,6 +176,14 @@
     decRailHoneyDot: document.getElementById("dec-rail-honey-dot"),
     decRailHoneyValue: document.getElementById("dec-rail-honey-value"),
     decRailHoneyTag: document.getElementById("dec-rail-honey-tag"),
+    secTripHint: document.getElementById("sec-trip-hint"),
+    secTripDot: document.getElementById("sec-trip-dot"),
+    secTripMode: document.getElementById("sec-trip-mode"),
+    secTripStatus: document.getElementById("sec-trip-status"),
+    secTripResolve: document.getElementById("sec-trip-resolve"),
+    secTripPass: document.getElementById("sec-trip-pass"),
+    secTripResolveBtn: document.getElementById("sec-trip-resolve-btn"),
+    tripBanner: document.getElementById("trip-banner"),
     secCanaryHint: document.getElementById("sec-canary-hint"),
     secCanaryToggle: document.getElementById("sec-canary-toggle"),
     secCanarySummary: document.getElementById("sec-canary-summary"),
@@ -4008,6 +4016,60 @@
       || `<tr><td colspan="5" class="empty">Honeypot is ${st.listening ? "listening — no scanners yet" : "disabled"}.</td></tr>`;
     renderHoneyDetail(conf, st);
   }
+
+  async function refreshTripwire() {
+    let d;
+    try { d = await fetchJSON("/api/security/tripwire"); }
+    catch (_) { return; }
+    if (!d || !d.ok) return;
+    if (els.secTripMode && document.activeElement !== els.secTripMode)
+      els.secTripMode.value = d.mode || "disabled";
+    if (els.secTripHint)
+      els.secTripHint.textContent = d.tripped
+        ? "TRIPPED (" + (d.trip_mode || "?") + ") - WAN contained"
+        : (d.mode === "disabled" ? "disabled" : "armed (" + d.mode + ")");
+    if (els.secTripDot)
+      els.secTripDot.dataset.status = d.tripped ? "crit" : (d.mode === "disabled" ? "inactive" : "ok");
+    if (els.secTripStatus) {
+      if (d.tripped) {
+        const mins = d.since ? Math.max(0, Math.round((Date.now() / 1000 - d.since) / 60)) : 0;
+        els.secTripStatus.hidden = false;
+        els.secTripStatus.textContent =
+          "Contained for " + mins + " min - " + (d.class || "?") +
+          (d.src_ip ? " from " + d.src_ip : "") +
+          (d.reason ? " - " + d.reason : "") +
+          " (" + (d.trips || 1) + " trip event(s))";
+      } else els.secTripStatus.hidden = true;
+    }
+    if (els.secTripResolve) els.secTripResolve.hidden = !d.tripped;
+    if (els.tripBanner) {
+      if (d.tripped) {
+        els.tripBanner.hidden = false;
+        els.tripBanner.textContent = "TRIPWIRE TRIPPED (" +
+          String(d.trip_mode || "?").toUpperCase() + "): WAN contained - " +
+          (d.reason || "intrusion-class event") +
+          ". This will NOT auto-restore. Resolve under Security > Tripwire.";
+      } else els.tripBanner.hidden = true;
+    }
+  }
+  setInterval(refreshTripwire, 30000);
+  refreshTripwire();
+
+  if (els.secTripMode) els.secTripMode.addEventListener("change", async () => {
+    try {
+      await postJSON("/api/security/tripwire/config", { mode: els.secTripMode.value });
+      refreshTripwire();
+    } catch (err) { showBanner(true, "Tripwire mode: " + err.message); }
+  });
+  if (els.secTripResolveBtn) els.secTripResolveBtn.addEventListener("click", async () => {
+    if (!els.secTripPass.value) { els.secTripPass.focus(); return; }
+    if (!confirm("Restore WAN access now? Only resolve after investigating the trip.")) return;
+    try {
+      await postJSON("/api/security/tripwire/resolve", { password: els.secTripPass.value });
+      els.secTripPass.value = "";
+      refreshTripwire();
+    } catch (err) { showBanner(true, "Tripwire resolve: " + err.message); }
+  });
 
   async function refreshHoneypot() {
     try {

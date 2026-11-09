@@ -3420,6 +3420,70 @@ def _canary_event_detail(logtype, logdata):
     return " ".join(parts) if parts else "connection"
 
 
+# --- Tripwire (WAN containment on confirmed intrusion) ---------------------
+TRIPWIRE_CONF = "/etc/tuxwall/tripwire.json"
+TRIPWIRE_STATE = "/etc/tuxwall/tripwire-state.json"
+TRIPWIRE_MODES = ("disabled", "medium", "high")
+
+
+def tripwire_status():
+    def rd(path, fb):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            return fb
+    conf = rd(TRIPWIRE_CONF, {})
+    st = rd(TRIPWIRE_STATE, {})
+    rules = False
+    try:
+        for ipt in ("iptables", "ip6tables"):
+            if subprocess.run([ipt, "-C", "FORWARD", "-m", "comment",
+                               "--comment", "TUXWALL-TRIPWIRE", "-j", "DROP"],
+                              capture_output=True).returncode == 0:
+                rules = True
+    except Exception:
+        pass
+    return {"ok": True,
+            "mode": str(conf.get("mode") or "disabled"),
+            "tripped": bool(st.get("tripped")),
+            "trip_mode": st.get("mode"), "since": st.get("since"),
+            "reason": st.get("reason"), "class": st.get("class"),
+            "src_ip": st.get("src_ip"), "trips": st.get("trips") or 0,
+            "rules_present": rules}
+
+
+def tripwire_set_mode(body):
+    mode = str(body.get("mode") or "").strip().lower()
+    if mode not in TRIPWIRE_MODES:
+        raise ValueError("mode must be disabled, medium or high")
+    tmp = TRIPWIRE_CONF + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"mode": mode}, f, indent=2)
+    os.replace(tmp, TRIPWIRE_CONF)
+    return {"ok": True, "mode": mode}
+
+
+def tripwire_resolve(body, identity):
+    """Lift the lockdown. Deliberate two-step: admin session PLUS the
+    acting admin's password - a stolen dashboard session must never be
+    enough to re-open the WAN during a trip."""
+    if not identity:
+        raise PermissionError("Authentication required")
+    users = _load_users()
+    user = _find_user(users, identity["username"])
+    if user is None:
+        raise PermissionError("Account no longer exists")
+    current = str(body.get("password") or "")
+    if not hmac.compare_digest(_hash_password(current, user["salt"]), user["hash"]):
+        raise PermissionError("Password is incorrect")
+    proc = subprocess.run(["/usr/local/sbin/tuxwall-tripwire", "resolve"],
+                          capture_output=True, text=True, timeout=30)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or "resolve failed").strip()[:200])
+    return {"ok": True, "detail": (proc.stdout or "").strip()[:200]}
+
+
 def build_canary():
     """Deception-services overview: emulated ports, events (with captured
     credentials), CrowdSec bans originated by the canary, and stat-card
@@ -11843,6 +11907,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_honeypot())
         elif path == "/api/security/canary":
             self._send(200, build_canary())
+        elif path == "/api/security/tripwire":
+            self._send(200, tripwire_status())
         elif path == "/api/agent/models":
             try:
                 data = self._agent_call("GET", "/config/providers", timeout=10)
@@ -12799,6 +12865,12 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/security/canary/config":
             result = set_canary_enabled(bool(body.get("enabled")))
             self._send(200 if result.get("ok") else 400, result)
+
+        elif path == "/api/security/tripwire/config":
+            self._send(200, tripwire_set_mode(body))
+
+        elif path == "/api/security/tripwire/resolve":
+            self._send(200, tripwire_resolve(body, identity))
 
         elif path == "/api/security/honeypot/config":
             self._send(200, set_honeypot_conf(body))
@@ -15428,6 +15500,30 @@ def _incident_conditions():
             elif pct >= 92:
                 add("memory:root", "warning", "Memory usage is high",
                     "%.1f%% used." % pct)
+    except Exception:
+        pass
+
+    # Unbound functional probe: the service can be 'active' while
+    # SERVFAILing everything (observed after a long WAN blackout - the
+    # daemon never recovered its upstream state and liveness checks
+    # missed it for hours). Compare a query THROUGH unbound with one
+    # DIRECT to an upstream: fire only when the WAN path works but the
+    # local resolver does not - during an intentional WAN containment
+    # (tripwire) the direct query fails too and this stays silent.
+    try:
+        local = subprocess.run(
+            ["dig", "+time=2", "+tries=1", "+short", "@127.0.0.1", "cloudflare.com"],
+            capture_output=True, text=True, timeout=5)
+        if not (local.stdout or "").strip():
+            direct = subprocess.run(
+                ["dig", "+time=2", "+tries=1", "+short", "@1.1.1.1", "cloudflare.com"],
+                capture_output=True, text=True, timeout=5)
+            if (direct.stdout or "").strip():
+                add("service:unbound-function", "critical",
+                    "Unbound is running but not resolving",
+                    "The DNS service answers but returns no results while the "
+                    "WAN path is working - queries from every LAN client are "
+                    "failing. Restart it: sudo systemctl restart unbound")
     except Exception:
         pass
 

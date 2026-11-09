@@ -143,6 +143,7 @@
 
     <div id="banner" class="banner" hidden></div>
     <div id="svc-banner" class="banner svc-banner" role="alert" hidden></div>
+        <div id="trip-banner" class="banner svc-banner" role="alert" hidden></div>
 
     <section id="view-overview" class="view" hidden>
 
@@ -1584,6 +1585,7 @@
       <!-- OPNsense-style sub-tabs -->
       <div class="fw-subtabs" id="sec-subtabs">
         <button class="fw-subtab active" type="button" data-sec-pane="attacks">Attacks</button>
+        <button class="fw-subtab" type="button" data-sec-pane="tripwire">Tripwire</button>
         <button class="fw-subtab" type="button" data-sec-pane="sensors">Sensors</button>
         <button class="fw-subtab" type="button" data-sec-pane="deception">Deception</button>
         <button class="fw-subtab" type="button" data-sec-pane="integrity">Integrity</button>
@@ -1665,6 +1667,29 @@
       </div>
 
       <!-- Pane: Sensors (IDS + Zeek) -->
+      <div class="fw-pane" data-sec-pane="tripwire" hidden>
+      <div class="card card-mt dec-card" id="sec-trip-card">
+        <div class="card-head dec-head">
+          <span class="dec-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg></span>
+          <div class="dec-head-copy">
+            <h2>Tripwire <span class="status-dot" id="sec-trip-dot" data-status="inactive"></span></h2>
+            <span class="muted dec-sub" id="sec-trip-hint"></span>
+          </div>
+          <select id="sec-trip-mode" style="padding:4px 8px">
+            <option value="disabled">Disabled</option>
+            <option value="medium">Medium (WG door open)</option>
+            <option value="high">High (LAN only)</option>
+          </select>
+        </div>
+        <div id="sec-trip-status" class="dec-chips" hidden></div>
+        <div id="sec-trip-resolve" hidden style="display:flex;gap:8px;align-items:center;margin:10px 0;flex-wrap:wrap">
+          <input type="password" id="sec-trip-pass" placeholder="Admin password" style="flex:1;max-width:240px;min-width:160px" autocomplete="off">
+          <button id="sec-trip-resolve-btn" class="btn btn-sm btn-act" type="button">Resolve &amp; restore WAN</button>
+        </div>
+        <p class="muted bl-note">WAN containment on <b>confirmed intrusion-class events</b>: Suricata priority-1 alerts (admin compromise, trojan activity, web application attack, shellcode) or the canary attempting any outbound connection. <b>Medium</b> cuts LAN&#8596;WAN forwarding but keeps WireGuard (51820) open as the emergency admin door; <b>High</b> additionally closes all WAN access — the router is reachable from the LAN only. <b>A trip never auto-restores</b>: a timer would re-open the door before the compromise is actually fixed. Resolve deliberately, after investigating, with your admin password.</p>
+      </div>
+      </div>
+
       <div class="fw-pane" data-sec-pane="sensors" hidden>
       <div class="card">
         <div class="card-head">
