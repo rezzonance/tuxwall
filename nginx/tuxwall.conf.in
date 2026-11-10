@@ -1,0 +1,114 @@
+# tuxwall dashboard site - reverse proxy for the Python API backend.
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    # Win the default slot on the LAN IPs too, so the Certbot catch-all
+    # in the homeassistant site doesn't 404 bare-IP dashboard requests.
+@@LISTEN@@
+
+    root /var/www/html;
+    index index.html;
+
+    server_name _;
+    server_tokens off;
+
+    # Clickjacking / sniffing backstop (live patch 2026-09-06).
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "same-origin" always;
+
+    # opencode agent SSE stream (/api/agent/events) — must stay open and
+    # unbuffered indefinitely: the agent can sit idle for minutes while a
+    # permission approval is pending, and default proxy_read_timeout (60s)
+    # kills the stream and drops events mid-turn.
+    location = /api/agent/events {
+        allow 127.0.0.1;
+        allow ::1;
+        allow 10.0.0.0/8;
+        allow 172.16.0.0/12;
+        allow 192.168.0.0/16;
+        # LAN/VPN IPv6 (fd00:1::/64 LAN, fd00:2::/64 WireGuard). Without
+        # this, any client reaching the dashboard over IPv6 is denied.
+        allow fd00::/8;
+        deny all;
+
+        proxy_pass http://127.0.0.1:8008;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # Login brute-force throttle (zone: conf.d/tuxwall-limits.conf).
+    location = /api/auth/login {
+        allow 127.0.0.1;
+        allow ::1;
+        allow 10.0.0.0/8;
+        allow 172.16.0.0/12;
+        allow 192.168.0.0/16;
+        # LAN/VPN IPv6 (fd00:1::/64 LAN, fd00:2::/64 WireGuard). Without
+        # this, any client reaching the dashboard over IPv6 is denied.
+        allow fd00::/8;
+        deny all;
+
+        limit_req zone=tuxwall_login burst=15 nodelay;
+
+        proxy_pass http://127.0.0.1:8008;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    # Dashboard API -> Python backend
+    location /api/ {
+        allow 127.0.0.1;
+        allow ::1;
+        allow 10.0.0.0/8;
+        allow 172.16.0.0/12;
+        allow 192.168.0.0/16;
+        # LAN/VPN IPv6 (fd00:1::/64 LAN, fd00:2::/64 WireGuard). Without
+        # this, any client reaching the dashboard over IPv6 is denied.
+        allow fd00::/8;
+        deny all;
+
+        proxy_pass http://127.0.0.1:8008;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    # Block access to Python source files
+    location ~ \.py$ {
+        return 404;
+    }
+
+    location / {
+        allow 127.0.0.1;
+        allow ::1;
+        allow 10.0.0.0/8;
+        allow 172.16.0.0/12;
+        allow 192.168.0.0/16;
+        # LAN/VPN IPv6 (fd00:1::/64 LAN, fd00:2::/64 WireGuard). Without
+        # this, any client reaching the dashboard over IPv6 is denied.
+        allow fd00::/8;
+        # Never heuristic-cache index.html: browsers must revalidate on every
+        # load so the deploy's asset-version bump (style.css?v=…) is picked up.
+        add_header Cache-Control "no-cache" always;
+        error_page 403 =200 @empty_response;
+        deny all;
+        try_files $uri $uri/ =404;
+    }
+
+    location @empty_response {
+        return 200 '';
+        default_type text/html;
+    }
+}
