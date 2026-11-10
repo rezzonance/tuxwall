@@ -15753,7 +15753,12 @@ def _incident_conditions():
                 iface = line.split(":")[1].strip().split("@")[0]
                 if iface in ("lo", wan) or "." in iface:
                     continue
-                if "UP" in line:
+                # virtual interfaces (wireguard tunnels, ifb shaping
+                # devices) are never a "LAN link" to monitor; they flap
+                # by design. Only physical interfaces with a carrier.
+                if iface.startswith(("wg", "ifb", "tun", "tap", "veth", "br-")):
+                    continue
+                if "UP" in line and "LOWER_UP" in line:
                     lan_ifaces.append(iface)
         except Exception:
             pass
