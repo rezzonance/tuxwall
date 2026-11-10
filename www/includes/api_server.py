@@ -3487,6 +3487,66 @@ def ensure_canary_token():
     return tok
 
 
+def _infra_exempt_ips():
+    """IPs whose services the box depends on: unbound's forward-zone
+    resolvers and chrony's NTP servers, read from their actual configs.
+    Updated on each call (cheap: two small file reads)."""
+    ips = set()
+    # unbound forward-zone addresses
+    try:
+        for conf in sorted(os.listdir("/etc/unbound/unbound.conf.d")):
+            if not conf.endswith(".conf"):
+                continue
+            with open(os.path.join("/etc/unbound/unbound.conf.d", conf)) as f:
+                for line in f:
+                    m = re.match(r"\s*forward-addr:\s*([0-9a-fA-F:.]+)", line)
+                    if m:
+                        try:
+                            ips.add(str(ipaddress.ip_address(m.group(1))))
+                        except ValueError:
+                            pass
+    except OSError:
+        pass
+    # chrony NTP servers
+    try:
+        with open("/etc/chrony/chrony.conf") as f:
+            for line in f:
+                m = re.match(r"\s*(?:server|pool)\s+([0-9a-fA-F:.]+)", line)
+                if m:
+                    try:
+                        ips.add(str(ipaddress.ip_address(m.group(1))))
+                    except ValueError:
+                        continue  # pool names (e.g. 2.debian.pool.ntp.org) - resolve separately
+    except OSError:
+        pass
+    # chrony pool names: resolve them (they're the common case)
+    try:
+        proc = subprocess.run(["chronyc", "sources", "-n"],
+                              capture_output=True, text=True, timeout=5)
+        for line in proc.stdout.splitlines():
+            if line.startswith(("^", "*", "?", "+")):
+                # format: ^-- 2607:f2d8:... or ^== 216.239.32.4
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        ip = parts[1].lstrip("^=+*?-")
+                        ipaddress.ip_address(ip)
+                        ips.add(str(ip))
+                    except (ValueError, IndexError):
+                        pass
+    except Exception:
+        pass
+    return ips
+
+
+def _is_infra_ip(ip):
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return ip in _infra_exempt_ips()
+
+
 def handle_canary_hit(body):
     """Parse an OpenCanary webhook alert; ban + report global sources."""
     fields = {}
@@ -3518,6 +3578,19 @@ def handle_canary_hit(body):
         if last and now - last < CANARY_RECENT_TTL:
             return {"ok": True, "ignored": True, "message": "recently handled"}
         CANARY_RECENT[ip] = now
+    # 2026-11-10 audit follow-up: exempt IPs the box ITSELF depends on.
+    # A spoofed UDP canary "hit" from an NTP server or DNS forwarder
+    # would locally ban that service for the duration, breaking time
+    # sync (which breaks TOTP login) or DNS. The exemption set is read
+    # from the actual service configs, not a static list.
+    if udp_evidence and _is_infra_ip(ip):
+        _honey_log("canary: IGNORED spoofable UDP 'hit' from {} ({}) - "
+                   "this is a configured infrastructure IP (DNS/NTP); "
+                   "the source was forged".format(ip, what))
+        return {"ok": True, "ignored": True, "ip": ip,
+                "message": "infrastructure IP exempt from canary bans "
+                           "(spoofed UDP evidence)", "infra_exempt": True}
+
     # 2026-11-09 audit: UDP-source canary evidence (SNMP, logtype 13001)
     # is SPOOFABLE - one forged packet with a fake source lands here and
     # used to earn a 1-year ban + a community report. TCP canaries are
