@@ -1474,18 +1474,50 @@ def add_firewall_rule(rule_text):
     return build_firewall()
 
 
-def delete_firewall_rule(number):
-    """Delete a ufw rule by its number in `ufw status numbered`.
+def delete_firewall_rule(spec):
+    """Delete a ufw rule by its CONTENT, not its number.
 
-    `ufw delete <num>` prompts for confirmation and aborts when there is no
-    stdin, so pass --force (same ruleset as 'ufw status numbered')."""
-    try:
-        num = int(number)
-    except (TypeError, ValueError):
-        raise RuntimeError("Invalid rule number")
-    if num < 1:
-        raise RuntimeError("Invalid rule number")
-    _ufw(["--force", "delete", str(num)])
+    2026-11-09 audit: numbers in 'ufw status numbered' shift whenever any
+    other component (crowdsec bouncer, tuxwall-nat, timers) touches the
+    ruleset between the dashboard rendering the list and the user clicking
+    delete - deleting by a stale number removes the WRONG rule. The client
+    sends the rule it saw (to/action/from + its number at render time);
+    we re-resolve against the CURRENT ruleset under the change lock and
+    delete the rule that matches the spec. A stale number is fine (it
+    just means things shifted); a stale SPEC that matches nothing is a
+    clean 'already deleted' error, never a wrong-rule deletion."""
+    to = str(spec.get("to") or "").strip()
+    action = str(spec.get("action") or "").strip()
+    frm = str(spec.get("from") or "").strip()
+    if not to or not action or not frm:
+        raise RuntimeError("Rule spec is incomplete")
+    with _fw_move_lock:
+        proc = subprocess.run(["ufw", "status", "numbered"],
+                              capture_output=True, text=True, timeout=10)
+        if proc.returncode != 0:
+            raise RuntimeError("ufw status failed")
+        found = None
+        for line in proc.stdout.splitlines():
+            ls = line.strip()
+            m = re.match(r"^\[\s*(\d+)\]\s+(.+)$", ls)
+            if not m:
+                continue
+            num, rest = int(m.group(1)), m.group(2)
+            rm = re.match(r"^(?P<to>.+?)\s+(?P<verb>ALLOW|DENY|LIMIT|REJECT)"
+                          r"(?:\s+(?P<dir>IN|OUT|FWD))?\s+(?P<from>.+)$", rest)
+            if not rm:
+                continue
+            if (rm.group("to").strip() == to and
+                    " ".join(([rm.group("verb"), rm.group("dir")]
+                               if rm.group("dir") else [rm.group("verb")])).strip() == action and
+                    rm.group("from").strip() == frm):
+                found = num
+                break  # first match: ufw CLI semantics (one rule per delete)
+        if found is None:
+            raise RuntimeError(
+                "Rule not found in the current ruleset - it may already "
+                "have been deleted. Refresh the firewall page.")
+        _ufw(["--force", "delete", str(found)])
     return build_firewall()
 
 
@@ -1518,7 +1550,7 @@ def _ufw_rule_key(r):
             r.src, r.dst, r.interface_in, r.interface_out, r.comment)
 
 
-def move_firewall_rule(number, direction):
+def move_firewall_rule(number, direction, expected_spec=None):
     """Swap the numbered rule with the adjacent rule in its family
     (IPv4/IPv6) list. Numbering matches `ufw status numbered`."""
     if direction not in ("up", "down"):
@@ -1529,6 +1561,27 @@ def move_firewall_rule(number, direction):
         raise RuntimeError("Invalid rule number")
     if num < 1:
         raise RuntimeError("Invalid rule number")
+
+    # staleness guard (2026-11-09 audit): if the client also sends the
+    # rule it SAW at this number, verify against the CURRENT numbered
+    # list - the ruleset may have shifted under the UI (bouncer/timers
+    # add rules). A stale number must move the RIGHT rule or refuse.
+    if expected_spec:
+        exp = " ".join(str(expected_spec.get(k) or "").strip()
+                       for k in ("to", "action", "from"))
+        proc = subprocess.run(["ufw", "status", "numbered"],
+                              capture_output=True, text=True, timeout=10)
+        cur = None
+        for line in proc.stdout.splitlines():
+            m = re.match(r"^\[\s*(\d+)\]\s+(.+)$", line.strip())
+            if m and int(m.group(1)) == num:
+                cur = m.group(2).strip()
+                break
+        if cur is None or cur != exp:
+            raise RuntimeError(
+                "Ruleset changed since the page was rendered (rule %d no "
+                "longer matches what you saw). Refresh the firewall page "
+                "and retry." % num)
 
     with _fw_move_lock:
         b = _ufw_backend()

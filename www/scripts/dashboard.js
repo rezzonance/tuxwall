@@ -2055,7 +2055,14 @@
       if (!window.confirm("Remove this firewall rule?")) return;
       btn.disabled = true;
       try {
-        await postJSON("/api/firewall/delete", { number: btn.dataset.num });
+        const row = btn.closest("tr");
+        const cells = row ? row.querySelectorAll("td") : [];
+        await postJSON("/api/firewall/delete", {
+          number: btn.dataset.num,
+          to: row ? (row.dataset.to || (cells[0] ? cells[0].textContent.trim() : "")) : "",
+          action: row ? (row.dataset.action || (cells[1] ? cells[1].textContent.trim() : "")) : "",
+          from: row ? (row.dataset.from || (cells[2] ? cells[2].textContent.trim() : "")) : "",
+        });
         els.fwHint.textContent = "Rule removed.";
         await refreshFirewall();
       } catch (err) {
