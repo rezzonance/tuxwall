@@ -76,7 +76,12 @@ EOF
     # never starts from scratch.
     AGENTS_SRC="/usr/share/tuxwall/AGENTS.md"
     AGENTS_DST_DIR="/home/tuxwall-agent/.config/opencode"
-    if [[ -f "$AGENTS_SRC" ]]; then
+    # 2026-11-09 audit: this used to run BEFORE the agent user exists
+    # (the user is created by the agent setup later in this script) -
+    # 'install -o tuxwall-agent' then failed under set -e and aborted
+    # the entire fresh-install postinst. Guard: only install when the
+    # user already exists; the agent setup installs it after useradd.
+    if [[ -f "$AGENTS_SRC" ]] && id tuxwall-agent >/dev/null 2>&1; then
       mkdir -p "$AGENTS_DST_DIR"
       if [[ ! -f "$AGENTS_DST_DIR/AGENTS.md" ]]; then
         install -o tuxwall-agent -g tuxwall-agent -m 0644 \

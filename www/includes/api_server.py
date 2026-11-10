@@ -2497,8 +2497,17 @@ class CommunityAutoWorker(threading.Thread):
                 continue
         missing = []
         skipped_cf = 0
+        skipped_low = 0
         for b in data.get("bans", []):
             if not (isinstance(b, dict) and b.get("ip")):
+                continue
+            # 2026-11-09 audit: the feed publishes single-reporter LOW
+            # entries (the deception gate trusts self-attested evidence
+            # classes). Enforce medium+ only - a forged report must clear
+            # the multi-reporter trust floor to reach installs via
+            # community-auto.
+            if str(b.get("severity") or "low").lower() in ("low", "info"):
+                skipped_low += 1
                 continue
             if _ip_in_protected(b["ip"]):
                 skipped_cf += 1     # never ban protected infra from remote intel
@@ -2519,6 +2528,7 @@ class CommunityAutoWorker(threading.Thread):
             state["last_pass_added"] = added
             state["added_total"] = (state.get("added_total") or 0) + added
             state["skipped_cf"] = skipped_cf
+            state["skipped_low"] = skipped_low
             state["pending"] = max(0, len(missing) - added)
             _save_community_auto(state)
 
@@ -2934,6 +2944,11 @@ def save_llm_conf(body):
     os.makedirs(os.path.dirname(LLM_CONF_PATH), exist_ok=True)
     with open(LLM_CONF_PATH, "w") as f:
         json.dump(data, f, indent=2)
+    # the file AND its backup hold the API key: never world-readable
+    # (2026-11-09 audit: direct-write path created them 0644)
+    os.chmod(LLM_CONF_PATH, 0o600)
+    if os.path.exists(bak):
+        os.chmod(bak, 0o600)
     return {"ok": True, "backup": bak if os.path.exists(bak) else None}
 
 
@@ -2949,7 +2964,7 @@ REPORTING_DEFAULT_URL = "https://tuxwall.org/report"
 # refuses reports from below MIN_REPORTER_VERSION (3.2.4) - that release is
 # the one that stops consumers from ever banning Cloudflare edge IPs.
 # Keep in sync with pkg/DEBIAN/control.
-TUXWALL_VERSION = "3.2.7"
+TUXWALL_VERSION = "3.2.10"
 REPORTING_TIMEOUT = 10
 _report_status_lock = threading.Lock()
 
@@ -3383,15 +3398,27 @@ def handle_canary_hit(body):
         if last and now - last < CANARY_RECENT_TTL:
             return {"ok": True, "ignored": True, "message": "recently handled"}
         CANARY_RECENT[ip] = now
+    # 2026-11-09 audit: UDP-source canary evidence (SNMP, logtype 13001)
+    # is SPOOFABLE - one forged packet with a fake source lands here and
+    # used to earn a 1-year ban + a community report. TCP canaries are
+    # handshake-authenticated (source is real) and keep both. UDP
+    # evidence: short local ban, NEVER community-reported.
+    udp_evidence = (logtype == 13001)
+    duration = "24h" if udp_evidence else CUSTOM_BLOCKLIST_DURATION
     try:
         subprocess.run(
             [CROWDSEC_BIN, "decisions", "add", "--ip", ip,
-             "--duration", CUSTOM_BLOCKLIST_DURATION,
+             "--duration", duration,
              "--reason", "canary/" + what.replace(" ", "-")],
             capture_output=True, text=True, timeout=CROWDSEC_TIMEOUT,
         )
     except Exception:
         pass
+    if udp_evidence:
+        _honey_log("canary: LOCAL-ONLY 24h ban {} ({}) - UDP evidence "
+                   "spoofable, not community-reported".format(ip, what))
+        return {"ok": True, "banned": True, "ip": ip,
+                "message": what, "local_only": True}
     _honey_log("canary: auto-banned {} ({})".format(ip, what))
     _spawn_report(ip, "deception service: %s" % what, "canary",
                   report_category_for(what, "canary"))

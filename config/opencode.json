@@ -15,7 +15,6 @@
       "ufw status*": "allow",
       "ip *": "allow",
       "ip -s link": "allow",
-      "ss *": "allow",
       "cat /var/log/*": "allow",
       "cat /etc/tuxwall/*": "allow",
       "cat /etc/crowdsec/*": "allow",
@@ -25,7 +24,6 @@
       "grep *": "allow",
       "ls *": "allow",
       "wc *": "allow",
-      "find *": "allow",
       "stat *": "allow",
       "file *": "allow",
       "sha256sum *": "allow",
@@ -46,11 +44,8 @@
       "opencode version": "allow",
       "ping *": "allow",
       "curl 127.0.0.1:*": "allow",
-      "curl -* 127.0.0.1:*": "allow",
       "curl localhost:*": "allow",
-      "curl -* localhost:*": "allow",
       "curl tuxwall.org*": "allow",
-      "curl -* tuxwall.org*": "allow",
       "unbound-control status": "allow",
       "unbound-control stats_noreset": "allow",
       "cscli decisions list": "allow",
@@ -75,7 +70,11 @@
       "sudo systemctl reload-or-restart *": "allow",
       "sudo systemctl daemon-reload": "allow",
       "sudo speedtest *": "allow",
-      "sudo /usr/local/sbin/tuxwall-sqm.sh": "allow"
+      "sudo /usr/local/sbin/tuxwall-sqm.sh": "allow",
+      "ss": "allow",
+      "ss -tulpn": "allow",
+      "ss -tln": "allow",
+      "find /var/log -type f -name *": "allow"
     }
   }
 }
