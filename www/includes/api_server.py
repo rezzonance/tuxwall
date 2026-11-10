@@ -4176,7 +4176,75 @@ def build_aide():
 # the source via CrowdSec. Any connection to these ports is hostile by
 # definition, so no reputation cross-checking is needed before a ban.
 HONEY_CONF_FILE = os.path.join(BLOCKLIST_DIR, "honeypot.json")
-HONEY_WAN_IFACE = "enp5s0"
+# --- Network portability (2026-11-10 audit #10) ---------------------------
+# /etc/tuxwall/network.json is the single source of truth for interface
+# roles. The installer seeds it from the actual box; everything that
+# used to hardcode one machine's names (enp5s0, enp6s0, 192.168.1.x)
+# reads from here. Absent file = derive dynamically (first boot before
+# the wizard runs), never a hardcoded guess.
+NETWORK_CONF = "/etc/tuxwall/network.json"
+
+
+def _net_conf():
+    try:
+        with open(NETWORK_CONF) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _detect_wan_iface():
+    """The interface holding the default route, or the config's answer."""
+    conf = _net_conf()
+    if conf.get("wan_iface"):
+        return str(conf["wan_iface"])
+    try:
+        out = subprocess.run(["ip", "route", "show", "default"],
+                             capture_output=True, text=True, timeout=5).stdout
+        if " dev " in out:
+            return out.split(" dev ")[1].split()[0]
+    except Exception:
+        pass
+    return ""
+
+
+def _lan_subnets():
+    """Private subnets the router serves (LAN, VLANs, VPN) — never the
+    WAN. Used by the honeypot LAN guard, the tarpit, and anywhere that
+    used to hardcode 192.168.1.0/24."""
+    conf = _net_conf()
+    if conf.get("lan_subnets"):
+        return [ipaddress.ip_network(str(n))
+                for n in conf["lan_subnets"] if n]
+    # dynamic: every private subnet on every non-WAN interface
+    wan = _detect_wan_iface()
+    nets = []
+    try:
+        out = subprocess.run(["ip", "-o", "addr", "show"],
+                             capture_output=True, text=True, timeout=5).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            iface = parts[1]
+            if iface == "lo" or iface == wan or iface.startswith(wan + "."):
+                continue
+            cidr = parts[3]
+            try:
+                net = ipaddress.ip_network(cidr, strict=False)
+                if net.is_private and not net.is_loopback and not net.is_link_local:
+                    if net not in nets:
+                        nets.append(net)
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    # loopback always counts as "ours"
+    nets.append(ipaddress.ip_network("127.0.0.0/8"))
+    return nets
+
+
+HONEY_WAN_IFACE = _detect_wan_iface() or "enp5s0"  # last-resort only
 HONEY_DEFAULT_PORTS = [23, 2323, 3389, 445, 5555]
 HONEY_MAX_TOTAL = 256        # concurrent trapped sockets across all ports
 HONEY_MAX_PER_IP = 8         # concurrent trapped sockets per source IP
@@ -4202,8 +4270,14 @@ HONEY_STATE = {
 }
 HONEY_STOP = threading.Event()
 HONEY_APPLY_LOCK = threading.RLock()
-HONEY_LAN_NETS = [ipaddress.ip_network(n) for n in
-                 ("192.168.1.0/24", "10.0.0.0/24", "127.0.0.0/8")]
+HONEY_LAN_NETS = []  # populated at first use from _lan_subnets()
+
+
+def _honey_lan_nets():
+    global HONEY_LAN_NETS
+    if not HONEY_LAN_NETS:
+        HONEY_LAN_NETS = _lan_subnets()
+    return HONEY_LAN_NETS
 
 
 def _honey_is_lan(ip):
@@ -4215,7 +4289,7 @@ def _honey_is_lan(ip):
         # Guard everything not globally routable: ULA (fc00::/7 covers the
         # LAN fd00:1::/64 and WireGuard fd00:2::/64), link-local, loopback.
         return not a.is_global
-    return any(a in net for net in HONEY_LAN_NETS)
+    return any(a in net for net in _honey_lan_nets())
 
 
 def _honey_load_conf():
@@ -5508,7 +5582,35 @@ WG_IFACE = "wg0"
 WG_DEFAULT_ADDRESS = "10.0.0.1/24"
 WG_V6_ADDRESS = "fd00:2::1/64"
 WG_V6_SUBNET = "fd00:2::/64"
-WG_DEFAULT_DNS = "192.168.1.1"
+WG_DEFAULT_DNS = ""  # derived: the router's own primary LAN address
+
+
+def _wg_default_dns():
+    global WG_DEFAULT_DNS
+    if WG_DEFAULT_DNS:
+        return WG_DEFAULT_DNS
+    conf = _net_conf()
+    if conf.get("lan_address"):
+        WG_DEFAULT_DNS = str(conf["lan_address"])
+        return WG_DEFAULT_DNS
+    # dynamic: first private v4 on the first non-WAN interface
+    wan = _detect_wan_iface()
+    try:
+        out = subprocess.run(["ip", "-o", "-4", "addr", "show"],
+                             capture_output=True, text=True, timeout=5).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            if parts[1] in ("lo", wan):
+                continue
+            ip = parts[3].split("/")[0]
+            if ipaddress.ip_address(ip).is_private:
+                WG_DEFAULT_DNS = ip
+                return ip
+    except Exception:
+        pass
+    return "192.168.1.1"  # last resort
 WG_DEFAULT_ALLOWED_IPS = "0.0.0.0/0, ::/0"
 WG_DEFAULT_KEEPALIVE = 25
 WG_DEFAULT_PORT = 51820
@@ -9770,7 +9872,13 @@ def delete_system_backup(filename):
 # --- SQM / traffic shaping (CAKE on WAN + IFB) -------------------------------
 SQM_CONF = "/etc/tuxwall/sqm.conf"
 SQM_SCRIPT = "/usr/local/sbin/tuxwall-sqm.sh"
-SQM_DEFAULTS = {"wan": "enp5s0", "ifb": "ifb4wan", "up_mbit": 285, "down_mbit": 1850}
+SQM_DEFAULTS = {"wan": "", "ifb": "ifb4wan", "up_mbit": 285, "down_mbit": 1850}
+
+
+def _sqm_wan():
+    if not SQM_DEFAULTS["wan"]:
+        SQM_DEFAULTS["wan"] = _detect_wan_iface() or "enp5s0"
+    return SQM_DEFAULTS["wan"]
 # Ookla speedtest is NOT in the Ubuntu archives, its packagecloud repo ends
 # at jammy (404 on noble+), and the snap is an unofficial wrapper — so
 # setup.sh / postinst auto-install the official tarball. The guided test
@@ -15632,7 +15740,25 @@ def _incident_conditions():
         add("wan:link", "critical", "WAN link is down",
             "%s reports %s." % (wan, _iface_operstate(wan)))
 
-    for name, label in (("enp6s0", "LAN"),):
+    conf = _net_conf()
+    lan_ifaces = conf.get("lan_ifaces") or []
+    if not lan_ifaces:
+        # derive: every UP non-WAN physical interface (skip VLAN subs,
+        # the tarpit handles those separately)
+        wan = _detect_wan_iface()
+        try:
+            out = subprocess.run(["ip", "-o", "link", "show"],
+                                 capture_output=True, text=True, timeout=5).stdout
+            for line in out.splitlines():
+                iface = line.split(":")[1].strip().split("@")[0]
+                if iface in ("lo", wan) or "." in iface:
+                    continue
+                if "UP" in line:
+                    lan_ifaces.append(iface)
+        except Exception:
+            pass
+    for name in lan_ifaces[:4]:  # cap at 4 to bound the check cost
+        label = "LAN"
         state = _iface_operstate(name)
         if state == "missing":
             add("lan:%s" % name, "critical", "%s interface is missing" % label,
