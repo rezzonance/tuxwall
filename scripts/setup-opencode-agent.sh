@@ -92,6 +92,12 @@ chmod 600 /etc/systemd/system/tuxwall-agent.service.d/password.conf \
 
 # ── 6. Web-root ownership: agent edits, nginx (www-data) reads ──────────────
 chown -R "$AGENT_USER":www-data /var/www/html
+# 2026-11-09 audit: api_server.py RUNS AS ROOT from this tree. Directory
+# write access = unlink-and-replace = root code execution on next
+# restart. The agent gets the dashboard ASSETS, never the code dirs.
+chown -R root:root /var/www/html/includes
+chmod 755 /var/www/html/includes
+chmod 644 /var/www/html/includes/*.py 2>/dev/null || true
 find /var/www/html -type d -exec chmod 775 {} +
 find /var/www/html -type f -exec chmod 664 {} +
 chmod 755 /var/www/html/includes/api_server.py /var/www/html/scripts/*.sh 2>/dev/null || true

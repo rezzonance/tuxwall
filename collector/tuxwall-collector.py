@@ -65,6 +65,17 @@ ADMIN_KEY_PATH = os.environ.get(
 # itself and every CF-fronted SaaS; Anthropic = model API). This hardcoded
 # floor becomes a managed whitelist in 3.2.4 - see
 # docs/whitelist-design.md.
+# 2026-11-09 audit: the installs THEMSELVES depend on these - a forged
+# report against any of them cuts DNS (or time sync) for every subscriber.
+# Refused at ingest like the CF ranges, and enforced in community-auto.
+INFRA_NETS = (
+    "1.1.1.0/24", "1.0.0.0/24",           # Cloudflare DNS (1.1.1.1/1.0.0.1)
+    "8.8.8.0/24", "8.8.4.0/24",           # Google DNS
+    "9.9.9.0/24", "149.112.112.0/24",     # Quad9
+    "208.67.222.0/24", "208.67.220.0/24", # OpenDNS
+    "162.159.200.0/24",                   # Cloudflare NTP
+    "216.239.32.0/19",                    # Google NTP backends
+)
 PROTECTED_NETS = tuple(ipaddress.ip_network(n) for n in (
     "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "104.16.0.0/13",
     "104.24.0.0/14", "108.162.192.0/18", "131.0.72.0/22", "141.101.64.0/18",
@@ -73,7 +84,7 @@ PROTECTED_NETS = tuple(ipaddress.ip_network(n) for n in (
     "160.79.104.0/24",     # Anthropic api.anthropic.com (not CF-fronted)
     "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
     "2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
-))
+) + INFRA_NETS)
 
 # Minimum reporter version (3.2.4: version-gated reporting, CF/Anthropic
 # ingest refusal, consumer-side exclusion and the managed whitelist
