@@ -1,0 +1,103 @@
+#!/bin/bash
+# tuxwall-nginx-render — generate the dashboard vhosts from a template,
+# with listen addresses derived from THIS box's actual interfaces.
+#
+# 2026-11-09 audit: the shipped nginx configs hardcoded one machine's
+# addresses (192.168.1.1, 10.0.0.1, fd00:1::1, housenetwork.site) - on
+# any other box nginx fails to bind and the dashboard never comes up.
+# This renderer reads the actual LAN/WG addresses and emits the vhost.
+#
+# Usage:  sudo tuxwall-nginx-render [--check]
+#   --check: render to stdout only, do not install or reload
+set -euo pipefail
+
+REPO="${TUXWALL_REPO:-/home/jeff/github-tuxwall}"
+TEMPLATE_HTTP="$REPO/nginx/tuxwall.conf.in"
+TEMPLATE_HTTPS="$REPO/nginx/tuxwall-https.conf.in"
+OUT_HTTP="/etc/nginx/sites-available/tuxwall"
+OUT_HTTPS="/etc/nginx/sites-available/tuxwall-https"
+HOSTNAME_FILE="/etc/tuxwall/dashboard-hostname"
+
+[[ $EUID -eq 0 ]] || { echo "Run as root: sudo $0"; exit 1; }
+
+# ── address discovery ────────────────────────────────────────────────────────
+# Every address on every interface EXCEPT the WAN (has the default route)
+# and loopback: the dashboard serves LAN, VLANs and VPN addresses.
+WAN_IF=$(ip route show default 2>/dev/null | head -1 | awk '{print $5; exit}')
+WAN_IF=${WAN_IF:-}
+
+V4=""
+V6=""
+for IFACE in $(ls /sys/class/net/ 2>/dev/null); do
+  [[ "$IFACE" == "lo" ]] && continue
+  [[ -n "$WAN_IF" && "$IFACE" == "$WAN_IF" ]] && continue
+  # skip the WAN's VLAN sub-interfaces too (enp5s0.* on the WAN port)
+  [[ "$IFACE" == "$WAN_IF".* ]] && continue
+  while read -r addr; do
+    case "$addr" in
+      fe80:*|fe00:*) continue ;;  # link-local: never useful as a listen
+      *:*) V6="$V6 $addr" ;;
+      *)   V4="$V4 $addr" ;;
+    esac
+  done < <(ip -o addr show dev "$IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+done
+
+# ── listen directive generation ──────────────────────────────────────────────
+gen_listen() {
+  local port="$1" suffix="${2:-}"
+  local lines=""
+  for a in $V4; do
+    lines+="    listen ${a}:${port}${suffix};\n"
+  done
+  for a in $V6; do
+    lines+="    listen [${a}]:${port}${suffix};\n"
+  done
+  # always include the wildcard as a fallback so nginx binds SOMETHING
+  # even if address discovery finds nothing (first-boot edge cases)
+  if [[ -z "$lines" ]]; then
+    lines="    listen ${port}${suffix};\n    listen [::]:${port}${suffix};\n"
+  fi
+  printf '%b' "$lines"
+}
+
+DOMAIN=$(hostname -d 2>/dev/null || true)
+DASH_HOSTNAME="router.${DOMAIN:-lan}"
+[[ -s "$HOSTNAME_FILE" ]] && DASH_HOSTNAME=$(cat "$HOSTNAME_FILE")
+export DASH_HOSTNAME
+
+render() {
+  local template="$1" port="$2" suffix="${3:-}"
+  local listens
+  listens=$(gen_listen "$port" "$suffix")
+  LISTENS="$listens" python3 -c "
+import os, sys
+tpl = open(sys.argv[1]).read()
+out = tpl.replace('@@LISTEN@@', os.environ['LISTENS'].rstrip())
+out = out.replace('@@HOSTNAME@@', os.environ['DASH_HOSTNAME'])
+sys.stdout.write(out)
+" "$template"
+}
+
+echo "Dashboard vhost renderer"
+echo "  WAN interface (excluded): ${WAN_IF:-<none detected>}"
+echo "  serving addresses:$(echo "$V4 $V6" | tr ' ' '\n' | grep -v '^$' | head -10 | tr '\n' ' ')"
+echo "  hostname: $DASH_HOSTNAME"
+
+if [[ "${1:-}" == "--check" ]]; then
+  echo "=== HTTP vhost (dry run):"
+  render "$TEMPLATE_HTTP" 80 | head -12
+  echo "=== HTTPS vhost (dry run):"
+  render "$TEMPLATE_HTTPS" 443 " ssl" | head -12
+  exit 0
+fi
+
+for spec in "$TEMPLATE_HTTP:$OUT_HTTP:80:" "$TEMPLATE_HTTPS:$OUT_HTTPS:443: ssl"; do
+  IFS=: read -r template out port suffix <<< "$spec"
+  [[ -f "$template" ]] || { echo "template missing: $template"; exit 1; }
+  render "$template" "$port" "$suffix" > "$out"
+  echo "  rendered $out"
+done
+
+nginx -t 2>&1 | tail -1
+systemctl reload nginx
+echo "Dashboard vhosts installed and nginx reloaded."
