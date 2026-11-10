@@ -3507,35 +3507,69 @@ def _infra_exempt_ips():
                             pass
     except OSError:
         pass
-    # chrony NTP servers
+    # chrony NTP servers: read every config surface (main conf,
+    # sources.d/, conf.d/, and the sourcedir directives that pull them in)
+    chrony_hosts = set()
     try:
-        with open("/etc/chrony/chrony.conf") as f:
-            for line in f:
-                m = re.match(r"\s*(?:server|pool)\s+([0-9a-fA-F:.]+)", line)
-                if m:
+        for conf_path in ["/etc/chrony/chrony.conf"]:
+            # walk the sourcedir/confdir includes
+            with open(conf_path) as f:
+                for line in f:
+                    m = re.match(r"\s*sourcedir\s+(\S+)", line)
+                    if m:
+                        import glob as _g
+                        for src in sorted(_g.glob(m.group(1) + "/*")):
+                            try:
+                                with open(src) as sf:
+                                    for sl in sf:
+                                        hm = re.match(
+                                            r"\s*(?:server|pool)\s+(\S+)", sl)
+                                        if hm:
+                                            chrony_hosts.add(
+                                                hm.group(1).split()[0])
+                            except OSError:
+                                continue
+                    m = re.match(r"\s*(?:server|pool)\s+(\S+)", line)
+                    if m:
+                        chrony_hosts.add(m.group(1).split()[0])
+        # also scan sources.d and conf.d directly (some distros put
+        # pools there without a sourcedir directive reaching them)
+        for d in ("/etc/chrony/sources.d", "/etc/chrony/conf.d"):
+            if os.path.isdir(d):
+                for fn in os.listdir(d):
+                    fp = os.path.join(d, fn)
                     try:
-                        ips.add(str(ipaddress.ip_address(m.group(1))))
-                    except ValueError:
-                        continue  # pool names (e.g. 2.debian.pool.ntp.org) - resolve separately
+                        with open(fp) as f:
+                            for line in f:
+                                m = re.match(r"\s*(?:server|pool)\s+(\S+)", line)
+                                if m:
+                                    chrony_hosts.add(m.group(1).split()[0])
+                    except OSError:
+                        continue
     except OSError:
         pass
-    # chrony pool names: resolve them (they're the common case)
-    try:
-        proc = subprocess.run(["chronyc", "sources", "-n"],
-                              capture_output=True, text=True, timeout=5)
-        for line in proc.stdout.splitlines():
-            if line.startswith(("^", "*", "?", "+")):
-                # format: ^-- 2607:f2d8:... or ^== 216.239.32.4
-                parts = line.split()
-                if len(parts) >= 2:
-                    try:
-                        ip = parts[1].lstrip("^=+*?-")
-                        ipaddress.ip_address(ip)
-                        ips.add(str(ip))
-                    except (ValueError, IndexError):
-                        pass
-    except Exception:
-        pass
+    # resolve every hostname to IPs
+    for host in chrony_hosts:
+        host = host.rstrip(".")
+        try:
+            ipaddress.ip_address(host)
+            ips.add(host)
+            continue
+        except ValueError:
+            pass
+        try:
+            answers = subprocess.run(
+                ["getent", "ahostsv4", host],
+                capture_output=True, text=True, timeout=3).stdout
+            for ans in answers.splitlines():
+                addr = ans.split()[0]
+                try:
+                    ipaddress.ip_address(addr)
+                    ips.add(addr)
+                except ValueError:
+                    continue
+        except Exception:
+            continue
     return ips
 
 
@@ -3578,6 +3612,14 @@ def handle_canary_hit(body):
         if last and now - last < CANARY_RECENT_TTL:
             return {"ok": True, "ignored": True, "message": "recently handled"}
         CANARY_RECENT[ip] = now
+    # 2026-11-09 audit: UDP-source canary evidence (SNMP, logtype 13001)
+    # is SPOOFABLE - one forged packet with a fake source lands here and
+    # used to earn a 1-year ban + a community report. TCP canaries are
+    # handshake-authenticated (source is real) and keep both. UDP
+    # evidence: short local ban, NEVER community-reported.
+    udp_evidence = (logtype == 13001)
+    duration = "24h" if udp_evidence else CUSTOM_BLOCKLIST_DURATION
+
     # 2026-11-10 audit follow-up: exempt IPs the box ITSELF depends on.
     # A spoofed UDP canary "hit" from an NTP server or DNS forwarder
     # would locally ban that service for the duration, breaking time
@@ -3590,14 +3632,6 @@ def handle_canary_hit(body):
         return {"ok": True, "ignored": True, "ip": ip,
                 "message": "infrastructure IP exempt from canary bans "
                            "(spoofed UDP evidence)", "infra_exempt": True}
-
-    # 2026-11-09 audit: UDP-source canary evidence (SNMP, logtype 13001)
-    # is SPOOFABLE - one forged packet with a fake source lands here and
-    # used to earn a 1-year ban + a community report. TCP canaries are
-    # handshake-authenticated (source is real) and keep both. UDP
-    # evidence: short local ban, NEVER community-reported.
-    udp_evidence = (logtype == 13001)
-    duration = "24h" if udp_evidence else CUSTOM_BLOCKLIST_DURATION
     try:
         subprocess.run(
             [CROWDSEC_BIN, "decisions", "add", "--ip", ip,
