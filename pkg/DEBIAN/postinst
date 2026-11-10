@@ -123,6 +123,7 @@ EOF
 
     if [[ -n "$LAN_SUBNET" && ! -s /etc/kea/kea-dhcp4.conf ]]; then
       _base="${LAN_SUBNET%/*}"; _base="${_base%.*}"
+      LAN_DOMAIN="${LAN_DOMAIN:-home.arpa}"
       _mask="$(python3 -c "import ipaddress; print(ipaddress.ip_network('${LAN_SUBNET}').netmask)" 2>/dev/null || echo 255.255.255.0)"
       _netip="${LAN_IP%/*}"
       TMP="$(mktemp)"
@@ -139,23 +140,27 @@ EOF
       "type": "memfile",
       "lfc-interval": 3600,
       "persist": true,
-      "name": "/var/lib/kea/dhcp4.leases"
+      "name": "/var/lib/kea/kea-leases4.csv"
     },
     "control-socket": {
       "socket-type": "unix",
-      "socket-address": "/run/kea/kea4-ctrl-socket"
+      "socket-name": "/run/kea/kea4-ctrl-socket"
     },
     "subnet4": [
       {
+        "id": 1,
         "subnet": "$LAN_SUBNET",
         "pools": [ { "pool": "$_base.100 - $_base.199" } ],
         "option-data": [
           { "name": "domain-name-servers", "data": "$_netip" },
-          { "name": "domain-name", "data": "housenetwork.site" },
+          { "name": "domain-name", "data": "${LAN_DOMAIN:-home.arpa}" },
           { "name": "routers", "data": "$_netip" },
           { "name": "subnet-mask", "data": "$_mask" }
         ]
       }
+    ],
+    "hooks-libraries": [
+      { "library": "/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_lease_cmds.so" }
     ],
     "loggers": [
       { "name": "kea-dhcp4", "output_options": [ { "output": "syslog" } ], "severity": "INFO" }
