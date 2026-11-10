@@ -14788,6 +14788,27 @@ def _plugin_safe_extract(zip_file, dest):
             shutil.copyfileobj(src, out)
 
 
+def _plugin_content_hash(root):
+    """SHA-256 over every code file (main.py, web/, plugin.json) — the
+    content pin. Config and credentials are excluded: only the code that
+    runs with admin rights in the browser get hashed."""
+    h = hashlib.sha256()
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in ("__pycache__",))
+        for fn in sorted(files):
+            if fn in ("config.json", ".provenance.json") or fn.endswith(".pyc"):
+                continue
+            fp = os.path.join(dirpath, fn)
+            rel = os.path.relpath(fp, root)
+            h.update(rel.encode())
+            try:
+                with open(fp, "rb") as f:
+                    h.update(f.read())
+            except OSError:
+                pass
+    return h.hexdigest()
+
+
 def _plugin_write_perms(root):
     for base, dirs, files in os.walk(root):
         os.chmod(base, 0o755)
@@ -14877,15 +14898,45 @@ def install_plugin_from_github(body):
                     except OSError:
                         pass
                 _plugin_write_perms(dest)
+                provenance = {
+                    "installed_at": time.time(),
+                    "source_url": url,
+                    "source_branch": branch,
+                    "version": manifest.get("version") or "",
+                    # content hash of the code files: THE PIN. Any future
+                    # integrity check compares against this (2026-11-09
+                    # audit #5: installs were unpinned and unsigned — a
+                    # changed upstream silently replaced installed code).
+                    "content_sha256": _plugin_content_hash(dest),
+                }
+                try:
+                    with open(os.path.join(dest, ".provenance.json"), "w") as f:
+                        json.dump(provenance, f, indent=2)
+                except OSError:
+                    pass
                 return {"ok": True, "updated": True, "plugin": {
                     "id": pid,
                     "name": manifest.get("name") or pid,
                     "version": manifest.get("version") or "",
+                    "pinned_sha": provenance["content_sha256"][:16],
                 }}
             os.makedirs(PLUGINS_DIR, exist_ok=True)
+            _pin = {
+                "installed_at": time.time(),
+                "source_url": url,
+                "source_branch": branch,
+                "version": manifest.get("version") or "",
+                "content_sha256": None,  # filled after copy below
+            }
             shutil.copytree(src, dest, ignore=shutil.ignore_patterns(
                 ".git", "__pycache__", "*.pyc", "config.json"))
             _plugin_write_perms(dest)
+            _pin["content_sha256"] = _plugin_content_hash(dest)
+            try:
+                with open(os.path.join(dest, ".provenance.json"), "w") as f:
+                    json.dump(_pin, f, indent=2)
+            except OSError:
+                pass
             return {"ok": True, "plugin": {
                 "id": pid,
                 "name": manifest.get("name") or pid,
