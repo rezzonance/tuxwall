@@ -850,6 +850,7 @@
     if (!state.authed || document.hidden) return;
     try {
       const d = await fetchJSON("/api/system/services");
+      if (window._tuxwallSetReachable) window._tuxwallSetReachable(true);
       const byUnit = new Map((d.services || []).map(s => [s.unit, s]));
       const down = CORE_SERVICES.filter(([unit]) => {
         const s = byUnit.get(unit);
@@ -875,7 +876,7 @@
       if (names !== lastSvcDown) console.warn("core services down:", names);
       lastSvcDown = names;
     } catch (_) {
-      // The generic dashboard-API banner already surfaces fetch failures.
+      if (window._tuxwallSetReachable) window._tuxwallSetReachable(false);
     }
   }
   setInterval(checkCoreServices, 30000);
@@ -4196,6 +4197,24 @@
       } else els.tripBanner.hidden = true;
     }
   }
+  // Defense Layers card: real state, not hardcoded green (audit #12)
+  function refreshDefenseLayers() {
+    fetchJSON("/api/system/services").then(d => {
+      const byUnit = new Map((d.services || []).map(s => [s.unit, s]));
+      const set = (id, ok) => {
+        const el = document.getElementById(id);
+        if (el) el.className = "dot " + (ok ? "dot-ok" : "dot-err");
+      };
+      set("dl-ufw-dot", (byUnit.get("ufw.service") || {}).active === "active");
+      set("dl-crowdsec-dot", (byUnit.get("crowdsec.service") || {}).active === "active" &&
+                            (byUnit.get("crowdsec-firewall-bouncer.service") || {}).active === "active");
+      set("dl-suricata-dot", (byUnit.get("suricata.service") || {}).active === "active");
+      set("dl-wireguard-dot", (byUnit.get("wg-quick@wg0.service") || {}).active === "active");
+    }).catch(() => {});
+  }
+  setInterval(refreshDefenseLayers, 30000);
+  refreshDefenseLayers();
+
   setInterval(refreshTripwire, 30000);
   refreshTripwire();
 
@@ -12996,13 +13015,24 @@
     observeSizeRecovery();
     bootstrapAuth();
 
-    // Online / Offline status indicator
+    // Online / Offline status indicator (2026-11-09 audit: was
+    // navigator.onLine - the BROWSER's connection, always true on LAN
+    // even when the router itself is unreachable. Now reports whether
+    // the router's API actually answers.)
     const brandStatusText = document.getElementById("brand-status-text");
     const brandStatusDot  = document.getElementById("brand-status-dot");
+    let routerReachable = null;
+    window._tuxwallSetReachable = (ok) => {
+      if (routerReachable === ok) return;
+      routerReachable = ok;
+      if (brandStatusText) brandStatusText.textContent = ok ? "Online" : "Router unreachable";
+      if (brandStatusDot)  brandStatusDot.dataset.status = ok ? "online" : "offline";
+    };
     function updateNetStatus() {
-      const online = navigator.onLine;
-      if (brandStatusText) brandStatusText.textContent = online ? "Online" : "Offline";
-      if (brandStatusDot)  brandStatusDot.dataset.status = online ? "online" : "offline";
+      // probe the router directly: a 5s timeout on the session endpoint
+      fetch("/api/auth/session", { signal: AbortSignal.timeout ? AbortSignal.timeout(5000) : undefined })
+        .then(() => window._tuxwallSetReachable(true))
+        .catch(() => window._tuxwallSetReachable(false));
     }
     updateNetStatus();
     window.addEventListener("online",  updateNetStatus);
