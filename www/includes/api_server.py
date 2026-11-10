@@ -1657,16 +1657,83 @@ def set_firewall_enabled(enabled):
     return build_firewall()
 
 
+# --- Confirm-or-rollback for dangerous changes (2026-11-09 audit #9) -----
+# A dangerous change (default policy to allow, NAT change, reset) applies
+# immediately but schedules an automatic revert in 60 seconds. The user
+# confirms via /api/firewall/confirm — if they can still reach the
+# dashboard, one click keeps the change; if the change locked them out,
+# the revert restores the previous state automatically. The same pattern
+# router firmware has used for decades.
+_FW_CONFIRM_LOCK = threading.Lock()
+_FW_PENDING = {}  # change_id -> {"revert": callable, "expires": ts, "desc": str}
+
+
+def _fw_schedule_revert(change_id, desc, revert_fn, ttl=60):
+    with _FW_CONFIRM_LOCK:
+        # cancel any prior pending revert of the same kind
+        for k in list(_FW_PENDING):
+            if _FW_PENDING[k]["desc"] == desc:
+                del _FW_PENDING[k]
+        _FW_PENDING[change_id] = {"revert": revert_fn, "expires": time.time() + ttl,
+                                  "desc": desc, "at": time.time()}
+    threading.Timer(ttl, _fw_expire, args=(change_id,)).start()
+
+
+def _fw_expire(change_id):
+    fn = None
+    desc = ""
+    with _FW_CONFIRM_LOCK:
+        pending = _FW_PENDING.pop(change_id, None)
+        if pending:
+            fn = pending["revert"]
+            desc = pending["desc"]
+    if fn:
+        try:
+            fn()
+            log("FW-CONFIRM-EXPIRED: auto-reverted '%s' (no confirmation "
+                "within 60s - the change may have locked the admin out)"
+                % desc)
+        except Exception as exc:
+            log("FW-CONFIRM-REVERT-FAILED: %s (%s)" % (desc, exc))
+
+
+def confirm_fw_change(change_id):
+    """Keep a pending dangerous change — cancels its auto-revert."""
+    with _FW_CONFIRM_LOCK:
+        pending = _FW_PENDING.pop(change_id, None)
+    if not pending:
+        raise RuntimeError("No pending change to confirm (it may have "
+                           "already auto-reverted — check the firewall)")
+    remaining = max(0, int(pending["expires"] - time.time()))
+    return {"ok": True, "confirmed": pending["desc"], "was_remaining_s": remaining}
+
+
 def set_firewall_default(direction, policy):
-    """Set a default policy: `ufw default <policy> <direction>`."""
+    """Set a default policy: `ufw default <policy> <direction>`.
+
+    Setting incoming/routed to allow/accept is the classic lockout-
+    yourself move, so those go through the confirm window: applied now,
+    auto-reverted in 60s unless confirmed."""
     direction = (direction or "").lower()
     policy = (policy or "").lower()
     if direction not in ("incoming", "outgoing", "routed"):
         raise RuntimeError("Invalid direction (incoming/outgoing/routed)")
     if policy not in _UFW_POLICIES:
         raise RuntimeError("Invalid policy (allow/deny/reject)")
+
+    dangerous = direction in ("incoming", "routed") and policy in ("allow", "accept")
+    if dangerous:
+        prev = build_firewall().get("defaults", {}).get(direction, "deny")
+        def revert():
+            _ufw(["default", prev, direction])
+        change_id = "fwdefault:%s:%s" % (direction, policy)
+        _fw_schedule_revert(change_id, "default %s -> %s" % (direction, policy), revert)
     _ufw(["default", policy, direction])
-    return build_firewall()
+    result = build_firewall()
+    if dangerous:
+        result["needs_confirmation"] = change_id
+        result["confirm_within_s"] = 60
+    return result
 
 
 def set_firewall_logging(level):
@@ -12813,6 +12880,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, set_firewall_logging(body.get("level")))
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/firewall/confirm":
+            self._send(200, confirm_fw_change(str(body.get("id") or "")))
 
         elif path == "/api/firewall/reset":
             action = (body.get("action") or "").lower()
