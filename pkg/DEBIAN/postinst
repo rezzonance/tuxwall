@@ -429,6 +429,10 @@ PY
     # systemd fails the whole namespace setup when any listed path is
     # missing (exit 226/NAMESPACE, restart loop) - create them first.
     mkdir -p /etc/cloudflared /etc/wireguard
+    # API state dir: the first blocklist download renames
+    # blocklists.json.tmp into it and died with ENOENT on fresh
+    # installs when it did not exist yet.
+    mkdir -p /var/lib/tuxwall
     systemctl daemon-reload
     systemctl enable tuxwall.service >/dev/null 2>&1 || true
     systemctl enable tuxwall-blocklist-update.timer >/dev/null 2>&1 || true

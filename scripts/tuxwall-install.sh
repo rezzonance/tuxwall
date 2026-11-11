@@ -1062,6 +1062,7 @@ write_kea() {
     }
     for key in socket-name socket-address; do
         kea_json "$key" >"$tmp"
+        chmod 0644 "$tmp"   # mktemp gives 0600 root-only; _kea must read it
         if ! command -v kea-dhcp4 >/dev/null 2>&1 || kea_check; then
             chosen=$key; break
         fi
