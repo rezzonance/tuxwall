@@ -424,6 +424,11 @@ PY
     fi
 
     step 7 "Enabling dashboard service and daily blocklist updates..."
+    # tuxwall.service's sandbox ReadWritePaths includes optional
+    # directories (cloudflared on boxes that run a tunnel, wireguard).
+    # systemd fails the whole namespace setup when any listed path is
+    # missing (exit 226/NAMESPACE, restart loop) - create them first.
+    mkdir -p /etc/cloudflared /etc/wireguard
     systemctl daemon-reload
     systemctl enable tuxwall.service >/dev/null 2>&1 || true
     systemctl enable tuxwall-blocklist-update.timer >/dev/null 2>&1 || true

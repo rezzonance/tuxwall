@@ -1046,9 +1046,23 @@ write_kea() {
     # Test file must live under /etc/kea: Kea's AppArmor profile blocks /tmp.
     mkdir -p /etc/kea
     tmp="$(mktemp -p /etc/kea .tuxwall-kea-dhcp4.XXXXXX)"
+    # Syntax check as the _kea user: Ubuntu 26.04's /etc/kea is
+    # _kea:_kea 0750 and Kea's AppArmor profile denies root the DAC
+    # override capabilities, so a root-run 'kea-dhcp4 -t' cannot even
+    # read the file. As _kea the check works on every release.
+    local kea_user=""
+    getent passwd _kea >/dev/null 2>&1 && kea_user=_kea
+    getent passwd kea  >/dev/null 2>&1 && kea_user=${kea_user:-kea}
+    kea_check() {
+        if [[ -n $kea_user ]] && command -v runuser >/dev/null 2>&1; then
+            q runuser -u "$kea_user" -- kea-dhcp4 -t "$tmp"
+        else
+            q kea-dhcp4 -t "$tmp"
+        fi
+    }
     for key in socket-name socket-address; do
         kea_json "$key" >"$tmp"
-        if ! command -v kea-dhcp4 >/dev/null 2>&1 || q kea-dhcp4 -t "$tmp"; then
+        if ! command -v kea-dhcp4 >/dev/null 2>&1 || kea_check; then
             chosen=$key; break
         fi
     done
