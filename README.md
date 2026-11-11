@@ -147,15 +147,15 @@ TuxWall is designed for a dedicated gateway. Running it on your desktop or on a 
 
 ## Installation
 
-There are four supported paths. They all install the same dashboard; they differ in how much of the host the installer configures.
-
-### 1. APT repository — recommended
-
-Adds the signed TuxWall repository and installs the package in one step:
+There is one installer with three sources (build from this repository, the signed APT repository, or a `.deb` file) and two roles: **gateway** configures WAN/LAN, DHCP, DNS, IPv6, NAT and the firewall; **dashboard** installs TuxWall without touching the machine's network. Every source ends in the same package, so they are equivalent.
 
 ```bash
-curl -fsSL https://rezzonance.github.io/tuxwall/install-repo.sh | sudo bash
+curl -fsSL https://tuxwall.org/downloads/tuxwall-install.sh -o tuxwall-install.sh
+sudo bash tuxwall-install.sh --dry-run   # see the full plan first
+sudo bash tuxwall-install.sh             # guided install, review screen included
 ```
+
+From a repository clone, run `sudo bash scripts/tuxwall-install.sh` instead (it defaults to building the package from your checkout). For headless or fresh-appliance installs, `sudo bash tuxwall-install.sh --console` stages a one-time first-boot wizard on the console. Unattended installs pass `--yes` with `--wan`/`--lan` and the options from `--help`.
 
 Future updates are normal APT updates:
 
@@ -163,15 +163,11 @@ Future updates are normal APT updates:
 sudo apt update && sudo apt upgrade tuxwall
 ```
 
-The package installs the dashboard, enables its services, and writes basic working configs for the gateway stack (Kea DHCP, Unbound with DNSSEC, radvd, IPv4/IPv6 forwarding, WAN NAT and a default-deny UFW posture). It does not overwrite configs you have already hand-tuned.
-
-> **Optional packages:** CrowdSec, its firewall bouncer, GeoIP and the Ookla speedtest are shipped as `Suggests`, so a bare APT install does not pull them in. Install them explicitly if you want those integrations:
+> **Optional packages:** CrowdSec, its firewall bouncer, GeoIP and the Ookla speedtest are shipped as `Suggests`, so a bare APT install does not pull them in. The installer offers them during setup; to add them by hand:
 >
 > ```bash
 > sudo apt install crowdsec crowdsec-firewall-bouncer-iptables python3-maxminddb
 > ```
->
-> `setup.sh` installs CrowdSec and the bouncer for you, and tries the official Ookla tarball.
 
 <details>
 <summary>Manual APT setup (if you prefer not to pipe a script)</summary>
@@ -188,38 +184,17 @@ sudo apt install tuxwall
 ```
 </details>
 
-### 2. Full provisioning from source — `setup.sh`
-
-Use this on an existing Ubuntu machine when you want the repository's installer to configure the host end to end. It installs dependencies, retires `systemd-resolved`, enables forwarding, configures Unbound/nginx/UFW/Avahi, installs the dashboard and systemd units, starts the services, and registers the APT repository for future updates.
-
-```bash
-git clone https://github.com/rezzonance/tuxwall.git
-cd tuxwall
-sudo bash setup.sh
-```
-
-### 3. Appliance wizard — `install.sh`
-
-Use this on a freshly installed stock Ubuntu server you want to turn into a TuxWall gateway. It stages the appliance payload and installs a one-time first-boot autologin. On your next login, a guided WAN/LAN wizard asks which interface is WAN and which is LAN, then configures the full stack.
-
-```bash
-git clone https://github.com/rezzonance/tuxwall.git
-cd tuxwall
-sudo bash install.sh
-```
-
-After it finishes, **log out or reboot**. The wizard runs once on the next login and restores normal login afterwards. This is the only path that uses the first-boot wizard; APT and `setup.sh` installs are ready immediately.
-
-### 4. Manual `.deb`
+<details>
+<summary>Manual .deb install</summary>
 
 Download the current package from [Releases](https://github.com/rezzonance/tuxwall/releases), then:
 
 ```bash
-sudo dpkg -i tuxwall_3.2.10_all.deb
-sudo apt -f install
+sudo bash tuxwall-install.sh --deb tuxwall_3.3.0_all.deb
+# or the classic way:
+sudo dpkg -i tuxwall_3.3.0_all.deb && sudo apt -f install
 ```
-
-The second command resolves any missing dependencies. Replace the filename with the version you downloaded.
+</details>
 
 ### Verify the install
 

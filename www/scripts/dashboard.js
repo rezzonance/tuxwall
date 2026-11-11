@@ -176,6 +176,22 @@
     decRailHoneyDot: document.getElementById("dec-rail-honey-dot"),
     decRailHoneyValue: document.getElementById("dec-rail-honey-value"),
     decRailHoneyTag: document.getElementById("dec-rail-honey-tag"),
+    secTripCard: document.getElementById("sec-trip-card"),
+    secTripHint: document.getElementById("sec-trip-hint"),
+    secTripDot: document.getElementById("sec-trip-dot"),
+    secTripBadge: document.getElementById("sec-trip-badge"),
+    secTripModes: document.getElementById("sec-trip-modes"),
+    secTripModeNote: document.getElementById("sec-trip-mode-note"),
+    secTripMessage: document.getElementById("sec-trip-message"),
+    secTripMsgTitle: document.getElementById("sec-trip-msg-title"),
+    secTripMsgMeta: document.getElementById("sec-trip-msg-meta"),
+    secTripMsgSev: document.getElementById("sec-trip-msg-sev"),
+    secTripMsgReason: document.getElementById("sec-trip-msg-reason"),
+    secTripMsgGrid: document.getElementById("sec-trip-msg-grid"),
+    secTripResolve: document.getElementById("sec-trip-resolve"),
+    secTripPass: document.getElementById("sec-trip-pass"),
+    secTripResolveBtn: document.getElementById("sec-trip-resolve-btn"),
+    tripBanner: document.getElementById("trip-banner"),
     secCanaryHint: document.getElementById("sec-canary-hint"),
     secCanaryToggle: document.getElementById("sec-canary-toggle"),
     secCanarySummary: document.getElementById("sec-canary-summary"),
@@ -834,6 +850,7 @@
     if (!state.authed || document.hidden) return;
     try {
       const d = await fetchJSON("/api/system/services");
+      if (window._tuxwallSetReachable) window._tuxwallSetReachable(true);
       const byUnit = new Map((d.services || []).map(s => [s.unit, s]));
       const down = CORE_SERVICES.filter(([unit]) => {
         const s = byUnit.get(unit);
@@ -859,7 +876,7 @@
       if (names !== lastSvcDown) console.warn("core services down:", names);
       lastSvcDown = names;
     } catch (_) {
-      // The generic dashboard-API banner already surfaces fetch failures.
+      if (window._tuxwallSetReachable) window._tuxwallSetReachable(false);
     }
   }
   setInterval(checkCoreServices, 30000);
@@ -2039,7 +2056,14 @@
       if (!window.confirm("Remove this firewall rule?")) return;
       btn.disabled = true;
       try {
-        await postJSON("/api/firewall/delete", { number: btn.dataset.num });
+        const row = btn.closest("tr");
+        const cells = row ? row.querySelectorAll("td") : [];
+        await postJSON("/api/firewall/delete", {
+          number: btn.dataset.num,
+          to: row ? (row.dataset.to || (cells[0] ? cells[0].textContent.trim() : "")) : "",
+          action: row ? (row.dataset.action || (cells[1] ? cells[1].textContent.trim() : "")) : "",
+          from: row ? (row.dataset.from || (cells[2] ? cells[2].textContent.trim() : "")) : "",
+        });
         els.fwHint.textContent = "Rule removed.";
         await refreshFirewall();
       } catch (err) {
@@ -4008,6 +4032,223 @@
       || `<tr><td colspan="5" class="empty">Honeypot is ${st.listening ? "listening — no scanners yet" : "disabled"}.</td></tr>`;
     renderHoneyDetail(conf, st);
   }
+
+  const TRIP_MODES = ["disabled", "logonly", "medium", "high"];
+  const TRIP_MODE_LABEL = { disabled: "Disabled", logonly: "Log only", medium: "Medium", high: "High" };
+  const TRIP_MODE_DESC = {
+    disabled: "Off — the WAN is never contained automatically.",
+    logonly: "Detection armed, blade sheathed — trip-class events are recorded and pushed, but nothing is ever contained. The away-from-home mode.",
+    medium: "Cuts LAN↔WAN forwarding but keeps WireGuard 51820 open as the emergency admin door.",
+    high: "Cuts all WAN access — the router is reachable from the LAN only.",
+  };
+  const TRIP_CLASS_DESC = {
+    "successful-admin": "An attacker appears to have GAINED administrator access to a system",
+    "attempted-admin": "An attacker attempted to gain administrator privileges",
+    "trojan-activity": "Trojan or malware network activity was detected",
+    "web-application-attack": "An attack against a web application (injection / code execution attempt)",
+    "shellcode-detect": "Executable exploit code was detected in network traffic",
+    "canary-egress": "The honeypot process attempted an outbound connection — presumed deception-layer compromise",
+  };
+
+  function tripReasonText(d) {
+    const raw = typeof d.reason === "string" ? d.reason.trim() : "";
+    if (raw) return raw;
+    return TRIP_CLASS_DESC[d.class] || d.class || "Intrusion-class event detected";
+  }
+
+  function tripKv(label, value, wide) {
+    return `<span class="trip-kv${wide ? " trip-kv-wide" : ""}"><span>${esc(label)}</span><b>${esc(value)}</b></span>`;
+  }
+
+  function renderTripMessage(d, mode, tripMode) {
+    if (!els.secTripMessage) return;
+    const msg = els.secTripMessage;
+    if (els.secTripMsgSev) els.secTripMsgSev.hidden = true;
+    if (els.secTripMsgGrid) els.secTripMsgGrid.innerHTML = "";
+
+    const src = d.src_ip
+      ? (String(d.src_ip).startsWith("local:")
+          ? "local (" + String(d.src_ip).replace(/^local:/, "") + ")"
+          : String(d.src_ip))
+      : "";
+
+    if (d.tripped) {
+      const age = Math.max(1, Date.now() / 1000 - (d.since || Date.now() / 1000));
+      msg.dataset.kind = "tripped";
+      els.secTripMsgTitle.textContent = "Tripwire tripped — WAN contained";
+      els.secTripMsgMeta.textContent =
+        `Contained for ${formatDuration(age)} · ${String(tripMode).toUpperCase()} mode · ${formatNumber(d.trips || 1)} trip event(s)`;
+      if (els.secTripMsgSev) {
+        els.secTripMsgSev.hidden = false;
+        els.secTripMsgSev.textContent = String(tripMode).toUpperCase();
+      }
+      els.secTripMsgReason.textContent = tripReasonText(d);
+      els.secTripMsgGrid.innerHTML = [
+        tripKv("Class", d.class || "—"),
+        tripKv("Source", src || "—"),
+        tripKv("Destination", d.dst || "—", true),
+        tripKv("Containment", d.rules_present ? "FORWARD drop active" : "rules not present"),
+        tripKv("Tripped", d.since ? formatDateTime(d.since) : "—"),
+        tripKv("Signature", d.signature || "—", true),
+      ].join("");
+      return;
+    }
+
+    if ((d.trips || 0) > 0 && (d.reason || d.class)) {
+      msg.dataset.kind = "last";
+      els.secTripMsgTitle.textContent = "Last trip — resolved";
+      els.secTripMsgMeta.textContent =
+        `Tripped ${formatRelative(d.since)} · ${String(tripMode).toUpperCase()} mode · ${formatNumber(d.trips || 1)} trip event(s)`;
+      els.secTripMsgReason.textContent = tripReasonText(d);
+      els.secTripMsgGrid.innerHTML = [
+        tripKv("Class", d.class || "—"),
+        tripKv("Source", src || "—"),
+        tripKv("Destination", d.dst || "—", true),
+        tripKv("Signature", d.signature || "—", true),
+      ].join("");
+      return;
+    }
+
+    if ((d.absorbed_events || 0) > 0) {
+      const la = d.last_absorbed || {};
+      msg.dataset.kind = "armed";
+      els.secTripMsgTitle.textContent = "Deception layer absorbed " + formatNumber(d.absorbed_events) + " trip-class event(s)";
+      els.secTripMsgMeta.textContent = "Delegated to the canary + ban pipeline - never contained, in any mode.";
+      els.secTripMsgReason.textContent = (la.class || "") + " hit a honeypot port and was absorbed by design.";
+      els.secTripMsgGrid.innerHTML = [
+        tripKv("Last class", la.class || "—"),
+        tripKv("Source", la.src && !String(la.src).startsWith("local:") ? String(la.src) : (la.src || "—")),
+        tripKv("Landed on", la.dst || "—", true),
+        tripKv("Absorbed", la.ts ? formatDateTime(la.ts) : "—"),
+      ].join("");
+      return;
+    }
+
+    if (mode === "logonly" && (d.logonly_events || 0) > 0) {
+      const last = d.last_logonly || {};
+      msg.dataset.kind = "armed";
+      els.secTripMsgTitle.textContent = "Armed (log only) — " + formatNumber(d.logonly_events) + " event(s) recorded";
+      els.secTripMsgMeta.textContent = "Nothing contained — trip-class events are recorded for review.";
+      els.secTripMsgReason.textContent = (last.reason || "") + (last.class ? " [" + last.class + "]" : "");
+      els.secTripMsgGrid.innerHTML = [
+        tripKv("Last class", last.class || "—"),
+        tripKv("Source", last.src && !String(last.src).startsWith("local:") ? String(last.src) : (last.src || "—")),
+        tripKv("Destination", last.dst || "—", true),
+        tripKv("Recorded", last.ts ? formatDateTime(last.ts) : "—"),
+      ].join("");
+      return;
+    }
+
+    msg.dataset.kind = mode === "disabled" ? "idle" : "armed";
+    els.secTripMsgTitle.textContent = mode === "disabled" ? "Tripwire is off" : "Armed — no trip recorded";
+    els.secTripMsgMeta.textContent = mode === "disabled"
+      ? "No automatic containment — the WAN stays open."
+      : "Watching for intrusion-class events.";
+    els.secTripMsgReason.textContent = mode === "disabled"
+      ? "Choose Medium or High above to contain the WAN when a confirmed intrusion is detected."
+      : "A Suricata priority-1 alert or a canary egress attempt will cut WAN forwarding and require your admin password to restore.";
+  }
+
+  async function refreshTripwire() {
+    let d;
+    try { d = await fetchJSON("/api/security/tripwire"); }
+    catch (_) { return; }
+    if (!d || !d.ok) return;
+
+    const mode = TRIP_MODES.includes(d.mode) ? d.mode : "disabled";
+    const tripMode = TRIP_MODES.includes(d.trip_mode) ? d.trip_mode : "high";
+    const state = d.tripped ? "tripped" : (mode === "disabled" ? "disabled" : "armed");
+
+    if (els.secTripCard) els.secTripCard.dataset.state = state;
+    if (els.secTripBadge) {
+      els.secTripBadge.dataset.state = state;
+      els.secTripBadge.textContent = d.tripped
+        ? String(tripMode).toUpperCase() + " · CONTAINED"
+        : TRIP_MODE_LABEL[mode].toUpperCase();
+    }
+    if (els.secTripHint) {
+      els.secTripHint.textContent = d.tripped
+        ? "WAN contained since " + formatDateTime(d.since) + " — resolve below"
+        : (mode === "disabled"
+            ? "Disabled — no automatic WAN containment"
+            : TRIP_MODE_LABEL[mode] + " containment armed");
+    }
+    if (els.secTripDot) {
+      els.secTripDot.dataset.status = d.tripped ? "crit" : (mode === "disabled" ? "unknown" : "ok");
+    }
+    if (els.secTripModes) {
+      els.secTripModes.querySelectorAll("[data-trip-mode]").forEach((btn) => {
+        const on = btn.dataset.tripMode === mode;
+        btn.classList.toggle("active", on);
+        btn.setAttribute("aria-pressed", on ? "true" : "false");
+      });
+    }
+    if (els.secTripModeNote) els.secTripModeNote.textContent = TRIP_MODE_DESC[mode];
+
+    renderTripMessage(d, mode, tripMode);
+    if (els.secTripResolve) els.secTripResolve.hidden = !d.tripped;
+    if (els.tripBanner) {
+      if (d.tripped) {
+        els.tripBanner.hidden = false;
+        els.tripBanner.textContent = "TRIPWIRE TRIPPED (" +
+          String(d.trip_mode || "?").toUpperCase() + "): WAN contained - " +
+          (d.reason || "intrusion-class event") +
+          ". This will NOT auto-restore. Resolve under Security > Tripwire.";
+      } else els.tripBanner.hidden = true;
+    }
+  }
+  // Defense Layers card: real state, not hardcoded green (audit #12)
+  function refreshDefenseLayers() {
+    fetchJSON("/api/system/services").then(d => {
+      const byUnit = new Map((d.services || []).map(s => [s.unit, s]));
+      const set = (id, ok) => {
+        const el = document.getElementById(id);
+        if (el) el.className = "dot " + (ok ? "dot-ok" : "dot-err");
+      };
+      set("dl-ufw-dot", (byUnit.get("ufw.service") || {}).active === "active");
+      set("dl-crowdsec-dot", (byUnit.get("crowdsec.service") || {}).active === "active" &&
+                            (byUnit.get("crowdsec-firewall-bouncer.service") || {}).active === "active");
+      set("dl-suricata-dot", (byUnit.get("suricata.service") || {}).active === "active");
+      set("dl-wireguard-dot", (byUnit.get("wg-quick@wg0.service") || {}).active === "active");
+    }).catch(() => {});
+  }
+  setInterval(refreshDefenseLayers, 30000);
+  refreshDefenseLayers();
+
+  setInterval(refreshTripwire, 30000);
+  refreshTripwire();
+
+  if (els.secTripModes) {
+    els.secTripModes.addEventListener("click", async (ev) => {
+      const btn = ev.target.closest("[data-trip-mode]");
+      if (!btn || btn.classList.contains("active")) return;
+      const mode = btn.dataset.tripMode;
+      if (!TRIP_MODES.includes(mode)) return;
+      const buttons = Array.from(els.secTripModes.querySelectorAll("button"));
+      buttons.forEach((b) => { b.disabled = true; });
+      els.secTripModes.setAttribute("aria-busy", "true");
+      try {
+        await postJSON("/api/security/tripwire/config", { mode });
+        await refreshTripwire();
+      } catch (err) {
+        showBanner(true, "Tripwire mode: " + err.message);
+      } finally {
+        buttons.forEach((b) => { b.disabled = false; });
+        els.secTripModes.removeAttribute("aria-busy");
+      }
+    });
+  }
+  if (els.secTripResolveBtn) els.secTripResolveBtn.addEventListener("click", async () => {
+    if (!els.secTripPass.value) { els.secTripPass.focus(); return; }
+    if (!confirm("Restore WAN access now?\nTriggered by: " +
+        (els.secTripMsgReason && els.secTripMsgReason.textContent || "unknown") +
+        "\n\nOnly resolve after investigating.")) return;
+    try {
+      await postJSON("/api/security/tripwire/resolve", { password: els.secTripPass.value });
+      els.secTripPass.value = "";
+      refreshTripwire();
+    } catch (err) { showBanner(true, "Tripwire resolve: " + err.message); }
+  });
 
   async function refreshHoneypot() {
     try {
@@ -12774,13 +13015,24 @@
     observeSizeRecovery();
     bootstrapAuth();
 
-    // Online / Offline status indicator
+    // Online / Offline status indicator (2026-11-09 audit: was
+    // navigator.onLine - the BROWSER's connection, always true on LAN
+    // even when the router itself is unreachable. Now reports whether
+    // the router's API actually answers.)
     const brandStatusText = document.getElementById("brand-status-text");
     const brandStatusDot  = document.getElementById("brand-status-dot");
+    let routerReachable = null;
+    window._tuxwallSetReachable = (ok) => {
+      if (routerReachable === ok) return;
+      routerReachable = ok;
+      if (brandStatusText) brandStatusText.textContent = ok ? "Online" : "Router unreachable";
+      if (brandStatusDot)  brandStatusDot.dataset.status = ok ? "online" : "offline";
+    };
     function updateNetStatus() {
-      const online = navigator.onLine;
-      if (brandStatusText) brandStatusText.textContent = online ? "Online" : "Offline";
-      if (brandStatusDot)  brandStatusDot.dataset.status = online ? "online" : "offline";
+      // probe the router directly: a 5s timeout on the session endpoint
+      fetch("/api/auth/session", { signal: AbortSignal.timeout ? AbortSignal.timeout(5000) : undefined })
+        .then(() => window._tuxwallSetReachable(true))
+        .catch(() => window._tuxwallSetReachable(false));
     }
     updateNetStatus();
     window.addEventListener("online",  updateNetStatus);

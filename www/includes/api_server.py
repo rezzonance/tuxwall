@@ -659,7 +659,8 @@ ALLOWED_SERVICE_ACTIONS = {"start", "stop", "restart", "reload"}
 
 
 # Services that conflict with Tuxwall's core stack and must NOT run on a
-# gateway. setup.sh disables them on fresh installs, but an apt upgrade or
+# gateway. The unified installer disables them on fresh installs, but an
+# apt upgrade or
 # a dependency package (libvirt pulls dnsmasq in, etc.) can quietly bring
 # them back. This table drives the dashboard banner warning; the backend
 # reports the live intersection so the client never hardcodes the list.
@@ -1474,18 +1475,50 @@ def add_firewall_rule(rule_text):
     return build_firewall()
 
 
-def delete_firewall_rule(number):
-    """Delete a ufw rule by its number in `ufw status numbered`.
+def delete_firewall_rule(spec):
+    """Delete a ufw rule by its CONTENT, not its number.
 
-    `ufw delete <num>` prompts for confirmation and aborts when there is no
-    stdin, so pass --force (same ruleset as 'ufw status numbered')."""
-    try:
-        num = int(number)
-    except (TypeError, ValueError):
-        raise RuntimeError("Invalid rule number")
-    if num < 1:
-        raise RuntimeError("Invalid rule number")
-    _ufw(["--force", "delete", str(num)])
+    2026-11-09 audit: numbers in 'ufw status numbered' shift whenever any
+    other component (crowdsec bouncer, tuxwall-nat, timers) touches the
+    ruleset between the dashboard rendering the list and the user clicking
+    delete - deleting by a stale number removes the WRONG rule. The client
+    sends the rule it saw (to/action/from + its number at render time);
+    we re-resolve against the CURRENT ruleset under the change lock and
+    delete the rule that matches the spec. A stale number is fine (it
+    just means things shifted); a stale SPEC that matches nothing is a
+    clean 'already deleted' error, never a wrong-rule deletion."""
+    to = str(spec.get("to") or "").strip()
+    action = str(spec.get("action") or "").strip()
+    frm = str(spec.get("from") or "").strip()
+    if not to or not action or not frm:
+        raise RuntimeError("Rule spec is incomplete")
+    with _fw_move_lock:
+        proc = subprocess.run(["ufw", "status", "numbered"],
+                              capture_output=True, text=True, timeout=10)
+        if proc.returncode != 0:
+            raise RuntimeError("ufw status failed")
+        found = None
+        for line in proc.stdout.splitlines():
+            ls = line.strip()
+            m = re.match(r"^\[\s*(\d+)\]\s+(.+)$", ls)
+            if not m:
+                continue
+            num, rest = int(m.group(1)), m.group(2)
+            rm = re.match(r"^(?P<to>.+?)\s+(?P<verb>ALLOW|DENY|LIMIT|REJECT)"
+                          r"(?:\s+(?P<dir>IN|OUT|FWD))?\s+(?P<from>.+)$", rest)
+            if not rm:
+                continue
+            if (rm.group("to").strip() == to and
+                    " ".join(([rm.group("verb"), rm.group("dir")]
+                               if rm.group("dir") else [rm.group("verb")])).strip() == action and
+                    rm.group("from").strip() == frm):
+                found = num
+                break  # first match: ufw CLI semantics (one rule per delete)
+        if found is None:
+            raise RuntimeError(
+                "Rule not found in the current ruleset - it may already "
+                "have been deleted. Refresh the firewall page.")
+        _ufw(["--force", "delete", str(found)])
     return build_firewall()
 
 
@@ -1518,7 +1551,7 @@ def _ufw_rule_key(r):
             r.src, r.dst, r.interface_in, r.interface_out, r.comment)
 
 
-def move_firewall_rule(number, direction):
+def move_firewall_rule(number, direction, expected_spec=None):
     """Swap the numbered rule with the adjacent rule in its family
     (IPv4/IPv6) list. Numbering matches `ufw status numbered`."""
     if direction not in ("up", "down"):
@@ -1529,6 +1562,27 @@ def move_firewall_rule(number, direction):
         raise RuntimeError("Invalid rule number")
     if num < 1:
         raise RuntimeError("Invalid rule number")
+
+    # staleness guard (2026-11-09 audit): if the client also sends the
+    # rule it SAW at this number, verify against the CURRENT numbered
+    # list - the ruleset may have shifted under the UI (bouncer/timers
+    # add rules). A stale number must move the RIGHT rule or refuse.
+    if expected_spec:
+        exp = " ".join(str(expected_spec.get(k) or "").strip()
+                       for k in ("to", "action", "from"))
+        proc = subprocess.run(["ufw", "status", "numbered"],
+                              capture_output=True, text=True, timeout=10)
+        cur = None
+        for line in proc.stdout.splitlines():
+            m = re.match(r"^\[\s*(\d+)\]\s+(.+)$", line.strip())
+            if m and int(m.group(1)) == num:
+                cur = m.group(2).strip()
+                break
+        if cur is None or cur != exp:
+            raise RuntimeError(
+                "Ruleset changed since the page was rendered (rule %d no "
+                "longer matches what you saw). Refresh the firewall page "
+                "and retry." % num)
 
     with _fw_move_lock:
         b = _ufw_backend()
@@ -1604,16 +1658,83 @@ def set_firewall_enabled(enabled):
     return build_firewall()
 
 
+# --- Confirm-or-rollback for dangerous changes (2026-11-09 audit #9) -----
+# A dangerous change (default policy to allow, NAT change, reset) applies
+# immediately but schedules an automatic revert in 60 seconds. The user
+# confirms via /api/firewall/confirm — if they can still reach the
+# dashboard, one click keeps the change; if the change locked them out,
+# the revert restores the previous state automatically. The same pattern
+# router firmware has used for decades.
+_FW_CONFIRM_LOCK = threading.Lock()
+_FW_PENDING = {}  # change_id -> {"revert": callable, "expires": ts, "desc": str}
+
+
+def _fw_schedule_revert(change_id, desc, revert_fn, ttl=60):
+    with _FW_CONFIRM_LOCK:
+        # cancel any prior pending revert of the same kind
+        for k in list(_FW_PENDING):
+            if _FW_PENDING[k]["desc"] == desc:
+                del _FW_PENDING[k]
+        _FW_PENDING[change_id] = {"revert": revert_fn, "expires": time.time() + ttl,
+                                  "desc": desc, "at": time.time()}
+    threading.Timer(ttl, _fw_expire, args=(change_id,)).start()
+
+
+def _fw_expire(change_id):
+    fn = None
+    desc = ""
+    with _FW_CONFIRM_LOCK:
+        pending = _FW_PENDING.pop(change_id, None)
+        if pending:
+            fn = pending["revert"]
+            desc = pending["desc"]
+    if fn:
+        try:
+            fn()
+            log("FW-CONFIRM-EXPIRED: auto-reverted '%s' (no confirmation "
+                "within 60s - the change may have locked the admin out)"
+                % desc)
+        except Exception as exc:
+            log("FW-CONFIRM-REVERT-FAILED: %s (%s)" % (desc, exc))
+
+
+def confirm_fw_change(change_id):
+    """Keep a pending dangerous change — cancels its auto-revert."""
+    with _FW_CONFIRM_LOCK:
+        pending = _FW_PENDING.pop(change_id, None)
+    if not pending:
+        raise RuntimeError("No pending change to confirm (it may have "
+                           "already auto-reverted — check the firewall)")
+    remaining = max(0, int(pending["expires"] - time.time()))
+    return {"ok": True, "confirmed": pending["desc"], "was_remaining_s": remaining}
+
+
 def set_firewall_default(direction, policy):
-    """Set a default policy: `ufw default <policy> <direction>`."""
+    """Set a default policy: `ufw default <policy> <direction>`.
+
+    Setting incoming/routed to allow/accept is the classic lockout-
+    yourself move, so those go through the confirm window: applied now,
+    auto-reverted in 60s unless confirmed."""
     direction = (direction or "").lower()
     policy = (policy or "").lower()
     if direction not in ("incoming", "outgoing", "routed"):
         raise RuntimeError("Invalid direction (incoming/outgoing/routed)")
     if policy not in _UFW_POLICIES:
         raise RuntimeError("Invalid policy (allow/deny/reject)")
+
+    dangerous = direction in ("incoming", "routed") and policy in ("allow", "accept")
+    if dangerous:
+        prev = build_firewall().get("defaults", {}).get(direction, "deny")
+        def revert():
+            _ufw(["default", prev, direction])
+        change_id = "fwdefault:%s:%s" % (direction, policy)
+        _fw_schedule_revert(change_id, "default %s -> %s" % (direction, policy), revert)
     _ufw(["default", policy, direction])
-    return build_firewall()
+    result = build_firewall()
+    if dangerous:
+        result["needs_confirmation"] = change_id
+        result["confirm_within_s"] = 60
+    return result
 
 
 def set_firewall_logging(level):
@@ -3367,6 +3488,100 @@ def ensure_canary_token():
     return tok
 
 
+def _infra_exempt_ips():
+    """IPs whose services the box depends on: unbound's forward-zone
+    resolvers and chrony's NTP servers, read from their actual configs.
+    Updated on each call (cheap: two small file reads)."""
+    ips = set()
+    # unbound forward-zone addresses
+    try:
+        for conf in sorted(os.listdir("/etc/unbound/unbound.conf.d")):
+            if not conf.endswith(".conf"):
+                continue
+            with open(os.path.join("/etc/unbound/unbound.conf.d", conf)) as f:
+                for line in f:
+                    m = re.match(r"\s*forward-addr:\s*([0-9a-fA-F:.]+)", line)
+                    if m:
+                        try:
+                            ips.add(str(ipaddress.ip_address(m.group(1))))
+                        except ValueError:
+                            pass
+    except OSError:
+        pass
+    # chrony NTP servers: read every config surface (main conf,
+    # sources.d/, conf.d/, and the sourcedir directives that pull them in)
+    chrony_hosts = set()
+    try:
+        for conf_path in ["/etc/chrony/chrony.conf"]:
+            # walk the sourcedir/confdir includes
+            with open(conf_path) as f:
+                for line in f:
+                    m = re.match(r"\s*sourcedir\s+(\S+)", line)
+                    if m:
+                        import glob as _g
+                        for src in sorted(_g.glob(m.group(1) + "/*")):
+                            try:
+                                with open(src) as sf:
+                                    for sl in sf:
+                                        hm = re.match(
+                                            r"\s*(?:server|pool)\s+(\S+)", sl)
+                                        if hm:
+                                            chrony_hosts.add(
+                                                hm.group(1).split()[0])
+                            except OSError:
+                                continue
+                    m = re.match(r"\s*(?:server|pool)\s+(\S+)", line)
+                    if m:
+                        chrony_hosts.add(m.group(1).split()[0])
+        # also scan sources.d and conf.d directly (some distros put
+        # pools there without a sourcedir directive reaching them)
+        for d in ("/etc/chrony/sources.d", "/etc/chrony/conf.d"):
+            if os.path.isdir(d):
+                for fn in os.listdir(d):
+                    fp = os.path.join(d, fn)
+                    try:
+                        with open(fp) as f:
+                            for line in f:
+                                m = re.match(r"\s*(?:server|pool)\s+(\S+)", line)
+                                if m:
+                                    chrony_hosts.add(m.group(1).split()[0])
+                    except OSError:
+                        continue
+    except OSError:
+        pass
+    # resolve every hostname to IPs
+    for host in chrony_hosts:
+        host = host.rstrip(".")
+        try:
+            ipaddress.ip_address(host)
+            ips.add(host)
+            continue
+        except ValueError:
+            pass
+        try:
+            answers = subprocess.run(
+                ["getent", "ahostsv4", host],
+                capture_output=True, text=True, timeout=3).stdout
+            for ans in answers.splitlines():
+                addr = ans.split()[0]
+                try:
+                    ipaddress.ip_address(addr)
+                    ips.add(addr)
+                except ValueError:
+                    continue
+        except Exception:
+            continue
+    return ips
+
+
+def _is_infra_ip(ip):
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return ip in _infra_exempt_ips()
+
+
 def handle_canary_hit(body):
     """Parse an OpenCanary webhook alert; ban + report global sources."""
     fields = {}
@@ -3405,6 +3620,19 @@ def handle_canary_hit(body):
     # evidence: short local ban, NEVER community-reported.
     udp_evidence = (logtype == 13001)
     duration = "24h" if udp_evidence else CUSTOM_BLOCKLIST_DURATION
+
+    # 2026-11-10 audit follow-up: exempt IPs the box ITSELF depends on.
+    # A spoofed UDP canary "hit" from an NTP server or DNS forwarder
+    # would locally ban that service for the duration, breaking time
+    # sync (which breaks TOTP login) or DNS. The exemption set is read
+    # from the actual service configs, not a static list.
+    if udp_evidence and _is_infra_ip(ip):
+        _honey_log("canary: IGNORED spoofable UDP 'hit' from {} ({}) - "
+                   "this is a configured infrastructure IP (DNS/NTP); "
+                   "the source was forged".format(ip, what))
+        return {"ok": True, "ignored": True, "ip": ip,
+                "message": "infrastructure IP exempt from canary bans "
+                           "(spoofed UDP evidence)", "infra_exempt": True}
     try:
         subprocess.run(
             [CROWDSEC_BIN, "decisions", "add", "--ip", ip,
@@ -3445,6 +3673,71 @@ def _canary_event_detail(logtype, logdata):
         if len(parts) >= 3:
             break
     return " ".join(parts) if parts else "connection"
+
+
+# --- Tripwire (WAN containment on confirmed intrusion) ---------------------
+TRIPWIRE_CONF = "/etc/tuxwall/tripwire.json"
+TRIPWIRE_STATE = "/etc/tuxwall/tripwire-state.json"
+TRIPWIRE_MODES = ("disabled", "logonly", "medium", "high")
+
+
+def tripwire_status():
+    def rd(path, fb):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            return fb
+    conf = rd(TRIPWIRE_CONF, {})
+    st = rd(TRIPWIRE_STATE, {})
+    rules = False
+    try:
+        for ipt in ("iptables", "ip6tables"):
+            if subprocess.run([ipt, "-C", "FORWARD", "-m", "comment",
+                               "--comment", "TUXWALL-TRIPWIRE", "-j", "DROP"],
+                              capture_output=True).returncode == 0:
+                rules = True
+    except Exception:
+        pass
+    return {"ok": True,
+            "mode": str(conf.get("mode") or "disabled"),
+            "tripped": bool(st.get("tripped")),
+            "trip_mode": st.get("mode"), "since": st.get("since"),
+            "reason": st.get("reason"), "class": st.get("class"),
+            "signature": st.get("signature") or "",
+            "src_ip": st.get("src_ip"), "trips": st.get("trips") or 0,
+            "rules_present": rules}
+
+
+def tripwire_set_mode(body):
+    mode = str(body.get("mode") or "").strip().lower()
+    if mode not in TRIPWIRE_MODES:
+        raise ValueError("mode must be disabled, logonly, medium or high")
+    tmp = TRIPWIRE_CONF + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"mode": mode}, f, indent=2)
+    os.replace(tmp, TRIPWIRE_CONF)
+    return {"ok": True, "mode": mode}
+
+
+def tripwire_resolve(body, identity):
+    """Lift the lockdown. Deliberate two-step: admin session PLUS the
+    acting admin's password - a stolen dashboard session must never be
+    enough to re-open the WAN during a trip."""
+    if not identity:
+        raise PermissionError("Authentication required")
+    users = _load_users()
+    user = _find_user(users, identity["username"])
+    if user is None:
+        raise PermissionError("Account no longer exists")
+    current = str(body.get("password") or "")
+    if not hmac.compare_digest(_hash_password(current, user["salt"]), user["hash"]):
+        raise PermissionError("Password is incorrect")
+    proc = subprocess.run(["/usr/local/sbin/tuxwall-tripwire", "resolve"],
+                          capture_output=True, text=True, timeout=30)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or "resolve failed").strip()[:200])
+    return {"ok": True, "detail": (proc.stdout or "").strip()[:200]}
 
 
 def build_canary():
@@ -3991,7 +4284,75 @@ def build_aide():
 # the source via CrowdSec. Any connection to these ports is hostile by
 # definition, so no reputation cross-checking is needed before a ban.
 HONEY_CONF_FILE = os.path.join(BLOCKLIST_DIR, "honeypot.json")
-HONEY_WAN_IFACE = "enp5s0"
+# --- Network portability (2026-11-10 audit #10) ---------------------------
+# /etc/tuxwall/network.json is the single source of truth for interface
+# roles. The installer seeds it from the actual box; everything that
+# used to hardcode one machine's names (enp5s0, enp6s0, 192.168.1.x)
+# reads from here. Absent file = derive dynamically (first boot before
+# the wizard runs), never a hardcoded guess.
+NETWORK_CONF = "/etc/tuxwall/network.json"
+
+
+def _net_conf():
+    try:
+        with open(NETWORK_CONF) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _detect_wan_iface():
+    """The interface holding the default route, or the config's answer."""
+    conf = _net_conf()
+    if conf.get("wan_iface"):
+        return str(conf["wan_iface"])
+    try:
+        out = subprocess.run(["ip", "route", "show", "default"],
+                             capture_output=True, text=True, timeout=5).stdout
+        if " dev " in out:
+            return out.split(" dev ")[1].split()[0]
+    except Exception:
+        pass
+    return ""
+
+
+def _lan_subnets():
+    """Private subnets the router serves (LAN, VLANs, VPN) — never the
+    WAN. Used by the honeypot LAN guard, the tarpit, and anywhere that
+    used to hardcode 192.168.1.0/24."""
+    conf = _net_conf()
+    if conf.get("lan_subnets"):
+        return [ipaddress.ip_network(str(n))
+                for n in conf["lan_subnets"] if n]
+    # dynamic: every private subnet on every non-WAN interface
+    wan = _detect_wan_iface()
+    nets = []
+    try:
+        out = subprocess.run(["ip", "-o", "addr", "show"],
+                             capture_output=True, text=True, timeout=5).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            iface = parts[1]
+            if iface == "lo" or iface == wan or iface.startswith(wan + "."):
+                continue
+            cidr = parts[3]
+            try:
+                net = ipaddress.ip_network(cidr, strict=False)
+                if net.is_private and not net.is_loopback and not net.is_link_local:
+                    if net not in nets:
+                        nets.append(net)
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    # loopback always counts as "ours"
+    nets.append(ipaddress.ip_network("127.0.0.0/8"))
+    return nets
+
+
+HONEY_WAN_IFACE = _detect_wan_iface() or "enp5s0"  # last-resort only
 HONEY_DEFAULT_PORTS = [23, 2323, 3389, 445, 5555]
 HONEY_MAX_TOTAL = 256        # concurrent trapped sockets across all ports
 HONEY_MAX_PER_IP = 8         # concurrent trapped sockets per source IP
@@ -4017,8 +4378,14 @@ HONEY_STATE = {
 }
 HONEY_STOP = threading.Event()
 HONEY_APPLY_LOCK = threading.RLock()
-HONEY_LAN_NETS = [ipaddress.ip_network(n) for n in
-                 ("192.168.1.0/24", "10.0.0.0/24", "127.0.0.0/8")]
+HONEY_LAN_NETS = []  # populated at first use from _lan_subnets()
+
+
+def _honey_lan_nets():
+    global HONEY_LAN_NETS
+    if not HONEY_LAN_NETS:
+        HONEY_LAN_NETS = _lan_subnets()
+    return HONEY_LAN_NETS
 
 
 def _honey_is_lan(ip):
@@ -4030,7 +4397,7 @@ def _honey_is_lan(ip):
         # Guard everything not globally routable: ULA (fc00::/7 covers the
         # LAN fd00:1::/64 and WireGuard fd00:2::/64), link-local, loopback.
         return not a.is_global
-    return any(a in net for net in HONEY_LAN_NETS)
+    return any(a in net for net in _honey_lan_nets())
 
 
 def _honey_load_conf():
@@ -5323,7 +5690,35 @@ WG_IFACE = "wg0"
 WG_DEFAULT_ADDRESS = "10.0.0.1/24"
 WG_V6_ADDRESS = "fd00:2::1/64"
 WG_V6_SUBNET = "fd00:2::/64"
-WG_DEFAULT_DNS = "192.168.1.1"
+WG_DEFAULT_DNS = ""  # derived: the router's own primary LAN address
+
+
+def _wg_default_dns():
+    global WG_DEFAULT_DNS
+    if WG_DEFAULT_DNS:
+        return WG_DEFAULT_DNS
+    conf = _net_conf()
+    if conf.get("lan_address"):
+        WG_DEFAULT_DNS = str(conf["lan_address"])
+        return WG_DEFAULT_DNS
+    # dynamic: first private v4 on the first non-WAN interface
+    wan = _detect_wan_iface()
+    try:
+        out = subprocess.run(["ip", "-o", "-4", "addr", "show"],
+                             capture_output=True, text=True, timeout=5).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            if parts[1] in ("lo", wan):
+                continue
+            ip = parts[3].split("/")[0]
+            if ipaddress.ip_address(ip).is_private:
+                WG_DEFAULT_DNS = ip
+                return ip
+    except Exception:
+        pass
+    return "192.168.1.1"  # last resort
 WG_DEFAULT_ALLOWED_IPS = "0.0.0.0/0, ::/0"
 WG_DEFAULT_KEEPALIVE = 25
 WG_DEFAULT_PORT = 51820
@@ -9585,10 +9980,16 @@ def delete_system_backup(filename):
 # --- SQM / traffic shaping (CAKE on WAN + IFB) -------------------------------
 SQM_CONF = "/etc/tuxwall/sqm.conf"
 SQM_SCRIPT = "/usr/local/sbin/tuxwall-sqm.sh"
-SQM_DEFAULTS = {"wan": "enp5s0", "ifb": "ifb4wan", "up_mbit": 285, "down_mbit": 1850}
+SQM_DEFAULTS = {"wan": "", "ifb": "ifb4wan", "up_mbit": 285, "down_mbit": 1850}
+
+
+def _sqm_wan():
+    if not SQM_DEFAULTS["wan"]:
+        SQM_DEFAULTS["wan"] = _detect_wan_iface() or "enp5s0"
+    return SQM_DEFAULTS["wan"]
 # Ookla speedtest is NOT in the Ubuntu archives, its packagecloud repo ends
 # at jammy (404 on noble+), and the snap is an unofficial wrapper — so
-# setup.sh / postinst auto-install the official tarball. The guided test
+# postinst auto-installs the official tarball. The guided test
 # degrades to a clear error when it is absent.
 SQM_SPEEDTEST_HINT = ("speedtest binary not found — install it for guided "
                       "tests: `sudo bash /var/www/html/scripts/install-speedtest.sh` "
@@ -11870,6 +12271,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_honeypot())
         elif path == "/api/security/canary":
             self._send(200, build_canary())
+        elif path == "/api/security/tripwire":
+            self._send(200, tripwire_status())
         elif path == "/api/agent/models":
             try:
                 data = self._agent_call("GET", "/config/providers", timeout=10)
@@ -12694,6 +13097,9 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
 
+        elif path == "/api/firewall/confirm":
+            self._send(200, confirm_fw_change(str(body.get("id") or "")))
+
         elif path == "/api/firewall/reset":
             action = (body.get("action") or "").lower()
             if action == "save":
@@ -12826,6 +13232,12 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/security/canary/config":
             result = set_canary_enabled(bool(body.get("enabled")))
             self._send(200 if result.get("ok") else 400, result)
+
+        elif path == "/api/security/tripwire/config":
+            self._send(200, tripwire_set_mode(body))
+
+        elif path == "/api/security/tripwire/resolve":
+            self._send(200, tripwire_resolve(body, identity))
 
         elif path == "/api/security/honeypot/config":
             self._send(200, set_honeypot_conf(body))
@@ -14662,6 +15074,27 @@ def _plugin_safe_extract(zip_file, dest):
             shutil.copyfileobj(src, out)
 
 
+def _plugin_content_hash(root):
+    """SHA-256 over every code file (main.py, web/, plugin.json) — the
+    content pin. Config and credentials are excluded: only the code that
+    runs with admin rights in the browser get hashed."""
+    h = hashlib.sha256()
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in ("__pycache__",))
+        for fn in sorted(files):
+            if fn in ("config.json", ".provenance.json") or fn.endswith(".pyc"):
+                continue
+            fp = os.path.join(dirpath, fn)
+            rel = os.path.relpath(fp, root)
+            h.update(rel.encode())
+            try:
+                with open(fp, "rb") as f:
+                    h.update(f.read())
+            except OSError:
+                pass
+    return h.hexdigest()
+
+
 def _plugin_write_perms(root):
     for base, dirs, files in os.walk(root):
         os.chmod(base, 0o755)
@@ -14751,15 +15184,45 @@ def install_plugin_from_github(body):
                     except OSError:
                         pass
                 _plugin_write_perms(dest)
+                provenance = {
+                    "installed_at": time.time(),
+                    "source_url": url,
+                    "source_branch": branch,
+                    "version": manifest.get("version") or "",
+                    # content hash of the code files: THE PIN. Any future
+                    # integrity check compares against this (2026-11-09
+                    # audit #5: installs were unpinned and unsigned — a
+                    # changed upstream silently replaced installed code).
+                    "content_sha256": _plugin_content_hash(dest),
+                }
+                try:
+                    with open(os.path.join(dest, ".provenance.json"), "w") as f:
+                        json.dump(provenance, f, indent=2)
+                except OSError:
+                    pass
                 return {"ok": True, "updated": True, "plugin": {
                     "id": pid,
                     "name": manifest.get("name") or pid,
                     "version": manifest.get("version") or "",
+                    "pinned_sha": provenance["content_sha256"][:16],
                 }}
             os.makedirs(PLUGINS_DIR, exist_ok=True)
+            _pin = {
+                "installed_at": time.time(),
+                "source_url": url,
+                "source_branch": branch,
+                "version": manifest.get("version") or "",
+                "content_sha256": None,  # filled after copy below
+            }
             shutil.copytree(src, dest, ignore=shutil.ignore_patterns(
                 ".git", "__pycache__", "*.pyc", "config.json"))
             _plugin_write_perms(dest)
+            _pin["content_sha256"] = _plugin_content_hash(dest)
+            try:
+                with open(os.path.join(dest, ".provenance.json"), "w") as f:
+                    json.dump(_pin, f, indent=2)
+            except OSError:
+                pass
             return {"ok": True, "plugin": {
                 "id": pid,
                 "name": manifest.get("name") or pid,
@@ -15385,7 +15848,30 @@ def _incident_conditions():
         add("wan:link", "critical", "WAN link is down",
             "%s reports %s." % (wan, _iface_operstate(wan)))
 
-    for name, label in (("enp6s0", "LAN"),):
+    conf = _net_conf()
+    lan_ifaces = conf.get("lan_ifaces") or []
+    if not lan_ifaces:
+        # derive: every UP non-WAN physical interface (skip VLAN subs,
+        # the tarpit handles those separately)
+        wan = _detect_wan_iface()
+        try:
+            out = subprocess.run(["ip", "-o", "link", "show"],
+                                 capture_output=True, text=True, timeout=5).stdout
+            for line in out.splitlines():
+                iface = line.split(":")[1].strip().split("@")[0]
+                if iface in ("lo", wan) or "." in iface:
+                    continue
+                # virtual interfaces (wireguard tunnels, ifb shaping
+                # devices) are never a "LAN link" to monitor; they flap
+                # by design. Only physical interfaces with a carrier.
+                if iface.startswith(("wg", "ifb", "tun", "tap", "veth", "br-")):
+                    continue
+                if "UP" in line and "LOWER_UP" in line:
+                    lan_ifaces.append(iface)
+        except Exception:
+            pass
+    for name in lan_ifaces[:4]:  # cap at 4 to bound the check cost
+        label = "LAN"
         state = _iface_operstate(name)
         if state == "missing":
             add("lan:%s" % name, "critical", "%s interface is missing" % label,
@@ -15414,6 +15900,7 @@ def _incident_conditions():
         ("unbound.service", "Unbound DNS", "critical"),
         ("kea-dhcp4-server.service", "Kea DHCP", "critical"),
         ("crowdsec.service", "CrowdSec", "warning"),
+        ("suricata.service", "Suricata IDS", "warning"),
         ("crowdsec-firewall-bouncer.service", "CrowdSec firewall bouncer", "warning"),
     )
     for unit, label, severity in services:
@@ -15425,6 +15912,31 @@ def _incident_conditions():
                     "%s is not active. Check the service on System ▸ Maintenance." % unit)
         except Exception:
             pass
+
+    # 2026-11-10: an in-place edit (sed -i) on eve.json rotates the file
+    # out from under suricata - the engine keeps writing to the orphaned
+    # inode while the dashboard and the tripwire watch a frozen file. This
+    # box ran blind for 37 hours before anyone noticed. Detect it by
+    # comparison: suricata writes every alert to BOTH fast.log and
+    # eve.json, so fresh-fast.log + stale-eve.json means the eve output
+    # is orphaned (never edit or rotate eve.json in place). A quiet
+    # network makes both stale and correctly raises nothing.
+    try:
+        proc = subprocess.run(["systemctl", "is-active", "--quiet", "suricata"],
+                              capture_output=True, timeout=5)
+        if proc.returncode == 0:
+            eve_age = time.time() - os.path.getmtime(SURICATA_EVE_LOG)
+            fast_age = time.time() - os.path.getmtime("/var/log/suricata/fast.log")
+            if fast_age < 600 and eve_age > fast_age + 300:
+                add("ids:eve-stale", "critical", "IDS is blind: eve.json is frozen",
+                    "Suricata is running and alerting (fast.log is fresh) but "
+                    "/var/log/suricata/eve.json has not been written in %d "
+                    "minutes - the engine is writing to an orphaned file, so "
+                    "the dashboard and the tripwire see nothing. Restart "
+                    "suricata, and never edit eve.json in place."
+                    % int(eve_age / 60))
+    except Exception:
+        pass
 
     try:
         usage = shutil.disk_usage("/")
@@ -15455,6 +15967,36 @@ def _incident_conditions():
             elif pct >= 92:
                 add("memory:root", "warning", "Memory usage is high",
                     "%.1f%% used." % pct)
+    except Exception:
+        pass
+
+    # Functional firewall check: the ufw systemd unit reports
+    # "active/finished" even when its ruleset failed to load (observed
+    # 2026-11-09: a failed boot left INPUT/FORWARD policy ACCEPT - the
+    # box failing OPEN - for 7 minutes with the unit green, and a failed
+    # reload can do the same live). Trust the packet filter's actual
+    # state, not the unit file. A tripwire lockdown never changes chain
+    # policies, so this cannot false-positive during containment.
+    try:
+        for ipt, fam in (("iptables", "IPv4"), ("ip6tables", "IPv6")):
+            state = []
+            enforcing = True
+            for chain in ("INPUT", "FORWARD"):
+                # iptables -S takes ONE chain; first line is "-P <chain> <pol>"
+                out = subprocess.run([ipt, "-S", chain],
+                                     capture_output=True, text=True, timeout=5).stdout
+                first = out.splitlines()[0].split() if out.splitlines() else []
+                pol = first[2] if len(first) >= 3 and first[0] == "-P" else "unknown"
+                state.append("%s=%s" % (chain, pol))
+                if pol != "DROP":
+                    enforcing = False
+            if not enforcing:
+                add("fw:function-%s" % fam.lower(), "critical",
+                    "Firewall is NOT enforcing (%s)" % fam,
+                    "INPUT/FORWARD are not DROP (%s) - the packet filter is "
+                    "failing OPEN. Usually a broken /etc/ufw/before.rules; "
+                    "validate with: tuxwall-fw-reload (tests before applying)."
+                    % ", ".join(state))
     except Exception:
         pass
 

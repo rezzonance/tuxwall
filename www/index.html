@@ -6,14 +6,14 @@
   <title>TuxWall - Network Dashboard</title>
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
-  <link rel="stylesheet" href="/css/style.css?v=202610291801">
-  <link rel="stylesheet" href="/css/polish.css?v=202610291801">
-  <link rel="stylesheet" href="/css/firewall.css?v=202610291801">
-  <link rel="stylesheet" href="/css/bento.css?v=202610291801">
-  <link rel="stylesheet" href="/css/heroes.css?v=202610291801">
-  <link rel="stylesheet" href="/css/sidebar.css?v=202610291801">
-  <link rel="stylesheet" href="/css/action-icons.css?v=202610291801">
-  <link rel="stylesheet" href="/css/subtab-icons.css?v=202610291801">
+  <link rel="stylesheet" href="/css/style.css?v=202611082105">
+  <link rel="stylesheet" href="/css/polish.css?v=202611082105">
+  <link rel="stylesheet" href="/css/firewall.css?v=202611082105">
+  <link rel="stylesheet" href="/css/bento.css?v=202611082105">
+  <link rel="stylesheet" href="/css/heroes.css?v=202611082105">
+  <link rel="stylesheet" href="/css/sidebar.css?v=202611082105">
+  <link rel="stylesheet" href="/css/action-icons.css?v=202611082105">
+  <link rel="stylesheet" href="/css/subtab-icons.css?v=202611082105">
 </head>
 <body>
 <div id="login-gate" class="login-gate" hidden>
@@ -143,6 +143,7 @@
 
     <div id="banner" class="banner" hidden></div>
     <div id="svc-banner" class="banner svc-banner" role="alert" hidden></div>
+        <div id="trip-banner" class="banner svc-banner" role="alert" hidden></div>
 
     <section id="view-overview" class="view" hidden>
 
@@ -1057,11 +1058,11 @@
 
         <article class="fw-card fw-layers" data-accent="teal">
           <span class="fw-kicker">Defense layers</span>
-          <ul>
-            <li><span class="dot dot-ok"></span>UFW default-deny<span class="tag">WAN</span></li>
-            <li><span class="dot dot-ok"></span>CrowdSec auto-ban<span class="tag">1 yr</span></li>
-            <li><span class="dot dot-ok"></span>Suricata IDS<span class="tag">passive</span></li>
-            <li><span class="dot dot-ok"></span>WireGuard<span class="tag">51820/udp</span></li>
+          <ul id="defense-layers-list">
+            <li><span class="dot" id="dl-ufw-dot"></span>UFW default-deny<span class="tag">WAN</span></li>
+            <li><span class="dot" id="dl-crowdsec-dot"></span>CrowdSec auto-ban<span class="tag">1 yr</span></li>
+            <li><span class="dot" id="dl-suricata-dot"></span>Suricata IDS<span class="tag">passive</span></li>
+            <li><span class="dot" id="dl-wireguard-dot"></span>WireGuard<span class="tag">51820/udp</span></li>
           </ul>
         </article>
 
@@ -1584,6 +1585,7 @@
       <!-- OPNsense-style sub-tabs -->
       <div class="fw-subtabs" id="sec-subtabs">
         <button class="fw-subtab active" type="button" data-sec-pane="attacks">Attacks</button>
+        <button class="fw-subtab" type="button" data-sec-pane="tripwire">Tripwire</button>
         <button class="fw-subtab" type="button" data-sec-pane="sensors">Sensors</button>
         <button class="fw-subtab" type="button" data-sec-pane="deception">Deception</button>
         <button class="fw-subtab" type="button" data-sec-pane="integrity">Integrity</button>
@@ -1665,6 +1667,52 @@
       </div>
 
       <!-- Pane: Sensors (IDS + Zeek) -->
+      <div class="fw-pane" data-sec-pane="tripwire" hidden>
+      <div class="card card-mt trip-card" id="sec-trip-card" data-state="disabled">
+        <div class="trip-head">
+          <span class="trip-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg></span>
+          <div class="trip-head-copy">
+            <h2>Tripwire <span class="status-dot" id="sec-trip-dot" data-status="unknown"></span></h2>
+            <span class="muted trip-sub" id="sec-trip-hint">Checking containment state &hellip;</span>
+          </div>
+          <span class="trip-badge" id="sec-trip-badge" data-state="disabled">Disabled</span>
+        </div>
+
+        <div class="trip-mode-block">
+          <div class="trip-mode-head">
+            <span class="trip-label">Containment mode</span>
+            <span class="trip-mode-note" id="sec-trip-mode-note"></span>
+          </div>
+          <div class="seg-btns trip-modes" id="sec-trip-modes" role="group" aria-label="Tripwire containment mode">
+            <button type="button" class="seg-btn" data-trip-mode="disabled" aria-pressed="false"><span>Disabled</span><em>no containment</em></button>
+            <button type="button" class="seg-btn" data-trip-mode="logonly" aria-pressed="false"><span>Log only</span><em>record, never cut</em></button>
+            <button type="button" class="seg-btn" data-trip-mode="medium" aria-pressed="false"><span>Medium</span><em>WireGuard stays open</em></button>
+            <button type="button" class="seg-btn" data-trip-mode="high" aria-pressed="false"><span>High</span><em>LAN only</em></button>
+          </div>
+        </div>
+
+        <div class="trip-message" id="sec-trip-message" data-kind="idle" role="status" aria-live="polite">
+          <div class="trip-message-head">
+            <span class="trip-message-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg></span>
+            <div class="trip-message-copy">
+              <strong id="sec-trip-msg-title">No active trip</strong>
+              <span class="trip-message-meta" id="sec-trip-msg-meta"></span>
+            </div>
+            <span class="trip-message-sev" id="sec-trip-msg-sev" hidden></span>
+          </div>
+          <p class="trip-message-reason" id="sec-trip-msg-reason"></p>
+          <div class="trip-message-grid" id="sec-trip-msg-grid"></div>
+          <div class="trip-resolve" id="sec-trip-resolve" hidden>
+            <input type="password" id="sec-trip-pass" placeholder="Admin password" aria-label="Admin password to resolve the trip" autocomplete="off">
+            <button id="sec-trip-resolve-btn" class="btn btn-sm btn-act" type="button">Resolve &amp; restore WAN</button>
+            <span class="trip-resolve-note">Admin session + password &mdash; a stolen session alone can't re-open the WAN.</span>
+          </div>
+        </div>
+
+        <p class="muted bl-note">WAN containment on <b>confirmed intrusion-class events</b>: Suricata priority-1 alerts (admin compromise, trojan activity, web application attack, shellcode) or the canary attempting any outbound connection. <b>Medium</b> cuts LAN&#8596;WAN forwarding but keeps WireGuard (51820) open as the emergency admin door; <b>High</b> additionally closes all WAN access — the router is reachable from the LAN only. <b>A trip never auto-restores</b>: a timer would re-open the door before the compromise is actually fixed. Resolve deliberately, after investigating, with your admin password.</p>
+      </div>
+      </div>
+
       <div class="fw-pane" data-sec-pane="sensors" hidden>
       <div class="card">
         <div class="card-head">
@@ -3663,7 +3711,7 @@
     <p class="muted" id="cs-ban-status" style="margin-top:10px"></p>
   </div>
 </div>
-<script src="/scripts/dashboard.js?v=202610291801"></script>
+<script src="/scripts/dashboard.js?v=202611082105"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>

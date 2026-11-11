@@ -2,7 +2,7 @@
 
 Static checks that catch the two bug classes that each took the live
 dashboard down during 3.0.6 development. Run both before any deploy of the
-dashboard files — `install.sh` on the maintainer's router runs them
+dashboard files — the deploy script on the maintainer's router runs them
 automatically before restarting services.
 
 ## boot-check.js — browser boot simulation
