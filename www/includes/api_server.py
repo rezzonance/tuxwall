@@ -1691,11 +1691,12 @@ def _fw_expire(change_id):
     if fn:
         try:
             fn()
-            log("FW-CONFIRM-EXPIRED: auto-reverted '%s' (no confirmation "
-                "within 60s - the change may have locked the admin out)"
-                % desc)
+            print("[fw] FW-CONFIRM-EXPIRED: auto-reverted '%s' (no "
+                  "confirmation within 60s - the change may have locked "
+                  "the admin out)" % desc, flush=True)
         except Exception as exc:
-            log("FW-CONFIRM-REVERT-FAILED: %s (%s)" % (desc, exc))
+            print("[fw] FW-CONFIRM-REVERT-FAILED: %s (%s)" % (desc, exc),
+                  flush=True)
 
 
 def confirm_fw_change(change_id):
