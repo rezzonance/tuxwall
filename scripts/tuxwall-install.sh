@@ -32,6 +32,12 @@ umask 022
 INSTALLER_VERSION="1.0.0"
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 REPO_DIR="$(dirname "$SELF")"
+# 2026-11-11 VM test: the canonical in-repo location is scripts/, but the
+# local-source lookup assumed the script sits at the repo root. Climb one
+# level when run from scripts/ so --source local works in both layouts.
+if [[ "$(basename "$REPO_DIR")" == "scripts" && -f "$REPO_DIR/../pkg/DEBIAN/control" ]]; then
+    REPO_DIR="$(dirname "$REPO_DIR")"
+fi
 
 LOG=/var/log/tuxwall-install.log
 LOCK=/run/tuxwall-install.lock
