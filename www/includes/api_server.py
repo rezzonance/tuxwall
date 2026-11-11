@@ -15899,6 +15899,7 @@ def _incident_conditions():
         ("unbound.service", "Unbound DNS", "critical"),
         ("kea-dhcp4-server.service", "Kea DHCP", "critical"),
         ("crowdsec.service", "CrowdSec", "warning"),
+        ("suricata.service", "Suricata IDS", "warning"),
         ("crowdsec-firewall-bouncer.service", "CrowdSec firewall bouncer", "warning"),
     )
     for unit, label, severity in services:
@@ -15910,6 +15911,31 @@ def _incident_conditions():
                     "%s is not active. Check the service on System ▸ Maintenance." % unit)
         except Exception:
             pass
+
+    # 2026-11-10: an in-place edit (sed -i) on eve.json rotates the file
+    # out from under suricata - the engine keeps writing to the orphaned
+    # inode while the dashboard and the tripwire watch a frozen file. This
+    # box ran blind for 37 hours before anyone noticed. Detect it by
+    # comparison: suricata writes every alert to BOTH fast.log and
+    # eve.json, so fresh-fast.log + stale-eve.json means the eve output
+    # is orphaned (never edit or rotate eve.json in place). A quiet
+    # network makes both stale and correctly raises nothing.
+    try:
+        proc = subprocess.run(["systemctl", "is-active", "--quiet", "suricata"],
+                              capture_output=True, timeout=5)
+        if proc.returncode == 0:
+            eve_age = time.time() - os.path.getmtime(SURICATA_EVE_LOG)
+            fast_age = time.time() - os.path.getmtime("/var/log/suricata/fast.log")
+            if fast_age < 600 and eve_age > fast_age + 300:
+                add("ids:eve-stale", "critical", "IDS is blind: eve.json is frozen",
+                    "Suricata is running and alerting (fast.log is fresh) but "
+                    "/var/log/suricata/eve.json has not been written in %d "
+                    "minutes - the engine is writing to an orphaned file, so "
+                    "the dashboard and the tripwire see nothing. Restart "
+                    "suricata, and never edit eve.json in place."
+                    % int(eve_age / 60))
+    except Exception:
+        pass
 
     try:
         usage = shutil.disk_usage("/")
