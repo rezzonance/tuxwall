@@ -1623,7 +1623,10 @@ stage_console() {
     mkdir -p "$APPLIANCE_DIR" /etc/tuxwall
     q rsync -a --delete --exclude '.git' --exclude '__pycache__' --exclude '*.pyc' \
         --exclude '*.bak' --exclude '*.bak-*' --exclude '*.bak.*' "$REPO_DIR/" "$APPLIANCE_DIR/src/"
-    chmod 755 "$APPLIANCE_DIR/src/tuxwall-install.sh"
+    # The console hook runs src/tuxwall-install.sh at the staged tree
+    # root; install a runnable copy there regardless of which layout
+    # the installer was invoked from (repo root or scripts/).
+    install -m 755 "$SELF" "$APPLIANCE_DIR/src/tuxwall-install.sh"
     chown -R root:root "$APPLIANCE_DIR"
     chmod -R go-w "$APPLIANCE_DIR"
     ok "Installer staged in $APPLIANCE_DIR/src"
