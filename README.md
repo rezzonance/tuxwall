@@ -155,7 +155,7 @@ sudo bash tuxwall-install.sh --dry-run   # see the full plan first
 sudo bash tuxwall-install.sh             # guided install, review screen included
 ```
 
-From a repository clone, run `sudo bash scripts/tuxwall-install.sh` instead (it defaults to building the package from your checkout). For headless or fresh-appliance installs, `sudo bash tuxwall-install.sh --console` stages a one-time first-boot wizard on the console. Unattended installs pass `--yes` with `--wan`/`--lan` and the options from `--help`.
+From a repository clone, run `sudo bash tuxwall-install.sh` instead (it defaults to building the package from your checkout). For headless or fresh-appliance installs, `sudo bash tuxwall-install.sh --console` stages a one-time first-boot wizard on the console. Unattended installs pass `--yes` with `--wan`/`--lan` and the options from `--help`.
 
 Future updates are normal APT updates:
 

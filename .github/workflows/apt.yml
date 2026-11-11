@@ -78,7 +78,7 @@ jobs:
                    apt/dists/stable/main/binary-amd64
           cp "tuxwall_${VERSION}_all.deb" apt/pool/main/t/tuxwall/
           cp apt-public.asc apt/public.asc
-          cp scripts/tuxwall-install.sh apt/
+          cp tuxwall-install.sh apt/
 
           cd apt
           apt-ftparchive packages pool/main \
