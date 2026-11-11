@@ -299,7 +299,7 @@ EOF
 
     # Cache-bust dashboard assets on every package upgrade: browsers cache
     # ?v= URLs hard, so a fresh stamp guarantees the shipped JS/CSS is
-    # actually fetched (the unified installer always did this; a bare
+    # actually fetched (installers always did; a bare apt path did not).
     ASSET_V="$(date +%Y%m%d%H%M)"
     sed -i -E "s/\.(js|css)\?v=[-A-Za-z0-9._]+/.\1?v=${ASSET_V}/g" /var/www/html/index.html 2>/dev/null || true
 
