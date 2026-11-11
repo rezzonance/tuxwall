@@ -4382,7 +4382,7 @@
     els.secHoneyApply.addEventListener("click", () => applyConf());
     els.secHoneyToggle.addEventListener("click", async () => {
       const enabling = els.secHoneyToggle.dataset.on !== "1";
-      if (enabling && !window.confirm("Enable the honeypot? This opens UFW allow rules for the listed ports on the WAN interface (enp5s0) ONLY, then traps and auto-bans anything that connects.")) return;
+      if (enabling && !window.confirm("Enable the honeypot? This opens UFW allow rules for the listed ports on the WAN interface (auto-detected; see System - Deception), then traps and auto-bans anything that connects.")) return;
       if (!enabling && !window.confirm("Disable the honeypot and close its UFW allow rules?")) return;
       await applyConf({ enabled: enabling });
     });

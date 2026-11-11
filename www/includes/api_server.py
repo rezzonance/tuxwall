@@ -3858,7 +3858,7 @@ def set_canary_enabled(enabled):
                 for line in (proc.stdout or "").splitlines():
                     for p in CANARY_PORTS:
                         if "{}:{}".format(wan_ip, p) in line:
-                            _ufw(["allow", "in", "on", HONEY_WAN_IFACE, "to", "any",
+                            _ufw(["allow", "in", "on", _honey_wan_iface(), "to", "any",
                                   "port", str(p), "proto", "tcp",
                                   "comment", "tuxwall-canary"])
                             opened.append(p)
@@ -3869,7 +3869,7 @@ def set_canary_enabled(enabled):
             # multi-word value passes as separate args and ufw rejects the
             # stray words ("Invalid token 'canary'") - which killed this
             # route's response (nginx 502 HTML -> browser JSON error).
-            _ufw(["allow", "in", "on", HONEY_WAN_IFACE, "to", "any",
+            _ufw(["allow", "in", "on", _honey_wan_iface(), "to", "any",
                   "port", str(CANARY_SNMP_PORT), "proto", "udp",
                   "comment", "tuxwall-canary-snmp"])
             opened.append(CANARY_SNMP_PORT)
@@ -3884,13 +3884,13 @@ def set_canary_enabled(enabled):
         closed = []
         for p in CANARY_PORTS:
             try:
-                _ufw(["delete", "allow", "in", "on", HONEY_WAN_IFACE, "to", "any",
+                _ufw(["delete", "allow", "in", "on", _honey_wan_iface(), "to", "any",
                       "port", str(p), "proto", "tcp"])
                 closed.append(p)
             except Exception:
                 pass
         try:
-            _ufw(["delete", "allow", "in", "on", HONEY_WAN_IFACE, "to", "any",
+            _ufw(["delete", "allow", "in", "on", _honey_wan_iface(), "to", "any",
                   "port", str(CANARY_SNMP_PORT), "proto", "udp"])
             closed.append(CANARY_SNMP_PORT)
         except Exception:
@@ -4352,7 +4352,15 @@ def _lan_subnets():
     return nets
 
 
-HONEY_WAN_IFACE = _detect_wan_iface() or "enp5s0"  # last-resort only
+def _honey_wan_iface():
+    """The deception layer's WAN: network.json override, else the default
+    route, re-read on every use (an import-time constant would freeze the
+    answer from whenever the API happened to start - including a moment
+    when the route was briefly down). enp5s0 is a last resort only."""
+    return _detect_wan_iface() or "enp5s0"
+
+
+HONEY_WAN_IFACE = _honey_wan_iface()  # legacy references during migration
 HONEY_DEFAULT_PORTS = [23, 2323, 3389, 445, 5555]
 HONEY_MAX_TOTAL = 256        # concurrent trapped sockets across all ports
 HONEY_MAX_PER_IP = 8         # concurrent trapped sockets per source IP
@@ -4469,7 +4477,7 @@ def _honey_wan6():
     """Resolve the WAN interface's global IPv6 (None if none/ULA-only)."""
     try:
         r = subprocess.run(
-            ["ip", "-j", "-6", "addr", "show", HONEY_WAN_IFACE],
+            ["ip", "-j", "-6", "addr", "show", _honey_wan_iface()],
             capture_output=True, text=True, timeout=5,
         )
         for iface in json.loads(r.stdout or "[]"):
@@ -4696,7 +4704,7 @@ def _honey_watchdog():
 
 def _honey_ufw_allow(port):
     try:
-        _ufw(["allow", "in", "on", HONEY_WAN_IFACE,
+        _ufw(["allow", "in", "on", _honey_wan_iface(),
               "to", "any", "port", str(port), "proto", "tcp"])
     except Exception as exc:
         _honey_log("ufw allow port {}: {}".format(port, exc))
@@ -4706,7 +4714,7 @@ def _honey_ufw_allow(port):
 
 def _honey_ufw_deny(port):
     try:
-        _ufw(["delete", "allow", "in", "on", HONEY_WAN_IFACE,
+        _ufw(["delete", "allow", "in", "on", _honey_wan_iface(),
               "to", "any", "port", str(port), "proto", "tcp"])
     except Exception:
         pass  # rule not present - fine

@@ -831,8 +831,6 @@ review() {
     if [[ $ROLE == gateway ]]; then
         [[ $NET_CIDR != 192.168.1.0/24 ]] && \
             warn "Port forwarding and DMZ in this dashboard version still assume a 192.168.1.0/24 LAN."
-        [[ $WAN != enp5s0 ]] && \
-            warn "The honeypot/deception layer in this dashboard version still assumes the WAN is enp5s0."
         [[ $KEA_ACTION == keep ]] && warn "Keeping your Kea config: its subnet must match $NET_CIDR for DHCP to work."
     fi
     return 0
