@@ -659,7 +659,8 @@ ALLOWED_SERVICE_ACTIONS = {"start", "stop", "restart", "reload"}
 
 
 # Services that conflict with Tuxwall's core stack and must NOT run on a
-# gateway. setup.sh disables them on fresh installs, but an apt upgrade or
+# gateway. The unified installer disables them on fresh installs, but an
+# apt upgrade or
 # a dependency package (libvirt pulls dnsmasq in, etc.) can quietly bring
 # them back. This table drives the dashboard banner warning; the backend
 # reports the live intersection so the client never hardcodes the list.
@@ -9988,7 +9989,7 @@ def _sqm_wan():
     return SQM_DEFAULTS["wan"]
 # Ookla speedtest is NOT in the Ubuntu archives, its packagecloud repo ends
 # at jammy (404 on noble+), and the snap is an unofficial wrapper — so
-# setup.sh / postinst auto-install the official tarball. The guided test
+# postinst auto-installs the official tarball. The guided test
 # degrades to a clear error when it is absent.
 SQM_SPEEDTEST_HINT = ("speedtest binary not found — install it for guided "
                       "tests: `sudo bash /var/www/html/scripts/install-speedtest.sh` "
