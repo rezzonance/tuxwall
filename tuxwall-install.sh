@@ -32,9 +32,9 @@ umask 022
 INSTALLER_VERSION="1.0.0"
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 REPO_DIR="$(dirname "$SELF")"
-# 2026-11-11 VM test: the canonical in-repo location is scripts/, but the
-# local-source lookup assumed the script sits at the repo root. Climb one
-# level when run from scripts/ so --source local works in both layouts.
+# The canonical location is the repository root. If someone runs an
+# older checkout where the script sits in scripts/, climb one level so
+# --source local works from both layouts.
 if [[ "$(basename "$REPO_DIR")" == "scripts" && -f "$REPO_DIR/../pkg/DEBIAN/control" ]]; then
     REPO_DIR="$(dirname "$REPO_DIR")"
 fi
@@ -831,8 +831,6 @@ review() {
     if [[ $ROLE == gateway ]]; then
         [[ $NET_CIDR != 192.168.1.0/24 ]] && \
             warn "Port forwarding and DMZ in this dashboard version still assume a 192.168.1.0/24 LAN."
-        [[ $WAN != enp5s0 ]] && \
-            warn "The honeypot/deception layer in this dashboard version still assumes the WAN is enp5s0."
         [[ $KEA_ACTION == keep ]] && warn "Keeping your Kea config: its subnet must match $NET_CIDR for DHCP to work."
     fi
     return 0
