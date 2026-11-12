@@ -58,6 +58,10 @@ install -d /var/www/html
 cp -f "$REPO_DIR/www/includes/api_server.py" /var/www/html/includes/api_server.py
 cp -f "$REPO_DIR/www/index.html" /var/www/html/index.html
 cp -f "$REPO_DIR/www/scripts/dashboard.js" /var/www/html/scripts/dashboard.js
+# 3.3.1 UI modules and the world-map data (index.html references them;
+# deploying a 3.3.1 index.html without these breaks the dashboard)
+cp -rf "$REPO_DIR/www/scripts/." /var/www/html/scripts/
+cp -rf "$REPO_DIR/www/data" /var/www/html/
 cp -f "$REPO_DIR/www/scripts/geoip-setup.sh" /var/www/html/scripts/geoip-setup.sh
 cp -rf "$REPO_DIR/www/css/." /var/www/html/css/
 chmod 755 /var/www/html/scripts/geoip-setup.sh
