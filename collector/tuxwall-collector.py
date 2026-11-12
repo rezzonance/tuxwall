@@ -874,8 +874,13 @@ class RateLimiter:
 
     def allow(self, key, now):
         with self._lock:
-            d = self._hits[key]
             window = now - 3600
+            if len(self._hits) > 20000:
+                # Keyed by real client addresses now: drop idle entries so
+                # the table cannot grow without bound.
+                for k in [k for k, d in self._hits.items() if not d or d[-1] < window]:
+                    del self._hits[k]
+            d = self._hits[key]
             while d and d[0] < window:
                 d.popleft()
             if len(d) >= self.limit:
@@ -925,6 +930,32 @@ class Handler(BaseHTTPRequestHandler):
 
     def _ok_json(self, **kw):
         self._json(200, {"ok": True, **kw})
+
+    def _rate_client(self):
+        """Rate-limit identity for anonymous endpoints (/register).
+
+        Behind nginx every request arrives from 127.0.0.1, so keying on
+        client_address put all installs in one shared bucket: a burst of
+        new installs - or one abuser - could lock everyone out of
+        registration for an hour. nginx passes the real client in
+        X-Real-IP (real_ip_header CF-Connecting-IP upstream); trust it
+        only when the peer is loopback, i.e. the request came through
+        the local proxy. IPv6 clients are bucketed per /64, since one
+        host commonly holds a whole /64. Used for the limiter only -
+        never logged or stored, so reporters stay anonymous.
+        """
+        peer = self.client_address[0] if self.client_address else ""
+        try:
+            if ipaddress.ip_address(peer).is_loopback:
+                real = (self.headers.get("X-Real-IP") or "").strip()
+                if real:
+                    addr = _plain_ip(ipaddress.ip_address(real))
+                    if addr.version == 6:
+                        return str(ipaddress.ip_network(str(addr) + "/64", strict=False))
+                    return str(addr)
+        except ValueError:
+            pass
+        return peer
 
     # --- Admin auth (loopback-only endpoints, never proxied by nginx) ------
     def _admin_key(self):
@@ -1201,7 +1232,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(426, {"ok": False, "error":
                     "Tuxwall %s+ required for community reporting - upgrade to continue sharing" % MIN_REPORTER_VERSION})
                 return
-            client = self.client_address[0] if self.client_address else ""
+            client = self._rate_client()
             if not RATE.allow(client, time.time()):
                 self._json(429, {"ok": False, "error": "Too many requests"})
                 return

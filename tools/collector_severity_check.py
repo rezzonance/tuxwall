@@ -13,7 +13,10 @@ asserts the rules installs rely on (Automatic mode enforces medium+):
   (canary source, huge hit counts, several fresh keys at once);
 - a key with a week of history plus deception evidence reaches medium;
 - top_bans(tier=...) returns exactly the rows severity_for() puts in that
-  tier, so the public tier filters agree with the feed.
+  tier, so the public tier filters agree with the feed;
+- /register rate limiting is keyed by the real client behind nginx
+  (X-Real-IP, trusted from loopback only), per /64 for IPv6, with idle
+  entries pruned.
 
 With a database path, the same tier-consistency audit runs against a
 copy of real data (pass a copy, never the live file) and prints the
@@ -118,6 +121,42 @@ store.ingest("old-key-bbbbbbbbbbbbb", "203.0.113.30", 80, "manual", "manual", "m
 check(sev_of("203.0.113.30") is None, "manual-only report never published")
 
 tier_audit(store, "scratch")
+
+print("Registration rate limit identity")
+
+
+class FakeReq:
+    """Just enough of a request for Handler._rate_client()."""
+    def __init__(self, peer, real=None):
+        self.client_address = (peer, 40000)
+        self.headers = {"X-Real-IP": real} if real else {}
+
+
+rc = col.Handler._rate_client
+check(rc(FakeReq("127.0.0.1", "198.51.100.7")) == "198.51.100.7",
+      "proxied request -> keyed by the real client (X-Real-IP)")
+check(rc(FakeReq("127.0.0.1", "198.51.100.7")) != rc(FakeReq("127.0.0.1", "198.51.100.8")),
+      "two installs behind the proxy get separate buckets")
+check(rc(FakeReq("127.0.0.1", "2001:db8:1:2::a")) == rc(FakeReq("127.0.0.1", "2001:db8:1:2:ffff::9")),
+      "IPv6 clients share one bucket per /64")
+check(rc(FakeReq("127.0.0.1", "::ffff:198.51.100.7")) == "198.51.100.7",
+      "IPv4-mapped X-Real-IP normalised")
+check(rc(FakeReq("203.0.113.5", "198.51.100.7")) == "203.0.113.5",
+      "X-Real-IP ignored unless the peer is loopback (no spoofing)")
+check(rc(FakeReq("127.0.0.1", "not-an-ip")) == "127.0.0.1",
+      "garbage X-Real-IP falls back to the peer")
+check(rc(FakeReq("127.0.0.1")) == "127.0.0.1",
+      "local request without X-Real-IP keyed by the peer")
+
+lim = col.RateLimiter(2)
+t0 = time.time()
+check(lim.allow("a", t0) and lim.allow("a", t0) and not lim.allow("a", t0),
+      "limiter refuses the third request in the hour")
+check(lim.allow("b", t0), "another client is unaffected")
+for i in range(20005):
+    lim.allow("idle-%d" % i, t0 - 7200)
+lim.allow("c", t0)
+check(len(lim._hits) < 100, "idle clients pruned (table bounded)")
 
 if len(sys.argv) > 1:
     print("Audit of %s" % sys.argv[1])

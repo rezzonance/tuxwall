@@ -60,10 +60,29 @@ never-ban list (DNS, NTP, gateway, own addresses, APT mirrors; added
 would close it, at the cost of single-install catches never being enforced
 by others.
 
+## Registration rate limit (same branch)
+
+`/register` rate-limited by `client_address`, which behind nginx is always
+`127.0.0.1`. Every install shared one bucket of `RATE_LIMIT_PER_HOUR` (120)
+registrations per hour, so a burst of new installs, or one abuser sending
+120 requests, made "register up front" fail for everyone for an hour.
+Reports still auto-register, but those installs' 7-day trust clock started
+late.
+
+`Handler._rate_client()` now keys the limiter on the real client from
+nginx's `X-Real-IP` (already set on `/register`; upstream `real_ip_header
+CF-Connecting-IP`). The header is trusted only when the peer is loopback;
+IPv6 clients are bucketed per /64; IPv4-mapped forms are normalised. The
+value is used only for the in-memory limiter, never logged or stored, so
+reporters stay anonymous. `RateLimiter` prunes idle entries once it tracks
+more than 20,000 clients. No nginx change is needed.
+
 ## Verification
 
 `python3 tools/collector_severity_check.py [copy-of-reports.db]`, also added
-to CI. It fails 9 checks on the 3.3.0 collector and passes on this branch.
+to CI. It covers the severity rules, the tier filters and the registration
+rate-limit identity; it fails on the 3.3.0 collector and passes on this
+branch.
 
 ## Rollout
 
