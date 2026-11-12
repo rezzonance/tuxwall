@@ -1043,12 +1043,6 @@ table .btn { margin-left: 8px; }
 .sec-map[data-palette="amber"]  { --map-accent: #ffa32e; --map-accent-soft: rgba(255,163,46,0.5); }
 
 .sec-map .leaflet-container { background: transparent; font-family: var(--font); }
-.sec-map .leaflet-tile-pane {
-  filter: saturate(0.35) brightness(0.62) contrast(1.15) hue-rotate(6deg);
-}
-.sec-map[data-palette="cyber"]  .leaflet-tile-pane { filter: saturate(0.4) brightness(0.6) contrast(1.2) hue-rotate(165deg); }
-.sec-map[data-palette="matrix"] .leaflet-tile-pane { filter: saturate(0.45) brightness(0.6) contrast(1.2) hue-rotate(95deg); }
-.sec-map[data-palette="amber"]  .leaflet-tile-pane { filter: saturate(0.5) brightness(0.65) contrast(1.15) hue-rotate(-18deg); }
 
 /* ── Leaflet chrome ─────────────────────────────────────────────────────── */
 .sec-map .leaflet-control-zoom {

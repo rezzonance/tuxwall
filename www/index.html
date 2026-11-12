@@ -6,14 +6,20 @@
   <title>TuxWall - Network Dashboard</title>
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
-  <link rel="stylesheet" href="/css/style.css?v=202611082105">
-  <link rel="stylesheet" href="/css/polish.css?v=202611082105">
-  <link rel="stylesheet" href="/css/firewall.css?v=202611082105">
-  <link rel="stylesheet" href="/css/bento.css?v=202611082105">
-  <link rel="stylesheet" href="/css/heroes.css?v=202611082105">
-  <link rel="stylesheet" href="/css/sidebar.css?v=202611082105">
-  <link rel="stylesheet" href="/css/action-icons.css?v=202611082105">
-  <link rel="stylesheet" href="/css/subtab-icons.css?v=202611082105">
+  <link rel="stylesheet" href="/css/style.css?v=20261111234908">
+  <link rel="stylesheet" href="/css/polish.css?v=202611110122">
+  <link rel="stylesheet" href="/css/firewall.css?v=202611110122">
+  <link rel="stylesheet" href="/css/bento.css?v=202611110122">
+  <link rel="stylesheet" href="/css/heroes.css?v=202611110122">
+  <link rel="stylesheet" href="/css/sidebar.css?v=202611110122">
+  <link rel="stylesheet" href="/css/action-icons.css?v=202611110122">
+  <link rel="stylesheet" href="/css/subtab-icons.css?v=202611110122">
+  <link rel="stylesheet" href="/css/themes.css?v=20261111195537">
+  <link rel="stylesheet" href="/css/enhance.css?v=20261111223739">
+  <link rel="stylesheet" href="/css/netmap.css?v=20261111202556">
+  <link rel="stylesheet" href="/css/insights.css?v=20261111233113">
+  <link rel="stylesheet" href="/css/buttons.css?v=20261111224055">
+  <link rel="stylesheet" href="/css/worldmap.css?v=20261111234908">
 </head>
 <body>
 <div id="login-gate" class="login-gate" hidden>
@@ -394,7 +400,7 @@
         </div>
       </div>
 
-      <!-- ── Attack map · top talkers · Suricata ──────────────────────── -->
+      <!-- ── Attack map (top talkers + Suricata moved to Router Insights) ── -->
       <div class="chart-grid chart-grid-map">
         <div class="card">
           <div class="card-head">
@@ -403,77 +409,12 @@
           </div>
           <div id="ov-map" class="sec-map ov-map"></div>
         </div>
-        <div class="card">
-          <div class="card-head"><h2>Top Talkers</h2><span class="muted">per-client rates</span></div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>Client</th><th>Download</th><th>Upload</th></tr></thead>
-              <tbody id="ov-talkers-body"></tbody>
-            </table>
-          </div>
-        </div>
-        <div class="card">
-          <div class="card-head"><h2>Suricata Alerts</h2><span class="muted" id="ov-suricata-hint">last 24h</span></div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>Signature</th><th>Sev</th><th>Count</th></tr></thead>
-              <tbody id="ov-suricata-body"></tbody>
-            </table>
-          </div>
-        </div>
       </div>
 
-      <!-- ── Ratio donuts (bento groups) ──────────────────────────────── -->
-      <div class="ov-donut-bento">
-        <div class="card ovb-card ovb-dns">
-          <div class="card-head"><h2>DNS</h2><span class="muted">filtering · query mix · cache</span></div>
-          <div class="ovb-mini-grid">
-            <div class="ovb-tile">
-              <div class="ovb-tile-title">Sinkhole<span>blocked vs allowed</span></div>
-              <div class="pie-wrap"><canvas id="ov-pie-sinkhole" class="pie-canvas"></canvas></div>
-            </div>
-            <div class="ovb-tile">
-              <div class="ovb-tile-title">Query types<span>unbound</span></div>
-              <div class="pie-wrap"><canvas id="ov-pie-qtypes" class="pie-canvas"></canvas></div>
-            </div>
-            <div class="ovb-tile">
-              <div class="ovb-tile-title">IPv4 / IPv6<span>queries</span></div>
-              <div class="pie-wrap"><canvas id="ov-pie-ipv" class="pie-canvas"></canvas></div>
-            </div>
-            <div class="ovb-tile">
-              <div class="ovb-tile-title">Cache<span>hit vs miss</span></div>
-              <div class="pie-wrap"><canvas id="ov-pie-cache" class="pie-canvas"></canvas></div>
-            </div>
-          </div>
-        </div>
-
-        <div class="card ovb-card ovb-attacks">
-          <div class="card-head"><h2>Attacks by Country</h2><span class="muted">unique sources</span></div>
-          <div class="ovb-tile ovb-tile-grow">
-            <div class="pie-wrap"><canvas id="ov-pie-countries" class="pie-canvas"></canvas></div>
-          </div>
-        </div>
-
-        <div class="card ovb-card ovb-mem">
-          <div class="card-head"><h2>Memory</h2><span class="muted">used vs available</span></div>
-          <div class="ovb-tile ovb-tile-grow">
-            <div class="pie-wrap"><canvas id="ov-pie-mem" class="pie-canvas"></canvas></div>
-          </div>
-        </div>
-
-        <div class="card ovb-card ovb-tfw">
-          <div class="card-head"><h2>Traffic &amp; Firewall</h2><span class="muted">lifetime totals</span></div>
-          <div class="ovb-mini-grid ovb-pair">
-            <div class="ovb-tile">
-              <div class="ovb-tile-title">Down / Up<span>traffic</span></div>
-              <div class="pie-wrap"><canvas id="ov-pie-bw" class="pie-canvas"></canvas></div>
-            </div>
-            <div class="ovb-tile">
-              <div class="ovb-tile-title">Allow / Block<span>packets</span></div>
-              <div class="pie-wrap"><canvas id="ov-pie-fw" class="pie-canvas"></canvas></div>
-            </div>
-          </div>
-        </div>
+      <!-- ── Router Insights (tabbed early-warning panel, scripts/insights.js) ── -->
+      <div class="card ins-card" id="ov-insights">
+        <div class="card-head"><h2>Router Insights</h2><span class="ins-summary" id="ins-summary" aria-live="polite">Collecting data…</span></div>
+        <div class="ins-body"></div>
       </div>
     </section>
     <section id="view-clients" class="view">
@@ -1087,7 +1028,7 @@
           <div class="card-toolbar bl-toolbar">
             <input type="search" id="fw-search" placeholder="Filter rules (port, host, iface, action)…" autocomplete="off" spellcheck="false">
             <span class="toolbar-spacer"></span>
-            <button id="fw-add-open" class="btn btn-primary" type="button">+ Add Rule</button>
+            <button id="fw-add-open" class="btn btn-primary" type="button">Add Rule</button>
           </div>
           <div class="fw-chip-row" id="fw-iface-chips"></div>
           <div class="table-wrap">
@@ -1217,7 +1158,7 @@
             <select id="pf-int-ip" title="Internal host (from DHCP leases)"></select>
             <input type="number" id="pf-int-port" placeholder="Int port" min="1" max="65535" autocomplete="off" style="width:110px">
             <input type="text"   id="pf-label"    placeholder="Label (optional)" autocomplete="off" style="width:160px" spellcheck="false">
-            <button id="pf-add-btn" class="btn" type="button">Add Rule</button>
+            <button id="pf-add-btn" class="btn btn-primary" type="button">Add Rule</button>
             <span class="toolbar-spacer"></span>
             <span class="muted" id="pf-hint"></span>
           </div>
@@ -1585,6 +1526,7 @@
       <!-- OPNsense-style sub-tabs -->
       <div class="fw-subtabs" id="sec-subtabs">
         <button class="fw-subtab active" type="button" data-sec-pane="attacks">Attacks</button>
+        <button class="fw-subtab" type="button" data-sec-pane="timeline">Timeline</button>
         <button class="fw-subtab" type="button" data-sec-pane="tripwire">Tripwire</button>
         <button class="fw-subtab" type="button" data-sec-pane="sensors">Sensors</button>
         <button class="fw-subtab" type="button" data-sec-pane="deception">Deception</button>
@@ -1592,6 +1534,9 @@
         <button class="fw-subtab" type="button" data-sec-pane="traffic">Traffic</button>
         <span class="fw-subtabs-fill"></span>
       </div>
+
+      <!-- Pane: Timeline (filled by /scripts/netmap.js) -->
+      <div class="fw-pane" data-sec-pane="timeline" hidden></div>
 
       <!-- Pane: Attacks (map + top lists + chart) -->
       <div class="fw-pane" data-sec-pane="attacks">
@@ -1702,11 +1647,11 @@
           </div>
           <p class="trip-message-reason" id="sec-trip-msg-reason"></p>
           <div class="trip-message-grid" id="sec-trip-msg-grid"></div>
-          <div class="trip-resolve" id="sec-trip-resolve" hidden>
+          <form class="trip-resolve" id="sec-trip-resolve" data-nosubmit hidden>
             <input type="password" id="sec-trip-pass" placeholder="Admin password" aria-label="Admin password to resolve the trip" autocomplete="off">
             <button id="sec-trip-resolve-btn" class="btn btn-sm btn-act" type="button">Resolve &amp; restore WAN</button>
             <span class="trip-resolve-note">Admin session + password &mdash; a stolen session alone can't re-open the WAN.</span>
-          </div>
+          </form>
         </div>
 
         <p class="muted bl-note">WAN containment on <b>confirmed intrusion-class events</b>: Suricata priority-1 alerts (admin compromise, trojan activity, web application attack, shellcode) or the canary attempting any outbound connection. <b>Medium</b> cuts LAN&#8596;WAN forwarding but keeps WireGuard (51820) open as the emergency admin door; <b>High</b> additionally closes all WAN access — the router is reachable from the LAN only. <b>A trip never auto-restores</b>: a timer would re-open the door before the compromise is actually fixed. Resolve deliberately, after investigating, with your admin password.</p>
@@ -2030,7 +1975,7 @@
               <input type="number" id="wg-setup-keepalive" value="25" min="0" max="3600">
             </label>
           </div>
-          <button type="submit" class="btn" id="wg-setup-btn">Set up WireGuard</button>
+          <button type="submit" class="btn btn-primary" id="wg-setup-btn">Set up WireGuard</button>
           <span class="muted" id="wg-setup-error"></span>
         </form>
         <p class="muted bl-note">Setup opens UDP port 51820 in the firewall, enables the wg0 interface at boot, and creates the first client config for you to scan.</p>
@@ -2060,7 +2005,7 @@
           <div class="card-head">
             <h2>Clients</h2>
             <span class="muted" id="wg-hint"></span>
-            <button type="button" class="btn" id="wg-add-peer">Add Client</button>
+            <button type="button" class="btn btn-primary" id="wg-add-peer">Add Client</button>
           </div>
           <div class="table-wrap">
             <table id="wg-peers-table">
@@ -3043,7 +2988,7 @@
         <textarea id="cfg-modal-text" class="wg-conf cfg-text" rows="18" spellcheck="false"></textarea>
         <p class="muted cfg-hint" id="cfg-modal-hint"></p>
         <div class="wg-modal-actions">
-          <button type="button" class="btn" id="cfg-modal-save">Save &amp; restart</button>
+          <button type="button" class="btn btn-primary" id="cfg-modal-save">Save &amp; restart</button>
           <button type="button" class="btn" id="cfg-modal-cancel">Cancel</button>
         </div>
       </div>
@@ -3326,7 +3271,7 @@
           <div class="card-toolbar">
             <input type="search" id="users-search" placeholder="Filter by username or full name..." autocomplete="off">
             <span class="muted" id="users-count"></span>
-            <button class="btn btn-sm" id="nu-open" type="button">+ Add user</button>
+            <button class="btn btn-sm" id="nu-open" type="button">Add user</button>
           </div>
           <div class="table-wrap">
             <table class="users-table">
@@ -3358,13 +3303,13 @@
           <button id="totp-confirm-btn" class="btn btn-primary" type="button">Confirm &amp; enable</button>
           <button id="totp-cancel-btn" class="btn" type="button">Cancel</button>
         </div>
-        <div id="totp-disable-row" hidden>
+        <form id="totp-disable-row" data-nosubmit hidden>
           <label class="login-label" for="totp-disable-pass">Current password</label>
           <input type="password" id="totp-disable-pass" class="login-input" autocomplete="current-password">
           <label class="login-label" for="totp-disable-code">6-digit code</label>
           <input type="text" id="totp-disable-code" class="login-input" inputmode="numeric" maxlength="6" autocomplete="one-time-code" spellcheck="false">
           <button id="totp-disable-btn" class="btn btn-act" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m6 6 12 12"/></svg><span>Disable 2FA</span></button>
-        </div>
+        </form>
         <p class="login-error" id="totp-msg" hidden></p>
       </div>
 
@@ -3433,7 +3378,7 @@
         <div class="modal-box">
           <button type="button" class="modal-close" id="user-modal-close">&times;</button>
           <h3 id="user-modal-title">Add user</h3>
-          <div class="fw-modal-grid">
+          <form class="fw-modal-grid" data-nosubmit autocomplete="off">
             <label class="fw-field">
               <span>Username</span>
               <input type="text" id="um-name" autocomplete="off" spellcheck="false" maxlength="32">
@@ -3465,10 +3410,10 @@
               <input type="checkbox" id="um-enabled" checked>
               <span>Account enabled</span>
             </label>
-          </div>
+          </form>
           <p class="muted" id="um-msg"></p>
           <div class="wg-modal-actions">
-            <button class="btn" id="um-save" type="button">Save</button>
+            <button class="btn btn-primary" id="um-save" type="button">Save</button>
             <button class="btn btn-ghost" id="um-cancel" type="button">Cancel</button>
           </div>
         </div>
@@ -3711,7 +3656,12 @@
     <p class="muted" id="cs-ban-status" style="margin-top:10px"></p>
   </div>
 </div>
-<script src="/scripts/dashboard.js?v=202611082105"></script>
+<script src="/scripts/worldmap.js?v=20261111235643"></script>
+<script src="/scripts/dashboard.js?v=20261111234908"></script>
+<script src="/scripts/enhance.js?v=20261111222731"></script>
+<script src="/scripts/netmap.js?v=20261112002528"></script>
+<script src="/scripts/insights.js?v=20261111233113"></script>
+<script src="/scripts/buttons.js?v=20261111222731"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>

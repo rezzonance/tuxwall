@@ -1,0 +1,43 @@
+/* Attack-map basemap (scripts/worldmap.js): Natural Earth outlines on canvas.
+   Ocean colours are set per theme by worldmap.js as --wm-* on the map. */
+.sec-map.wm,
+body.light-theme .sec-map.wm {
+  background:
+    radial-gradient(ellipse at 50% 45%, var(--wm-ocean-hi, #0b1626) 0%, var(--wm-ocean, #060a12) 58%, var(--wm-ocean-lo, #03060b) 100%);
+}
+.sec-map.wm canvas.leaflet-interactive { cursor: grab; }
+.sec-map.wm.leaflet-dragging canvas.leaflet-interactive { cursor: grabbing; }
+
+/* Country labels */
+.sec-map .wm-label {
+  background: none; border: 0; width: auto !important; height: auto !important;
+  pointer-events: none;
+}
+.sec-map .wm-label span {
+  position: absolute; left: 0; top: 0; transform: translate(-50%, -50%);
+  white-space: nowrap;
+  font: 600 9.5px/1 var(--tw-font-sys, var(--font, system-ui, sans-serif));
+  letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--wm-label, rgba(200, 210, 225, 0.55));
+  text-shadow: 0 0 3px var(--wm-halo, #000), 0 0 6px var(--wm-halo, #000);
+  opacity: 0.8;
+}
+.sec-map .wm-label.wm-hot span { color: var(--wm-label-hot, #ff8a9a); opacity: 0.95; }
+
+/* Country hover card — lives above every map overlay */
+.sec-map .wm-tip {
+  position: absolute; left: 0; top: 0; z-index: 480;
+  pointer-events: none;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 7px 10px; border-radius: 8px;
+  background: linear-gradient(160deg, rgba(14, 21, 34, 0.96), rgba(7, 11, 19, 0.96));
+  border: 1px solid color-mix(in srgb, var(--map-accent) 30%, rgba(255, 255, 255, 0.1));
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+  color: var(--text, #e6edf3);
+  font-size: 11.5px; line-height: 1.35; white-space: nowrap;
+}
+.sec-map .wm-tip[hidden] { display: none; }
+.sec-map .wm-tip b { font-size: 12.5px; font-weight: 700; color: #fff; }
+.sec-map .wm-tip span { color: rgba(255, 255, 255, 0.62); }
+.sec-map .wm-tip i { font-style: normal; font-weight: 700; color: color-mix(in srgb, var(--map-accent) 70%, #fff); font-variant-numeric: tabular-nums; }
+.sec-map .wm-tip .wm-tip-none { color: rgba(255, 255, 255, 0.4); }

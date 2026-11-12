@@ -25,7 +25,9 @@ install -m 0755 "$REPO_DIR/collector/tuxwall-collector.py" /opt/tuxwall-collecto
 # Admin key for the loopback-only /api/admin endpoints (ban removal).
 # Never proxied by nginx. Created once, never overwritten. Group "adm" can
 # read it so the local admin shell can drive deletions without sudo.
-install -d -m 0750 -g adm /etc/tuxwall-collector
+# 0751: www-data (the LAN Ban Management page) must traverse the directory
+# to read its own admin-api.key; admin.key itself stays 0640 root:adm.
+install -d -m 0751 -g adm /etc/tuxwall-collector
 if [[ ! -s /etc/tuxwall-collector/admin.key ]]; then
   ( umask 027; openssl rand -hex 32 > /etc/tuxwall-collector/admin.key )
   chown root:adm /etc/tuxwall-collector/admin.key

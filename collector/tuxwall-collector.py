@@ -113,7 +113,7 @@ def _version_tuple(value):
 
 def _addr_in_net(ip, net):
     try:
-        return ipaddress.ip_address(str(ip)) in net
+        return _plain_ip(ipaddress.ip_address(str(ip))) in net
     except ValueError:
         return False
 
@@ -130,6 +130,21 @@ def _effective_whitelist():
     except Exception:
         pass
     return nets
+
+
+_NAT64_NET = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _plain_ip(addr):
+    """IPv4 written in IPv6 notation (::ffff:a.b.c.d, NAT64 64:ff9b::a.b.c.d)
+    becomes plain IPv4, so the protected-range check cannot be sidestepped
+    and the same host is never stored under two spellings."""
+    if addr.version == 6:
+        if addr.ipv4_mapped:
+            return addr.ipv4_mapped
+        if addr in _NAT64_NET:
+            return ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
+    return addr
 
 
 def _protected_match(addr):
@@ -156,24 +171,30 @@ TRUST_SECONDS = 7 * 86400  # a key's evidence counts as trusted after a week
 def severity_for(hits, reporters, deception=False, trusted=0):
     """Severity driven by how much of the community has been hit and how hard.
 
-    Deception-source reports (canary/honeypot) are definitionally hostile -
-    nothing legitimate connects to services that do not exist, so they carry
-    zero false-positive potential. A single confirmed canary touch is a
-    deliberate intrusion attempt (e.g. an SSH login with sprayed
-    credentials), not recon noise - so deception evidence floors the entry
-    at medium rather than letting volume alone speak.
+    trusted = distinct reporter keys with at least TRUST_SECONDS (a week) of
+    registration history. Reporter keys are free and auto-registered, and
+    `hits` and `source` are self-reported, so nothing a brand-new key sends
+    can be taken at face value:
 
-    trusted = distinct reporter keys with at least TRUST_SECONDS of
-    registration history. High and critical REQUIRE trusted keys: a single
-    key - even one posting huge fabricated hit counts - can never push an
-    IP past medium on its own, and a brand-new key is capped until it has
-    a week of honest history.
+    - critical: 5+ trusted reporters
+    - high:     2+ trusted reporters, or 1 trusted reporter with 500+ hits
+    - medium:   1+ trusted reporter AND supporting evidence (canary/honeypot
+                evidence, 50+ hits, or a second reporter)
+    - low:      everything else
+
+    Installs in Automatic mode enforce medium and above, so an IP only
+    reaches them once a key with a week of history vouches for it. A burst
+    of fresh keys (each registered seconds ago, each claiming "canary" or a
+    large hit count) stays at low: listed and visible on report cards, but
+    never auto-enforced. Deception evidence from a trusted key is still a
+    single-report medium - a real canary catch from an established install
+    reaches every subscriber immediately.
     """
     if trusted >= 5:
         return SEVERITY_CRITICAL
     if trusted >= 2 or (trusted >= 1 and hits >= 500):
         return SEVERITY_HIGH
-    if reporters >= 2 or hits >= 50 or deception:
+    if trusted >= 1 and (deception or hits >= 50 or reporters >= 2):
         return SEVERITY_MEDIUM
     return SEVERITY_LOW
 
@@ -599,13 +620,16 @@ class Store:
                       re-shows or skips rows when new bans arrive mid-browse.
         order:        "hits" (default) or "recent" (last_seen DESC, ip DESC).
         """
+        # Exact-tier filters, mirroring severity_for() for the published
+        # set (every published row has deception evidence, so severity
+        # depends only on trusted reporters and hits). Must stay in sync.
+        tr = "COALESCE(t.trusted, 0)"
         tier_constraints = {
-            SEVERITY_LOW: "(r.hits < 50 AND c.reporters < 2)",
-            SEVERITY_MEDIUM: ("(r.hits >= 50 OR c.reporters >= 2)"
-                              " AND r.hits < 500 AND c.reporters < 5"),
-            SEVERITY_HIGH: ("(r.hits >= 500 OR c.reporters >= 5)"
-                            " AND r.hits < 5000 AND c.reporters < 10"),
-            SEVERITY_CRITICAL: "(r.hits >= 5000 OR c.reporters >= 10)",
+            SEVERITY_LOW: "%s = 0" % tr,
+            SEVERITY_MEDIUM: "(%s = 1 AND r.hits < 500)" % tr,
+            SEVERITY_HIGH: ("(%s BETWEEN 2 AND 4 OR (%s = 1 AND r.hits >= 500))"
+                            % (tr, tr)),
+            SEVERITY_CRITICAL: "%s >= 5" % tr,
         }
         # Deception-evidence gate: only IPs with canary/honeypot evidence
         # can ever be published (see _deception_evidence). Manual/engine
@@ -850,8 +874,13 @@ class RateLimiter:
 
     def allow(self, key, now):
         with self._lock:
-            d = self._hits[key]
             window = now - 3600
+            if len(self._hits) > 20000:
+                # Keyed by real client addresses now: drop idle entries so
+                # the table cannot grow without bound.
+                for k in [k for k, d in self._hits.items() if not d or d[-1] < window]:
+                    del self._hits[k]
+            d = self._hits[key]
             while d and d[0] < window:
                 d.popleft()
             if len(d) >= self.limit:
@@ -901,6 +930,32 @@ class Handler(BaseHTTPRequestHandler):
 
     def _ok_json(self, **kw):
         self._json(200, {"ok": True, **kw})
+
+    def _rate_client(self):
+        """Rate-limit identity for anonymous endpoints (/register).
+
+        Behind nginx every request arrives from 127.0.0.1, so keying on
+        client_address put all installs in one shared bucket: a burst of
+        new installs - or one abuser - could lock everyone out of
+        registration for an hour. nginx passes the real client in
+        X-Real-IP (real_ip_header CF-Connecting-IP upstream); trust it
+        only when the peer is loopback, i.e. the request came through
+        the local proxy. IPv6 clients are bucketed per /64, since one
+        host commonly holds a whole /64. Used for the limiter only -
+        never logged or stored, so reporters stay anonymous.
+        """
+        peer = self.client_address[0] if self.client_address else ""
+        try:
+            if ipaddress.ip_address(peer).is_loopback:
+                real = (self.headers.get("X-Real-IP") or "").strip()
+                if real:
+                    addr = _plain_ip(ipaddress.ip_address(real))
+                    if addr.version == 6:
+                        return str(ipaddress.ip_network(str(addr) + "/64", strict=False))
+                    return str(addr)
+        except ValueError:
+            pass
+        return peer
 
     # --- Admin auth (loopback-only endpoints, never proxied by nginx) ------
     def _admin_key(self):
@@ -1029,7 +1084,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/public/bans/"):
             # Per-IP lookup used by dashboard browsers and third-party tools.
             try:
-                addr = ipaddress.ip_address(path[len("/api/public/bans/"):])
+                addr = _plain_ip(ipaddress.ip_address(path[len("/api/public/bans/"):]))
             except ValueError:
                 self._json(400, {"ok": False, "error": "Invalid IP"})
                 return
@@ -1051,7 +1106,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/ip/"):
             try:
-                addr = ipaddress.ip_address(path[len("/ip/"):])
+                addr = _plain_ip(ipaddress.ip_address(path[len("/ip/"):]))
             except ValueError:
                 self._json(400, {"ok": False, "error": "Invalid IP"})
                 return
@@ -1125,7 +1180,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(401, {"ok": False, "error": "Admin key required"})
                 return
             try:
-                addr = ipaddress.ip_address(path[len("/api/admin/bans/"):])
+                addr = _plain_ip(ipaddress.ip_address(path[len("/api/admin/bans/"):]))
             except ValueError:
                 self._json(400, {"ok": False, "error": "Invalid IP"})
                 return
@@ -1177,7 +1232,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(426, {"ok": False, "error":
                     "Tuxwall %s+ required for community reporting - upgrade to continue sharing" % MIN_REPORTER_VERSION})
                 return
-            client = self.client_address[0] if self.client_address else ""
+            client = self._rate_client()
             if not RATE.allow(client, time.time()):
                 self._json(429, {"ok": False, "error": "Too many requests"})
                 return
@@ -1268,7 +1323,7 @@ class Handler(BaseHTTPRequestHandler):
 
         ip_raw = str(body.get("ip") or "").strip()
         try:
-            addr = ipaddress.ip_address(ip_raw)
+            addr = _plain_ip(ipaddress.ip_address(ip_raw))
         except ValueError:
             self._json(400, {"ok": False, "error": "Invalid IP"})
             return
@@ -1386,7 +1441,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(401, {"ok": False, "error": "Admin key required"})
             return
         try:
-            addr = ipaddress.ip_address(path[len("/api/admin/bans/"):])
+            addr = _plain_ip(ipaddress.ip_address(path[len("/api/admin/bans/"):]))
         except ValueError:
             self._json(400, {"ok": False, "error": "Invalid IP"})
             return

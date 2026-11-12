@@ -1,0 +1,461 @@
+/* Icons (24x24 stroke 1.9, round caps) used as a CSS mask by .btn::before.
+   buttons.js sets data-btn-icon from the label. */
+[data-btn-icon="save"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 3h11.2L20 6.8V19a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 1-2Z'/%3E%3Cpath d='M8 3v5h7V3'/%3E%3Cpath d='M7.5 21v-6.5h9V21'/%3E%3C/svg%3E"); }
+[data-btn-icon="check"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m4.5 12.5 5 5L19.5 7'/%3E%3C/svg%3E"); }
+[data-btn-icon="edit"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 20h8.5'/%3E%3Cpath d='M16.4 3.6a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z'/%3E%3C/svg%3E"); }
+[data-btn-icon="plus"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 5v14M5 12h14'/%3E%3C/svg%3E"); }
+[data-btn-icon="trash"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 6.5h17'/%3E%3Cpath d='M8.5 6.5V4.5h7v2'/%3E%3Cpath d='M18.5 6.5 17.7 19a2 2 0 0 1-2 1.9H8.3a2 2 0 0 1-2-1.9L5.5 6.5'/%3E%3Cpath d='M10 11v5.5M14 11v5.5'/%3E%3C/svg%3E"); }
+[data-btn-icon="x"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6.5 6.5l11 11M17.5 6.5l-11 11'/%3E%3C/svg%3E"); }
+[data-btn-icon="rotate"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20.5 12a8.5 8.5 0 1 1-2.5-6'/%3E%3Cpath d='M20.5 3.5V9H15'/%3E%3C/svg%3E"); }
+[data-btn-icon="download"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3.5v11'/%3E%3Cpath d='m7.5 10 4.5 4.5 4.5-4.5'/%3E%3Cpath d='M4 16.5V19a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2.5'/%3E%3C/svg%3E"); }
+[data-btn-icon="upload"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 15V4'/%3E%3Cpath d='M7.5 8.5 12 4l4.5 4.5'/%3E%3Cpath d='M4 16.5V19a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2.5'/%3E%3C/svg%3E"); }
+[data-btn-icon="play"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7.5 5.2v13.6a1 1 0 0 0 1.5.86l11-6.8a1 1 0 0 0 0-1.72L9 4.34a1 1 0 0 0-1.5.86Z'/%3E%3C/svg%3E"); }
+[data-btn-icon="send"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 3 10.5 13.5'/%3E%3Cpath d='m21 3-6.5 18-4-7.5L3 9.5 21 3Z'/%3E%3C/svg%3E"); }
+[data-btn-icon="copy"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='8.5' y='8.5' width='12' height='12' rx='2'/%3E%3Cpath d='M15.5 8.5V5.5a2 2 0 0 0-2-2h-8a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h3'/%3E%3C/svg%3E"); }
+[data-btn-icon="ban"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3 4.5 6v5.5c0 4.6 3.2 8.2 7.5 9.5 4.3-1.3 7.5-4.9 7.5-9.5V6L12 3Z'/%3E%3Cpath d='m9.5 9.5 5 5M14.5 9.5l-5 5'/%3E%3C/svg%3E"); }
+[data-btn-icon="allow"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3 4.5 6v5.5c0 4.6 3.2 8.2 7.5 9.5 4.3-1.3 7.5-4.9 7.5-9.5V6L12 3Z'/%3E%3Cpath d='m8.8 12.2 2.3 2.3 4.4-4.6'/%3E%3C/svg%3E"); }
+[data-btn-icon="power"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3v8.5'/%3E%3Cpath d='M17.7 6.6a8 8 0 1 1-11.4 0'/%3E%3C/svg%3E"); }
+[data-btn-icon="power-off"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='8.5'/%3E%3Cpath d='m6 6 12 12'/%3E%3C/svg%3E"); }
+[data-btn-icon="search"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='10.8' cy='10.8' r='6.8'/%3E%3Cpath d='m20.5 20.5-4.9-4.9'/%3E%3C/svg%3E"); }
+[data-btn-icon="sliders"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 7h9M17 7h3M4 17h3M11 17h9'/%3E%3Ccircle cx='15' cy='7' r='2.2'/%3E%3Ccircle cx='9' cy='17' r='2.2'/%3E%3C/svg%3E"); }
+[data-btn-icon="login"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14.5 3.5H18a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2h-3.5'/%3E%3Cpath d='m10 16.5 4.5-4.5L10 7.5'/%3E%3Cpath d='M14.5 12H3.5'/%3E%3C/svg%3E"); }
+[data-btn-icon="qr"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3.5' y='3.5' width='6.5' height='6.5' rx='1'/%3E%3Crect x='14' y='3.5' width='6.5' height='6.5' rx='1'/%3E%3Crect x='3.5' y='14' width='6.5' height='6.5' rx='1'/%3E%3Cpath d='M14 14h2.5v2.5M20.5 14v.01M14 20.5h3M20.5 17.5v3M17.5 17.5h.01'/%3E%3C/svg%3E"); }
+[data-btn-icon="key"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='8' cy='15.5' r='4.5'/%3E%3Cpath d='m11.2 12.3 8.8-8.8M16.5 7l2.5 2.5M14.2 9.3l2 2'/%3E%3C/svg%3E"); }
+[data-btn-icon="code"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5Z'/%3E%3Cpath d='M14 3.5v5h5'/%3E%3Cpath d='m10 12.5-2 2 2 2M14 12.5l2 2-2 2'/%3E%3C/svg%3E"); }
+[data-btn-icon="chevron"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6.5 9.5 5.5 5.5 5.5-5.5'/%3E%3C/svg%3E"); }
+[data-btn-icon="check-square"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3.5' y='3.5' width='17' height='17' rx='3'/%3E%3Cpath d='m8 12.2 2.8 2.8L16.2 9'/%3E%3C/svg%3E"); }
+[data-btn-icon="square"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3.5' y='3.5' width='17' height='17' rx='3'/%3E%3C/svg%3E"); }
+[data-btn-icon="external"] { --btn-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 4h6v6'/%3E%3Cpath d='M20 4 11 13'/%3E%3Cpath d='M18.5 14v4.5a1.5 1.5 0 0 1-1.5 1.5H5.5A1.5 1.5 0 0 1 4 18.5V7a1.5 1.5 0 0 1 1.5-1.5H10'/%3E%3C/svg%3E"); }
+
+/* ============================================================================
+   TuxWall buttons — ONE design for every button (the System → Maintenance
+   "Reboot system" look): a translucent tint of the button colour with a
+   coloured border, tinted label and soft glow at rest; a solid colour
+   gradient with white (or dark, on pale colours) label on hover.
+   The only thing that differs between buttons is --bc, the button colour,
+   picked from data-btn-tone (set by scripts/buttons.js from the label /
+   class) and taken from the theme palette, so it follows the theme. Themes
+   change colours, corner shape and glow vs. shadow — never the structure.
+   Selectors are prefixed with html:not(#_tw#_x) — two IDs' worth of
+   specificity — so they beat legacy per-view button rules without
+   !important. Tabs, chips, toggles and sidebar items are not tagged.
+   ========================================================================= */
+html:not(#_tw#_x) :is(.btn, [data-btn-tone]),
+html:not(#_tw#_x) input[type="file"] {
+  --bc: var(--h-slate, #94a3b8);
+  --b-h: 36px;
+  --b-px: 14px;
+  --b-fs: 13px;
+  --b-fw: 600;
+  --b-ico: 16px;
+  --b-radius: var(--tw-radius-sm, 9px);
+  --b-font: inherit;
+  --b-tt: none;
+  --b-ls: .015em;
+  --b-lift: -1px;
+  --b-blur: none;
+  /* rest */
+  --b-fg: color-mix(in srgb, var(--bc) 72%, var(--text));
+  --b-bg: color-mix(in srgb, var(--bc) 9%, rgba(255, 255, 255, .03));
+  --b-bd: color-mix(in srgb, var(--bc) 50%, transparent);
+  --b-sh: 0 0 16px color-mix(in srgb, var(--bc) 18%, transparent);
+  /* hover */
+  --b-on: #fff;
+  --b-bg-h: linear-gradient(to bottom,
+      color-mix(in srgb, var(--bc) 86%, #fff) 0%,
+      var(--bc) 50%,
+      color-mix(in srgb, var(--bc) 86%, #000) 100%);
+  --b-bd-h: color-mix(in srgb, var(--bc) 75%, #000);
+  --b-sh-h: 0 0 22px color-mix(in srgb, var(--bc) 28%, transparent);
+  /* pressed */
+  --b-bg-a: linear-gradient(to bottom,
+      color-mix(in srgb, var(--bc) 78%, #000) 0%,
+      color-mix(in srgb, var(--bc) 90%, #000) 100%);
+  --b-sh-a: inset 0 2px 5px rgba(0, 0, 0, .3), 0 0 12px color-mix(in srgb, var(--bc) 20%, transparent);
+  /* current state, read by the cyberpunk shape layer */
+  --b-fill: var(--b-bg);
+  --b-line: var(--b-bd);
+}
+/* Hover label: white, or a dark shade of the colour when the colour is so
+   pale (amber, cyan, frost, neon green) that white would not read. */
+@supports (color: oklch(from red l c h)) {
+  html:not(#_tw#_x) :is(.btn, [data-btn-tone]),
+  html:not(#_tw#_x) input[type="file"] {
+    --b-on: oklch(from var(--bc) clamp(.22, (.75 - l) * 1000, 1) clamp(0, (l - .75) * 1000, .06) h);
+  }
+}
+
+/* ---- Tones ---------------------------------------------------------------- */
+html:not(#_tw#_x) :is(.btn.btn-danger, [data-btn-tone][data-btn-tone="danger"])   { --bc: var(--red, #f85149); }
+html:not(#_tw#_x) :is(.btn.btn-primary, .btn.login-btn, [data-btn-tone][data-btn-tone="primary"]) { --bc: var(--accent, #4f8cff); }
+html:not(#_tw#_x) [data-btn-tone][data-btn-tone="success"]  { --bc: var(--green, #3fb950); }
+html:not(#_tw#_x) [data-btn-tone][data-btn-tone="warning"]  { --bc: var(--amber, #d29922); }
+html:not(#_tw#_x) :is([data-btn-tone][data-btn-tone="info"], input[type="file"]) { --bc: var(--tw-btn-info, var(--h-teal, #39c5cf)); }
+html:not(#_tw#_x) [data-btn-tone][data-btn-tone="neutral"]  { --bc: var(--h-slate, #94a3b8); }
+/* where teal sits too close to the accent, info borrows the blue hue */
+html[data-theme-style="cyberpunk"], html[data-theme-style="nord"] { --tw-btn-info: var(--h-blue); }
+
+/* ---- The button ----------------------------------------------------------- */
+html:not(#_tw#_x) :is(.btn, [data-btn-tone]) {
+  isolation: isolate;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: .5em;
+  box-sizing: border-box;
+  min-height: var(--b-h);
+  min-width: 0;
+  padding: 0 var(--b-px);
+  vertical-align: middle;
+  font-family: var(--b-font);
+  font-size: var(--b-fs);
+  font-weight: var(--b-fw);
+  line-height: 1.15;
+  letter-spacing: var(--b-ls);
+  text-transform: var(--b-tt);
+  text-decoration: none;
+  text-shadow: none;
+  white-space: nowrap;
+  color: var(--b-fg);
+  background: var(--b-bg);
+  border: 1px solid var(--b-bd);
+  border-radius: var(--b-radius);
+  box-shadow: var(--b-sh);
+  backdrop-filter: var(--b-blur);
+  -webkit-backdrop-filter: var(--b-blur);
+  filter: none;
+  opacity: 1;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: color .14s ease, background-color .14s ease, border-color .14s ease,
+    box-shadow .14s ease, translate .14s ease, filter .14s ease, opacity .14s ease;
+}
+/* No margin reset here: legacy layout rules (table row spacing, 2FA card,
+   deception form alignment) rely on button margins. */
+html:not(#_tw#_x) .btn { position: relative; transform: none; }
+html:not(#_tw#_x) :is(.btn, [data-btn-tone]):hover {
+  --b-fill: var(--b-bg-h);
+  --b-line: var(--b-bd-h);
+  color: var(--b-on);
+  background: var(--b-bg-h);
+  border-color: var(--b-bd-h);
+  box-shadow: var(--b-sh-h);
+  text-shadow: none;
+  translate: 0 var(--b-lift);
+  filter: none;
+}
+html:not(#_tw#_x) .btn:hover { transform: none; }
+html:not(#_tw#_x) :is(.btn, [data-btn-tone]):active {
+  --b-fill: var(--b-bg-a);
+  color: var(--b-on);
+  background: var(--b-bg-a);
+  box-shadow: var(--b-sh-a);
+  translate: 0 0;
+  transition-duration: .06s;
+}
+html:not(#_tw#_x) :is(.btn, [data-btn-tone]) :is(svg, span, b, i, small) { color: inherit; }
+html:not(#_tw#_x) :is(.btn, [data-btn-tone]):focus { outline: none; }
+html:not(#_tw#_x) :is(.btn, [data-btn-tone]):focus-visible {
+  outline: 2px solid var(--bc);
+  outline-offset: 2px;
+}
+
+/* ---- Sizes ---------------------------------------------------------------- */
+html:not(#_tw#_x) :is(.btn.btn-sm, [data-btn-tone].btn-sm) {
+  --b-h: 30px;
+  --b-px: 11px;
+  --b-fs: 12px;
+  --b-ico: 14px;
+}
+html:not(#_tw#_x) :is(.btn.btn-lg, .btn.login-btn) {
+  --b-h: 42px;
+  --b-px: 20px;
+  --b-fs: 14px;
+  --b-ico: 17px;
+}
+html:not(#_tw#_x) .btn.login-btn { width: 100%; margin-top: 6px; }
+
+/* Icon-only buttons (row actions, ✕, service start/stop, bell …): square. */
+html:not(#_tw#_x) [data-btn-tone]:not(.btn)[data-btn-only] { --b-h: 32px; }
+html:not(#_tw#_x) :is(.btn.icon-btn, [data-btn-tone][data-btn-only]) {
+  width: var(--b-h);
+  height: var(--b-h);
+  min-width: var(--b-h);
+  padding: 0;
+  gap: 0;
+  flex: none;
+}
+html:not(#_tw#_x) [data-btn-tone][data-btn-only][data-btn-icon] { font-size: 0; letter-spacing: 0; }
+html:not(#_tw#_x) [data-btn-tone][data-btn-only] > svg {
+  width: var(--b-ico);
+  height: var(--b-ico);
+  flex: none;
+  transform: none;
+}
+html:not(#_tw#_x) .act-btn + .act-btn { margin-left: 6px; }
+/* Topbar Pause/Resume sits inside the "Updated …" pill. */
+html:not(#_tw#_x) .tw-live-btn[data-btn-tone] { --b-h: 30px; --b-px: 11px; --b-fs: 12px; --b-ico: 14px; }
+/* Menu items keep their full-width row layout. */
+html:not(#_tw#_x) .user-menu-item[data-btn-tone] { display: flex; width: 100%; justify-content: flex-start; }
+
+/* ---- Icon slot ------------------------------------------------------------
+   ::before is the leading icon, drawn as a mask so it survives code that
+   rewrites the label with textContent. */
+html:not(#_tw#_x) .btn::before { content: none; }
+html:not(#_tw#_x) [data-btn-tone][data-btn-icon]::before,
+html:not(#_tw#_x) :is(.btn, [data-btn-tone]):is([data-btn-busy], .is-busy, [aria-busy="true"])::before {
+  content: "";
+  display: block;
+  position: static;
+  inset: auto;
+  flex: none;
+  width: var(--b-ico);
+  height: var(--b-ico);
+  margin: 0 0 0 -.15em;
+  background: currentColor;
+  -webkit-mask: var(--btn-icon) center / contain no-repeat;
+  mask: var(--btn-icon) center / contain no-repeat;
+  transform: none;
+  transition: none;
+  pointer-events: none;
+  opacity: .92;
+}
+html:not(#_tw#_x) [data-btn-tone][data-btn-only]::before { margin: 0; }
+html:not(#_tw#_x) .btn-act svg {
+  width: var(--b-ico);
+  height: var(--b-ico);
+  margin-left: -.15em;
+  stroke-width: 1.9;
+}
+html:not(#_tw#_x) .btn.btn-act { gap: .5em; }
+
+/* Busy: label ends with "…" (Saving…, Applying…), .is-busy or aria-busy. */
+html:not(#_tw#_x) :is(.btn, [data-btn-tone]):is([data-btn-busy], .is-busy, [aria-busy="true"]) { cursor: progress; }
+html:not(#_tw#_x) :is(.btn, [data-btn-tone]):is([data-btn-busy], .is-busy, [aria-busy="true"])::before {
+  -webkit-mask: none;
+  mask: none;
+  background: none;
+  box-sizing: border-box;
+  width: calc(var(--b-ico) - 2px);
+  height: calc(var(--b-ico) - 2px);
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: tw-btn-spin .7s linear infinite;
+}
+html:not(#_tw#_x) :is(.btn, [data-btn-tone]):is([data-btn-busy], .is-busy, [aria-busy="true"]) svg { display: none; }
+@keyframes tw-btn-spin { to { transform: rotate(360deg); } }
+
+/* Disabled: the rest look, faded; no hover change. */
+html:not(#_tw#_x) :is(.btn, [data-btn-tone]):is([disabled], [aria-disabled="true"]) {
+  opacity: .48;
+  filter: saturate(.35);
+  box-shadow: none;
+  translate: none;
+  cursor: not-allowed;
+}
+html:not(#_tw#_x) :is(.btn, [data-btn-tone]):is([disabled], [aria-disabled="true"]):hover {
+  --b-fill: var(--b-bg);
+  --b-line: var(--b-bd);
+  color: var(--b-fg);
+  background: var(--b-bg);
+  border-color: var(--b-bd);
+}
+html:not(#_tw#_x) :is(.btn, [data-btn-tone])[disabled]:is([data-btn-busy], .is-busy, [aria-busy="true"]) { opacity: .8; cursor: progress; }
+
+/* ---- Native file input: the "Choose file" button is an info button ------- */
+html:not(#_tw#_x) input[type="file"]::file-selector-button {
+  box-sizing: border-box;
+  height: 30px;
+  padding: 0 11px;
+  margin-right: 10px;
+  font: inherit;
+  font-family: var(--b-font);
+  font-size: 12px;
+  font-weight: var(--b-fw);
+  letter-spacing: var(--b-ls);
+  text-transform: var(--b-tt);
+  color: var(--b-fg);
+  background: var(--b-bg);
+  border: 1px solid var(--b-bd);
+  border-radius: var(--b-radius);
+  box-shadow: var(--b-sh);
+  text-shadow: none;
+  cursor: pointer;
+  transition: color .14s ease, border-color .14s ease, box-shadow .14s ease;
+}
+html:not(#_tw#_x) input[type="file"]::file-selector-button:hover {
+  color: var(--b-on);
+  background: var(--b-bg-h);
+  border-color: var(--b-bd-h);
+  box-shadow: var(--b-sh-h);
+}
+html:not(#_tw#_x) input[type="file"]:focus-visible { outline: 2px solid var(--bc); outline-offset: 2px; }
+
+/* ---- Light themes: dark label at rest (colour mixed with black) ---------- */
+html:not(#_tw#_x) body.light-theme :is(.btn, [data-btn-tone], input[type="file"]) {
+  --b-fg: color-mix(in srgb, var(--bc) 74%, #000);
+  --b-bg: color-mix(in srgb, var(--bc) 10%, transparent);
+  --b-bd: color-mix(in srgb, var(--bc) 55%, transparent);
+  --b-sh: 0 1px 2px color-mix(in srgb, var(--bc) 14%, transparent), 0 0 14px color-mix(in srgb, var(--bc) 12%, transparent);
+  --b-sh-h: 0 0 20px color-mix(in srgb, var(--bc) 26%, transparent), 0 3px 8px -3px color-mix(in srgb, var(--bc) 45%, transparent);
+  --b-sh-a: inset 0 2px 4px rgba(0, 0, 0, .25);
+}
+
+/* ---- Theme personalities: colours, corners, glow vs. shadow -------------- */
+
+/* Midnight Glass: frosted, 12px corners (the reference look). */
+html:not(#_tw#_x)[data-theme-style="midnight"] :is(.btn, [data-btn-tone], input[type="file"]) {
+  --b-radius: 12px;
+  --b-blur: blur(14px) saturate(160%);
+}
+
+/* Nord: calm — soft drop shadow instead of glow. */
+html:not(#_tw#_x)[data-theme-style="nord"] :is(.btn, [data-btn-tone], input[type="file"]) {
+  --b-sh: 0 1px 2px rgba(0, 0, 0, .22);
+  --b-sh-h: 0 4px 12px -4px rgba(0, 0, 0, .45), 0 2px 8px -4px color-mix(in srgb, var(--bc) 45%, transparent);
+  --b-sh-a: inset 0 2px 4px rgba(0, 0, 0, .25);
+}
+
+/* Solarized Light: ink on paper — firmer coloured border, soft shadow. */
+html:not(#_tw#_x)[data-theme-style="solarized-light"] body :is(.btn, [data-btn-tone], input[type="file"]) {
+  --b-fg: color-mix(in srgb, var(--bc) 80%, #000);
+  --b-bg: color-mix(in srgb, var(--bc) 8%, transparent);
+  --b-bd: color-mix(in srgb, var(--bc) 70%, transparent);
+  --b-sh: 0 1px 2px color-mix(in srgb, var(--text) 18%, transparent);
+  --b-sh-h: 0 4px 10px -4px color-mix(in srgb, var(--text) 45%, transparent);
+  --b-sh-a: inset 0 2px 3px rgba(0, 0, 0, .25);
+}
+
+/* Cyberpunk: cut corners, mono uppercase. The shape is painted by a clipped
+   ::after so the glow — a drop-shadow on the button — follows the angled
+   outline instead of being clipped away. */
+html:not(#_tw#_x)[data-theme-style="cyberpunk"] :is(.btn, [data-btn-tone], input[type="file"]) {
+  --cut: 7px;
+  --b-font: var(--tw-font-mono, ui-monospace, monospace);
+  --b-tt: uppercase;
+  --b-ls: .08em;
+  --b-fs: 11.5px;
+  --b-lift: 0px;
+  --b-radius: 0;
+  --b-glow: drop-shadow(0 0 6px color-mix(in srgb, var(--bc) 30%, transparent));
+}
+html:not(#_tw#_x)[data-theme-style="cyberpunk"] :is(.btn, [data-btn-tone]).btn-sm { --b-fs: 11px; }
+html:not(#_tw#_x)[data-theme-style="cyberpunk"] [data-btn-tone]:not(.btn)[data-btn-only] { --cut: 5px; }
+html:not(#_tw#_x)[data-theme-style="cyberpunk"] :is(.btn, [data-btn-tone]) {
+  overflow: visible;
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  filter: var(--b-glow);
+}
+html:not(#_tw#_x)[data-theme-style="cyberpunk"] :is(.btn, [data-btn-tone]):not(.modal-close, .theme-del, .tw-toast-x, .tw-sheet-x, .oc-modal-x) {
+  position: relative;
+}
+html:not(#_tw#_x)[data-theme-style="cyberpunk"] :is(.btn, [data-btn-tone]):not(.act-btn)::after { content: ""; }
+@media (min-width: 561px) {
+  html:not(#_tw#_x)[data-theme-style="cyberpunk"] .act-btn[data-btn-tone]::after { content: ""; }
+}
+html:not(#_tw#_x)[data-theme-style="cyberpunk"] :is(.btn, [data-btn-tone])::after {
+  position: absolute;
+  inset: -1px;
+  z-index: -1;
+  display: block;
+  width: auto;
+  height: auto;
+  margin: 0;
+  opacity: 1;
+  transform: none;
+  border-radius: 0;
+  clip-path: polygon(var(--cut) 0, 100% 0, 100% calc(100% - var(--cut)), calc(100% - var(--cut)) 100%, 0 100%, 0 var(--cut));
+  background:
+    linear-gradient(135deg, transparent calc(var(--cut) * .7071 - .6px), var(--b-line) calc(var(--cut) * .7071 - .6px) calc(var(--cut) * .7071 + .8px), transparent calc(var(--cut) * .7071 + .8px)) 0 0 / calc(var(--cut) * 2) calc(var(--cut) * 2) no-repeat,
+    linear-gradient(315deg, transparent calc(var(--cut) * .7071 - .6px), var(--b-line) calc(var(--cut) * .7071 - .6px) calc(var(--cut) * .7071 + .8px), transparent calc(var(--cut) * .7071 + .8px)) 100% 100% / calc(var(--cut) * 2) calc(var(--cut) * 2) no-repeat,
+    var(--b-fill);
+  box-shadow: inset 0 0 0 1px var(--b-line);
+  pointer-events: none;
+}
+html:not(#_tw#_x)[data-theme-style="cyberpunk"] :is(.btn, [data-btn-tone]):not([disabled], [aria-disabled="true"]):hover {
+  filter: drop-shadow(0 0 9px color-mix(in srgb, var(--bc) 55%, transparent));
+}
+html:not(#_tw#_x)[data-theme-style="cyberpunk"] :is(.btn, [data-btn-tone]):active {
+  filter: brightness(.92);
+  translate: 0 1px;
+}
+html:not(#_tw#_x)[data-theme-style="cyberpunk"] :is(.btn, [data-btn-tone]):focus-visible {
+  outline: 1px dashed var(--bc);
+  outline-offset: 3px;
+}
+html:not(#_tw#_x)[data-theme-style="cyberpunk"] :is(.btn, [data-btn-tone]):is([disabled], [aria-disabled="true"]) { filter: saturate(.35); }
+html:not(#_tw#_x)[data-theme-style="cyberpunk"] input[type="file"]::file-selector-button {
+  font-size: 11px;
+  clip-path: polygon(5px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 5px);
+}
+/* Phones: row icon buttons get a text label on ::after (polish.css); there
+   the cut shape steps aside so the label shows. */
+@media (max-width: 560px) {
+  html:not(#_tw#_x) .act-btn[data-btn-only] { width: auto; min-width: var(--b-h); padding: 0 9px; gap: 6px; }
+  html:not(#_tw#_x)[data-theme-style="cyberpunk"] .act-btn[data-btn-tone] {
+    background: var(--b-fill) !important;
+    border-color: var(--b-line) !important;
+  }
+  html:not(#_tw#_x)[data-theme-style="cyberpunk"] .act-btn[data-btn-tone]::after {
+    position: static;
+    z-index: auto;
+    clip-path: none;
+    background: none;
+    box-shadow: none;
+  }
+}
+
+/* ---- Mobile: comfortable tap targets -------------------------------------- */
+@media (max-width: 760px) {
+  html:not(#_tw#_x) :is(.btn, [data-btn-tone]) { --b-h: 40px; --b-px: 15px; }
+  html:not(#_tw#_x) :is(.btn.btn-sm, [data-btn-tone].btn-sm) { --b-h: 34px; --b-px: 12px; }
+  html:not(#_tw#_x) [data-btn-tone]:not(.btn)[data-btn-only] { --b-h: 36px; }
+  html:not(#_tw#_x) .btn.login-btn { --b-h: 46px; }
+}
+
+/* ---- Motion --------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  html:not(#_tw#_x) :is(.btn, [data-btn-tone]),
+  html:not(#_tw#_x) :is(.btn, [data-btn-tone]):hover,
+  html:not(#_tw#_x) :is(.btn, [data-btn-tone]):active { translate: none !important; }
+  /* style.css hides every .btn::before here (old shimmer); keep the icon. */
+  html:not(#_tw#_x) [data-btn-tone][data-btn-icon]::before,
+  html:not(#_tw#_x) :is(.btn, [data-btn-tone]):is([data-btn-busy], .is-busy, [aria-busy="true"])::before { display: block !important; }
+  html:not(#_tw#_x) :is(.btn, [data-btn-tone]):is([data-btn-busy], .is-busy, [aria-busy="true"])::before {
+    animation: tw-btn-spin 1.4s linear infinite !important;
+  }
+}
+
+
+/* Inline copy-IP icon (Security tables): a 10px glyph, not a full button.
+   Same tone colour; tinted backdrop on hover/focus only. */
+html:not(#_tw#_x) .ip-copy-btn,
+html:not(#_tw#_x) .ip-copy-btn[data-btn-tone] {
+  width: 10px; height: 10px; min-width: 0; min-height: 0;
+  padding: 0; margin: 0 0 0 4px; border: 0; border-radius: 2px;
+  background: transparent; box-shadow: none; clip-path: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  vertical-align: middle; line-height: 0; transform: none;
+  color: color-mix(in srgb, var(--bc, currentColor) 80%, var(--text, #fff));
+}
+html:not(#_tw#_x) .ip-copy-btn::before,
+html:not(#_tw#_x) .ip-copy-btn::after { display: none; }
+html:not(#_tw#_x) .ip-copy-btn svg { width: 10px; height: 10px; display: block; }
+html:not(#_tw#_x) .ip-copy-btn:hover,
+html:not(#_tw#_x) .ip-copy-btn:focus-visible {
+  background: color-mix(in srgb, var(--bc, currentColor) 22%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--bc, currentColor) 22%, transparent);
+  transform: none;
+}
+html:not(#_tw#_x) .ip-copy-btn.copied { color: var(--green); }
+
+/* The base rule's display:inline-flex must not un-hide the phone-only menu
+   toggle (sidebar.css shows it only at <= 760px). */
+html:not(#_tw#_x) .nav-toggle { display: none; }
+@media (max-width: 760px) {
+  html:not(#_tw#_x) .nav-toggle { display: inline-flex; }
+}

@@ -27,7 +27,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1442,7 +1442,66 @@ def build_firewall():
         "defaults": defaults,
         "rules": rules,
         "traffic": traffic,
+        "counters": _firewall_counters(),
     }
+
+
+_FW_COUNTER_CACHE = {"at": 0.0, "data": None}
+_FW_COUNTER_LOCK = threading.Lock()
+
+
+def _firewall_counters():
+    """Lifetime packet/byte counters for inbound traffic (IPv4 + IPv6):
+    accepted by an explicit ufw rule vs dropped by the default-deny policy.
+    UFW only logs blocks, so counters are the only source for allow vs block.
+    Read-only (iptables -L -v -x); cached for 10 s."""
+    now = time.time()
+    with _FW_COUNTER_LOCK:
+        if _FW_COUNTER_CACHE["data"] is not None and now - _FW_COUNTER_CACHE["at"] < 10:
+            return _FW_COUNTER_CACHE["data"]
+    out = {"allowed_packets": 0, "allowed_bytes": 0,
+           "blocked_packets": 0, "blocked_bytes": 0, "at": int(now), "ok": False}
+    for binary, prefix in (("iptables", "ufw"), ("ip6tables", "ufw6")):
+        for chain, kind in (("%s-user-input" % prefix, "allowed"),
+                            ("%s-before-input" % prefix, None),
+                            ("INPUT", "policy")):
+            try:
+                proc = subprocess.run([binary, "-w", "2", "-L", chain, "-v", "-x", "-n"],
+                                      capture_output=True, text=True, timeout=5)
+            except Exception:
+                continue
+            if proc.returncode != 0:
+                continue
+            lines = proc.stdout.splitlines()
+            if kind == "policy":
+                # "Chain INPUT (policy DROP 123 4567 bytes)" - packets the
+                # default policy dropped after every ufw chain declined them.
+                m = re.search(r"policy \w+ (\d+) packets?, (\d+) bytes", lines[0] if lines else "")
+                if not m:
+                    m = re.search(r"policy DROP (\d+) (\d+)", lines[0] if lines else "")
+                if m:
+                    out["blocked_packets"] += int(m.group(1))
+                    out["blocked_bytes"] += int(m.group(2))
+                    out["ok"] = True
+                continue
+            if kind is None:
+                # Explicit drops in ufw-before-input (invalid packets etc.).
+                for ln in lines[2:]:
+                    f = ln.split()
+                    if len(f) >= 3 and f[2] in ("DROP", "REJECT") and f[0].isdigit():
+                        out["blocked_packets"] += int(f[0])
+                        out["blocked_bytes"] += int(f[1])
+                continue
+            for ln in lines[2:]:
+                f = ln.split()
+                if len(f) >= 3 and f[2] == "ACCEPT" and f[0].isdigit():
+                    out["allowed_packets"] += int(f[0])
+                    out["allowed_bytes"] += int(f[1])
+                    out["ok"] = True
+    with _FW_COUNTER_LOCK:
+        _FW_COUNTER_CACHE["at"] = now
+        _FW_COUNTER_CACHE["data"] = out
+    return out
 
 
 def add_firewall_rule(rule_text):
@@ -1838,6 +1897,18 @@ def _cscli(args, default=None):
         return default
 
 
+_GO_DURATION_RE = re.compile(r"(-?\d+(?:\.\d+)?)(h|ms|m|s)")
+
+
+def _go_duration_seconds(text):
+    """'8759h54m34.5s' (cscli decision duration) -> seconds, or None."""
+    parts = _GO_DURATION_RE.findall(str(text or ""))
+    if not parts:
+        return None
+    mult = {"h": 3600.0, "m": 60.0, "s": 1.0, "ms": 0.001}
+    return sum(float(v) * mult[u] for v, u in parts)
+
+
 def _parse_iso(ts):
     if not ts:
         return None
@@ -1909,7 +1980,22 @@ def _fetch_crowdsec_active_decisions():
     decisions = []
     for item in decisions_alerts:
         if isinstance(item, dict) and isinstance(item.get("decisions"), list):
-            decisions.extend(item["decisions"])
+            # Decisions have no created_at/until of their own: inherit the
+            # alert's creation time and derive expiry from the remaining
+            # duration (cscli reports time left, e.g. "8759h54m34s").
+            alert_created = item.get("created_at") or item.get("start_at") or ""
+            for dec in item["decisions"]:
+                if not isinstance(dec, dict):
+                    continue
+                dec = dict(dec)
+                if not dec.get("created_at") and alert_created:
+                    dec["created_at"] = alert_created
+                if not dec.get("until"):
+                    secs = _go_duration_seconds(dec.get("duration"))
+                    if secs is not None:
+                        dec["until"] = datetime.fromtimestamp(
+                            now + secs, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                decisions.append(dec)
         elif isinstance(item, dict):
             decisions.append(item)
 
@@ -2572,7 +2658,7 @@ PROTECTED_NETS = tuple(ipaddress.ip_network(n) for n in (
 def _ip_in_published(value, networks):
     """True when `value` falls in a collector-published protected range."""
     try:
-        addr = ipaddress.ip_address(str(value))
+        addr = _plain_ip(ipaddress.ip_address(str(value)))
     except ValueError:
         return False
     return any(addr in net for net in networks)
@@ -2580,10 +2666,85 @@ def _ip_in_published(value, networks):
 
 def _ip_in_protected(value):
     try:
-        addr = ipaddress.ip_address(str(value))
+        addr = _plain_ip(ipaddress.ip_address(str(value)))
     except ValueError:
         return False
     return any(addr in net for net in PROTECTED_NETS)
+
+
+def _plain_ip(addr):
+    """IPv4 written as IPv6 (::ffff:a.b.c.d, NAT64 64:ff9b::a.b.c.d) -> IPv4,
+    so range and set checks cannot be sidestepped by the notation."""
+    if addr.version == 6:
+        if addr.ipv4_mapped:
+            return addr.ipv4_mapped
+        if addr in _NAT64_NET:
+            return ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
+    return addr
+
+
+_NAT64_NET = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _community_never_ban_ips():
+    """Addresses this router depends on, which remote community intel must
+    never ban locally: its configured DNS forwarders and NTP servers (the
+    canary exemption set), its own interface addresses, default gateways,
+    resolv.conf nameservers and APT mirror hosts. Read live each pass."""
+    ips = set(_infra_exempt_ips())
+    try:
+        out = subprocess.run(["ip", "-j", "addr"], capture_output=True,
+                             text=True, timeout=5).stdout
+        for iface in json.loads(out or "[]"):
+            for a in iface.get("addr_info", []):
+                if a.get("local"):
+                    ips.add(a["local"])
+    except Exception:
+        pass
+    for fam in ("-4", "-6"):
+        try:
+            out = subprocess.run(["ip", "-j", fam, "route", "show", "default"],
+                                 capture_output=True, text=True, timeout=5).stdout
+            for r in json.loads(out or "[]"):
+                if r.get("gateway"):
+                    ips.add(r["gateway"])
+        except Exception:
+            pass
+    try:
+        with open("/etc/resolv.conf") as f:
+            for line in f:
+                m = re.match(r"\s*nameserver\s+([0-9a-fA-F:.]+)", line)
+                if m:
+                    ips.add(m.group(1))
+    except OSError:
+        pass
+    hosts = set()
+    for path in ["/etc/apt/sources.list"] + sorted(
+            os.path.join("/etc/apt/sources.list.d", n)
+            for n in (os.listdir("/etc/apt/sources.list.d")
+                      if os.path.isdir("/etc/apt/sources.list.d") else [])):
+        try:
+            with open(path) as f:
+                for line in f:
+                    for m in re.finditer(r"https?://([A-Za-z0-9.-]+)", line):
+                        hosts.add(m.group(1).lower())
+        except OSError:
+            continue
+    for host in sorted(hosts)[:20]:
+        try:
+            out = subprocess.run(["getent", "ahosts", host], capture_output=True,
+                                 text=True, timeout=3).stdout
+            for ln in out.splitlines():
+                ips.add(ln.split()[0])
+        except Exception:
+            continue
+    clean = set()
+    for ip in ips:
+        try:
+            clean.add(str(_plain_ip(ipaddress.ip_address(ip.split("%")[0]))))
+        except ValueError:
+            continue
+    return clean
 
 
 class CommunityAutoWorker(threading.Thread):
@@ -2620,8 +2781,23 @@ class CommunityAutoWorker(threading.Thread):
         missing = []
         skipped_cf = 0
         skipped_low = 0
+        skipped_infra = 0
+        try:
+            never_ban = _community_never_ban_ips()
+        except Exception:
+            never_ban = set()
         for b in data.get("bans", []):
             if not (isinstance(b, dict) and b.get("ip")):
+                continue
+            try:
+                b = dict(b, ip=str(_plain_ip(ipaddress.ip_address(str(b["ip"])))))
+            except ValueError:
+                continue
+            # Never ban an address this router itself depends on (its DNS
+            # forwarders, NTP, gateway, own IPs, APT mirrors) - the static
+            # protected ranges only cover the big public providers.
+            if b["ip"] in never_ban:
+                skipped_infra += 1
                 continue
             # 2026-11-09 audit: the feed publishes single-reporter LOW
             # entries (the deception gate trusts self-attested evidence
@@ -2651,6 +2827,7 @@ class CommunityAutoWorker(threading.Thread):
             state["added_total"] = (state.get("added_total") or 0) + added
             state["skipped_cf"] = skipped_cf
             state["skipped_low"] = skipped_low
+            state["skipped_infra"] = skipped_infra
             state["pending"] = max(0, len(missing) - added)
             _save_community_auto(state)
 
@@ -3086,7 +3263,7 @@ REPORTING_DEFAULT_URL = "https://tuxwall.org/report"
 # refuses reports from below MIN_REPORTER_VERSION (3.2.4) - that release is
 # the one that stops consumers from ever banning Cloudflare edge IPs.
 # Keep in sync with pkg/DEBIAN/control.
-TUXWALL_VERSION = "3.3.0"
+TUXWALL_VERSION = "3.3.1"
 REPORTING_TIMEOUT = 10
 _report_status_lock = threading.Lock()
 
@@ -4045,6 +4222,63 @@ def build_suricata():
         "count_24h": len(alerts),
         "alerts": alerts[:30],
         "top": top_list[:10],
+        **_suricata_talkers(alerts),
+    }
+
+
+def _suricata_talkers(alerts):
+    """Aggregate the alert window for the Overview's Router Insights panel:
+    the hosts involved in the most alerts (as source or destination), the
+    most-targeted destination ports, and alerts per hour."""
+    hosts = {}
+    ports = {}
+    hourly = {}
+    now = time.time()
+    for a in alerts:
+        sev = a.get("severity") or "LOW"
+        for role, ip, peer in (("src", a.get("src"), a.get("dst")),
+                               ("dst", a.get("dst"), a.get("src"))):
+            if not ip or (role == "dst" and ip == a.get("src")):
+                continue
+            h = hosts.get(ip)
+            if h is None:
+                try:
+                    local = ipaddress.ip_address(ip).is_private
+                except ValueError:
+                    local = False
+                h = hosts[ip] = {"ip": ip, "local": local, "count": 0, "as_src": 0,
+                                 "as_dst": 0, "high": 0, "medium": 0, "low": 0,
+                                 "last_ts": a.get("ts") or 0, "_sigs": {}, "_peers": set()}
+            h["count"] += 1
+            h["as_" + role] += 1
+            h[sev.lower() if sev.lower() in ("high", "medium", "low") else "low"] += 1
+            sig = a.get("sig") or "unknown"
+            h["_sigs"][sig] = h["_sigs"].get(sig, 0) + 1
+            if peer and len(h["_peers"]) < 500:
+                h["_peers"].add(peer)
+            if (a.get("ts") or 0) > h["last_ts"]:
+                h["last_ts"] = a.get("ts") or 0
+        dport = a.get("dport")
+        if dport:
+            key = "{}/{}".format(dport, a.get("proto") or "")
+            ports[key] = ports.get(key, 0) + 1
+        ts = a.get("ts")   # epoch seconds (build_suricata parses eve.json timestamps)
+        if isinstance(ts, (int, float)) and now - ts < 86400:
+            bucket = int(ts // 3600) * 3600
+            hourly[bucket] = hourly.get(bucket, 0) + 1
+    talkers = sorted(hosts.values(), key=lambda h: (-h["count"], -h["high"]))[:15]
+    for h in talkers:
+        sigs = sorted(h.pop("_sigs").items(), key=lambda kv: -kv[1])
+        h["sigs"] = [{"sig": k, "count": v} for k, v in sigs[:3]]
+        h["peers"] = len(h.pop("_peers"))
+    first_hour = int(now // 3600) * 3600 - 23 * 3600
+    return {
+        "talkers": talkers,
+        "talker_hosts": len(hosts),
+        "top_ports": [{"port": k, "count": v} for k, v in
+                      sorted(ports.items(), key=lambda kv: -kv[1])[:10]],
+        "hourly": [{"t": first_hour + i * 3600, "count": hourly.get(first_hour + i * 3600, 0)}
+                   for i in range(24)],
     }
 
 
@@ -8550,6 +8784,8 @@ def auth_session_state(identity=None):
     for t in list_themes()["themes"]:
         if t["id"] == active:
             theme = {"id": t["id"], "name": t["name"], "dark": t["dark"], "colors": t["colors"]}
+            if t.get("style"):
+                theme["style"] = t["style"]
             break
     state["active_theme"] = theme or {
         "id": "dark", "name": "Dark", "dark": True,
@@ -9056,6 +9292,9 @@ def _custom_theme_files():
             "dark": bool(data.get("dark", True)),
             "colors": {k: str(colors.get(k, "")) for k in THEME_COLOR_KEYS},
         }
+        style = _clean_theme_style(data.get("style"))
+        if style:
+            entry["style"] = style
         out.append(entry)
     out.sort(key=lambda t: t["name"].lower())
     return out
@@ -9077,6 +9316,15 @@ def list_themes():
     return {"ok": True, "active": active, "themes": themes}
 
 
+def _clean_theme_style(value):
+    """Optional 'style' key of a custom theme: the id of a built-in theme
+    whose look (surfaces, corners, fonts, effects) it inherits."""
+    style = str(value or "").strip().lower()
+    if style and any(t["id"] == style for t in BUILTIN_THEMES):
+        return style
+    return ""
+
+
 def validate_theme_payload(body):
     name = str(body.get("name") or "").strip()
     if not name:
@@ -9094,7 +9342,8 @@ def validate_theme_payload(body):
         clean[key] = val.lower()
     dark = bool(body.get("dark", True))
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:32] or "custom"
-    return {"name": name, "dark": dark, "colors": clean, "slug": slug}
+    return {"name": name, "dark": dark, "colors": clean, "slug": slug,
+            "style": _clean_theme_style(body.get("style"))}
 
 
 def save_custom_theme(payload):
@@ -9105,6 +9354,8 @@ def save_custom_theme(payload):
     if os.path.exists(path):
         raise FileExistsError("A theme named '{}' already exists".format(payload["name"]))
     record = {"name": payload["name"], "dark": payload["dark"], "colors": payload["colors"]}
+    if payload.get("style"):
+        record["style"] = payload["style"]
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(record, f, indent=2)
@@ -9115,6 +9366,7 @@ def save_custom_theme(payload):
         "builtin": False,
         "dark": payload["dark"],
         "colors": payload["colors"],
+        **({"style": payload["style"]} if payload.get("style") else {}),
     }
 
 
@@ -9485,7 +9737,17 @@ def build_system():
             swap["total"] = int(parts[1]) * 1024
         elif parts[0] == "SwapFree:":
             swap["free"] = int(parts[1]) * 1024
+        elif parts[0] in ("MemFree:", "Buffers:", "Cached:", "SReclaimable:", "Shmem:"):
+            mem[parts[0][:-1].lower()] = int(parts[1]) * 1024
     mem["used"] = mem["total"] - mem["available"]
+    # Breakdown for the Overview: page cache (incl. reclaimable slab, minus
+    # shared memory, as free(1) counts it), buffers, and the remainder that
+    # applications actually hold.
+    if "cached" in mem:
+        cache = mem.get("cached", 0) + mem.get("sreclaimable", 0) - mem.get("shmem", 0)
+        mem["cache"] = max(0, cache)
+        mem["buffers"] = mem.get("buffers", 0)
+        mem["apps"] = max(0, mem["total"] - mem.get("memfree", 0) - mem["buffers"] - mem["cache"])
     swap["used"] = swap["total"] - swap["free"]
 
     disk = {}

@@ -873,7 +873,7 @@
       } else {
         svcBannerEl.hidden = true;
       }
-      if (names !== lastSvcDown) console.warn("core services down:", names);
+      if (names && names !== lastSvcDown) console.warn("core services down:", names);
       lastSvcDown = names;
     } catch (_) {
       if (window._tuxwallSetReachable) window._tuxwallSetReachable(false);
@@ -964,7 +964,7 @@
     // Delete buttons
     document.querySelectorAll(".res-del-btn").forEach(btn => {
       btn.addEventListener("click", async () => {
-        if (!confirm(`Delete reservation for ${btn.dataset.ip}?\nThe device will fall back to a dynamic lease.`)) return;
+        if (!(await (window.twConfirm || window.confirm)(`Delete reservation for ${btn.dataset.ip}?\nThe device will fall back to a dynamic lease.`))) return;
         btn.disabled = true;
         try {
           const r = await fetchJSON("/api/reservations/delete", {
@@ -1264,7 +1264,7 @@
     els.dmCancel.addEventListener("click", resetDomainForm);
 
     els.dmImportAll.addEventListener("click", async () => {
-      if (!window.confirm("Import all existing records into the tuxwall-managed list?")) return;
+      if (!(await (window.twConfirm || window.confirm)("Import all existing records into the tuxwall-managed list?"))) return;
       els.dmImportAll.disabled = true;
       try {
         const data = await postJSON("/api/domains/import-all", {});
@@ -1315,7 +1315,7 @@
         const msg = managed
           ? `Delete local domain "${del.dataset.domain}"? It will stop resolving on your LAN.`
           : `Delete local domain "${del.dataset.domain}"? It will be removed from your unbound config file.`;
-        if (!window.confirm(msg)) return;
+        if (!(await (window.twConfirm || window.confirm)(msg))) return;
         del.disabled = true;
         try {
           const data = await postJSON("/api/domains/delete", { id: del.dataset.id });
@@ -1572,7 +1572,7 @@
     document.querySelectorAll(".vlan-del-btn").forEach(btn => {
       btn.addEventListener("click", async () => {
         const iface = btn.dataset.iface;
-        if (!confirm(`Delete VLAN interface ${iface}? The interface will be removed immediately.`)) return;
+        if (!(await (window.twConfirm || window.confirm)(`Delete VLAN interface ${iface}? The interface will be removed immediately.`))) return;
         btn.disabled = true;
         try {
           const r = await fetchJSON("/api/vlans/delete", { method: "POST", body: JSON.stringify({ iface }) });
@@ -1588,7 +1588,7 @@
     // Delete policy buttons
     document.querySelectorAll(".pol-del-btn").forEach(btn => {
       btn.addEventListener("click", async () => {
-        if (!confirm("Remove this routing policy?")) return;
+        if (!(await (window.twConfirm || window.confirm)("Remove this routing policy?"))) return;
         btn.disabled = true;
         try {
           const r = await fetchJSON("/api/vlans/policy/delete", { method: "POST", body: JSON.stringify({ id: btn.dataset.id }) });
@@ -1760,7 +1760,7 @@
 
       document.querySelectorAll(".pf-del-btn").forEach(btn => {
         btn.addEventListener("click", async () => {
-          if (!confirm("Delete this port forward rule?")) return;
+          if (!(await (window.twConfirm || window.confirm)("Delete this port forward rule?"))) return;
           btn.disabled = true;
           try {
             const r = await fetchJSON("/api/portforward/delete", {
@@ -1864,17 +1864,15 @@
           const action  = enabled ? "disable" : "enable";
 
           if (!enabled) {
-            const confirmed = confirm(
-              `Enable DMZ isolation for ${ip}?\n\n` +
+            const confirmed = (await (window.twConfirm || window.confirm)(`Enable DMZ isolation for ${ip}?\n\n` +
               `This will:\n` +
               `  • Block ${ip} from reaching other LAN hosts\n` +
               `  • Allow ${ip} to reach the gateway and internet\n` +
               `  • Allow inbound connections from the internet (via port forwards)\n\n` +
-              `The rest of your network will NOT be able to initiate connections to ${ip}.`
-            );
+              `The rest of your network will NOT be able to initiate connections to ${ip}.`));
             if (!confirmed) return;
           } else {
-            if (!confirm(`Disable DMZ isolation for ${ip}? The client will regain full LAN access.`)) return;
+            if (!(await (window.twConfirm || window.confirm)(`Disable DMZ isolation for ${ip}? The client will regain full LAN access.`))) return;
           }
 
           btn.disabled = true;
@@ -2035,9 +2033,8 @@
       if (moveBtn) {
         // ufw evaluates top-down, so reordering past a rule with a
         // different action (allow vs deny) changes what traffic matches.
-        if (!window.confirm(
-          `Move rule ${moveBtn.dataset.num} ${moveBtn.dataset.dir === "up" ? "above" : "below"} its neighbour? ` +
-          "Rules are evaluated top-down — if the two rules overlap with different actions, the effective outcome changes.")) return;
+        if (!(await (window.twConfirm || window.confirm)(`Move rule ${moveBtn.dataset.num} ${moveBtn.dataset.dir === "up" ? "above" : "below"} its neighbour? ` +
+          "Rules are evaluated top-down — if the two rules overlap with different actions, the effective outcome changes."))) return;
         moveBtn.disabled = true;
         try {
           const res = await postJSON("/api/firewall/move",
@@ -2053,7 +2050,7 @@
       }
       const btn = e.target.closest(".fw-remove");
       if (!btn) return;
-      if (!window.confirm("Remove this firewall rule?")) return;
+      if (!(await (window.twConfirm || window.confirm)("Remove this firewall rule?"))) return;
       btn.disabled = true;
       try {
         const row = btn.closest("tr");
@@ -2097,7 +2094,7 @@
 
     // ── One-click block on traffic views ────────────────────────────────
     async function blockSource(ip) {
-      if (!window.confirm(`Add a firewall rule blocking all traffic from ${ip}?`)) return;
+      if (!(await (window.twConfirm || window.confirm)(`Add a firewall rule blocking all traffic from ${ip}?`))) return;
       try {
         await postJSON("/api/firewall/allow", { rule: `deny from ${ip}` });
         els.fwHint.textContent = "Blocked source: " + ip;
@@ -2136,7 +2133,7 @@
       const lv = document.getElementById("fw-log-level").value;
       hint.textContent = "";
       if (!wantEnabled && wasEnabled &&
-          !window.confirm("Disable the firewall?\n\nThis turns off ALL packet filtering until re-enabled.")) {
+          !(await (window.twConfirm || window.confirm)("Disable the firewall?\n\nThis turns off ALL packet filtering until re-enabled."))) {
         return;
       }
       btn.disabled = true;
@@ -2164,7 +2161,7 @@
     });
 
     els.fwBaseline.addEventListener("click", async () => {
-      if (!window.confirm("Save the current live ruleset as the restore baseline?")) return;
+      if (!(await (window.twConfirm || window.confirm)("Save the current live ruleset as the restore baseline?"))) return;
       els.fwBaseline.disabled = true;
       try {
         const res = await postJSON("/api/firewall/reset", { action: "save" });
@@ -2178,13 +2175,11 @@
     });
 
     els.fwReset.addEventListener("click", async () => {
-      if (!window.confirm(
-        "Restore the saved baseline?\n\n" +
+      if (!(await (window.twConfirm || window.confirm)("Restore the saved baseline?\n\n" +
         "This atomically replaces all IPv4/IPv6 tables " +
         "(filter/nat/mangle/raw) with the saved baseline rules. " +
         "Any rules added since the baseline was saved will be lost. " +
-        "Your SSH session and internet should survive, but use the LAN connection to be safe."
-      )) return;
+        "Your SSH session and internet should survive, but use the LAN connection to be safe."))) return;
       els.fwReset.disabled = true;
       try {
         await firewallOp({ action: "restore" });
@@ -2339,12 +2334,8 @@
 
     L.control.zoom({ position: "bottomright" }).addTo(m.map);
 
-    // CARTO dark basemap with registered API key (keyless tiles are watermarked)
-    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=cb1_2tvx_1_e55a010f34e5e3603b0ff643", {
-      maxZoom: 18,
-      subdomains: "abcd",
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-    }).addTo(m.map);
+    // Local Natural Earth basemap, theme-coloured and shaded by attack count (worldmap.js)
+    m.world = window.TuxWorldMap ? window.TuxWorldMap.attach(m.map) : null;
 
     // Gateway marker lives in its own overlay above the arcs — a Leaflet
     // marker is trapped in the z-400 map pane and gets buried by the glow.
@@ -2828,10 +2819,12 @@
     }).join("");
   }
 
-  function renderAttackMap(m, byIp, force) {
+  function renderAttackMap(m, byIp, force, countries) {
     if (!m) return;
     const next = byIp || [];
     m.lastByIp = next;
+    if (countries) m.lastCountries = countries;
+    if (m.world) m.world.setData(m.lastCountries, next);
     // Only positions and severity tier affect what is drawn. Hit counts tick on
     // almost every poll of a live firewall, but they change the picture only
     // when they cross a tier boundary — so a plain count bump no longer tears
@@ -3260,7 +3253,7 @@
     els.secRate.textContent = st.hits_1m != null ? `${formatNumber(st.hits_1m)} / min` : "—";
     els.secGeoHint.textContent = d.geo_db.hint || `${formatNumber(st.unique_ips)} sources · last hit ${formatRelative(st.last_event)}`;
 
-    renderAttackMap(secMap, d.by_ip || []);
+    renderAttackMap(secMap, d.by_ip || [], false, d.countries || []);
 
     const countries = d.countries || [];
     const cTotal = countries.reduce((s, c) => s + c.count, 0) || 1;
@@ -3838,7 +3831,7 @@
       }
     });
     els.secAideUpdate.addEventListener("click", async () => {
-      if (!window.confirm("Re-baseline the AIDE database? This records every current file state as trusted — only do this after reviewing changes or intentional upgrades (~25 min).")) return;
+      if (!(await (window.twConfirm || window.confirm)("Re-baseline the AIDE database? This records every current file state as trusted — only do this after reviewing changes or intentional upgrades (~25 min)."))) return;
       try {
         await postJSON("/api/security/aide/update", {});
         await refreshAide();
@@ -4240,9 +4233,9 @@
   }
   if (els.secTripResolveBtn) els.secTripResolveBtn.addEventListener("click", async () => {
     if (!els.secTripPass.value) { els.secTripPass.focus(); return; }
-    if (!confirm("Restore WAN access now?\nTriggered by: " +
+    if (!(await (window.twConfirm || window.confirm)("Restore WAN access now?\nTriggered by: " +
         (els.secTripMsgReason && els.secTripMsgReason.textContent || "unknown") +
-        "\n\nOnly resolve after investigating.")) return;
+        "\n\nOnly resolve after investigating."))) return;
     try {
       await postJSON("/api/security/tripwire/resolve", { password: els.secTripPass.value });
       els.secTripPass.value = "";
@@ -4344,8 +4337,8 @@
   function bindCanaryActions() {
     els.secCanaryToggle.addEventListener("click", async () => {
       const enabling = els.secCanaryToggle.dataset.on !== "1";
-      if (enabling && !window.confirm("Enable the deception canary? Starts the emulators (SSH 22, VNC 5900, MSSQL 1433, Redis 6379, SNMP 161) on the WAN address and opens WAN rules only for the ports they bind.")) return;
-      if (!enabling && !window.confirm("Disable the deception canary? Stops the emulators and closes their WAN ports (the tarpit is unaffected).")) return;
+      if (enabling && !(await (window.twConfirm || window.confirm)("Enable the deception canary? Starts the emulators (SSH 22, VNC 5900, MSSQL 1433, Redis 6379, SNMP 161) on the WAN address and opens WAN rules only for the ports they bind."))) return;
+      if (!enabling && !(await (window.twConfirm || window.confirm)("Disable the deception canary? Stops the emulators and closes their WAN ports (the tarpit is unaffected)."))) return;
       els.secCanaryToggle.disabled = true;
       try {
         await postJSON("/api/security/canary/config", { enabled: enabling });
@@ -4382,8 +4375,8 @@
     els.secHoneyApply.addEventListener("click", () => applyConf());
     els.secHoneyToggle.addEventListener("click", async () => {
       const enabling = els.secHoneyToggle.dataset.on !== "1";
-      if (enabling && !window.confirm("Enable the honeypot? This opens UFW allow rules for the listed ports on the WAN interface (auto-detected; see System - Deception), then traps and auto-bans anything that connects.")) return;
-      if (!enabling && !window.confirm("Disable the honeypot and close its UFW allow rules?")) return;
+      if (enabling && !(await (window.twConfirm || window.confirm)("Enable the honeypot? This opens UFW allow rules for the listed ports on the WAN interface (auto-detected; see System - Deception), then traps and auto-bans anything that connects."))) return;
+      if (!enabling && !(await (window.twConfirm || window.confirm)("Disable the honeypot and close its UFW allow rules?"))) return;
       await applyConf({ enabled: enabling });
     });
   }
@@ -4988,7 +4981,7 @@
   }
 
   async function wgRemove(pk, name) {
-    if (!window.confirm(`Remove client “${name}”? This immediately revokes its access.`)) return;
+    if (!(await (window.twConfirm || window.confirm)(`Remove client “${name}”? This immediately revokes its access.`))) return;
     try {
       await postJSON("/api/wireguard/peer/remove", { public_key: pk });
       await refreshWireguard();
@@ -5085,14 +5078,15 @@
     els.csBouncers.textContent = `${activeBouncers} / ${bouncers.length}`;
     els.csExpiring.textContent = formatNumber(decisions.filter((x) => x.expiring).length);
 
-    els.csDecisionsBody.innerHTML = decisions.map((x) => `
+    els.csDecisionsBody.innerHTML = decisions.slice(0, CS_ROW_LIMIT).map((x) => `
       <tr>
         <td class="mono">${esc(x.ip || "—")}</td>
         <td class="mono">${esc(x.scenario || "—")}</td>
         <td><span class="badge ${x.type === "ban" ? "badge-err" : "badge-ok"}">${esc(x.type || "—")}</span></td>
         <td>${esc(x.origin || "—")}</td>
         <td class="mono">${esc(x.until || "—")}</td>
-      </tr>`).join("") || '<tr><td colspan="5" class="empty">No active decisions</td></tr>';
+      </tr>`).join("") + csMoreRow(decisions.length, 5)
+      || '<tr><td colspan="5" class="empty">No active decisions</td></tr>';
 
     els.csBouncersBody.innerHTML = bouncers.map((b) => `
       <tr>
@@ -5118,13 +5112,28 @@
     }).join("") || '<tr><td colspan="5" class="empty">No alerts yet</td></tr>';
   }
 
+  // The decisions list is ~2 MB of HTML (thousands of bans); building it
+  // every 30 s while the page is hidden caused 250-400 ms main-thread stalls.
+  // switchView("crowdsec") refreshes on entry, so hidden refreshes are skipped.
+  const CS_ROW_LIMIT = 500;
+  const csOffscreen = () => state.activeView && state.activeView !== "crowdsec";
+
   async function refreshCrowdsec() {
+    if (csOffscreen()) return;
     try {
       const data = await fetchJSON("/api/crowdsec");
       renderCrowdsec(data);
     } catch (err) {
       showBanner(true, "CrowdSec stats error: " + err.message);
     }
+  }
+
+  function csMoreRow(total, cols) {
+    if (total <= CS_ROW_LIMIT) return "";
+    const href = `https://${location.hostname}:8744/`;
+    return `<tr class="cs-more-row"><td colspan="${cols}" class="muted" style="text-align:center">
+      Showing the newest ${formatNumber(CS_ROW_LIMIT)} of ${formatNumber(total)} &middot;
+      <a href="${esc(href)}" target="_blank" rel="noopener">search and page through all of them in Ban Management</a></td></tr>`;
   }
 
   function renderCustomBlocklist(d) {
@@ -5135,7 +5144,7 @@
     if (els.cblFile) els.cblFile.textContent = d.file || "";
     const entries = d.entries || [];
     els.cblEmpty.hidden = entries.length > 0;
-    els.cblBody.innerHTML = entries.map((e) => {
+    els.cblBody.innerHTML = entries.slice(0, CS_ROW_LIMIT).map((e) => {
       const timed = e.kind === "timed";
       const remaining = e.until_ts
         ? formatDuration(e.until_ts - Math.floor(Date.now() / 1000))
@@ -5156,11 +5165,12 @@
           ${actBtn("delete", timed ? "Remove timed ban" : "Remove entry", `data-entry="${esc(e.value)}"`, "cbl-remove")}
         </td>
       </tr>`;
-    }).join("");
+    }).join("") + csMoreRow(entries.length, 5);
     if (els.cblStatus) els.cblStatus.textContent = "";
   }
 
   async function refreshCustomBlocklist() {
+    if (csOffscreen()) return;
     try {
       const data = await fetchJSON("/api/crowdsec/blocklist");
       renderCustomBlocklist(data);
@@ -5439,7 +5449,7 @@
         .slice(0, communityBans.shown)
         .map((b) => b.ip);
       if (!ips.length) return;
-      if (!window.confirm(`Ban all ${ips.length} shown community IPs for 90 days? (local bans - nothing is reported to tuxwall.org)`)) return;
+      if (!(await (window.twConfirm || window.confirm)(`Ban all ${ips.length} shown community IPs for 90 days? (local bans - nothing is reported to tuxwall.org)`))) return;
       els.cbanBanAll.disabled = true;
       let ok = 0;
       let failed = 0;
@@ -5506,7 +5516,7 @@
       const btn = e.target.closest(".cbl-remove");
       if (!btn) return;
       const entry = btn.dataset.entry;
-      if (!window.confirm(`Remove ${entry} from the blocklist and lift its ban?`)) return;
+      if (!(await (window.twConfirm || window.confirm)(`Remove ${entry} from the blocklist and lift its ban?`))) return;
       btn.disabled = true;
       els.cblStatus.textContent = "Removing…";
       try {
@@ -5751,7 +5761,7 @@
     } else {
       forwarders = dnsUpCompose(choice, useTls);
     }
-    if (!window.confirm("Change upstream DNS (" + (useTls ? "DNS-over-TLS" : "plaintext port 53") + ") and hot-reload Unbound? A backup of router-dns.conf is made first; LAN DNS blips for a second.")) return;
+    if (!(await (window.twConfirm || window.confirm)("Change upstream DNS (" + (useTls ? "DNS-over-TLS" : "plaintext port 53") + ") and hot-reload Unbound? A backup of router-dns.conf is made first; LAN DNS blips for a second."))) return;
     hint.textContent = "Saving…";
     dnsUpSaveBtn.disabled = true;
     try {
@@ -5903,7 +5913,7 @@
     els.blBody.addEventListener("click", async (e) => {
       const btn = e.target.closest(".bl-remove");
       if (!btn) return;
-      if (!window.confirm("Remove this blocklist source?")) return;
+      if (!(await (window.twConfirm || window.confirm)("Remove this blocklist source?"))) return;
       try {
         await postJSON("/api/blocklists/remove", { url: btn.dataset.url });
         await refreshBlocklists();
@@ -5945,7 +5955,7 @@
     els.wlBody.addEventListener("click", async (e) => {
       const btn = e.target.closest(".wl-remove");
       if (!btn) return;
-      if (!window.confirm(`Remove "${btn.dataset.domain}" from the whitelist?`)) return;
+      if (!(await (window.twConfirm || window.confirm)(`Remove "${btn.dataset.domain}" from the whitelist?`))) return;
       try {
         await postJSON("/api/blocklists/whitelist/remove", { domain: btn.dataset.domain });
         await refreshBlocklists();
@@ -6099,7 +6109,7 @@
     els.rpzBody.addEventListener("click", async (e) => {
       const btn = e.target.closest(".rpz-remove");
       if (!btn) return;
-      if (!window.confirm(`Remove the RPZ policy for "${btn.dataset.domain}"?`)) return;
+      if (!(await (window.twConfirm || window.confirm)(`Remove the RPZ policy for "${btn.dataset.domain}"?`))) return;
       try {
         await postJSON("/api/rpz/remove", { domain: btn.dataset.domain });
         await refreshBlocklists();
@@ -6146,7 +6156,7 @@
     els.rpzfBody.addEventListener("click", async (e) => {
       const btn = e.target.closest(".rpzf-remove");
       if (!btn) return;
-      if (!window.confirm("Remove this RPZ feed? Its zone is removed from Unbound on the next reload.")) return;
+      if (!(await (window.twConfirm || window.confirm)("Remove this RPZ feed? Its zone is removed from Unbound on the next reload."))) return;
       try {
         await postJSON("/api/rpz/feed/remove", { url: btn.dataset.url });
         await refreshBlocklists();
@@ -6480,7 +6490,7 @@
       }
     };
     els.sqmTest.addEventListener("click", async () => {
-      if (!window.confirm("Run speedtest? Shaping is briefly removed for a clean measurement (~1 min), then restored automatically.")) return;
+      if (!(await (window.twConfirm || window.confirm)("Run speedtest? Shaping is briefly removed for a clean measurement (~1 min), then restored automatically."))) return;
       els.sqmTest.disabled = true;
       els.sqmTestBox.hidden = false;
       els.sqmTestResult.innerHTML = "";
@@ -6729,7 +6739,7 @@
     els.cfgModalSave.addEventListener("click", async () => {
       const kind = state.cfgTarget;
       if (!kind) return;
-      if (!window.confirm("Save changes and restart the service? A backup of the current file is made first.")) return;
+      if (!(await (window.twConfirm || window.confirm)("Save changes and restart the service? A backup of the current file is made first."))) return;
       els.cfgModalSave.disabled = true;
       try {
         const data = await postJSON(`/api/system/${kind}-config`, { content: els.cfgModalText.value });
@@ -7057,11 +7067,9 @@
       }
       const san = e.target.closest(".bk-sys-san");
       if (san) {
-        if (!window.confirm(
-          `Create a sanitized export of "${san.dataset.name}"?\n\n` +
+        if (!(await (window.twConfirm || window.confirm)(`Create a sanitized export of "${san.dataset.name}"?\n\n` +
           "Secrets (WireGuard keys, CrowdSec/cloudflared credentials, tuxwall auth) are removed or redacted. " +
-          "The export downloads automatically and a copy stays on this server."
-        )) return;
+          "The export downloads automatically and a copy stays on this server."))) return;
         try {
           const res = await postJSON("/api/backups/system/sanitize", { name: san.dataset.name });
           if (!res.ok || !res.name) throw new Error(res.error || "sanitize failed");
@@ -7077,7 +7085,7 @@
       }
       const del = e.target.closest(".bk-sys-del");
       if (del) {
-        if (!window.confirm(`Delete system backup "${del.dataset.name}"?`)) return;
+        if (!(await (window.twConfirm || window.confirm)(`Delete system backup "${del.dataset.name}"?`))) return;
         try {
           await postJSON("/api/backups/system/delete", { name: del.dataset.name });
           setBkSysMsg("System backup deleted.", false);
@@ -7103,17 +7111,13 @@
         const isFw = rst.dataset.file === "iptables-save.txt" || rst.dataset.file === "ip6tables-save.txt";
         const isCode = rst.dataset.file.startsWith("var/www/html/includes/") ||
           rst.dataset.file.startsWith("var/www/html/scripts/");
-        if (!window.confirm(
-          `Restore "${rst.dataset.file}" from this backup?\n\n` +
+        if (!(await (window.twConfirm || window.confirm)(`Restore "${rst.dataset.file}" from this backup?\n\n` +
           (isFw
             ? "This atomically replaces the ENTIRE live ruleset (IPv4 or IPv6) with the rules from the backup. Do this from a LAN connection."
             : "The current file is kept as a timestamped .bak alongside it." +
-              (svc ? `\nAfterwards, apply it with: sudo systemctl restart ${svc}` : ""))
-        )) return;
-        if (isCode && !window.confirm(
-          `SECOND CONFIRMATION — "${rst.dataset.file}" is executable dashboard code.\n\n` +
-          "Restoring it changes what the dashboard itself runs. Only proceed if you trust this backup."
-        )) return;
+              (svc ? `\nAfterwards, apply it with: sudo systemctl restart ${svc}` : ""))))) return;
+        if (isCode && !(await (window.twConfirm || window.confirm)(`SECOND CONFIRMATION — "${rst.dataset.file}" is executable dashboard code.\n\n` +
+          "Restoring it changes what the dashboard itself runs. Only proceed if you trust this backup."))) return;
         try {
           const res = await postJSON("/api/backups/system/restore-file", {
             name: rst.dataset.name, file: rst.dataset.file,
@@ -7232,7 +7236,7 @@
       }
     });
     els.sysUpdApply.addEventListener("click", async () => {
-      if (!window.confirm("Install all available system updates now? This can take several minutes. A reboot may be recommended afterwards.")) return;
+      if (!(await (window.twConfirm || window.confirm)("Install all available system updates now? This can take several minutes. A reboot may be recommended afterwards."))) return;
       try {
         await postJSON("/api/system/updates/apply", {});
         startUpdPoll();
@@ -7242,8 +7246,8 @@
       }
     });
     els.sysReboot.addEventListener("click", async () => {
-      if (!window.confirm("Reboot the router now? The dashboard and network go offline for about a minute.")) return;
-      if (!window.confirm("Are you sure? All connections through this router will drop.")) return;
+      if (!(await (window.twConfirm || window.confirm)("Reboot the router now? The dashboard and network go offline for about a minute."))) return;
+      if (!(await (window.twConfirm || window.confirm)("Are you sure? All connections through this router will drop."))) return;
       try {
         await postJSON("/api/system/reboot", {});
         els.sysReboot.textContent = "Rebooting…";
@@ -7274,7 +7278,7 @@
         reload: `Reload ${unit}?`,
         start: `Start ${unit}?`,
       }[action];
-      if (!window.confirm(warn)) return;
+      if (!(await (window.twConfirm || window.confirm)(warn))) return;
       btn.disabled = true;
       try {
         await postJSON("/api/system/services/action", { unit, action });
@@ -9120,11 +9124,13 @@
       : "Collecting samples…";
     if (!liveLatSnap.length) liveLatSnap = d.latHistory || [];
 
-    renderAttackMap(ovMap, sec.by_ip || []);
+    renderAttackMap(ovMap, sec.by_ip || [], false, sec.countries || []);
     els.ovGeoHint.textContent = (sec.geo_db && sec.geo_db.hint) || `${formatNumber((sec.stats || {}).unique_ips || 0)} attack sources`;
 
     const clients = (bw.clients || []).slice(0, 6).sort((a, b) => (b.rx_bytes_per_s || 0) - (a.rx_bytes_per_s || 0));
-    els.ovTalkersBody.innerHTML = clients.length
+    // The Overview Top Talkers / Suricata cards were replaced by the Router
+    // Insights panel (insights.js); skip if their markup is gone.
+    if (els.ovTalkersBody) els.ovTalkersBody.innerHTML = clients.length
       ? clients.map((c) => `
         <tr>
           <td><span class="mono">${esc(c.ip)}</span>${c.hostname ? `<span class="muted"> · ${esc(c.hostname)}</span>` : ""}</td>
@@ -9134,8 +9140,8 @@
       : `<tr><td colspan="3" class="empty">No client traffic yet.</td></tr>`;
 
     const sur = d.sur || {};
-    els.ovSuricataHint.textContent = sur.enabled ? `${formatNumber(sur.count_24h)} alerts in last 24h` : "not running";
-    els.ovSuricataBody.innerHTML = sur.enabled && (sur.top || []).length
+    if (els.ovSuricataHint) els.ovSuricataHint.textContent = sur.enabled ? `${formatNumber(sur.count_24h)} alerts in last 24h` : "not running";
+    if (els.ovSuricataBody) els.ovSuricataBody.innerHTML = sur.enabled && (sur.top || []).length
       ? (sur.top || []).slice(0, 6).map((a) => `
         <tr>
           <td>${esc(a.sig)}</td>
@@ -9247,10 +9253,10 @@
     if (!btn || btn.hidden) return;
     if (state.role !== "admin") return;
     const on = btn.dataset.on === "1";
-    if (!window.confirm(on
+    if (!(await (window.twConfirm || window.confirm)(on
       ? "Disable WireGuard?\n\nAll VPN peers disconnect immediately. If you are connected through WireGuard, " +
         "you will lose access to this dashboard until the tunnel is enabled again."
-      : "Enable WireGuard?\n\nThe wg0 interface will start with the saved configuration.")) return;
+      : "Enable WireGuard?\n\nThe wg0 interface will start with the saved configuration."))) return;
     btn.disabled = true;
     try {
       await postJSON(on ? "/api/wireguard/stop" : "/api/wireguard/start", {});
@@ -9783,7 +9789,7 @@
   const SVC_ACTION_ICONS = {
     start: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>',
     stop: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M6 6h12v12H6z"/></svg>',
-    restart: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42A6.99 6.99 0 0 1 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-1.93.78-3.68 2.05-4.95L5.64 5.63A8.95 8.95 0 0 0 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.62-1.12-4.98-2.91-6.63z"/></svg>',
+    restart: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>',
     reload: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M12 6v3l4-4-4-4v3c-4.42 0-8 3.58-8 8 0 1.57.46 3.03 1.24 4.26L6.7 14.8A5.87 5.87 0 0 1 6 12c0-3.31 2.69-6 6-6zm6.76 1.74L17.3 9.2c.44.84.7 1.79.7 2.8 0 3.31-2.69 6-6 6v-3l-4 4 4 4v-3c4.42 0 8-3.58 8-8 0-1.57-.46-3.03-1.24-4.26z"/></svg>',
   };
 
@@ -9876,7 +9882,7 @@
         restart: `Restart ${unit}? Active connections through it may drop.`,
         start: `Start ${unit}?`,
       }[action];
-      if (!window.confirm(warn)) return;
+      if (!(await (window.twConfirm || window.confirm)(warn))) return;
       btn.disabled = true;
       try {
         await postJSON("/api/system/services/action", { unit, action });
@@ -9951,7 +9957,7 @@
           restart: `Restart ${unit}? Active connections through it may drop.`,
           start: `Start ${unit}?`,
         }[action];
-        if (warn && !window.confirm(warn)) return;
+        if (warn && !(await (window.twConfirm || window.confirm)(warn))) return;
         btn.disabled = true;
         try {
           await postJSON("/api/system/services/action", { unit, action });
@@ -10143,12 +10149,24 @@
       || null;
   }
 
+  // Personality (css/themes.css) for a theme: built-ins use their own id;
+  // custom themes may name a built-in via "style", which the server stores.
+  // Themes uploaded before that only have it in this browser's localStorage.
+  const THEME_STYLE_KEY = "tuxwall-theme-styles";
+  function themeStyleOf(theme) {
+    let s = theme.style || (theme.builtin ? theme.id : "");
+    if (!s) { try { s = JSON.parse(localStorage.getItem(THEME_STYLE_KEY) || "{}")[theme.id] || ""; } catch (err) { s = ""; } }
+    return BUILTIN_THEMES.some((b) => b.id === s) ? s : "";
+  }
+
   function applyThemeColors(theme) {
     const root = document.documentElement;
     THEME_COLOR_KEYS.forEach((k) => {
       root.style.setProperty(`--${k}`, theme.colors[k] || "");
     });
     document.body.classList.toggle("light-theme", theme.dark === false);
+    root.dataset.theme = theme.id;
+    root.dataset.themeStyle = themeStyleOf(theme);
   }
 
   function cacheTheme(theme) {
@@ -10239,6 +10257,9 @@
     const themes = [...BUILTIN_THEMES, ...state.allThemes.filter((t) => !t.builtin)];
     els.themeGrid.innerHTML = themes.map((t) => `
       <div class="theme-card${t.id === state.activeTheme ? " active" : ""}" data-id="${esc(t.id)}" role="button" tabindex="0">
+        <div class="theme-preview" aria-hidden="true" data-theme-style="${esc(themeStyleOf(t))}" style="${THEME_COLOR_KEYS.map((k) => `--${k}:${esc(t.colors[k] || "")}`).join(";")}">
+          <span class="tp-side"><i></i><i></i><i></i></span><span class="tp-card"><span class="tp-glow"></span><span class="tp-kicker">System</span><span class="tp-val">97<small>%</small></span><span class="tp-bar"><i></i></span></span>
+        </div>
         <div class="theme-swatches">
           ${THEME_SWATCH_KEYS.map((k) => `<span class="theme-swatch" style="background:${esc(t.colors[k] || "#777777")}"></span>`).join("")}
         </div>
@@ -10255,10 +10276,12 @@
       const d = await fetchJSON("/api/themes");
       state.allThemes = d.themes || [];
       if (state.themeBootstrapped) {
-        // Theme was already restored from localStorage — keep it and sync it
-        // back to the server so the two stay in agreement.
-        if (state.activeTheme && state.activeTheme !== d.active) {
-          postJSON("/api/themes/active", { id: state.activeTheme }).catch(() => {});
+        // The localStorage copy only avoids a flash on load. The server's
+        // choice wins: pushing a stale cached theme back would overwrite a
+        // newer selection made from another browser.
+        if (d.active && d.active !== state.activeTheme && findTheme(d.active)) {
+          await applyTheme(d.active, { persist: false });
+          return;
         }
         renderThemePicker();
         return;
@@ -10430,13 +10453,27 @@
     els.themeFormatSample.textContent = JSON.stringify({
       name: "My Theme",
       dark: false,
+      style: "solarized-light",
       colors: {
         bg: "#f6f8fa", "bg-elev": "#ffffff", card: "#ffffff",
         border: "#d0d7de", text: "#1f2328", muted: "#59636e",
         accent: "#0969da", green: "#1a7f37", red: "#cf222e",
         amber: "#9a6700",
       },
-    }, null, 2);
+    }, null, 2) + "\n\n\"style\" is optional: the id of a built-in theme whose look\n(surfaces, corners, glow, fonts, background) your colours inherit:\n" + BUILTIN_THEMES.map((b) => b.id).join(", ") + ".\nLeave it out to keep the classic look. The style is saved on\nthe server with the theme, so every browser shows it.";
+
+    let themeHoverTimer = null;
+    els.themeGrid.addEventListener("mouseover", (e) => {
+      const card = e.target.closest(".theme-card");
+      if (!card) return;
+      clearTimeout(themeHoverTimer);
+      themeHoverTimer = setTimeout(() => { const t = findTheme(card.dataset.id); if (t) applyThemeColors(t); }, 220);
+    });
+    els.themeGrid.addEventListener("mouseleave", () => {
+      clearTimeout(themeHoverTimer);
+      const t = findTheme(state.activeTheme);
+      if (t) applyThemeColors(t);
+    });
 
     els.themeGrid.addEventListener("click", async (e) => {
       const del = e.target.closest(".theme-del");
@@ -10444,7 +10481,7 @@
         e.stopPropagation();
         const id = del.dataset.del;
         const t = findTheme(id);
-        if (!window.confirm(`Delete custom theme "${t ? t.name : id}"?`)) return;
+        if (!(await (window.twConfirm || window.confirm)(`Delete custom theme "${t ? t.name : id}"?`))) return;
         del.disabled = true;
         try {
           await postJSON("/api/themes/delete", { id });
@@ -10508,7 +10545,14 @@
       }
       els.themeUploadBtn.disabled = true;
       try {
-        const d = await postJSON("/api/themes/upload", parsed);
+        const d = await postJSON("/api/themes/upload", { ...parsed, style: parsed && parsed.style ? String(parsed.style) : "" });
+        if (parsed && parsed.style && d.theme && !d.theme.style) {
+          try {
+            const map = JSON.parse(localStorage.getItem(THEME_STYLE_KEY) || "{}");
+            map[d.theme.id] = String(parsed.style);
+            localStorage.setItem(THEME_STYLE_KEY, JSON.stringify(map));
+          } catch (err) { }
+        }
         els.themeUploadMsg.textContent = `Installed "${d.theme.name}". Click its card above to apply it.`;
         els.themeFile.value = "";
         await loadThemes();
@@ -11127,7 +11171,7 @@
     listEl.querySelectorAll("[data-plugin-uninstall]").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const pid = btn.dataset.pluginUninstall;
-        if (!window.confirm(`Uninstall ${pid}? This removes the plugin, its settings and any stored credentials. The plugin's nav entry disappears after the list reloads.`)) return;
+        if (!(await (window.twConfirm || window.confirm)(`Uninstall ${pid}? This removes the plugin, its settings and any stored credentials. The plugin's nav entry disappears after the list reloads.`))) return;
         btn.disabled = true;
         try {
           const d = await postJSON("/api/plugins/" + encodeURIComponent(pid) + "/uninstall", {});
@@ -12423,7 +12467,7 @@
           del.textContent = "delete";
           del.addEventListener("click", async (e) => {
             e.stopPropagation();
-            if (!window.confirm("Delete this agent session?")) return;
+            if (!(await (window.twConfirm || window.confirm)("Delete this agent session?"))) return;
             try {
               await postJSON("/api/agent/session/delete", { sessionID: s.id });
               row.remove();
@@ -12904,11 +12948,9 @@
       if (!btn) return;
       const banning = btn.classList.contains("ban-btn");
       const label = btn.dataset.hostname || btn.dataset.ip;
-      if (!window.confirm(
-        banning
+      if (!(await (window.twConfirm || window.confirm)(banning
           ? `Ban ${label}? This blocks all internet access (firewall + DNS).`
-          : `Unban ${label}?`
-      )) return;
+          : `Unban ${label}?`))) return;
       btn.disabled = true;
       try {
         await postJSON(banning ? "/api/leases/ban" : "/api/leases/unban", {
@@ -13342,7 +13384,7 @@
       try {
         if (del) {
           const username = del.dataset.del;
-          if (!window.confirm(`Remove user "${username}"? Their session ends immediately.`)) return;
+          if (!(await (window.twConfirm || window.confirm)(`Remove user "${username}"? Their session ends immediately.`))) return;
           await postJSON("/api/auth/users/delete", { username });
           els.usersMsg.textContent = `Removed ${username}.`;
           await loadUsers();
@@ -13354,7 +13396,7 @@
             const msg = self
               ? `Disable user "${username}"? This is YOUR account - your session ends immediately and you must sign in as another admin.`
               : `Disable user "${username}"? Their session ends immediately.`;
-            if (!window.confirm(msg)) return;
+            if (!(await (window.twConfirm || window.confirm)(msg))) return;
           }
           await postJSON("/api/auth/users/enabled", { username, enabled: !enabled });
           els.usersMsg.textContent = `${username} ${enabled ? "disabled" : "enabled"}.`;
@@ -13933,7 +13975,8 @@
   const scheduled = new WeakSet();
 
   function rowsOf(tbody) {
-    return Array.from(tbody.rows);
+    // The "showing N of M" footer row is never capped away.
+    return Array.from(tbody.rows).filter((r) => !r.classList.contains("cs-more-row"));
   }
 
   function apply(table, cap) {
@@ -14115,7 +14158,7 @@
 
   function ensure() {
     document.querySelectorAll(SELECTOR).forEach((el) => {
-      if (el.querySelector(":scope > .card-topglow")) return;
+      if (el.classList.contains("card-topglow-host") && el.querySelector(":scope > .card-topglow")) return;
       el.classList.add("card-topglow-host");
       const glow = document.createElement("span");
       glow.className = "card-topglow";
@@ -14142,5 +14185,16 @@
   } else {
     ensure();
   }
-  new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
+  // Only rescan when an added element is (or contains) a card; live text and
+  // chart updates otherwise triggered a full-document scan on every tick.
+  new MutationObserver((muts) => {
+    for (const m of muts) {
+      for (const n of m.addedNodes) {
+        if (n.nodeType === 1 && (n.matches(SELECTOR) || n.querySelector(SELECTOR))) {
+          schedule();
+          return;
+        }
+      }
+    }
+  }).observe(document.body, { childList: true, subtree: true });
 })();
