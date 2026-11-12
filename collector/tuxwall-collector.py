@@ -113,7 +113,7 @@ def _version_tuple(value):
 
 def _addr_in_net(ip, net):
     try:
-        return ipaddress.ip_address(str(ip)) in net
+        return _plain_ip(ipaddress.ip_address(str(ip))) in net
     except ValueError:
         return False
 
@@ -130,6 +130,21 @@ def _effective_whitelist():
     except Exception:
         pass
     return nets
+
+
+_NAT64_NET = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _plain_ip(addr):
+    """IPv4 written in IPv6 notation (::ffff:a.b.c.d, NAT64 64:ff9b::a.b.c.d)
+    becomes plain IPv4, so the protected-range check cannot be sidestepped
+    and the same host is never stored under two spellings."""
+    if addr.version == 6:
+        if addr.ipv4_mapped:
+            return addr.ipv4_mapped
+        if addr in _NAT64_NET:
+            return ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
+    return addr
 
 
 def _protected_match(addr):
@@ -1029,7 +1044,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/public/bans/"):
             # Per-IP lookup used by dashboard browsers and third-party tools.
             try:
-                addr = ipaddress.ip_address(path[len("/api/public/bans/"):])
+                addr = _plain_ip(ipaddress.ip_address(path[len("/api/public/bans/"):]))
             except ValueError:
                 self._json(400, {"ok": False, "error": "Invalid IP"})
                 return
@@ -1051,7 +1066,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/ip/"):
             try:
-                addr = ipaddress.ip_address(path[len("/ip/"):])
+                addr = _plain_ip(ipaddress.ip_address(path[len("/ip/"):]))
             except ValueError:
                 self._json(400, {"ok": False, "error": "Invalid IP"})
                 return
@@ -1125,7 +1140,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(401, {"ok": False, "error": "Admin key required"})
                 return
             try:
-                addr = ipaddress.ip_address(path[len("/api/admin/bans/"):])
+                addr = _plain_ip(ipaddress.ip_address(path[len("/api/admin/bans/"):]))
             except ValueError:
                 self._json(400, {"ok": False, "error": "Invalid IP"})
                 return
@@ -1268,7 +1283,7 @@ class Handler(BaseHTTPRequestHandler):
 
         ip_raw = str(body.get("ip") or "").strip()
         try:
-            addr = ipaddress.ip_address(ip_raw)
+            addr = _plain_ip(ipaddress.ip_address(ip_raw))
         except ValueError:
             self._json(400, {"ok": False, "error": "Invalid IP"})
             return
@@ -1386,7 +1401,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(401, {"ok": False, "error": "Admin key required"})
             return
         try:
-            addr = ipaddress.ip_address(path[len("/api/admin/bans/"):])
+            addr = _plain_ip(ipaddress.ip_address(path[len("/api/admin/bans/"):]))
         except ValueError:
             self._json(400, {"ok": False, "error": "Invalid IP"})
             return
