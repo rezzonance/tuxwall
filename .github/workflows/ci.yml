@@ -45,6 +45,9 @@ jobs:
       - name: Import + behavior smoke test
         run: python3 tools/api_server_smoke.py
 
+      - name: Collector severity / trust floor
+        run: python3 tools/collector_severity_check.py
+
   dashboard:
     name: dashboard.js gates
     runs-on: ubuntu-latest
