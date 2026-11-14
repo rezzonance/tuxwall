@@ -16662,6 +16662,403 @@ def start_incident_monitor():
         return _INCIDENT_MONITOR
 
 
+# --- Agent facts: a compact, live summary of this install for the dashboard's
+# OpenCode agent (tuxwall-agent). Loaded as an "instructions" file from
+# /etc/tuxwall/opencode.json so the agent knows the box before the first
+# question. Checked every 5 min; the file is only rewritten when a value
+# changes (every rewrite reaches open sessions as an instruction update).
+# No secrets: no keys, tokens, passwords, peer configs or public addresses.
+AGENT_FACTS_FILE = "/var/lib/tuxwall/agent/facts.md"
+AGENT_FACTS_INTERVAL = 300
+AGENT_FACTS_START_DELAY = 30
+AGENT_FACTS_SERVICES = (
+    "systemd-networkd", "tuxwall-nat", "ufw", "kea-dhcp4-server", "unbound", "radvd",
+    "wg-quick@wg0", "crowdsec", "crowdsec-firewall-bouncer", "suricata", "opencanary",
+    "tuxwall-tripwire", "tuxwall-sqm", "nginx", "tuxwall", "tuxwall-agent", "tuxwall-collector",
+)
+_AGENT_FACTS_HEADER_LINES = 4
+
+
+def _af_run(args, timeout=8):
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return p.stdout if p.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _af_ago(ts, now=None):
+    try:
+        d = int((now or time.time()) - float(ts))
+    except (TypeError, ValueError):
+        return "?"
+    if d < 3600:
+        return "<1 h ago"
+    if d < 86400:
+        return "%d h ago" % (d // 3600)
+    return "%d d ago" % (d // 86400)
+
+
+def _af_clip(text, n):
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= n else text[:n - 3].rstrip() + "..."
+
+
+def _af_round(n):
+    return str(n) if n < 1000 else "~{:,}".format(int(round(n, -2)))
+
+
+def _af_addrs():
+    """{dev: {"v4": [cidr], "v6": [cidr], "state": str}} from `ip -j addr`."""
+    out = {}
+    try:
+        data = json.loads(_af_run(["ip", "-j", "addr", "show"]) or "[]")
+    except ValueError:
+        data = []
+    for l in data:
+        dev = l.get("ifname", "")
+        if not dev or dev == "lo":
+            continue
+        e = out.setdefault(dev, {"v4": [], "v6": [], "state": (l.get("operstate") or "").lower()})
+        for a in l.get("addr_info") or []:
+            if a.get("local") and a.get("scope") == "global":
+                e["v4" if a.get("family") == "inet" else "v6"].append("%s/%s" % (a["local"], a.get("prefixlen")))
+    return out
+
+
+def _af_v6_text(cidrs):
+    ula, gua = [], 0
+    for c in cidrs:
+        try:
+            n = ipaddress.ip_interface(c).network
+        except ValueError:
+            continue
+        if n.is_private:
+            if str(n) not in ula:
+                ula.append(str(n))
+        else:
+            gua += 1
+    parts = ula + (["GUA from ISP prefix (not shown)"] if gua else [])
+    return ", ".join(parts) or "none"
+
+
+def _af_v4_text(cidrs):
+    out = []
+    for c in cidrs:
+        try:
+            ip = ipaddress.ip_interface(c).ip
+        except ValueError:
+            continue
+        out.append(c if ip.is_private else ("public (not shown)" if ip.is_global else "CGNAT/shared address"))
+    return ", ".join(out) or "none"
+
+
+def _af_section_system():
+    lines = ["## System"]
+    boot = ""
+    try:
+        with open("/proc/uptime") as f:
+            boot = time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() - float(f.read().split()[0])))
+    except (OSError, ValueError, IndexError):
+        pass
+    lines.append("- Host `%s`, TuxWall %s, last boot %s" % (os.uname().nodename, TUXWALL_VERSION, boot or "?"))
+    dr = _af_run(["ip", "route", "show", "default"]).split()
+    dr6 = _af_run(["ip", "-6", "route", "show", "default"]).split()
+    lines.append("- Default route: IPv4 via dev `%s`, IPv6 via dev `%s`" % (
+        dr[dr.index("dev") + 1] if "dev" in dr[:-1] else "NONE",
+        dr6[dr6.index("dev") + 1] if "dev" in dr6[:-1] else "none"))
+    return lines
+
+
+def _af_section_interfaces():
+    topo_mod = globals().get("_topology")
+    addrs = _af_addrs()
+    lines = ["## Interfaces and networks"]
+    if topo_mod is None or not topo_mod.has_file():
+        lines.append("- No /etc/tuxwall/interfaces.json role record; live addresses:")
+        for dev, e in sorted(addrs.items()):
+            lines.append("  - `%s` %s: IPv4 %s; IPv6 %s" % (dev, e["state"], _af_v4_text(e["v4"]),
+                                                            _af_v6_text(e["v6"])))
+        return lines
+    t = topo_mod.load()
+    inv = {i["device"]: i for i in topo_mod.inventory()}
+
+    def link(dev):
+        i = inv.get(dev)
+        if not i:
+            return "MISSING"
+        return "up" if i.get("carrier") else "no link (%s)" % (i.get("operstate") or "down")
+
+    lines.append("Roles from /etc/tuxwall/interfaces.json (apply_locked=%s, policy=%s):" % (
+        str(t.get("apply_locked", True) is not False).lower(), json.dumps(t.get("policy") or {})))
+    w = t.get("wan") or {}
+    wdev = w.get("device", "")
+    lines.append("- WAN `%s` (%s): %s; IPv4 %s; IPv6 %s" % (
+        wdev, w.get("mode", "?"), link(wdev), _af_v4_text((addrs.get(wdev) or {}).get("v4", [])).replace("none", "NONE"),
+        _af_v6_text((addrs.get(wdev) or {}).get("v6", []))))
+    for n in topo_mod.networks(t):
+        dev = n.get("device", "")
+        flags = []
+        if n.get("vlan"):
+            flags.append("VLAN %s on `%s`" % (n.get("vlan"), n.get("parent", "?")))
+        if n.get("role") != "vpn":
+            flags.append("DHCP %s" % ("on" if n.get("dhcp") else "off"))
+            flags.append("RA %s" % ("on" if n.get("ra") else "off"))
+        label = "LAN" if n.get("role") == "lan" else "%s %s \"%s\"" % (n.get("role", "").upper(), n.get("id"), n.get("name"))
+        lines.append("- %s `%s`: %s; %s (subnet %s); IPv6 %s%s" % (
+            label, dev, link(dev), n.get("address") or "no address", n.get("subnet") or "?",
+            _af_v6_text(n.get("subnets6") or []), ("; " + ", ".join(flags)) if flags else ""))
+    known = {wdev} | {n.get("device") for n in topo_mod.networks(t)}
+    other = ["%s(%s)" % (d, "up" if i.get("carrier") else "down") for d, i in sorted(inv.items()) if d not in known]
+    if other:
+        lines.append("- Other devices (no role): %s" % ", ".join(other))
+    return lines
+
+
+def _af_section_policy():
+    topo_mod = globals().get("_topology")
+    if topo_mod is None or not hasattr(topo_mod, "current_policy"):
+        return []
+    p = topo_mod.current_policy()
+    names = {c["id"]: c.get("name", c["id"]) for c in p.get("columns") or []}
+    lines = ["## Zone policy (Interfaces > Policy matrix, derived from ufw)",
+             "Defaults: " + ", ".join("%s %s" % (k, v) for k, v in (p.get("defaults") or {}).items())]
+    for src, row in (p.get("cells") or {}).items():
+        cells = []
+        for dst, c in row.items():
+            if c.get("state") == "self":
+                continue
+            s = c.get("state", "?")
+            if c.get("exceptions"):
+                s += "+%d exc" % len(c["exceptions"])
+            cells.append("%s %s" % (names.get(dst, dst), s))
+        lines.append("- from %s -> %s" % (names.get(src, src), ", ".join(cells)))
+    for note in p.get("notes") or []:
+        lines.append("- Note: %s" % note)
+    return lines
+
+
+def _af_section_services():
+    try:  # one call; is-active exits 3 when any unit is down, stdout still lists every state
+        states = subprocess.run(["systemctl", "is-active"] + list(AGENT_FACTS_SERVICES),
+                                capture_output=True, text=True, timeout=10).stdout.split()
+    except Exception:
+        states = []
+    if len(states) != len(AGENT_FACTS_SERVICES):
+        states = ["active" if service_active(s) else "inactive" for s in AGENT_FACTS_SERVICES]
+    up = [s for s, st in zip(AGENT_FACTS_SERVICES, states) if st == "active"]
+    down = ["%s (%s)" % (s, st) for s, st in zip(AGENT_FACTS_SERVICES, states) if st != "active"]
+    return ["## Services",
+            "- active: %s" % (", ".join(up) or "none"),
+            "- NOT active: %s" % (", ".join(down) or "none")]
+
+
+def _af_section_firewall():
+    lines = ["## Firewall (ufw)"]
+    st = _af_run(["ufw", "status"], timeout=15)
+    lines.append("- ufw: %s" % ("active" if "Status: active" in st else "INACTIVE or unknown"))
+    guard = globals().get("_fw_guard")
+    if guard is not None:
+        ctx = _fw_ctx("")
+        s = guard.summary(guard.load_ruleset(ctx), ctx)
+        g = s.get("groups") or {}
+        lines.append("- Rules: %d (managed %d, policy %d, owner's %d); by owner: %s" % (
+            sum(g.values()), g.get("managed", 0), g.get("policy", 0), g.get("yours", 0),
+            ", ".join("%s %d" % kv for kv in sorted((s.get("owners") or {}).items(), key=lambda kv: -kv[1]))))
+        inv = s.get("invariants") or []
+        lines.append("- Guard invariants violated: %s" % (
+            "; ".join(str(i.get("title") or i.get("id") or i)[:100] for i in inv[:5]) if inv else "none"))
+        c = s.get("context") or {}
+        hp = c.get("honeypot") or {}
+        tw = c.get("tripwire") or {}
+        lines.append("- Deception: honeypot %s (WAN ports %s); canary %s; tripwire mode %s%s; CrowdSec bouncer chains: %s" % (
+            "enabled" if hp.get("enabled") else "DISABLED", ", ".join(str(x) for x in hp.get("ports") or []) or "none",
+            "active" if c.get("canary_active") else "NOT active", tw.get("mode", "?"),
+            " (TRIPPED)" if tw.get("tripped") else "", ", ".join(c.get("crowdsec_chains") or []) or "none"))
+    else:
+        n = len([l for l in st.splitlines() if l[:1] == "["]) or len([l for l in st.splitlines() if " ALLOW" in l or " DENY" in l])
+        lines.append("- Rules: %d (ufw status)" % n)
+    try:
+        import canary_egress as _ce
+        ok = []
+        for fam, path in (("v4", "/etc/ufw/before.rules"), ("v6", "/etc/ufw/before6.rules")):
+            with open(path) as f:
+                ok.append(_ce.present(f.read(), fam))
+        lines.append("- Canary egress containment in before*.rules: %s" % ("present (v4+v6)" if all(ok) else "MISSING"))
+    except Exception:
+        pass
+    view = globals().get("fw_findings_view")
+    if view is not None:
+        code, res = view("findings", "")
+        if code == 200 and res.get("ok"):
+            cnt = res.get("counts") or {}
+            lines.append("- Findings (Firewall > Findings): %d open - %s" % (
+                len(res.get("findings") or []), ", ".join("%s %d" % (k, v) for k, v in cnt.items())))
+            for f in [f for f in res.get("findings") or [] if f.get("severity") in ("critical", "high", "medium")][:8]:
+                lines.append("  - [%s] %s" % (f.get("severity"), _af_clip(f.get("title"), 140)))
+    snap = globals().get("_fw_snap")
+    if snap is not None:
+        snaps = snap.list_snaps(_fw_ctx(raw=False))
+        if snaps:
+            m = snaps[0]
+            lines.append("- Latest snapshot: `%s` (%s, %s%s); %d kept in %s" % (
+                m.get("id"), m.get("time", "?"), m.get("kind", "?"),
+                (": " + _af_clip(m.get("note"), 80)) if m.get("note") else "", len(snaps), snap.SNAP_DIR))
+        else:
+            lines.append("- Snapshots: none yet")
+    return lines
+
+
+def _af_section_nat():
+    wan = (_topo("wan_device") if "_topo" in globals() else "") or get_wan_interface()
+    rules = [l.strip() for l in _af_run(["iptables", "-t", "nat", "-S", "POSTROUTING"]).splitlines()
+             if "MASQUERADE" in l or "SNAT" in l]
+    want = "-A POSTROUTING -o %s -j MASQUERADE" % wan
+    mine = [r for r in rules if r == want]
+    txt = "present" if mine else "MISSING (LAN IPv4 has no internet - see the tuxwall-connectivity skill)"
+    if len(mine) > 1:
+        txt += " (%d copies)" % len(mine)
+    other = [r.replace("-A POSTROUTING ", "") for r in rules if r != want]
+    return ["## NAT",
+            "- LAN IPv4 masquerade `%s`: %s; owned by tuxwall-nat.service "
+            "(/usr/local/sbin/tuxwall-nat-ensure)" % (want, txt),
+            "- Other POSTROUTING NAT rules: %s" % ("; ".join("`%s`" % r for r in other[:6]) or "none")]
+
+
+def _af_section_crowdsec():
+    res = _crowdsec_active_decisions()
+    if not res.get("ok"):
+        return ["## CrowdSec", "- decisions: unavailable (%s)" % str(res.get("error", ""))[:80]]
+    decs = res.get("decisions") or []
+    origins = {}
+    for d in decs:
+        origins[d.get("origin") or "?"] = origins.get(d.get("origin") or "?", 0) + 1
+    top = sorted(origins.items(), key=lambda kv: -kv[1])[:4]
+    return ["## CrowdSec",
+            "- Active decisions: %s (bans %s); by origin: %s (counts rounded)" % (
+                _af_round(len(decs)), _af_round(len([d for d in decs if d.get("type") == "ban"])),
+                ", ".join("%s %s" % (k, _af_round(v)) for k, v in top) or "none")]
+
+
+def _af_section_dhcp():
+    try:
+        with open("/etc/kea/kea-dhcp4.conf") as f:
+            kea = json.load(f)
+    except (OSError, ValueError):
+        topo_mod = globals().get("_topology")
+        kea = topo_mod._read_kea() if topo_mod is not None else {}
+    subnets = (kea.get("Dhcp4") or {}).get("subnet4") or []
+    counts = {}
+    resp = kea_command("lease4-get-all")
+    entry = resp[0] if isinstance(resp, list) and resp else resp
+    now = time.time()
+    for l in ((entry or {}).get("arguments") or {}).get("leases") or []:
+        if int(l.get("state", 0)) == STATE_EXPIRED:
+            continue
+        if int(l.get("cltt") or 0) + int(l.get("valid-lft") or 0) <= now:
+            continue
+        counts[l.get("subnet-id")] = counts.get(l.get("subnet-id"), 0) + 1
+    lines = ["## DHCP (Kea)"]
+    for s in subnets:
+        pools = ", ".join(p.get("pool", "") for p in s.get("pools") or [])
+        lines.append("- %s on `%s`: %d active leases, %d reservations, pool %s" % (
+            s.get("subnet"), s.get("interface", "?"), counts.get(s.get("id"), 0),
+            len(s.get("reservations") or []), pools or "none"))
+    return lines
+
+
+def _af_section_wireguard():
+    dump = _wg(["show", "wg0", "dump"])
+    peers = parse_wg_dump(dump)["peers"]
+    now = time.time()
+    hs = [p["last_handshake"] for p in peers if p.get("last_handshake")]
+    active = len([h for h in hs if now - h < 180])
+    day = len([h for h in hs if now - h < 86400])
+    latest = ("active now" if active else _af_ago(max(hs), now)) if hs else "never"
+    return ["## WireGuard",
+            "- wg0 up; %d peers; handshake <3 min: %d, <24 h: %d; latest handshake: %s" % (
+                len(peers), active, day, latest)]
+
+
+def _af_section_incidents():
+    with _INCIDENT_LOCK:
+        items = _load_incidents()
+    now = time.time()
+    active = [i for i in items if i.get("status") == "active"]
+    recent = [i for i in items if i.get("status") != "active" and now - (i.get("last_seen") or 0) < 86400]
+    lines = ["## Incidents (dashboard bell)",
+             "- Active: %d; resolved in the last 24 h: %d" % (len(active), len(recent))]
+    for i in (active + sorted(recent, key=lambda x: -(x.get("last_seen") or 0)))[:8]:
+        lines.append("  - [%s, %s] %s (%s)" % (i.get("severity", "?"), i.get("status", "?"),
+                                              _af_clip(i.get("title"), 110), _af_ago(i.get("last_seen"), now)))
+    return lines
+
+
+def build_agent_facts():
+    """Markdown body (without the header) - every section fails on its own."""
+    out = []
+    for fn in (_af_section_system, _af_section_interfaces, _af_section_policy, _af_section_nat,
+               _af_section_firewall, _af_section_services, _af_section_dhcp, _af_section_wireguard,
+               _af_section_crowdsec, _af_section_incidents):
+        try:
+            part = fn()
+        except Exception as exc:
+            part = ["## %s" % fn.__name__.replace("_af_section_", "").capitalize(),
+                    "- unavailable (%s)" % type(exc).__name__]
+        if part:
+            out.extend(part + [""])
+    out.append("Detail: load a tuxwall-* skill (firewall-change, connectivity, interfaces, deception, "
+               "dashboard-dev); verify with live commands before acting.")
+    return "\n".join(out).rstrip() + "\n"
+
+
+def write_agent_facts(force=False):
+    body = build_agent_facts()
+    try:
+        with open(AGENT_FACTS_FILE) as f:
+            old = f.read().split("\n", _AGENT_FACTS_HEADER_LINES)
+        if not force and len(old) > _AGENT_FACTS_HEADER_LINES and old[-1] == body:
+            return False
+    except OSError:
+        pass
+    header = [
+        "# TuxWall live facts (auto-generated)",
+        "Generated by the TuxWall API (api_server.py); checked every 5 minutes, rewritten only when a value",
+        "changes. Values as of %s. If a live command disagrees, the live command wins." % time.strftime("%Y-%m-%d %H:%M %Z"),
+        "",
+    ]
+    d = os.path.dirname(AGENT_FACTS_FILE)
+    os.makedirs(d, exist_ok=True)
+    os.chmod(d, 0o755)
+    fd, tmp = tempfile.mkstemp(prefix=".facts.", dir=d)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write("\n".join(header) + "\n" + body)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, AGENT_FACTS_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return True
+
+
+def _agent_facts_loop():
+    time.sleep(AGENT_FACTS_START_DELAY)
+    while True:
+        try:
+            write_agent_facts()
+        except Exception as exc:
+            print("[agent-facts] write failed: %r" % exc, flush=True)
+        time.sleep(AGENT_FACTS_INTERVAL)
+
+
+def start_agent_facts_writer():
+    threading.Thread(target=_agent_facts_loop, name="agent-facts", daemon=True).start()
+
+
 def _self_restart(signum, frame):
     """SIGUSR1 handler: re-exec the API process in-place to pick up code changes."""
     print("tuxwall API self-restarting...", flush=True)
@@ -16679,6 +17076,7 @@ def main():
     get_latency_monitor()
     start_incident_monitor()
     get_community_auto_worker()   # community auto-ban sync (no-op until enabled)
+    start_agent_facts_writer()    # /var/lib/tuxwall/agent/facts.md for the AI agent (5 min)
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     server.daemon_threads = True
     print(f"tuxwall API listening on http://{LISTEN_HOST}:{LISTEN_PORT}", flush=True)

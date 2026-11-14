@@ -76,5 +76,11 @@
       "ss -tln": "allow",
       "find /var/log -type f -name *": "allow"
     }
-  }
+  },
+  "instructions": [
+    "/var/lib/tuxwall/agent/facts.md"
+  ],
+  "skills": [
+    "/usr/share/tuxwall/agent-skills"
+  ]
 }
