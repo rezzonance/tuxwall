@@ -608,7 +608,7 @@
     var ex = f.explain ? '<button type="button" class="btn btn-sm" data-s2="explain" data-target="' + esc(f.explain) + '">Explain</button>' : "";
     if (!x) return ex;
     if (x.kind === "link") return '<button type="button" class="btn btn-sm" data-s2="link" data-href="' + esc(x.href) + '">' + esc(x.label || "Open") + "</button>" + ex;
-    return '<button type="button" class="btn btn-sm btn-primary" data-s2="fix" data-list="' + list + '" data-idx="' + idx + '">Fix…</button>' + ex;
+    return '<button type="button" class="btn btn-sm btn-primary" data-s2="fix" data-list="' + list + '" data-idx="' + idx + '">Preview fix</button>' + ex;
   }
   function findingHtml(f, i) {
     var long = (f.detail || "").length > 220 || (f.raw || []).length;
@@ -648,7 +648,7 @@
     var plan = s.plan || {};
     var st = s.status ? '<span class="fwp-st fwp-st-' + esc(s.status) + '">' + esc(s.status === "ok" ? "in place" : s.status) + "</span>" : "";
     var btns = "";
-    if (plan.op && plan.op !== "template") btns += '<button type="button" class="btn btn-sm btn-primary" data-s2="fix" data-list="s" data-idx="' + i + '">Preview…</button>';
+    if (plan.op && plan.op !== "template") btns += '<button type="button" class="btn btn-sm btn-primary" data-s2="fix" data-list="s" data-idx="' + i + '">Preview</button>';
     if (plan.op === "template") btns += '<button type="button" class="btn btn-sm" data-s2="tpl" data-idx="' + i + '">Show rules</button>';
     if (s.href) btns += '<button type="button" class="btn btn-sm" data-s2="link" data-href="' + esc(s.href) + '">' + (s.href === "#interfaces" ? "Policy matrix" : "Open") + "</button>";
     if (s.explain) btns += '<button type="button" class="btn btn-sm" data-s2="explain" data-target="' + esc(s.explain) + '">Explain</button>';
@@ -838,7 +838,7 @@
       '<label>Comment <input type="text" class="fwp-ed-com" maxlength="120" value="' + esc(m && m[2] ? m[2] : "") + '" placeholder="why this rule exists"></label></div>' +
       '<div class="muted fwp-sub">Now: ' + esc(h.plain || "") + "</div>" +
       '<div class="fwp-ed-btns"><button type="button" class="btn btn-sm btn-primary" data-s2e="preview" data-num="' + num + '">Preview edit</button>' +
-      ' <button type="button" class="btn btn-sm" data-s2r="disable">Disable…</button>' +
+      ' <button type="button" class="btn btn-sm" data-s2r="disable">Disable</button>' +
       ' <button type="button" class="btn btn-sm" data-s2e="cancel">Cancel</button></div><div class="fwp-plan" hidden></div>';
     box.querySelector(".fwp-ed-rule").focus();
   }
@@ -885,7 +885,7 @@
       dis.innerHTML = "<summary>Disabled rules (" + l.length + ")</summary><ul>" + l.map(function (r) {
         return '<li><div><span class="mono">' + esc(r.text) + '</span><div class="muted fwp-sub">' + esc(r.plain) +
           " · disabled " + esc(ago(r.disabled_at)) + (r.who ? " by " + esc(r.who) : "") + "</div></div>" +
-          '<button type="button" class="btn btn-sm" data-s2d="' + esc(r.id) + '">Enable…</button><div class="fwp-plan" hidden></div></li>';
+          '<button type="button" class="btn btn-sm" data-s2d="' + esc(r.id) + '">Enable</button><div class="fwp-plan" hidden></div></li>';
       }).join("") + "</ul>";
     }).catch(function () { dis.hidden = true; });
   }

@@ -346,8 +346,12 @@ def describe(rs, prop, info, ctx):
     guard = G.check(rs, prop, ctx)
     lines = []
     for r in info.get("old") or []:
+        p = plain(r, ctx)
+        if info["op"] == "move":
+            to = info["to"] + 1 + (len(rs["v4"]) if info["family"] == "v6" else 0)
+            p = "Moves to position #%d: %s" % (to, p)
         lines.append({"kind": "remove" if info["op"] in ("edit", "disable") else "move",
-                      "text": r["text"], "plain": plain(r, ctx), "family": r["family"]})
+                      "text": r["text"], "plain": p, "family": r["family"]})
     for r in info.get("new") or []:
         lines.append({"kind": "add", "text": r["text"], "plain": plain(r, ctx), "family": r["family"]})
     lock = [x for x in guard["new"] + guard["existing"] if x["id"] == "lockout"]
