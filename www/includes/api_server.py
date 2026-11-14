@@ -6587,6 +6587,11 @@ _WG_RAW_FWD_RE = re.compile(
     r"ip6?tables -A FORWARD -[io] %i -j ACCEPT; ")
 
 
+_WG_RAW_DNS_RE = re.compile(
+    r"ip6?tables -C INPUT -i %i -s \S+ -p (?:udp|tcp) --dport 53 -j ACCEPT 2>/dev/null \|\| "
+    r"ip6?tables -A INPUT -i %i -s \S+ -p (?:udp|tcp) --dport 53 -j ACCEPT; ?")
+
+
 def _wg_raw_forward_disabled():
     """True once an applied policy matrix took over WireGuard forwarding
     (interfaces.json policy.wg_raw_forward == false)."""
@@ -6635,8 +6640,9 @@ def ensure_wg_routing():
              "-p", "tcp", "--dport", "53", "-j", "ACCEPT"],
         ]
         if _wg_raw_forward_disabled():
-            # the interface policy matrix replaced these with tagged ufw rules
-            adds = [a for a in adds if a[1:3] != ["-A", "FORWARD"]]
+            # the interface policy matrix replaced these with tagged ufw rules;
+            # the DNS INPUT accepts only repeat the ufw allows added below
+            adds = [a for a in adds if a[1:3] not in (["-A", "FORWARD"], ["-A", "INPUT"])]
         for add in adds:
             check = ["-C" if x == "-A" else x for x in add]
             if subprocess.run(check, capture_output=True, text=True,
@@ -6837,7 +6843,7 @@ def write_wg_conf(state):
             # ufw route rules / the policy matrix own WireGuard forwarding:
             # raw FORWARD -i/-o wg0 ACCEPTs would bypass them. PostDown keeps
             # its (harmless) deletes so older rules are cleaned up on wg down.
-            lines[-2] = _WG_RAW_FWD_RE.sub("", lines[-2])
+            lines[-2] = _WG_RAW_DNS_RE.sub("", _WG_RAW_FWD_RE.sub("", lines[-2]))
     for peer in state.get("peers", []):
         lines.append("")
         lines.append("# Peer: {}".format(peer.get("name") or "device"))

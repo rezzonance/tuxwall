@@ -25,6 +25,9 @@ RISKY_FORWARD = {21: "FTP", 23: "Telnet", 135: "MS-RPC", 139: "NetBIOS", 445: "S
                  6379: "Redis", 9200: "Elasticsearch", 11211: "memcached", 27017: "MongoDB", 161: "SNMP"}
 ZERO_HIT_DAYS = 7
 NOISE_PORTS = {67, 68, 137, 138, 139, 1900, 5353, 5355, 3702}
+# protocols that exist in one address family only (DHCPv4 / DHCPv6): a rule
+# for them has no meaningful twin in the other family
+FAMILY_ONLY_UDP = {"v4": {67, 68}, "v6": {546, 547}}
 LOG_RE = re.compile(r"^(?P<ts>\S+)\s+\S+\s+kernel:.*?\[UFW (?P<action>BLOCK|ALLOW|AUDIT)\]\s+IN=(?P<in>\S*)\s+OUT=(?P<out>\S*)"
                     r".*?SRC=(?P<src>\S+)\s+DST=(?P<dst>\S+).*?PROTO=(?P<proto>\S+)(?:\s+SPT=(?P<spt>\d+))?"
                     r"(?:\s+DPT=(?P<dpt>\d+))?")
@@ -585,6 +588,8 @@ def _asymmetry(rs, ctx, cls):
                     or r["sport"] != "any" or cls[(fam, i)]["managed"]):
                 continue
             p = G._ports(r["dport"])
+            if p and r["proto"] == "udp" and p <= FAMILY_ONLY_UDP[fam]:
+                continue
             port = min(p) if p else 9
             pkt = {"iface": r["in"] or "__any__", "src": sample[fam], "dst": "", "proto":
                    r["proto"] if r["proto"] != "any" else "tcp", "dport": port}
