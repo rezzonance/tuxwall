@@ -6582,6 +6582,11 @@ def get_wan_interface():
         return ""
 
 
+_WG_RAW_FWD_RE = re.compile(
+    r"ip6?tables -C FORWARD -[io] %i -j ACCEPT 2>/dev/null \|\| "
+    r"ip6?tables -A FORWARD -[io] %i -j ACCEPT; ")
+
+
 def _wg_raw_forward_disabled():
     """True once an applied policy matrix took over WireGuard forwarding
     (interfaces.json policy.wg_raw_forward == false)."""
@@ -6828,6 +6833,11 @@ def write_wg_conf(state):
             "ip6tables -D INPUT -i %i -s {} -p tcp --dport 53 -j ACCEPT 2>/dev/null".format(
                 subnet, wan, subnet, subnet,
                 WG_V6_SUBNET, wan, WG_V6_SUBNET, WG_V6_SUBNET))
+        if _wg_raw_forward_disabled():
+            # ufw route rules / the policy matrix own WireGuard forwarding:
+            # raw FORWARD -i/-o wg0 ACCEPTs would bypass them. PostDown keeps
+            # its (harmless) deletes so older rules are cleaned up on wg down.
+            lines[-2] = _WG_RAW_FWD_RE.sub("", lines[-2])
     for peer in state.get("peers", []):
         lines.append("")
         lines.append("# Peer: {}".format(peer.get("name") or "device"))
