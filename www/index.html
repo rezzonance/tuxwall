@@ -20,6 +20,7 @@
   <link rel="stylesheet" href="/css/insights.css?v=20261111233113">
   <link rel="stylesheet" href="/css/buttons.css?v=20261111224055">
   <link rel="stylesheet" href="/css/worldmap.css?v=20261111234908">
+  <link rel="stylesheet" href="/css/ai-panel.css?v=20261114063846">
 </head>
 <body>
 <div id="login-gate" class="login-gate" hidden>
@@ -96,6 +97,9 @@
     <header class="topbar">
       <h1 id="page-title">DHCP Clients</h1>
       <div class="topbar-actions">
+        <button class="ai-panel-btn" id="ai-panel-btn" type="button" hidden aria-label="Assistant" aria-haspopup="dialog" aria-expanded="false" aria-controls="ai-panel" aria-keyshortcuts="Control+/" title="Assistant (Ctrl+/)">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3Z"/><path d="m18.5 15 .8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2Z"/></svg>
+        </button>
         <div class="incident-wrap" id="incident-wrap" hidden>
           <button class="incident-bell" id="incident-bell" type="button" aria-label="Incidents" aria-haspopup="dialog" aria-expanded="false" title="Incidents">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg>
@@ -3657,11 +3661,12 @@
   </div>
 </div>
 <script src="/scripts/worldmap.js?v=20261111235643"></script>
-<script src="/scripts/dashboard.js?v=20261111234908"></script>
+<script src="/scripts/dashboard.js?v=20261114063846"></script>
 <script src="/scripts/enhance.js?v=20261111222731"></script>
 <script src="/scripts/netmap.js?v=20261112002528"></script>
 <script src="/scripts/insights.js?v=20261111233113"></script>
-<script src="/scripts/buttons.js?v=20261111222731"></script>
+<script src="/scripts/ai-panel.js?v=20261114063846"></script>
+<script src="/scripts/buttons.js?v=20261114063846"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>

@@ -11550,7 +11550,15 @@
       agentLoadModels();
       agentUpdateStats();
       ocRenderSuggestions();
-      if (!agent.booted) { agent.booted = true; ocBootScreen(); agentLoadBootInfo(); }
+      if (!agent.booted) {
+        agent.booted = true;
+        const stored = twStoredSession();
+        ocBootScreen(!!stored);
+        agentLoadBootInfo();
+        if (stored) ocLoadSession(stored);
+      } else {
+        twSyncPage();
+      }
       if (elOcInput) setTimeout(() => elOcInput.focus(), 50);
     }
 
@@ -11623,7 +11631,7 @@
 
     function ocBootScreen(keepSession) {
       if (!elOcScreen) return;
-      if (!keepSession) { agent.sessionID = null; agent.tokens = 0; agent.cost = 0; agent.msgs = 0; }
+      if (!keepSession) { agent.sessionID = null; agent.tokens = 0; agent.cost = 0; agent.msgs = 0; twSetSession(null, "page"); }
       elOcScreen.innerHTML = "";
       const boot = document.createElement("div");
       boot.className = "oc-boot";
@@ -11689,7 +11697,16 @@
           <span class="oc-msg-time">${ocTime()}</span>
         </div>
         <div class="oc-msg-body"></div>`;
-      el.querySelector(".oc-msg-body").textContent = text;
+      const ctx = twParseContext(text);
+      const msgBody = el.querySelector(".oc-msg-body");
+      msgBody.textContent = ctx.text;
+      if (ctx.context) {
+        const chip = document.createElement("span");
+        chip.className = "tw-ctx-chip";
+        chip.title = "Page context sent with this question";
+        chip.textContent = ctx.context;
+        msgBody.insertBefore(chip, msgBody.firstChild);
+      }
       if (elOcScreen) elOcScreen.appendChild(el);
       ocScroll();
       return el;
@@ -11896,6 +11913,7 @@
         await postJSON("/api/agent/permission/reply", { requestID, response });
         const card = btn.closest(".oc-perm");
         if (card) ocPermResolve(card, response === "reject" ? "denied" : "approved");
+        twEmit({ type: "tw.permission.resolved", properties: { requestID, note: response === "reject" ? "denied" : "approved" } });
       } catch (err) {
         // The request was already resolved server-side (duplicate card from
         // a re-render, or auto-allowed by an earlier "always"): settle the
@@ -12088,6 +12106,7 @@
         try {
           await postJSON("/api/agent/question/reply", { requestID: rid, answers });
           ocPermResolve(card, "answered");
+          twEmit({ type: "tw.question.resolved", properties: { requestID: rid, note: "answered" } });
         } catch (err) {
           sent = false;
           const errEl = card.querySelector(".oc-q-err");
@@ -12165,6 +12184,7 @@
         try {
           await postJSON("/api/agent/question/reject", { requestID: rid });
           ocPermResolve(card, "skipped");
+          twEmit({ type: "tw.question.resolved", properties: { requestID: rid, note: "skipped" } });
         } catch (err) {
           sent = false;
           const errEl = card.querySelector(".oc-q-err");
@@ -12200,18 +12220,20 @@
     }
 
     async function agentEnsureSession() {
-      if (agent.sessionID) return agent.sessionID;
-      const d = await postJSON("/api/agent/session/new", {});
-      const sid = d.id;
-      if (!sid) throw new Error(d.error || "could not create agent session");
-      agent.sessionID = sid;
+      if (!agent.sessionID) {
+        const d = await postJSON("/api/agent/session/new", {});
+        const sid = d.id;
+        if (!sid) throw new Error(d.error || "could not create agent session");
+        agent.sessionID = sid;
+        twSetSession(sid, "page");
+      }
       // start permission polling while a session is active
       if (!agent.pollTimer) {
           agent.pollTimer = setInterval(() => {
             if (agent.busy) { agentPollPermissions(); ocPollQuestions(); }
           }, 2000);
         }
-      return sid;
+      return agent.sessionID;
     }
 
     // ── live event stream (SSE) from opencode ──────────────────────
@@ -12223,16 +12245,199 @@
       try {
         const es = new EventSource("/api/agent/events");
         es.onmessage = (ev) => {
-          if (!agent.onEvent) return;
           let d = null;
           try { d = JSON.parse(ev.data); } catch (_) { return; }
-          agent.onEvent(d);
+          if (agent.onEvent) agent.onEvent(d);
+          else ocFollowEvent(d);
+          twEmit(d);
         };
         es.onerror = () => { /* EventSource auto-reconnects */ };
         agent.es = es;
       } catch (_) { agent.es = null; }
       return agent.es;
     }
+
+    // ── shared conversation (header panel, scripts/ai-panel.js) ─────
+    // One current session for the AI page and the header panel, kept in
+    // localStorage; the panel subscribes to the SSE stream above instead
+    // of opening its own EventSource.
+    const TW_SESSION_KEY = "tuxwall.agent.session";
+    const twListeners = new Set();
+    const twSessionSubs = new Set();
+    const twModelSubs = new Set();
+    let twExtBusy = false;
+
+    function twStoredSession() {
+      try { return localStorage.getItem(TW_SESSION_KEY) || null; } catch (_) { return null; }
+    }
+    function twSetSession(sid, from) {
+      sid = sid || null;
+      if (sid === twStoredSession()) return;
+      try {
+        if (sid) localStorage.setItem(TW_SESSION_KEY, sid);
+        else localStorage.removeItem(TW_SESSION_KEY);
+      } catch (_) { /* private mode: in-memory only */ }
+      twSessionSubs.forEach((fn) => { try { fn(sid, from || "panel"); } catch (_) { } });
+    }
+    function twEmit(d) {
+      twListeners.forEach((fn) => { try { fn(d); } catch (_) { } });
+    }
+    function twReleaseEvents() {
+      if (twListeners.size || agent.onEvent || agent.busy || !agent.es) return;
+      try { agent.es.close(); } catch (_) { }
+      agent.es = null;
+    }
+    // first line "[TuxWall context: …]" + blank line, added by the panel
+    function twParseContext(text) {
+      const m = /^\[TuxWall context: ([^\]\n]*)\]\n\n?/.exec(String(text || ""));
+      return m ? { context: m[1].trim(), text: String(text).slice(m[0].length) } : { context: "", text: String(text || "") };
+    }
+    // opencode V2 returns {type, content[]} newest first; V1 {info, parts}.
+    // Normalise both to V1 shape, oldest first.
+    function twNormalizeMessages(list) {
+      const out = (Array.isArray(list) ? list : []).map((m) => {
+        if (m && m.info) return m;
+        if (!m || (m.type !== "user" && m.type !== "assistant")) return null;
+        const info = { id: m.id, role: m.type, time: m.time || {}, tokens: m.tokens, cost: m.cost,
+          modelID: (m.model && (m.model.id || m.model.modelID)) || "", error: m.error || null };
+        if (m.type === "user") return { info, parts: [{ type: "text", text: m.text || "" }] };
+        const parts = (m.content || []).map((c) => {
+          if (!c || c.type !== "tool") return c;
+          const st = Object.assign({}, c.state || {});
+          if (Array.isArray(st.content) && st.output == null) {
+            st.output = st.content.map((x) => (x && x.type === "text" ? x.text : typeof x === "string" ? x : "")).join("");
+          }
+          if (st.error && typeof st.error === "object") st.error = st.error.message || JSON.stringify(st.error);
+          if (st.metadata && !st.meta) st.meta = st.metadata;
+          return { type: "tool", id: c.id, tool: c.name, name: c.name, state: st };
+        });
+        return { info, parts };
+      }).filter(Boolean);
+      const t = (m) => (m.info.time && (m.info.time.created || m.info.time.start)) || 0;
+      return out.map((m, i) => [m, i]).sort((a, b) => (t(a[0]) - t(b[0])) || (a[1] - b[1])).map((x) => x[0]);
+    }
+    async function twFetchMessages(sid) {
+      const res = await fetch("/api/agent/session/messages?id=" + encodeURIComponent(sid), { cache: "no-store" });
+      if (res.status === 401) handleSessionExpired();
+      let d = {};
+      try { d = await res.json(); } catch (_) { }
+      if (!res.ok || !d.ok) {
+        const err = new Error(d.error || ("HTTP " + res.status));
+        err.notFound = d.status === 404 || /not ?found/i.test(d.error || "");
+        throw err;
+      }
+      return twNormalizeMessages(d.messages);
+    }
+    function twSetModel(id, from) {
+      if (elAgentModel && id != null && [...elAgentModel.options].some((o) => o.value === id)) {
+        elAgentModel.value = id;
+        agent.model = id;
+        try { localStorage.setItem("tuxwall.agent.model", id); } catch (_) { }
+        ocRenderStatus();
+      }
+      twModelSubs.forEach((fn) => { try { fn(elAgentModel ? elAgentModel.value : id, from || "panel"); } catch (_) { } });
+    }
+    // remote turn (started from the panel) shown on the AI page
+    function ocFollowEvent(d) {
+      if (!d || agent.busy || !agent.booted) return;
+      const props = d.properties || {};
+      const onPage = state.activeView === "ai";
+      if (d.type === "permission.asked") {
+        const rid = props.id || props.requestID;
+        if (onPage && twExtBusy && rid && !document.querySelector(`.oc-perm[data-perm-id="${rid}"]`)) ocPermCard(props);
+        return;
+      }
+      if (d.type === "question.asked" || d.type === "question.v2.asked") {
+        if (onPage && (props.sessionID || "") === agent.sessionID) ocQuestionCard(props);
+        return;
+      }
+      if (!agent.sessionID || props.sessionID !== agent.sessionID) return;
+      if (d.type === "session.idle") {
+        if (!agent.remote && !twExtBusy) return;
+        agent.remote = false;
+        if (onPage) { agent.stale = false; ocLoadSession(agent.sessionID); ocSetState("idle"); }
+        else agent.stale = true;
+      } else if (d.type === "message.part.delta" || d.type === "message.part.updated") {
+        agent.remote = true;
+        if (onPage && elOcState && elOcState.textContent !== "busy") ocSetState("busy");
+      }
+    }
+    function ocLocalEvent(d) {
+      const p = (d && d.properties) || {};
+      if (d.type === "tw.permission.resolved") {
+        const c = document.querySelector(`.oc-perm[data-perm-id="${p.requestID}"]`);
+        if (c) ocPermResolve(c, p.note || "answered");
+      } else if (d.type === "tw.question.resolved") {
+        const c = document.querySelector(`.oc-question[data-qid="${p.requestID}"]`);
+        if (c) ocPermResolve(c, p.note || "answered");
+      }
+    }
+    // bring the AI page in line with the shared session
+    function twSyncPage() {
+      if (!agent.booted || agent.busy) return;
+      const sid = twStoredSession();
+      if (sid === agent.sessionID && !agent.stale) return;
+      agent.stale = false;
+      ocToolEls.clear(); ocToolGroups.clear();
+      if (sid) {
+        ocLoadSession(sid).then(() => {
+          if (twExtBusy) { agentPollPermissions(); ocPollQuestions(); }
+        });
+      } else {
+        ocBootScreen(false);
+      }
+    }
+    twSessionSubs.add((sid, from) => {
+      if (from === "page") return;
+      if (state.activeView === "ai") twSyncPage();
+      else agent.stale = true;
+    });
+
+    window.twAgent = {
+      session: twStoredSession,
+      setSession: (sid) => twSetSession(sid, "panel"),
+      async ensureSession() {
+        const sid = twStoredSession();
+        if (sid) return sid;
+        agent.sessionID = null;
+        return agentEnsureSession();
+      },
+      newSession() {
+        if (agent.busy) return false;
+        twSetSession(null, "panel");
+        return true;
+      },
+      onSession(fn) { twSessionSubs.add(fn); return () => twSessionSubs.delete(fn); },
+      subscribe(fn) {
+        twListeners.add(fn);
+        agentEvents();
+        return () => { twListeners.delete(fn); twReleaseEvents(); };
+      },
+      // resolves once the shared stream is connected (or after `ms`)
+      ready(ms) {
+        const es = agentEvents();
+        if (!es || es.readyState === 1) return Promise.resolve(!!es);
+        return new Promise((resolve) => {
+          const done = (ok) => { clearTimeout(t); es.removeEventListener("open", onOpen); resolve(ok); };
+          const onOpen = () => done(true);
+          const t = setTimeout(() => done(false), ms || 4000);
+          es.addEventListener("open", onOpen);
+        });
+      },
+      emitLocal(d) { ocLocalEvent(d); twEmit(d); },
+      messages: twFetchMessages,
+      normalizeMessages: twNormalizeMessages,
+      parseContext: twParseContext,
+      async loadModels() { await agentLoadModels(); return elAgentModel; },
+      model: () => (elAgentModel ? elAgentModel.value : ""),
+      setModel: (id) => twSetModel(id, "panel"),
+      onModel(fn) { twModelSubs.add(fn); return () => twModelSubs.delete(fn); },
+      isAdmin: () => isAdminUser(),
+      pageBusy: () => agent.busy,
+      setExternalBusy(on) { twExtBusy = !!on; if (!on) twReleaseEvents(); },
+      get: fetchJSON,
+      post: postJSON,
+    };
 
     // ── agent prompt pipeline (terminal) ────────────────────────────
     function ocClearInput() {
@@ -12472,6 +12677,7 @@
               await postJSON("/api/agent/session/delete", { sessionID: s.id });
               row.remove();
               if (s.id === agent.sessionID) agent.sessionID = null;
+              if (s.id === twStoredSession()) twSetSession(null, "page");
             } catch (err) { ocLine("delete failed: " + err.message, "oc-error"); }
           });
           row.appendChild(del);
@@ -12487,15 +12693,22 @@
       ocToolEls.clear(); ocToolGroups.clear();
       if (elOcScreen) elOcScreen.innerHTML = "";
       agent.sessionID = sid;
+      twSetSession(sid, "page");
       try {
-        const d = await fetchJSON("/api/agent/session/messages?id=" + encodeURIComponent(sid));
-        const msgs = d.messages || [];
+        const msgs = await twFetchMessages(sid);
+        if (agent.sessionID !== sid) return;
         if (elOcScreen) elOcScreen.innerHTML = "";
+        ocToolEls.clear(); ocToolGroups.clear();
         if (!msgs.length) { ocLine("(empty session)", "oc-muted"); return; }
         msgs.forEach((m) => ocRenderHistoryMsg(m.info, m.parts));
         ocLine("— session restored · " + msgs.length + " messages —", "oc-muted");
         ocScroll();
       } catch (err) {
+        if (err.notFound && agent.sessionID === sid) {
+          ocToolEls.clear(); ocToolGroups.clear();
+          ocBootScreen(false);
+          return;
+        }
         ocLine("failed to load session: " + err.message, "oc-error");
       }
     }
@@ -12534,6 +12747,8 @@
       const tokEl = el.querySelector(".oc-msg-tok-v");
       if (tokEl && totalTok) tokEl.textContent = totalTok.toLocaleString() + " tokens";
       if (!body.childNodes.length && anchor === el) el.remove();
+      const er = info && info.error;
+      if (er) ocLine("Agent error: " + (er.message || (er.data && er.data.message) || er.name || "failed"), "oc-error");
       ocScroll();
     }
 
@@ -12641,6 +12856,7 @@
       if (text.startsWith("/")) return ocRunCommand(text);
       if (text.startsWith("!")) return ocShell(text.slice(1).trim());
       if (agent.busy) { ocLine("a task is already running — press esc to abort", "oc-muted"); return; }
+      if (twExtBusy) { ocLine("the header assistant panel is still running a task — wait or stop it there", "oc-muted"); return; }
 
       ocUserMsg(text);
       agent.busy = true;
@@ -12850,6 +13066,7 @@
         try { localStorage.setItem("tuxwall.agent.model", elAgentModel.value); } catch (_) {}
         ocLine("model → " + (elAgentModel.value || "default"), "oc-muted");
         ocRenderStatus();
+        twModelSubs.forEach((fn) => { try { fn(elAgentModel.value, "page"); } catch (_) { } });
       });
     }
     if (elOcInput) {
@@ -13137,8 +13354,9 @@
     // The AI Assistant reaches the opencode agent, which runs shell commands
     // and holds sudo, so it is admin-only server-side. Hide it for viewers
     // rather than leaving a panel that only returns 403.
-    document.querySelectorAll('.nav-item[data-view="settings"], .nav-item[data-view="ai"]')
+    document.querySelectorAll('.nav-item[data-view="settings"], .nav-item[data-view="ai"], #ai-panel-btn')
       .forEach((el) => { el.hidden = !isAdmin; });
+    document.dispatchEvent(new CustomEvent("tw:role", { detail: { admin: isAdmin } }));
     const pluginTab = document.querySelector('#sys-subtabs [data-sys-pane="plugins"]');
     if (pluginTab) pluginTab.hidden = !isAdmin;
     if (!isAdmin && pluginTab && pluginTab.classList.contains("active")) setSysTab("status");

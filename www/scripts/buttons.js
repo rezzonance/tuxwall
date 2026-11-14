@@ -17,7 +17,7 @@
     ".fw-chip", ".tl-chip", ".ai-prompt-chip", ".ov-post-chip", ".theme-card",
     ".sec-feed-row", ".oc-tools-head", ".oc-perm-diff-toggle", ".oc-q-opt",
     ".tl-ip", ".tw-svc-sum", ".tw-pal-item", '[role="tab"]', '[role="switch"]',
-    '[role="option"]', '[role="menuitemradio"]', ".leaflet-container *",
+    '[role="option"]', '[role="menuitemradio"]', ".leaflet-container *", ".aip-raw",
   ].join(",");
 
   const ICON_RULES = [
