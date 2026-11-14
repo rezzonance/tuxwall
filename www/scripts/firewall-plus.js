@@ -778,12 +778,6 @@
       var h = s2.byNum[num];
       if (h) meta.firstChild.innerHTML = hitsHtml(h);
     }
-    // an open editor survives the periodic re-render of the table
-    if (s2.ed && !s2.ed.node.isConnected) {
-      var r = tbody.querySelector('tr[data-num="' + s2.ed.num + '"]');
-      if (r) r.parentNode.insertBefore(s2.ed.node, r.nextSibling);
-      else s2.ed = null;
-    }
   }
   function loadHits() {
     if (Date.now() - s2.hitsAt < 60000 && s2.hits) return;
@@ -815,16 +809,21 @@
   if (fwNav) fwNav.addEventListener("click", function () { loadHits(); });
   if (tbody.querySelector("tr[data-num]") || !view.hidden) loadHits();
 
+  // The editor is a fixed panel, not a table row: changing it never re-lays
+  // out the 80-row table, and the periodic table re-render can't remove it.
+  var edp = document.createElement("div");
+  edp.className = "fwp-edpanel";
+  edp.hidden = true;
+  edp.setAttribute("role", "dialog");
+  edp.setAttribute("aria-label", "Edit firewall rule");
+  edp.innerHTML = '<div class="fwp-edp-head"><b class="fwp-edp-title"></b><button type="button" class="btn btn-sm" data-s2e="cancel">Close</button></div><div class="fwp-ed"></div>';
+  view.appendChild(edp);
   function editorRow(row) {
-    var n = row.nextElementSibling;
-    if (n && n.classList.contains("fwp-edrow")) return n;
-    if (s2.ed && s2.ed.node.isConnected) s2.ed.node.remove();
-    n = document.createElement("tr");
-    n.className = "fwp-edrow";
-    n.innerHTML = '<td colspan="9"><div class="fwp-ed"></div></td>';
-    row.parentNode.insertBefore(n, row.nextSibling);
-    s2.ed = { num: row.dataset.num, node: n };
-    return n;
+    s2.ed = { num: row.dataset.num };
+    edp.hidden = false;
+    edp.querySelector(".fwp-edp-title").textContent = "Rule #" + row.dataset.num;
+    edp.querySelector(".fwp-ed").innerHTML = "";
+    return edp;
   }
   function openEditor(num) {
     var row = tbody.querySelector('tr[data-num="' + num + '"]');
@@ -840,24 +839,23 @@
       '<div class="fwp-ed-btns"><button type="button" class="btn btn-sm btn-primary" data-s2e="preview" data-num="' + num + '">Preview edit</button>' +
       ' <button type="button" class="btn btn-sm" data-s2r="disable">Disable</button>' +
       ' <button type="button" class="btn btn-sm" data-s2e="cancel">Cancel</button></div><div class="fwp-plan" hidden></div>';
-    box.querySelector(".fwp-ed-rule").focus();
+    box.querySelector(".fwp-ed-rule").focus({ preventScroll: true });
   }
-  tbody.addEventListener("click", function (e) {
+  function onRowClick(e) {
     var b = e.target.closest("[data-s2r], [data-s2e]");
     if (!b) return;
     var row = b.closest("tr[data-num]");
-    var edr = b.closest("tr.fwp-edrow");
-    if (!row && edr) row = edr.previousElementSibling;
+    if (!row && b.closest(".fwp-edpanel") && s2.ed) row = tbody.querySelector('tr[data-num="' + s2.ed.num + '"]');
     var act = b.getAttribute("data-s2r") || b.getAttribute("data-s2e");
     if (act === "explain") e.preventDefault();
     if (act === "explain") { explain(b.getAttribute("data-target")); return; }
-    if (act === "cancel") { var er = b.closest("tr.fwp-edrow"); if (er) er.remove(); s2.ed = null; return; }
+    if (act === "cancel") { edp.hidden = true; edp.querySelector(".fwp-ed").innerHTML = ""; s2.ed = null; return; }
     if (act === "edit" && row) { openEditor(row.dataset.num); return; }
     var hh = row ? s2.byNum[row.dataset.num] : null;
     if (act === "disable" && row) {
-      var tr = editorRow(row);
-      openPlan(tr.querySelector(".fwp-ed .fwp-plan") || tr.querySelector(".fwp-ed").appendChild(document.createElement("div")),
-        { op: "disable", number: row.dataset.num, expect: hh ? hh.key : "" });
+      var pl = edp.querySelector(".fwp-ed .fwp-plan");
+      if (!pl) { editorRow(row); pl = edp.querySelector(".fwp-ed").appendChild(document.createElement("div")); pl.className = "fwp-plan"; }
+      openPlan(pl, { op: "disable", number: row.dataset.num, expect: hh ? hh.key : "" });
       return;
     }
     if (act === "preview") {
@@ -869,7 +867,10 @@
       openPlan(ed.querySelector(".fwp-plan"), { op: "edit", number: num, expect: h2 ? h2.key : "",
         rule: rule + (com ? " comment '" + com.replace(/'/g, "") + "'" : "") });
     }
-  });
+  }
+  tbody.addEventListener("click", onRowClick);
+  edp.addEventListener("click", onRowClick);
+  if (subtabs) subtabs.addEventListener("click", function () { edp.hidden = true; s2.ed = null; });
 
   // disabled rules (stored in /etc/tuxwall/fw-disabled.json)
   var rulesCard = table.closest(".card");
@@ -893,11 +894,6 @@
     var b = e.target.closest("[data-s2d]");
     if (!b) return;
     openPlan(b.parentNode.querySelector(".fwp-plan"), { op: "enable", id: b.getAttribute("data-s2d") });
-  });
-  if (rulesCard) rulesCard.addEventListener("click", function (e) {
-    var b = e.target.closest('[data-s2="apply"], [data-s2="close-plan"]');
-    if (!b || b.closest("#fw-findings, #fw-suggestions")) return;
-    if (b.getAttribute("data-s2") === "close-plan") { var er = b.closest("tr.fwp-edrow"); if (er) { er.remove(); s2.ed = null; } }
   });
   new MutationObserver(function (m) {
     for (var i = 0; i < m.length; i++) if (m[i].addedNodes.length) { loadDisabled(); return; }
