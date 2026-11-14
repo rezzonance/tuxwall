@@ -53,6 +53,9 @@ jobs:
         # pure tests: fixtures in a temp tree, mocked command runner
         run: python3 tools/firewall_safety_check.py
 
+      - name: Collector severity / trust floor
+        run: python3 tools/collector_severity_check.py
+
   dashboard:
     name: dashboard.js gates
     runs-on: ubuntu-latest
