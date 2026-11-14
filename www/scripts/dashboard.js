@@ -5130,7 +5130,7 @@
 
   function csMoreRow(total, cols) {
     if (total <= CS_ROW_LIMIT) return "";
-    const href = `https://${location.hostname}:8744/`;
+    const href = "https://tuxwall.org/bans";
     return `<tr class="cs-more-row"><td colspan="${cols}" class="muted" style="text-align:center">
       Showing the newest ${formatNumber(CS_ROW_LIMIT)} of ${formatNumber(total)} &middot;
       <a href="${esc(href)}" target="_blank" rel="noopener">search and page through all of them in Ban Management</a></td></tr>`;
