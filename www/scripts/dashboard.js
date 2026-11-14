@@ -11668,7 +11668,10 @@
       if (!elOcStatus) return;
       const perms = document.querySelectorAll(".oc-perm:not(.oc-question):not(.oc-approved):not(.oc-denied)").length;
       const dir = agent.directory || "/";
-      const git = agent.vcs && agent.vcs.branch ? " · git(" + agent.vcs.branch + ")" : "";
+      // opencode 2.x returns the branch as an object ({} outside a repo)
+      const vb = agent.vcs && agent.vcs.branch;
+      const branch = typeof vb === "string" ? vb : (vb && typeof vb.name === "string" ? vb.name : "");
+      const git = branch ? " · git(" + branch + ")" : "";
       const model = (elAgentModel && elAgentModel.value) ? elAgentModel.value : agent.model || "";
       elOcStatus.innerHTML =
         `<span class="oc-sb-dir">${esc(dir)}${esc(git)}</span>` +
