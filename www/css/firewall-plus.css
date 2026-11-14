@@ -193,3 +193,9 @@
   #view-firewall .fwp-flist { padding: 4px 10px 12px; }
   #view-firewall .fwp-sevs { padding: 0 10px; }
 }
+
+/* Rule actions: buttons first (fixed order up/down/trash/edit), owner chip
+   last, left-aligned on one line so the buttons form clean columns. */
+#fw-rules-table tbody tr[data-num] > td:last-child { white-space: nowrap; text-align: left; }
+#view-firewall .fwp-owner { margin-right: 0; margin-left: 8px; }
+#view-firewall .act-btn.fwp-ph { visibility: hidden; pointer-events: none; }

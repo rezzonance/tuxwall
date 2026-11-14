@@ -86,7 +86,8 @@
       chip.className = "fwp-owner fwp-o-" + owner + (managed ? "" : " fwp-soft");
       chip.title = (managed ? "Managed by " : "") + label + (reason ? " — " + reason : "");
       chip.innerHTML = (managed ? LOCK : "") + esc(SHORT[owner] || owner);
-      if (cell) cell.insertBefore(chip, cell.firstChild);
+      // after the action buttons, so up/down/trash/edit line up in every row
+      if (cell) cell.appendChild(chip);
       if (managed) {
         row.classList.add("fwp-managed");
         var btns = row.querySelectorAll(".fw-move, .fw-remove");
@@ -762,6 +763,20 @@
         meta.innerHTML = '<span class="fwp-hslot"></span><a href="#security" class="fwp-link" data-s2r="explain" data-target="' + esc(tgt) +
           '" title="Open Security → Traffic → Diagnose' + (tgt ? " for " + esc(tgt) : "") + '">Explain</a>';
         src.appendChild(meta);
+        var chipEl = cell.querySelector(".fwp-owner");
+        if (row.dataset.managed === "1") {
+          // invisible stand-in the size of the edit button keeps columns aligned
+          var ph = document.createElement("button");
+          ph.type = "button";
+          ph.className = "act-btn fwp-act fwp-ph";
+          ph.setAttribute("data-btn-only", "");
+          ph.setAttribute("data-btn-tone", "info");
+          ph.setAttribute("aria-hidden", "true");
+          ph.tabIndex = -1;
+          ph.disabled = true;
+          ph.innerHTML = SVG.edit;
+          cell.insertBefore(ph, chipEl);
+        }
         if (row.dataset.managed !== "1") {
           var eb = document.createElement("button");
           eb.type = "button";
@@ -772,7 +787,7 @@
           eb.title = "Edit or disable this rule (preview, guard, 60 s confirm)";
           eb.setAttribute("aria-label", "Edit rule " + num);
           eb.innerHTML = SVG.edit;
-          cell.appendChild(eb);
+          cell.insertBefore(eb, chipEl);
         }
       }
       var h = s2.byNum[num];
