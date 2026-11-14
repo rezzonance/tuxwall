@@ -21,6 +21,7 @@
   <link rel="stylesheet" href="/css/buttons.css?v=202611120056">
   <link rel="stylesheet" href="/css/worldmap.css?v=202611120056">
   <link rel="stylesheet" href="/css/interfaces.css?v=20261114030140">
+  <link rel="stylesheet" href="/css/firewall-plus.css?v=STAMP">
 </head>
 <body>
 <div id="login-gate" class="login-gate" hidden>
@@ -1055,8 +1056,8 @@
           <div class="card-toolbar bl-toolbar fw-footbar">
             <span class="muted" id="fw-hint"></span>
             <span class="toolbar-spacer"></span>
-            <button id="fw-baseline" class="btn" type="button" title="Save the current live iptables/ip6tables ruleset as the restore baseline (re-capture after intentional rule changes)">Save baseline</button>
-            <button id="fw-reset" class="btn btn-act" type="button" title="Atomically restore all IPv4/IPv6 tables (filter/nat/mangle/raw) from the saved baseline. Current live rules are replaced — save a new baseline first if you've made changes you want to keep."><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v7c0 1.7 3.1 3 7 3h1"/><path d="M19 6v5"/><path d="M5 10c0 1.7 3.1 3 7 3"/><path d="M16 17h6m-3-3-3 3 3 3"/></svg><span>Restore baseline</span></button>
+            <button id="fw-baseline" class="btn" type="button" title="Save the current ufw configuration as a snapshot (Settings → Snapshots)">Save snapshot</button>
+            <button id="fw-reset" class="btn btn-act" type="button" title="Open the snapshot history (Settings → Snapshots): preview, firewall guard and a 60 s confirm before anything is restored"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v7c0 1.7 3.1 3 7 3h1"/><path d="M19 6v5"/><path d="M5 10c0 1.7 3.1 3 7 3"/><path d="M16 17h6m-3-3-3 3 3 3"/></svg><span>Restore</span></button>
           </div>
         </div>
       </div>
@@ -3739,6 +3740,7 @@
 <script src="/scripts/netmap.js?v=202611120056"></script>
 <script src="/scripts/insights.js?v=20261112182249"></script>
 <script src="/scripts/interfaces.js?v=20261114030140"></script>
+<script src="/scripts/firewall-plus.js?v=STAMP"></script>
 <script src="/scripts/buttons.js?v=202611120056"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
