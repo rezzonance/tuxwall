@@ -11556,22 +11556,6 @@
     ];
     const OC_PLACEHOLDERS = OC_SUGGESTIONS.slice(0, 4);
 
-    // The sidebar had ~400px of dead space below the usage stats; these fill
-    // it with something useful and give a one-click way into the agent.
-    function ocRenderSuggestions() {
-      const list = document.getElementById("ai-prompt-list");
-      if (!list || list.dataset.ready) return;
-      list.dataset.ready = "1";
-      list.innerHTML = OC_SUGGESTIONS.map((q) =>
-        `<button type="button" class="ai-prompt-chip">${esc(q)}</button>`).join("");
-      list.addEventListener("click", (ev) => {
-        const chip = ev.target.closest(".ai-prompt-chip");
-        if (!chip || !elOcInput) return;
-        elOcInput.value = chip.textContent;
-        elOcInput.focus();
-        elOcInput.dispatchEvent(new Event("input", { bubbles: true }));
-      });
-    }
     const OC_COMMANDS = [
       { cmd: "/new",      desc: "start a new session",                       alias: "/clear" },
       { cmd: "/sessions", desc: "list and switch sessions",                  alias: "/resume" },
@@ -11683,7 +11667,6 @@
       agentCheckHealth();
       agentLoadModels();
       agentUpdateStats();
-      ocRenderSuggestions();
       if (!agent.booted) {
         agent.booted = true;
         const stored = twStoredSession();
