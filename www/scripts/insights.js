@@ -1,8 +1,9 @@
 /* ============================================================================
    TuxWall — Router Insights (Overview). One tabbed early-warning panel that
    replaced the ratio donuts. Read-only: observes the /api/* responses the
-   Overview already polls (via window.twApi from netmap.js) and keeps a small
-   client-side history (1-min buckets, 24h, localStorage). Hand-written SVG.
+   Overview already polls (via window.twApi from netmap.js); chart history
+   comes from the API's per-minute collector (/api/insights/history), with
+   the live samples drawn on top. Hand-written SVG.
    ========================================================================= */
 (function () {
   "use strict";
@@ -79,78 +80,15 @@
     return Math.min(100, 90 + (v - th.c) / Math.max(1, th.max - th.c) * 10);
   }
 
-  /* ---------- history: in-memory fine samples + persisted minute buckets ---------- */
-  const LS_HIST = "tw.insights.hist.v1";
-  const FINE_KEEP = 65 * MIN, DAY = 24 * 60 * MIN, COMPACT_AFTER = 6 * 60 * MIN;
+  /* ---------- history: server minute rows (/api/insights/history, collected
+     by the API whether or not a browser is watching) + live in-memory samples
+     that add detail and extend the line between server minutes ---------- */
+  const FINE_KEEP = 65 * MIN;
   const fine = {};               // key -> [[t, v], ...]
-  const acc = {};                // key -> { m, sum, n }
-  let rows = [];                 // [{ t, s (minutes), v: {key: val} }] sorted by t
-  const bmap = new Map();        // t -> row
-  let dirtyStore = false;
-
-  (function load() {
-    try {
-      const j = JSON.parse(localStorage.getItem(LS_HIST) || "null");
-      if (!j || j.v !== 1 || !Array.isArray(j.r)) return;
-      const cutoff = Date.now() - DAY;
-      j.r.forEach((r) => {
-        const t = r[0] * MIN;
-        if (t < cutoff) return;
-        const row = { t, s: r[1] || 1, v: {} };
-        j.k.forEach((k, i) => { if (r[i + 2] != null) row.v[k] = r[i + 2]; });
-        rows.push(row); bmap.set(t, row);
-      });
-      rows.sort((a, b) => a.t - b.t);
-    } catch (_) { }
-  })();
-
-  function saveHist() {
-    if (!dirtyStore) return;
-    dirtyStore = false;
-    const now = Date.now();
-    // Older than 6h: merge 1-minute rows into 5-minute rows; drop beyond 24h.
-    const out = [], groups = new Map();
-    rows.forEach((r) => {
-      if (r.t < now - DAY) return;
-      if (r.s === 1 && r.t < now - COMPACT_AFTER) {
-        const g5 = Math.floor(r.t / (5 * MIN)) * 5 * MIN;
-        let g = groups.get(g5);
-        if (!g) { g = { t: g5, s: 5, sums: {}, ns: {} }; groups.set(g5, g); out.push(g); }
-        KEYS.forEach((k) => { if (r.v[k] != null) { g.sums[k] = (g.sums[k] || 0) + r.v[k]; g.ns[k] = (g.ns[k] || 0) + 1; } });
-      } else out.push(r);
-    });
-    rows = out.map((r) => {
-      if (!r.sums) return r;
-      const v = {};
-      Object.keys(r.sums).forEach((k) => { v[k] = round1(r.sums[k] / r.ns[k]); });
-      return { t: r.t, s: 5, v };
-    }).sort((a, b) => a.t - b.t);
-    // two partial 5-min groups for the same slot can appear only across a
-    // compaction boundary; keep the first
-    bmap.clear();
-    rows = rows.filter((r) => (bmap.has(r.t) ? false : (bmap.set(r.t, r), true)));
-    try {
-      localStorage.setItem(LS_HIST, JSON.stringify({
-        v: 1, k: KEYS,
-        r: rows.map((r) => [r.t / MIN, r.s].concat(KEYS.map((k) => (r.v[k] == null ? null : r.v[k])))),
-      }));
-    } catch (_) { }
-  }
-  const round1 = (v) => Math.round(v * 10) / 10;
-
-  function finalize(key) {
-    const a = acc[key];
-    if (!a || !a.n) return;
-    let row = bmap.get(a.m);
-    if (!row) {
-      row = { t: a.m, s: 1, v: {} };
-      bmap.set(a.m, row);
-      if (rows.length && rows[rows.length - 1].t > a.m) { rows.push(row); rows.sort((x, y) => x.t - y.t); }
-      else rows.push(row);
-    }
-    if (row.s === 1) row.v[key] = round1(a.sum / a.n);
-    dirtyStore = true;
-  }
+  // server history per range: { at, step, oldest, pts: {key: [[mid, v, step]]} }
+  const srv = {};
+  const srvBusy = {};
+  try { localStorage.removeItem("tw.insights.hist.v1"); } catch (_) { }
 
   function add(key, t, v) {
     if (v == null || !isFinite(v)) return;
@@ -161,38 +99,55 @@
       let i = 0; while (i < f.length && f[i][0] < t - FINE_KEEP) i++;
       f.splice(0, i);
     }
-    const m = Math.floor(t / MIN) * MIN;
-    const a = acc[key];
-    if (!a || a.m !== m) { finalize(key); acc[key] = { m, sum: v, n: 1 }; }
-    else { a.sum += v; a.n++; }
   }
 
+  // Fetch the selected range's server history; refreshed once the server
+  // has a new minute row (~every 60 s) while the panel is rendering.
+  function ensureHist(rg) {
+    const h = srv[rg], now = Date.now();
+    if (srvBusy[rg] || (h && now - h.at < (h.ok ? MIN : 5000))) return;
+    srvBusy[rg] = 1;
+    fetch("/api/insights/history?range=" + rg, { cache: "no-store", credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d || !Array.isArray(d.points) || !Array.isArray(d.keys)) throw 0;
+        const step = (d.step || 60) * 1000, pts = {};
+        d.keys.forEach((k, i) => {
+          const a = pts[k] = [];
+          d.points.forEach((p) => { const v = p[i + 1]; if (v != null && isFinite(v)) a.push([p[0] * 1000 + step / 2, v, step]); });
+        });
+        srv[rg] = { at: Date.now(), ok: 1, step, oldest: d.oldest ? d.oldest * 1000 : null, pts };
+      })
+      .catch(() => { srv[rg] = Object.assign(srv[rg] || { pts: {} }, { at: Date.now(), ok: 0 }); })
+      .then(() => { srvBusy[rg] = 0; if (st.range === rg) schedule(); });
+  }
+
+  const lowerBound = (a, t) => { let lo = 0, hi = a.length; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m][0] < t) lo = m + 1; else hi = m; } return lo; };
+  // Server rows, except where live samples cover that row's interval (they
+  // carry finer detail), merged with the live samples.
   function seriesOf(key, range) {
     const now = Date.now(), t0 = now - range;
     const f = fine[key] || [];
+    const h = srv[st.range];
+    const s = (h && h.pts[key]) || [];
     const out = [];
-    const fStart = f.length ? f[0][0] : Infinity;
-    let fineFrom;
-    if (range <= 60 * MIN) fineFrom = Math.max(t0, Math.min(fStart, now));
-    else {
-      const a = acc[key];
-      fineFrom = a ? a.m : now;
+    for (const p of s) {
+      const a = p[0] - p[2] / 2, b = p[0] + p[2] / 2;
+      if (b < t0) continue;
+      const i = lowerBound(f, a);
+      if (i < f.length && f[i][0] < b) continue;
+      out.push(p);
     }
-    for (const r of rows) {
-      const mid = r.t + r.s * MIN / 2;
-      if (r.t + r.s * MIN < t0 || mid >= fineFrom) continue;
-      const v = r.v[key];
-      if (v != null) out.push([mid, v, r.s * MIN]);
-    }
-    for (const p of f) if (p[0] >= fineFrom && p[0] >= t0) out.push([p[0], p[1], 15000]);
-    return out;
+    for (const p of f) if (p[0] >= t0) out.push([p[0], p[1], 15000]);
+    return out.sort((x, y) => x[0] - y[0]);
   }
   function oldest(keys) {
     let o = Infinity;
     keys.forEach((k) => {
       const f = fine[k]; if (f && f.length) o = Math.min(o, f[0][0]);
+      const h = srv[st.range], p = h && h.pts[k];
+      if (p && p.length) o = Math.min(o, Math.max(h.oldest || 0, p[0][0] - p[0][2] / 2));
     });
-    for (const r of rows) { if (keys.some((k) => r.v[k] != null)) { o = Math.min(o, r.t); break; } }
     return o;
   }
   function recentAvg(key, ms) {
@@ -200,9 +155,18 @@
     const t0 = Date.now() - ms;
     let s = 0, n = 0;
     for (let i = f.length - 1; i >= 0 && f[i][0] >= t0; i--) { s += f[i][1]; n++; }
-    return n ? s / n : null;
+    return n ? s / n : srvLast(key);
   }
-  const last = (key) => { const f = fine[key]; return f && f.length ? f[f.length - 1][1] : null; };
+  // newest server row (if recent) until the live samples arrive
+  function srvLast(key) {
+    let best = null;
+    Object.keys(srv).forEach((rg) => {
+      const p = srv[rg].pts[key], q = p && p[p.length - 1];
+      if (q && (!best || q[0] + q[2] / 2 > best[0] + best[2] / 2 || (q[0] + q[2] / 2 === best[0] + best[2] / 2 && q[2] < best[2]))) best = q;
+    });
+    return best && Date.now() - (best[0] + best[2] / 2) < 3 * MIN ? best[1] : null;
+  }
+  const last = (key) => { const f = fine[key]; return f && f.length ? f[f.length - 1][1] : srvLast(key); };
 
   /* ---------- ingest observed API responses ---------- */
   const cur = { sys: null, bw: null, sec: null, dns: null, fw: null, tm: null, sur: null, surAt: 0 };
@@ -225,7 +189,8 @@
       cur.sys = d;
       if (!seeded.sys && Array.isArray(d.history)) {
         seeded.sys = 1;
-        d.history.forEach((h) => { add("cpu", h[0] * 1000, h[1]); add("mem", h[0] * 1000, h[2]); });
+        // the API's first CPU sample after a (re)start is always 0
+        d.history.forEach((h, i) => { if (i || h[1]) add("cpu", h[0] * 1000, h[1]); add("mem", h[0] * 1000, h[2]); });
       }
       const u = d.usage || {}, cores = (d.cpu || {}).cores || 1;
       add("cpu", now, u.cpu_pct);
@@ -639,17 +604,20 @@
     const p = Math.pow(10, Math.floor(Math.log10(v))), n = v / p;
     return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p;
   }
-  function thin(pts, maxN) {
+  // Average into fixed time buckets (not fixed point counts) so a gap in
+  // the data stays a gap and dense live samples don't crowd sparse rows.
+  function thin(pts, maxN, t0, t1) {
     if (pts.length <= maxN) return pts;
-    const k = Math.ceil(pts.length / maxN), out = [];
-    for (let i = 0; i < pts.length; i += k) {
-      let t = 0, v = 0, raw = 0, hasRaw = false, step = 0, n = 0;
-      for (let j = i; j < Math.min(pts.length, i + k); j++) {
-        t += pts[j][0]; v += pts[j][1]; step = Math.max(step, pts[j][2] || 0); n++;
-        if (pts[j][3] != null) { raw += pts[j][3]; hasRaw = true; }
-      }
-      out.push([t / n, v / n, step * k, hasRaw ? raw / n : undefined]);
+    const w = (t1 - t0) / maxN, out = [];
+    let cur = null;
+    const push = () => { if (cur) out.push([cur.t / cur.n, cur.v / cur.n, Math.max(cur.step, w), cur.rn ? cur.raw / cur.rn : undefined]); };
+    for (const p of pts) {
+      const b = Math.floor((p[0] - t0) / w);
+      if (!cur || cur.b !== b) { push(); cur = { b, t: 0, v: 0, n: 0, step: 0, raw: 0, rn: 0 }; }
+      cur.t += p[0]; cur.v += p[1]; cur.n++; cur.step = Math.max(cur.step, p[2] || 0);
+      if (p[3] != null) { cur.raw += p[3]; cur.rn++; }
     }
+    push();
     return out;
   }
 
@@ -659,15 +627,15 @@
     if (!slot.__ro && ro) { slot.__ro = 1; widths.set(slot, slot.clientWidth); ro.observe(slot); }
     const W = widths.get(slot) || slot.clientWidth || 600;
     const H = cfg.h || 180, R = 12, T = 10, B = 22;
+    const t1 = Date.now(), t0 = t1 - rangeMs();
     const vis = cfg.series.filter((s) => !st.off.has(s.k));
-    vis.forEach((s) => { s.draw = thin(s.pts, Math.max(40, Math.floor((W - 60) / 2))); });
+    vis.forEach((s) => { s.draw = thin(s.pts.filter((p) => p[0] >= t0), Math.max(40, Math.floor((W - 60) / 2)), t0, t1); });
     const dataMax = Math.max(0, ...vis.map((s) => Math.max(0, ...s.draw.map((p) => p[1]))));
     const yMax = cfg.yMax || niceMax(dataMax * 1.12);
     const yFmt = cfg.yFmt || fmtShort;
     const ticks = cfg.yLabels || [0, 1, 2, 3, 4].map((i) => [yMax * i / 4, yFmt(yMax * i / 4)]);
     const L = Math.round(14 + Math.max(...ticks.map((t) => String(t[1]).length)) * 6.4);
     const pw = Math.max(10, W - L - R), ph = H - T - B;
-    const t1 = Date.now(), t0 = t1 - rangeMs();
     const X = (t) => L + (t - t0) / (t1 - t0) * pw;
     const Y = (v) => T + ph - Math.max(0, Math.min(1, v / yMax)) * ph;
     const id = slot.__id || (slot.__id = "insc" + (++uid));
@@ -1328,6 +1296,8 @@
       clearTimeout(st.enterT); st.enterT = setTimeout(() => panel.classList.remove("ins-enter"), 900);
     }
     if (entering) tip.hidden = true;
+    // wait for the first polled response so we know the session is valid
+    if (!v.noHist && (cur.sys || cur.bw || cur.sec)) ensureHist(st.range);
     v.update();
     if (v.noHist) { note.textContent = v.note(); return; }
     const o = oldest(v.keys);
@@ -1349,8 +1319,8 @@
   }
   // theme switches change CSS-variable colours only; SVG uses var() so no redraw needed.
 
-  setInterval(() => { Object.keys(acc).forEach((k) => { if (acc[k] && acc[k].m < Date.now() - 2 * MIN) { finalize(k); acc[k] = null; } }); saveHist(); }, MIN);
-  window.addEventListener("pagehide", () => { Object.keys(acc).forEach(finalize); dirtyStore = true; saveHist(); });
+  // pull the next server minute even when no polled response triggers a render
+  setInterval(() => { if (!VIEWS[st.tab].noHist && ovVisible() && st.inView) schedule(); }, 20000);
 
   syncChrome();
   function attach() {
