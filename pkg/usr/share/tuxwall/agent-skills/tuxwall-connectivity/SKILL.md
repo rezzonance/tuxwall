@@ -10,6 +10,9 @@ Detect, don't assume: take interface names, subnets and roles from the facts fil
 Diagnose read-only first, change one thing at a time, re-verify after every fix.
 Restarting unbound, kea, systemd-networkd, wg-quick or suricata blips the whole LAN: ask first.
 Never stop crowdsec/bouncer/suricata/unbound/ufw to "test".
+First pass without commands: the read-only tools `tuxwall_interfaces` (roles, link, addresses), `tuxwall_dhcp_leases`,
+`tuxwall_dns_stats`, `tuxwall_incidents`, `tuxwall_insights` (WAN throughput, DNS rates, load). Use the bundle below
+for what they do not show.
 
 ## 0. Collect bundle (read-only)
 ```

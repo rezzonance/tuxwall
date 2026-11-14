@@ -13,6 +13,7 @@ description: Use for questions or changes about interface roles (WAN, LAN, OPT n
 - Legacy VLAN list: `/etc/tuxwall/vlans.json` (kept in sync by the dashboard).
 - Dashboard: Interfaces page (Assignments, Policy matrix, VLANs). Read API (admin session):
   `GET /api/interfaces`, `/api/interfaces/policy`, `/api/interfaces/vlans`, `/api/interfaces/lock`.
+- Quickest read for you: the `tuxwall_interfaces` tool (roles, link, addresses, apply_locked, policy matrix with exceptions).
 
 ## Apply is locked
 `apply_locked: true` means Interface Assignments may only produce a plan: `POST /api/interfaces/plan` (dry run) or the

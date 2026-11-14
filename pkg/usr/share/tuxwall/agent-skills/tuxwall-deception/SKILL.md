@@ -9,6 +9,8 @@ Ground rule: the deception layer must never lose protection. Do not stop, disabl
 open around any of it. Fix the specific thing (one IP, one port, one rule) instead. Ask the owner before any change.
 
 ## Components (current state: facts file "Firewall" and "Services" sections)
+Live state without shell: `tuxwall_crowdsec_decisions` (pass `ip` to check one address), `tuxwall_security_events`,
+`tuxwall_firewall_rules` with `owner` honeypot / canary.
 - Honeypot tarpit (inside the tuxwall API): config `/var/lib/tuxwall/honeypot.json` {enabled, ports, auto_ban, ban_threshold};
   listens on WAN decoy ports opened by ufw rules commented `tuxwall-honeypot`. Hits -> CrowdSec ban (long) -> community report.
 - OpenCanary (`opencanary.service`, user `opencanary`): fake services on WAN ports opened by ufw rules commented

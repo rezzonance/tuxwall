@@ -8668,6 +8668,107 @@ def _is_trusted_local(handler):
     return _valid_internal_token(handler)
 
 
+# AI assistant (2026-11-14): read-only token for the opencode agent's tuxwall
+# MCP tool (/usr/local/lib/tuxwall/tuxwall_mcp.py). The token file is
+# readable by the tuxwall-agent group only. A request carrying the header is
+# served ONLY when it is a direct loopback connection (no proxy headers -
+# nginx always adds them, so the header is useless from the LAN), a GET, the
+# token matches, and the path is in the explicit allowlist below. The
+# resulting identity (role "agent-ro") never passes an admin/write check.
+AGENT_API_TOKEN_DIR = "/etc/tuxwall/agent"
+AGENT_API_TOKEN_FILE = AGENT_API_TOKEN_DIR + "/api.token"
+AGENT_API_TOKEN_HEADER = "X-TuxWall-Agent-Token"
+AGENT_API_GROUP = "tuxwall-agent"
+AGENT_API_READ_PATHS = frozenset({
+    "/api/status",
+    "/api/system",
+    "/api/system/services",
+    "/api/firewall",
+    "/api/firewall/managed",
+    "/api/firewall/findings",
+    "/api/firewall/suggestions",
+    "/api/firewall/hits",
+    "/api/firewall/interfaces",
+    "/api/interfaces",
+    "/api/interfaces/policy",
+    "/api/leases",
+    "/api/dns",
+    "/api/crowdsec",
+    "/api/security",
+    "/api/incidents",
+    "/api/insights/history",
+})
+_AGENT_API_PROXY_HEADERS = ("X-Forwarded-For", "X-Real-IP", "X-Forwarded-Proto",
+                            "X-Forwarded-Host", "Forwarded")
+
+
+def _ensure_agent_api_token():
+    """Create (or repair perms of) the agent read token. Called at start."""
+    import grp
+    try:
+        gid = grp.getgrnam(AGENT_API_GROUP).gr_gid
+    except KeyError:
+        gid = 0   # no agent user yet: root-only until the next start
+    try:
+        os.makedirs(AGENT_API_TOKEN_DIR, mode=0o750, exist_ok=True)
+        os.chown(AGENT_API_TOKEN_DIR, 0, gid)
+        os.chmod(AGENT_API_TOKEN_DIR, 0o750)
+        try:
+            with open(AGENT_API_TOKEN_FILE) as f:
+                ok = len(f.read().strip()) >= 32
+        except FileNotFoundError:
+            ok = False
+        if not ok:
+            fd, tmp = tempfile.mkstemp(prefix=".api.token.", dir=AGENT_API_TOKEN_DIR)
+            try:
+                os.fchmod(fd, 0o640)
+                os.fchown(fd, 0, gid)
+                with os.fdopen(fd, "w") as f:
+                    f.write(secrets.token_urlsafe(32) + "\n")
+                os.replace(tmp, AGENT_API_TOKEN_FILE)
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        os.chown(AGENT_API_TOKEN_FILE, 0, gid)
+        os.chmod(AGENT_API_TOKEN_FILE, 0o640)
+    except Exception as exc:
+        print("[agent-api] read token unavailable: %s" % type(exc).__name__, flush=True)
+
+
+def _agent_api_token():
+    try:
+        with open(AGENT_API_TOKEN_FILE) as f:
+            tok = f.read().strip()
+    except OSError:
+        return ""
+    return tok if len(tok) >= 32 else ""
+
+
+def _agent_ro_identity(handler, path):
+    """Validate a request that carries the agent token header (GET only).
+    Returns the read-only identity, or None after sending the error."""
+    try:
+        direct = handler.client_address[0]
+    except Exception:
+        direct = ""
+    if (direct not in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+            or any(handler.headers.get(h) is not None for h in _AGENT_API_PROXY_HEADERS)):
+        handler._send(403, {"ok": False, "error": "Agent token accepted from local direct connections only"})
+        return None
+    tok = _agent_api_token()
+    supplied = handler.headers.get(AGENT_API_TOKEN_HEADER) or ""
+    if not tok or not hmac.compare_digest(supplied.encode(), tok.encode()):
+        handler._send(401, {"ok": False, "error": "Invalid agent token"})
+        return None
+    if path not in AGENT_API_READ_PATHS:
+        handler._send(403, {"ok": False, "error": "Endpoint not available to the agent read token"})
+        return None
+    return {"username": "agent", "role": "agent-ro", "owner": False}
+
+
 # 2026-11-03 audit: global failure cap. The per-source lockout was
 # bypassable by rotating the source key - a DIRECT loopback connection
 # (SSRF from the co-hosted public service, local malware) controls
@@ -10684,7 +10785,7 @@ SANITIZED_KEEP = 3
 # Name fragments that mark a member as secret -> dropped from sanitized export
 SANITIZE_DROP_SUBSTR = (
     "llm.json", "auth.json", "opencode.json", "credentials",
-    "cert.pem", "privatekey", "publickey",
+    "cert.pem", "privatekey", "publickey", "agent/api.token",
 )
 # (arc prefix, regex pattern, replacement) applied to text files
 SANITIZE_TEXT_RULES = [
@@ -12476,6 +12577,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
+        agent_ro = None
+        if self.headers.get(AGENT_API_TOKEN_HEADER) is not None:
+            agent_ro = _agent_ro_identity(self, path)
+            if agent_ro is None:
+                return
         if path == "/api/agent/events":
             identity = _session_identity(self.headers)
             if identity is None:
@@ -12491,7 +12597,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/auth/session":
             self._send(200, auth_session_state(_session_identity(self.headers)))
             return
-        identity = _session_identity(self.headers) if path.startswith("/api/") else None
+        if agent_ro is not None:
+            identity = agent_ro
+        else:
+            identity = _session_identity(self.headers) if path.startswith("/api/") else None
         if path.startswith("/api/") and identity is None:
             self._send(401, {"ok": False, "error": "Authentication required"})
             return
@@ -12883,6 +12992,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?")[0]
+        if self.headers.get(AGENT_API_TOKEN_HEADER) is not None:
+            self._send(403, {"ok": False, "error": "The agent read token is GET-only"})
+            return
         qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
         # Lightweight CSRF check: when the browser sends Origin/Referer, its
         # host must match the Host we were reached on. Same-origin dashboard
@@ -17077,6 +17189,7 @@ def main():
     start_incident_monitor()
     get_community_auto_worker()   # community auto-ban sync (no-op until enabled)
     start_agent_facts_writer()    # /var/lib/tuxwall/agent/facts.md for the AI agent (5 min)
+    _ensure_agent_api_token()     # /etc/tuxwall/agent/api.token for the agent's read-only MCP tool
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     server.daemon_threads = True
     print(f"tuxwall API listening on http://{LISTEN_HOST}:{LISTEN_PORT}", flush=True)

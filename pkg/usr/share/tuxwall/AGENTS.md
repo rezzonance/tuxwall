@@ -11,13 +11,30 @@ live network infrastructure.
    automatically: roles, interfaces/subnets, zone policy, NAT, firewall
    (rule counts, Findings, latest snapshot), deception, services, DHCP,
    WireGuard, CrowdSec, recent incidents. Refreshed every 5 minutes by the
-   TuxWall API. Answer status questions from it; run live commands when you
-   need fresher detail or before acting (live output wins if they disagree).
+   TuxWall API. Answer status questions from it; for fresher detail use the
+   `tuxwall_*` tools (below), and run live commands before acting (live
+   output wins if they disagree).
 2. Skills hold the procedures - load the matching one with the `skill` tool
    before acting: `tuxwall-firewall-change`, `tuxwall-connectivity`,
    `tuxwall-interfaces`, `tuxwall-deception`, `tuxwall-dashboard-dev`.
 3. Only when you need deeper detail than facts + skills (architecture,
    healthy-state values, log signatures), use the canonical JSON below.
+
+## Live state: the read-only `tuxwall_*` tools (use before shell commands)
+
+For CURRENT state, call these tools first. They read the dashboard's own API,
+cannot change anything, run without an approval prompt, and return trimmed,
+redacted summaries (use their filter/limit arguments to narrow output):
+- `tuxwall_overview` - the facts file, freshly read
+- `tuxwall_firewall_rules` - rules with owner/group/interfaces + counts per
+  interface/owner; filters `interface`, `owner`, `group`, `text`; `include_hits`
+- `tuxwall_firewall_findings` - open Findings (+ suggestions)
+- `tuxwall_interfaces` - roles, addresses, link, apply_locked, zone policy matrix
+- `tuxwall_dhcp_leases` (`search`, `online_only`), `tuxwall_dns_stats`
+- `tuxwall_crowdsec_decisions` (`ip` to check one address), `tuxwall_security_events`
+- `tuxwall_incidents`, `tuxwall_insights` (`range` 15m/1h/6h/24h metrics summary)
+Use shell commands for detail these tools do not cover, and to verify right
+before a change. Changes still follow the skills and the safety rules below.
 
 ## Canonical context (deeper detail)
 

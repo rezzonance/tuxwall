@@ -21,6 +21,8 @@ Read the "Firewall", "NAT" and "Zone policy" sections of the facts file first.
 - Ask the owner before any change; say exactly what will change and how it is undone.
 
 ## 1. Collect (read-only)
+- Start with the `tuxwall_firewall_rules` tool (owner, group, interfaces; filters; `include_hits`) and
+  `tuxwall_firewall_findings` - read-only, no approval needed. Then confirm with the commands below.
 - `sudo ufw status numbered` and `sudo ufw status verbose` (defaults, logging)
 - `sudo iptables-save` (raw chains, NAT) - look, do not edit
 - Facts file: findings count, latest snapshot id, NAT rule present, deception state
