@@ -428,7 +428,6 @@
   // ══ Session 2: findings, suggestions, edit / enable-disable, hit counters ══
   var SVG = {
     edit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L9 17l-4 1 1-4Z"/></svg>',
-    power: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v10"/><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/></svg>',
     explain: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/><path d="M11 8v3l2 1"/></svg>',
     tab: '<path d="M12 3 2 20h20Z"/><path d="M12 10v4"/><path d="M12 17h.01"/>'
   };
@@ -738,7 +737,8 @@
     var tip = "Matched " + (h.hits || 0) + " packets since the last firewall reload" +
       (h.total != null ? "; " + h.total + " since " + new Date((h.first || 0) * 1000).toLocaleDateString() : "") +
       ". Last hit: " + ago(h.last_hit) + ". Sparkline: last 24 h.";
-    return '<span class="fwp-hits' + (h.hits ? "" : " fwp-zero") + '" title="' + esc(tip) + '">' + spark(h.spark || [0, 0]) +
+    var any = (h.spark || []).some(function (v) { return v > 0; });
+    return '<span class="fwp-hits' + (h.hits ? "" : " fwp-zero") + '" title="' + esc(tip) + '">' + (any ? spark(h.spark) : "") +
       '<span class="mono">' + fmtN(h.hits) + "</span> hits" + (h.last_hit ? " · " + ago(h.last_hit) : "") + "</span>";
   }
   function rowTarget(row) {
@@ -759,15 +759,20 @@
         var tgt = rowTarget(row);
         meta = document.createElement("div");
         meta.className = "fwp-meta";
-        meta.innerHTML = '<span class="fwp-hslot"></span><button type="button" class="fwp-link" data-s2r="explain" data-target="' + esc(tgt) +
-          '" title="Open Security → Traffic → Diagnose' + (tgt ? " for " + esc(tgt) : "") + '">Explain</button>';
+        meta.innerHTML = '<span class="fwp-hslot"></span><a href="#security" class="fwp-link" data-s2r="explain" data-target="' + esc(tgt) +
+          '" title="Open Security → Traffic → Diagnose' + (tgt ? " for " + esc(tgt) : "") + '">Explain</a>';
         src.appendChild(meta);
         if (row.dataset.managed !== "1") {
-          var span = document.createElement("span");
-          span.className = "fwp-rowx";
-          span.innerHTML = '<button type="button" class="act-btn fwp-act" data-s2r="edit" title="Edit this rule (preview, guard, 60 s confirm)" aria-label="Edit rule ' + esc(num) + '">' + SVG.edit + "</button>" +
-            '<button type="button" class="act-btn fwp-act" data-s2r="disable" title="Disable (removed from ufw, kept under Disabled rules)" aria-label="Disable rule ' + esc(num) + '">' + SVG.power + "</button>";
-          cell.appendChild(span);
+          var eb = document.createElement("button");
+          eb.type = "button";
+          eb.className = "act-btn fwp-act";
+          eb.setAttribute("data-s2r", "edit");
+          eb.setAttribute("data-btn-only", "");
+          eb.setAttribute("data-btn-tone", "info");
+          eb.title = "Edit or disable this rule (preview, guard, 60 s confirm)";
+          eb.setAttribute("aria-label", "Edit rule " + num);
+          eb.innerHTML = SVG.edit;
+          cell.appendChild(eb);
         }
       }
       var h = s2.byNum[num];
@@ -781,22 +786,34 @@
     }
   }
   function loadHits() {
-    if (Date.now() - s2.hitsAt < 60000 && s2.hits) { decorateS2(); return; }
+    if (Date.now() - s2.hitsAt < 60000 && s2.hits) return;
+    if (s2.hitsLoading) return;
+    s2.hitsLoading = true;
     req("GET", "/api/firewall/hits").then(function (d) {
+      s2.hitsLoading = false;
       s2.hits = d;
       s2.hitsAt = Date.now();
       s2.byNum = {};
       (d.rules || []).forEach(function (r) { s2.byNum[r.number] = r; });
-      decorateS2();
-    }).catch(function () { /* counters optional */ });
+      if (tbody.querySelector("tr[data-num]")) scheduleS2();
+    }).catch(function () { s2.hitsLoading = false; });
+  }
+  // Decorate in the next frame (one style/layout pass together with the
+  // table render) and fetch counters ahead of the table so both land at once.
+  var raf = 0;
+  function scheduleS2() {
+    if (raf) return;
+    raf = requestAnimationFrame(function () { raf = 0; decorateS2(); });
   }
   new MutationObserver(function () {
     if (tbody.querySelector("tr[data-num]:not([data-fwp-s2])")) {
-      decorateS2();
+      scheduleS2();
       loadHits();
     }
   }).observe(tbody, { childList: true });
-  if (tbody.querySelector("tr[data-num]")) loadHits();
+  var fwNav = document.querySelector('.nav-item[data-view="firewall"]');
+  if (fwNav) fwNav.addEventListener("click", function () { loadHits(); });
+  if (tbody.querySelector("tr[data-num]") || !view.hidden) loadHits();
 
   function editorRow(row) {
     var n = row.nextElementSibling;
@@ -820,7 +837,8 @@
     box.innerHTML = '<div class="fwp-ed-grid"><label>Rule <input type="text" class="mono fwp-ed-rule" value="' + esc(m ? m[1] : text) + '" spellcheck="false" autocomplete="off"></label>' +
       '<label>Comment <input type="text" class="fwp-ed-com" maxlength="120" value="' + esc(m && m[2] ? m[2] : "") + '" placeholder="why this rule exists"></label></div>' +
       '<div class="muted fwp-sub">Now: ' + esc(h.plain || "") + "</div>" +
-      '<div class="fwp-ed-btns"><button type="button" class="btn btn-sm btn-primary" data-s2e="preview" data-num="' + num + '">Preview</button>' +
+      '<div class="fwp-ed-btns"><button type="button" class="btn btn-sm btn-primary" data-s2e="preview" data-num="' + num + '">Preview edit</button>' +
+      ' <button type="button" class="btn btn-sm" data-s2r="disable">Disable…</button>' +
       ' <button type="button" class="btn btn-sm" data-s2e="cancel">Cancel</button></div><div class="fwp-plan" hidden></div>';
     box.querySelector(".fwp-ed-rule").focus();
   }
@@ -828,16 +846,18 @@
     var b = e.target.closest("[data-s2r], [data-s2e]");
     if (!b) return;
     var row = b.closest("tr[data-num]");
+    var edr = b.closest("tr.fwp-edrow");
+    if (!row && edr) row = edr.previousElementSibling;
     var act = b.getAttribute("data-s2r") || b.getAttribute("data-s2e");
+    if (act === "explain") e.preventDefault();
     if (act === "explain") { explain(b.getAttribute("data-target")); return; }
     if (act === "cancel") { var er = b.closest("tr.fwp-edrow"); if (er) er.remove(); s2.ed = null; return; }
     if (act === "edit" && row) { openEditor(row.dataset.num); return; }
     var hh = row ? s2.byNum[row.dataset.num] : null;
     if (act === "disable" && row) {
       var tr = editorRow(row);
-      var host = tr.querySelector(".fwp-ed");
-      host.innerHTML = '<div class="fwp-plan"></div>';
-      openPlan(host.querySelector(".fwp-plan"), { op: "disable", number: row.dataset.num, expect: hh ? hh.key : "" });
+      openPlan(tr.querySelector(".fwp-ed .fwp-plan") || tr.querySelector(".fwp-ed").appendChild(document.createElement("div")),
+        { op: "disable", number: row.dataset.num, expect: hh ? hh.key : "" });
       return;
     }
     if (act === "preview") {
