@@ -187,7 +187,9 @@ def matrix(box):
     rec = ctx.record()
     wan_drop = [l.split()[3] for l in ctx.read("/etc/ufw/before.rules").splitlines()
                 if l.startswith("-A ufw-before-forward -i ") and l.endswith("-j DROP")]
-    pol = T.current_policy(rec, rules=T._ufw_tuples(texts), raw=box.raw, wan_drop=wan_drop)
+    vf = T._read_json(box.root + T.VLAN_FILE) or {}
+    pol = T.current_policy(rec, rules=T._ufw_tuples(texts), raw=box.raw, wan_drop=wan_drop,
+                           legacy=vf.get("__policies__") or [])
     return pol
 
 
@@ -291,8 +293,8 @@ def t_vlan():
     t = topo(b)
     t["opt"] = []
     res = P.build({"topology": t}, "", b.ctx())
-    np = res.files.get("/etc/netplan/99-tuxwall-vlans.yaml", {}).get("new", "")
-    check("eth1.20" not in np, "vlan-remove: still in netplan")
+    np = res.files.get("/etc/netplan/99-tuxwall-vlans.yaml", {})
+    check(np.get("old") and np.get("new") is None, "vlan-remove: empty VLAN netplan file not removed")
     k = json.loads(res.files["/etc/kea/kea-dhcp4.conf"]["new"])["Dhcp4"]
     check(k["interfaces-config"]["interfaces"] == ["eth1"] and len(k["subnet4"]) == 1, "vlan-remove: kea")
     check("eth1.20" not in res.files["/etc/ufw/user.rules"]["new"], "vlan-remove: ufw rules kept")
@@ -503,6 +505,178 @@ def t_apply_sandbox():
     b.close()
 
 
+# ---------------------------------------------------------------- VLAN tab
+
+APS = {"status": "ok", "vlans": [], "vaps": [
+    {"ap": "AP1", "ssid": "Home IoT", "network": "IoT", "clients": 4, "up": True},
+    {"ap": "AP2", "ssid": "Home IoT", "network": "IoT", "clients": 2, "up": True},
+    {"ap": "AP1", "ssid": "Home", "network": "lan", "clients": 3, "up": True}]}
+
+
+def _write(box, path, text):
+    os.makedirs(os.path.dirname(box.root + path), exist_ok=True)
+    with open(box.root + path, "w") as f:
+        f.write(text)
+
+
+def _leases(box, n_active, subnet_id=2, net="10.10.20"):
+    now = int(time.time())
+    lines = ["address,hwaddr,client_id,valid_lifetime,expire,subnet_id,fqdn_fwd,fqdn_rev,hostname,state,user_context"]
+    for k in range(n_active):
+        lines.append("%s.%d,aa:bb:cc:00:00:%02x,,3600,%d,%d,0,0,h%d,0," % (net, 30 + k, k, now + 3000, subnet_id, k))
+    lines.append("%s.99,aa:bb:cc:00:00:99,,3600,%d,%d,0,0,old,0," % (net, now - 10, subnet_id))  # expired
+    _write(box, P.KEA_LEASES, "\n".join(lines) + "\n")
+
+
+def _vplan(box, body, aps=None):
+    T.SYS_NET = box.root + "/sys/class/net"
+    return P.plan(body, ctx=P.Ctx(root=box.root, raw=copy.deepcopy(box.raw), validate=False, aps=aps))
+
+
+def t_vlan_tab():
+    # no edits: vlans.json is compared semantically (key order, indent, newline)
+    b = Box("vlan")
+    _write(b, T.VLAN_FILE, json.dumps({"eth1.20": {"parent": "eth1", "vlan_id": 20, "address": "10.10.20.1/24",
+                                                   "label": "IoT"}}, separators=(",", ":")))
+    r = _vplan(b, {}, APS)
+    check(r["ok"] and r["summary"] == "No changes", "vlan-tab: no-edit plan has changes: %s" % r.get("changes"))
+    r = _vplan(b, {"topology": topo(b)}, APS)
+    check(r["ok"] and r["summary"] == "No changes", "vlan-tab: echoed topology has changes: %s" % r.get("changes"))
+    b.close()
+
+    # add a VLAN (as the VLANs tab's Add VLAN routes it into the editor)
+    b = Box("vlan")
+    t = topo(b)
+    t["opt"].append({"name": "Guest", "vlan": 30, "parent": "eth1", "address": "10.10.30.1/24", "dhcp": True,
+                     "ra": False, "pool": "10.10.30.100-10.10.30.200"})
+    r = _vplan(b, {"topology": t, "presets": {"opt2": "guest"}}, APS)
+    check(r["ok"], "vlan-add: %s" % r.get("error"))
+    paths = [f["path"] for f in r["files"]]
+    np = r["diffs"].get("/etc/netplan/99-tuxwall-vlans.yaml", "")
+    check("+    eth1.30:" in np and "+      id: 30" in np, "vlan-add: netplan diff %r" % np)
+    check("/etc/tuxwall/vlans.json" in paths, "vlan-add: vlans.json mirror not rendered %s" % paths)
+    vj = r["diffs"]["/etc/tuxwall/vlans.json"]
+    check('+  "eth1.30": {' in vj and '"label": "Guest"' in vj and '"vlan_id": 30' in vj, "vlan-add: vlans.json diff %r" % vj)
+    check("10.10.30.100-10.10.30.200" in r["diffs"].get("/etc/kea/kea-dhcp4.conf", ""), "vlan-add: kea pool")
+    check(r["matrix_after"]["opt2"]["lan"] == "block" and r["matrix_after"]["lan"]["opt2"] == "block"
+          and r["matrix_after"]["opt2"]["wan"] == "allow", "vlan-add: guest preset %s" % r["matrix_after"].get("opt2"))
+    check(not any("SSID" in w for w in r["warnings"]), "vlan-add: unexpected SSID warning %s" % r["warnings"])
+    b.close()
+
+    # edit the pool of an existing VLAN: Kea only (+ the record), no netplan / mirror change
+    b = Box("vlan")
+    t = topo(b)
+    t["opt"][0]["pool"] = "10.10.20.100-10.10.20.150"
+    r = _vplan(b, {"topology": t}, APS)
+    paths = [f["path"] for f in r["files"]]
+    check(r["ok"] and "/etc/kea/kea-dhcp4.conf" in paths, "vlan-pool: %s %s" % (r.get("error"), paths))
+    check(not [p for p in paths if p.startswith("/etc/netplan/") or p == T.VLAN_FILE], "vlan-pool: extra files %s" % paths)
+    k = json.loads(P.build({"topology": t}, "", b.ctx()).files["/etc/kea/kea-dhcp4.conf"]["new"])["Dhcp4"]
+    check(k["subnet4"][1]["pools"] == [{"pool": "10.10.20.100-10.10.20.150"}], "vlan-pool: kea %s" % k["subnet4"][1])
+    check(any("DHCP pool for IoT" in x for g in r["changes"] for x in g["items"]), "vlan-pool: change text")
+    r = _vplan(b, {"topology": dict(t, opt=[dict(t["opt"][0], pool="10.10.21.1-10.10.21.9")])}, APS)
+    check(not r["ok"] and "pool" in r.get("error", "").lower(), "vlan-pool: pool outside subnet accepted: %s" % r.get("error"))
+    b.close()
+
+    # remove a VLAN that has leases, an SSID, a legacy policy and an unmanaged sibling
+    b = Box("vlan")
+    _leases(b, 3)
+    _write(b, T.VLAN_FILE, json.dumps({
+        "eth1.20": {"label": "IoT", "address": "10.10.20.1/24", "vlan_id": 20, "parent": "eth1"},
+        "eth1.99": {"label": "Lab", "address": "10.10.99.1/24", "vlan_id": 99, "parent": "eth1"},
+        "__policies__": [{"id": "ab12cd34", "src": "eth1.20", "dst": "eth1", "policy": "deny", "proto": "any",
+                          "port": "", "rule": "route deny in on eth1.20 out on eth1"},
+                         {"id": "ef56ab78", "src": "eth1", "dst": "eth1.99", "policy": "allow", "proto": "any",
+                          "port": "", "rule": "route allow in on eth1 out on eth1.99"}]}, indent=2))
+    t = topo(b)
+    t["opt"] = []
+    r = _vplan(b, {"topology": t}, APS)
+    check(r["ok"], "vlan-remove: %s" % r.get("error"))
+    w = " | ".join(r["warnings"])
+    check("3 active DHCP lease(s)" in w, "vlan-remove: lease warning missing: %s" % w)
+    check("SSID 'Home IoT' on AP1, AP2" in w and "VLAN 20" in w, "vlan-remove: SSID warning missing: %s" % w)
+    check("'Home'" not in w, "vlan-remove: LAN SSID flagged: %s" % w)
+    items = [x for g in r["changes"] for x in g["items"]]
+    check(any("row and column are removed" in x for x in items), "vlan-remove: policy cells note missing %s" % items)
+    check(any("ab12cd34" in x for x in items), "vlan-remove: legacy policy drop not listed %s" % items)
+    check(any("DHCP for IoT stops" in x for x in items), "vlan-remove: kea change missing")
+    res = P.build({"topology": t}, "", P.Ctx(root=b.root, raw=[], validate=False, aps=APS))
+    vj = json.loads(res.files[T.VLAN_FILE]["new"])
+    check("eth1.20" not in vj and vj.get("eth1.99", {}).get("label") == "Lab", "vlan-remove: mirror %s" % vj)
+    check([p["id"] for p in vj["__policies__"]] == ["ef56ab78"], "vlan-remove: mirror policies %s" % vj["__policies__"])
+    check(res.files["/etc/netplan/99-tuxwall-vlans.yaml"]["new"] is None, "vlan-remove: netplan file kept")
+    # without AP data (plugin absent): no SSID warning, no failure
+    r2 = _vplan(b, {"topology": t}, {"status": "absent"})
+    check(r2["ok"] and not any("SSID" in x or "access points" in x for x in r2["warnings"]), "vlan-remove: plugin absent %s" % r2["warnings"])
+    r3 = _vplan(b, {"topology": t}, {"status": "error", "error": "ssh timeout"})
+    check(any("Could not check the access points" in x for x in r3["warnings"]), "vlan-remove: AP error not reported")
+    b.close()
+
+    # re-tag a VLAN (id 20 -> 21): device follows, mirror follows, SSID warned
+    b = Box("vlan")
+    t = topo(b)
+    t["opt"][0].update(vlan=21, device="eth1.21")
+    r = _vplan(b, {"topology": t}, APS)
+    check(r["ok"] and any("re-tag" in x for x in r["warnings"]), "vlan-retag: %s %s" % (r.get("error"), r["warnings"]))
+    res = P.build({"topology": t}, "", b.ctx())
+    vj = json.loads(res.files[T.VLAN_FILE]["new"])
+    check(list(k for k in vj if not k.startswith("__")) == ["eth1.21"] and vj["eth1.21"]["vlan_id"] == 21, "vlan-retag: mirror %s" % vj)
+    check("eth1.21:" in res.files["/etc/netplan/99-tuxwall-vlans.yaml"]["new"], "vlan-retag: netplan")
+    b.close()
+
+    # the VLANs tab rows: leases, pool, SSIDs, preset guess, legacy policy cells
+    b = Box("vlan")
+    _leases(b, 2)
+    _write(b, T.VLAN_FILE, json.dumps({
+        "eth1.20": {"label": "IoT", "address": "10.10.20.1/24", "vlan_id": 20, "parent": "eth1"},
+        "__policies__": [{"id": "ab12cd34", "src": "eth1.20", "dst": "eth1", "policy": "deny", "proto": "any",
+                          "port": "", "rule": "route deny in on eth1.20 out on eth1"}]}, indent=2))
+    pol = matrix(b)
+    check(pol["cells"]["opt1"]["lan"].get("legacy", [{}])[0].get("id") == "ab12cd34", "vlan-view: legacy policy not on its cell")
+    check(len(pol["legacy_policies"]) == 1 and pol["legacy_policies"][0]["cell"] == ["opt1", "lan"], "vlan-view: legacy list")
+    view = {"topology": b.rec, "bindings": {"opt1": {"kea": {"listening": True, "subnets": [
+        {"id": 2, "subnet": "10.10.20.0/24", "pools": ["10.10.20.20-10.10.20.254"], "reservations": 0}]},
+        "radvd": {"enabled": False, "prefixes": []}}},
+        "inventory": [{"device": "eth1", "kind": "ethernet", "operstate": "up", "carrier": True, "addresses": []},
+                      {"device": "eth1.20", "kind": "vlan", "vlan": 20, "parent": "eth1", "operstate": "up",
+                       "carrier": True, "addresses": [{"family": "inet", "cidr": "10.10.20.1/24"}]},
+                      {"device": "eth1.50", "kind": "vlan", "vlan": 50, "parent": "eth1", "operstate": "up",
+                       "carrier": True, "addresses": [{"family": "inet", "cidr": "10.10.50.1/24"}]}]}
+    v = P.vlans(P.Ctx(root=b.root, validate=False), view=view, policy=pol, aps=APS)
+    rows = {r["device"]: r for r in v["vlans"]}
+    iot = rows.get("eth1.20") or {}
+    check(iot.get("vlan") == 20 and iot.get("gateway") == "10.10.20.1" and iot.get("subnet") == "10.10.20.0/24", "vlan-view: row %s" % iot)
+    check(iot.get("leases") == 2 and iot.get("pools") == ["10.10.20.20-10.10.20.254"] and iot.get("dhcp"), "vlan-view: dhcp %s" % iot)
+    check([c["ssid"] for c in iot.get("aps", [])] == ["Home IoT"] and iot["aps"][0]["clients"] == 6, "vlan-view: ssids %s" % iot.get("aps"))
+    check(iot["policy"]["preset"]["preset"] == "guest" and iot["policy"]["preset"]["exact"], "vlan-view: preset %s" % iot["policy"]["preset"])
+    check([x["id"] for x in iot["policy"]["legacy"]] == ["ab12cd34"], "vlan-view: legacy on row")
+    check(rows.get("eth1.50", {}).get("managed") is False, "vlan-view: unmanaged live VLAN not listed")
+    check([c["ssid"] for c in v["lan_ssids"]] == ["Home"], "vlan-view: lan ssids %s" % v["lan_ssids"])
+    v2 = P.vlans(P.Ctx(root=b.root, validate=False), view=view, policy=pol, aps={"status": "absent"})
+    check(v2["ok"] and v2["aps"]["status"] == "absent" and not v2["vlans"][0]["aps"], "vlan-view: plugin absent")
+    b.close()
+
+
+def t_legacy_sync():
+    """The old VLANs page keeps interfaces.json in step (sync_legacy_vlan)."""
+    b = Box("2nic")
+    path = b.root + T.CONF
+    T.sync_legacy_vlan("add", "eth1.40", {"label": "Cams", "address": "10.10.40.1/24", "vlan_id": 40, "parent": "eth1"}, path=path)
+    rec = T._read_json(path)
+    o = [x for x in rec["opt"] if x.get("device") == "eth1.40"]
+    check(len(o) == 1 and o[0]["vlan"] == 40 and o[0]["name"] == "Cams" and o[0]["dhcp"] is False, "legacy-sync add %s" % o)
+    T.sync_legacy_vlan("edit", "eth1.40", {"label": "Cameras", "address": "10.10.41.1/24"}, path=path)
+    o = [x for x in T._read_json(path)["opt"] if x.get("device") == "eth1.40"][0]
+    check(o["name"] == "Cameras" and o["address"] == "10.10.41.1/24", "legacy-sync edit %s" % o)
+    T.sync_legacy_vlan("delete", "eth1.40", {}, path=path)
+    check(not [x for x in T._read_json(path)["opt"] if x.get("device") == "eth1.40"], "legacy-sync delete")
+    check(T._read_json(path).get("apply_locked") is False, "legacy-sync: record keys lost")
+    missing = b.root + "/etc/tuxwall/none.json"
+    T.sync_legacy_vlan("add", "eth1.41", {"vlan_id": 41, "parent": "eth1"}, path=missing)
+    check(not os.path.exists(missing), "legacy-sync: created a record that did not exist")
+    b.close()
+
+
 def t_tools():
     """Real validators on rendered sandbox configs (root, tools installed)."""
     for kind, edit in (("2nic", lambda t: t["lan"].update(address="10.30.0.1/24")),
@@ -526,7 +700,7 @@ def t_tools():
 
 def main():
     tests = [t_no_changes, t_lan_readdress, t_add_opt, t_vlan, t_swap, t_validation, t_policy_edits, t_raw_wg,
-             t_apply_sandbox]
+             t_apply_sandbox, t_vlan_tab, t_legacy_sync]
     if "--tools" in sys.argv:
         tests.append(t_tools)
     for fn in tests:

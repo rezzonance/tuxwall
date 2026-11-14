@@ -402,6 +402,52 @@ def ensure():
     return True
 
 
+def sync_legacy_vlan(op, dev, meta, path=CONF):
+    """Keep the record in step with the old VLANs page (add/edit/delete),
+    which changes the live interface directly. Only touches an existing
+    record; returns True when it was rewritten."""
+    data = _read_json(path)
+    if not isinstance(data, dict) or not dev:
+        return False
+    meta = meta or {}
+    opts = [o for o in data.get("opt") or [] if isinstance(o, dict)]
+    hit = next((o for o in opts if o.get("device") == dev), None)
+    if op == "delete":
+        if not hit:
+            return False
+        opts.remove(hit)
+    elif op == "edit":
+        if not hit:
+            return False
+        if meta.get("label"):
+            hit["name"] = meta["label"]
+        if meta.get("address"):
+            hit["address"] = meta["address"]
+        else:
+            hit.pop("address", None)
+    elif op == "add":
+        if hit:
+            return False
+        used = {o.get("id") for o in opts}
+        n = 1
+        while "opt%d" % n in used:
+            n += 1
+        try:
+            vid = int(meta.get("vlan_id"))
+        except (TypeError, ValueError):
+            return False
+        o = {"id": "opt%d" % n, "name": meta.get("label") or "VLAN %d" % vid, "device": dev,
+             "dhcp": False, "ra": False, "vlan": vid, "parent": meta.get("parent", "")}
+        if meta.get("address"):
+            o["address"] = meta["address"]
+        opts.append(o)
+    else:
+        return False
+    data["opt"] = opts
+    write(data, path)
+    return True
+
+
 # ---------------------------------------------------------------- accessors
 
 def wan():
@@ -662,7 +708,7 @@ def _before_forward_drops():
 _DNS_DHCP_PORTS = {"53", "67", "68", "546", "547", "5353"}
 
 
-def current_policy(topo=None, rules=None, raw=None, wan_drop=None, nets=None):
+def current_policy(topo=None, rules=None, raw=None, wan_drop=None, nets=None, legacy=None):
     """The effective zone-to-zone matrix derived from today's rules.
 
     Cell states: allow | block | established (return traffic only) |
@@ -774,6 +820,25 @@ def current_policy(topo=None, rules=None, raw=None, wan_drop=None, nets=None):
             row[d["id"]] = c4
         cells[s["id"]] = row
 
+    # inter-VLAN policies created on the old VLANs page (vlans.json __policies__)
+    if legacy is None:
+        legacy = (_read_json(VLAN_FILE) or {}).get("__policies__") or []
+    legacy_out = []
+    for lp in legacy if isinstance(legacy, list) else []:
+        if not isinstance(lp, dict):
+            continue
+        s, d = by_dev.get(lp.get("src") or ""), by_dev.get(lp.get("dst") or "")
+        ent = {"id": lp.get("id", ""), "src": lp.get("src", ""), "dst": lp.get("dst", ""),
+               "policy": lp.get("policy", ""), "proto": lp.get("proto", "any"),
+               "port": lp.get("port", ""), "rule": lp.get("rule", ""),
+               "cell": [s, d] if s and d and s != d else None}
+        legacy_out.append(ent)
+        if ent["cell"]:
+            cells[s][d].setdefault("legacy", []).append(ent)
+        else:
+            notes.append("VLANs-page policy %s (%s) refers to an interface that is in no network."
+                         % (ent["id"] or "?", ent["rule"] or "%s -> %s" % (ent["src"], ent["dst"])))
+
     shadow = [r for r in raw if r["target"] == "ACCEPT"]
     if shadow:
         notes.append("Raw FORWARD accepts (%s) run before ufw, so ufw deny rules for "
@@ -783,7 +848,7 @@ def current_policy(topo=None, rules=None, raw=None, wan_drop=None, nets=None):
                      "traffic (and port forwards via DNAT) pass." % d)
     return {"ok": True, "source": "derived", "managed": bool(t.get("policy")),
             "rows": zones, "columns": cols, "cells": cells,
-            "defaults": defaults, "notes": notes,
+            "defaults": defaults, "notes": notes, "legacy_policies": legacy_out,
             "states": ["allow", "block", "established", "dns_dhcp", "custom", "self"]}
 
 
@@ -955,11 +1020,13 @@ def _norm(t):
     return json.dumps({k: (t or {}).get(k) for k in keep}, sort_keys=True)
 
 
-def plan(body, session_ip=""):
+def plan(body, session_ip="", aps=None):
     """POST /api/interfaces/plan: render every affected config into a temp
-    dir, validate it and return the ordered changes (assign_plan.py)."""
+    dir, validate it and return the ordered changes (assign_plan.py).
+    aps: optional callable returning the cached OpenWrt AP/SSID data."""
     import assign_plan
-    return assign_plan.plan(body if isinstance(body, dict) else {}, session_ip=session_ip)
+    return assign_plan.plan(body if isinstance(body, dict) else {}, session_ip=session_ip,
+                            ctx=assign_plan.Ctx(aps=aps))
 
 
 if __name__ == "__main__":

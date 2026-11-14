@@ -78,11 +78,23 @@ PRESETS = {
 class Ctx(object):
     """Where to read the current state. root="" is the live box."""
 
-    def __init__(self, root="", raw=None, validate=True, now=None):
+    def __init__(self, root="", raw=None, validate=True, now=None, aps=None):
         self.root = (root or "").rstrip("/")
         self._raw = raw
         self.validate = validate
         self.now = now or time.time()
+        self._aps = aps  # None | dict | callable -> OpenWrt AP data (see ap_carriers)
+        self._aps_done = False
+
+    def aps(self):
+        if not self._aps_done:
+            self._aps_done = True
+            if callable(self._aps):
+                try:
+                    self._aps = self._aps()
+                except Exception:
+                    self._aps = {"status": "error", "error": "access point lookup failed"}
+        return self._aps if isinstance(self._aps, dict) else None
 
     def p(self, path):
         return self.root + path
@@ -344,11 +356,30 @@ def r_netplan(ctx, m, res):
         elif e["ip"]:
             cfg.update({"dhcp4": False, "addresses": [e["ip"].with_prefixlen]})
         d["network"].setdefault("ethernets", {})[dev] = cfg
+    vn = os.path.basename(NETPLAN_VLANS)
+    vd = (new_docs.get(vn) or {}).get("network")
+    drop_vlans_file = False
+    if isinstance(vd, dict) and new_docs.get(vn) != docs.get(vn):
+        # like the old VLANs page: a VLAN parent must be defined somewhere
+        defined = {d for doc in new_docs.values() for d in ((((doc or {}).get("network") or {}).get("ethernets")) or {})}
+        for dev, cfg in (vd.get("vlans") or {}).items():
+            lk = (cfg or {}).get("link")
+            if lk and lk not in defined:
+                vd.setdefault("ethernets", {})[lk] = {"optional": True}
+                defined.add(lk)
+        if not vd.get("vlans"):
+            vd.pop("vlans", None)
+        # parents keep their entry (e.g. optional: true); the file goes only when nothing is left
+        drop_vlans_file = not vd.get("vlans") and not vd.get("ethernets") and set(vd) <= {"version", "renderer"}
     for n, doc in sorted(new_docs.items()):
         if doc == docs.get(n):
             continue
         path = T.NETPLAN_DIR + "/" + n
         old = ctx.read(path) if n in docs else None
+        if n == vn and drop_vlans_file:
+            if old is not None:
+                res.file("netplan", path, old, None, 0o600)
+            continue
         res.file("netplan", path, old, _yaml_dump(doc), 0o600)
         if old and "#" in old:
             res.warn("%s is rewritten from its parsed form: its comments are not kept "
@@ -421,11 +452,13 @@ def _pool_of(s):
 def _lease_counts(ctx):
     """Active leases per Kea subnet id (last record per address wins)."""
     last = {}
-    for line in ctx.read(KEA_LEASES).splitlines()[1:]:
-        f = line.split(",")
-        if len(f) < 10:
-            continue
-        last[f[0]] = f
+    # memfile: lease-file cleanup leaves older records in .2 (and .1 while it runs)
+    for path in (KEA_LEASES + ".2", KEA_LEASES + ".1", KEA_LEASES):
+        for line in ctx.read(path).splitlines()[1:]:
+            f = line.split(",")
+            if len(f) < 10:
+                continue
+            last[f[0]] = f
     out = {}
     for f in last.values():
         try:
@@ -857,7 +890,7 @@ def r_ufw(ctx, m, res, body):
 
     def derive(bl, rw):
         txt = {f: "".join(bl[f]) for f in bl}
-        return T.current_policy(t_new, rules=T._ufw_tuples(txt), raw=rw, wan_drop=wan_drop, nets=nets)
+        return T.current_policy(t_new, rules=T._ufw_tuples(txt), raw=rw, wan_drop=wan_drop, nets=nets, legacy=[])
 
     before = derive(blocks, raw)
     want = {}
@@ -1063,12 +1096,32 @@ def r_record(ctx, m, res, cur, body):
         rec["generated"] = {"by": "assign_apply", "at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(ctx.now))}
         old = ctx.read(T.CONF)
         res.file("record", T.CONF, old or None, json.dumps(rec, indent=2) + "\n")
+        res.change("record", "%s records the new assignments (the source of truth)." % T.CONF)
         res.record = rec
     vf = T._read_json(ctx.p(T.VLAN_FILE))
     if isinstance(vf, dict) or any(n.get("vlan") for n in m.nw.values()):
         vf = vf if isinstance(vf, dict) else {}
-        nv = {k: v for k, v in vf.items() if k.startswith("__")}
-        olddev = {m.old[i]["device"]: i for i in m.old}
+        olddev = {m.old[i]["device"]: i for i in m.old if m.old[i].get("device")}
+        # keep metadata keys and VLANs the record does not manage (e.g. made on the old VLANs page)
+        nv = {k: copy.deepcopy(v) for k, v in vf.items() if k.startswith("__") or k not in olddev}
+        pols = nv.get("__policies__")
+        if isinstance(pols, list):
+            keep = []
+            for lp in pols:
+                if not isinstance(lp, dict):
+                    keep.append(lp)
+                    continue
+                if lp.get("src") in m.removed_devs or lp.get("dst") in m.removed_devs:
+                    res.change("record", "VLANs-page policy %s (%s) is dropped with its network." % (
+                        lp.get("id", "?"), lp.get("rule") or "%s -> %s" % (lp.get("src"), lp.get("dst"))))
+                    continue
+                for k in ("src", "dst"):
+                    if lp.get(k) in m.dev_map:
+                        lp[k] = m.dev_map[lp[k]]
+                if lp.get("rule"):
+                    lp["rule"] = _subst(lp["rule"], m.dev_map)
+                keep.append(lp)
+            nv["__policies__"] = keep
         for n in m.nw.values():
             if n.get("vlan") and n["role"] == "opt":
                 prev = None
@@ -1082,6 +1135,7 @@ def r_record(ctx, m, res, cur, body):
         if nv != vf:
             old = ctx.read(T.VLAN_FILE)
             res.file("record", T.VLAN_FILE, old or None, json.dumps(nv, indent=2))
+            res.change("record", "%s is kept in step as a mirror for the old VLANs page." % T.VLAN_FILE)
 
 
 # ---------------------------------------------------------------- validators
@@ -1216,6 +1270,175 @@ def run_validators(ctx, res, tmp):
     res.validators = out
 
 
+# ---------------------------------------------------------------- VLANs
+
+def ap_carriers(aps, vid, name=""):
+    """SSIDs (and the APs broadcasting them) that put clients on VLAN vid.
+
+    aps: {"status", "vlans": [openwrt vlan-list rows], "vaps": [{ap, ssid,
+    network, clients, up}]}. An SSID carries the VLAN when its OpenWrt
+    network is that VLAN's interface in vlan-list (swconfig APs) or, since
+    DSA APs report no switch VLANs, when the network is named like the
+    VLAN (its name, vlan<id>, br-vlan<id>): match "name"."""
+    if not isinstance(aps, dict) or not aps.get("vaps") or vid in (None, ""):
+        return []
+    vid = str(vid)
+    listed = {str(v.get("interface") or "") for v in aps.get("vlans") or []
+              if str(v.get("vlan")) == vid} - {""}
+    names = {x.lower() for x in (name or "", "vlan" + vid, "vlan_" + vid, "br-vlan" + vid) if x}
+    out = {}
+    for v in aps["vaps"]:
+        net = str(v.get("network") or "")
+        how = "vlan-list" if net in listed else ("name" if net.lower() in names else "")
+        if not how:
+            continue
+        ssid = str(v.get("ssid") or "")
+        e = out.setdefault(ssid, {"ssid": ssid, "network": net, "aps": [], "clients": 0, "match": how})
+        if v.get("ap") and v["ap"] not in e["aps"]:
+            e["aps"].append(v["ap"])
+        try:
+            e["clients"] += int(v.get("clients") or 0)
+        except (TypeError, ValueError):
+            pass
+        if how == "vlan-list":
+            e["match"] = how
+    return sorted(out.values(), key=lambda e: e["ssid"].lower())
+
+
+def _carrier_text(c):
+    return "SSID '%s' on %s (network %s, %d client(s) now)" % (
+        c["ssid"], ", ".join(c["aps"]) or "?", c["network"], c["clients"])
+
+
+def guess_preset(zid, policy):
+    """Which preset a network's current row/column matches. VPN cells are
+    ignored (raw WireGuard accepts decide them, not the preset)."""
+    zones = [z for z in policy.get("rows") or [] if z.get("role") != "vpn"]
+    cells = policy.get("cells") or {}
+    best = None
+    for key in PRESETS:
+        want = preset_cells(zid, key, zones)
+        n = tot = 0
+        for s_, row in want.items():
+            for d_, st in row.items():
+                tot += 1
+                if ((cells.get(s_) or {}).get(d_) or {}).get("state") != st:
+                    n += 1
+        if best is None or n < best[1]:
+            best = (key, n, tot)
+    if not best:
+        return {"preset": "", "label": "Custom", "exact": False, "differs": 0}
+    key, n, _ = best
+    return {"preset": key, "exact": n == 0, "differs": n,
+            "label": PRESETS[key]["label"] if n == 0 else "Custom (closest: %s, %d cell%s differ%s)" % (
+                PRESETS[key]["label"], n, "" if n == 1 else "s", "s" if n == 1 else "")}
+
+
+def vlans(ctx=None, view=None, policy=None, aps=None):
+    """Rows for the Interfaces -> VLANs tab: every VLAN in the record plus
+    VLAN devices (or vlans.json entries) the record does not know yet."""
+    ctx = ctx or Ctx()
+    view = view if view is not None else T.interfaces_view()
+    policy = policy if policy is not None else T.current_policy()
+    aps = aps if isinstance(aps, dict) else ctx.aps()
+    t = view.get("topology") or {}
+    binds = view.get("bindings") or {}
+    inv = {i["device"]: i for i in view.get("inventory") or []}
+    vf = T._read_json(ctx.p(T.VLAN_FILE))
+    vf = vf if isinstance(vf, dict) else {}
+    leases = _lease_counts(ctx)
+    cols = {c["id"]: c for c in policy.get("columns") or []}
+    rows, seen = [], set()
+
+    def link(dev):
+        i = inv.get(dev)
+        if not i:
+            return {"present": False, "state": "missing", "carrier": False}
+        return {"present": True, "state": i.get("operstate") or "", "carrier": bool(i.get("carrier"))}
+
+    def pol(zid):
+        row = (policy.get("cells") or {}).get(zid)
+        if not row:
+            return None
+        out = []
+        for cid, c in row.items():
+            if c.get("state") == "self":
+                continue
+            out.append({"dst": cid, "name": (cols.get(cid) or {}).get("name", cid), "state": c.get("state"),
+                        "source": c.get("source", ""), "exceptions": len(c.get("exceptions") or [])})
+        inbound = []
+        for sid, srow in (policy.get("cells") or {}).items():
+            c = srow.get(zid) or {}
+            if sid != zid and c.get("state"):
+                inbound.append({"src": sid, "name": (cols.get(sid) or {}).get("name", sid), "state": c["state"]})
+        legacy = [lp for lp in policy.get("legacy_policies") or [] if lp.get("cell") and zid in lp["cell"]]
+        g = guess_preset(zid, policy)
+        return {"preset": g, "out": out, "in": inbound, "legacy": legacy}
+
+    for o in t.get("opt") or []:
+        if not o.get("vlan"):
+            continue
+        dev = o.get("device") or "%s.%s" % (o.get("parent"), o.get("vlan"))
+        seen.add(dev)
+        ipi = _iface(o.get("address"))
+        b = binds.get(o.get("id")) or {}
+        kea = b.get("kea") or {}
+        subs = kea.get("subnets") or []
+        n_leases = sum(leases.get(str(x.get("id")), 0) for x in subs)
+        legacy = vf.get(dev) if isinstance(vf.get(dev), dict) else None
+        rows.append({
+            "id": o.get("id"), "managed": True, "name": o.get("name") or o.get("id"),
+            "vlan": o.get("vlan"), "parent": o.get("parent"), "device": dev,
+            "address": o.get("address") or "", "gateway": str(ipi.ip) if ipi else "",
+            "subnet": str(ipi.network) if ipi else "",
+            "dhcp": bool(o.get("dhcp")), "dhcp_listening": bool(kea.get("listening")),
+            "pools": [p for x in subs for p in (x.get("pools") or [])],
+            "kea_subnets": [x.get("id") for x in subs],
+            "reservations": sum(int(x.get("reservations") or 0) for x in subs),
+            "leases": n_leases,
+            "ra": bool(o.get("ra")), "ra_prefixes": (b.get("radvd") or {}).get("prefixes") or [],
+            "link": link(dev),
+            "mirror": {"vlans_json": bool(legacy), "label": (legacy or {}).get("label", "")},
+            "policy": pol(o.get("id")),
+            "aps": ap_carriers(aps, o.get("vlan"), o.get("name") or ""),
+        })
+    extra = {}
+    for dev, i in inv.items():
+        if i.get("kind") == "vlan" and dev not in seen:
+            extra[dev] = {"vlan": i.get("vlan"), "parent": i.get("parent"),
+                          "address": next((a["cidr"] for a in i.get("addresses") or [] if a.get("family") == "inet"), "")}
+    for dev, e in vf.items():
+        if dev.startswith("__") or dev in seen or not isinstance(e, dict):
+            continue
+        x = extra.setdefault(dev, {"vlan": e.get("vlan_id"), "parent": e.get("parent"), "address": e.get("address", "")})
+        x["label"] = e.get("label", "")
+    for dev, e in sorted(extra.items()):
+        ipi = _iface(e.get("address"))
+        rows.append({"id": "", "managed": False, "name": e.get("label") or dev, "vlan": e.get("vlan"),
+                     "parent": e.get("parent"), "device": dev, "address": e.get("address") or "",
+                     "gateway": str(ipi.ip) if ipi else "", "subnet": str(ipi.network) if ipi else "",
+                     "dhcp": False, "pools": [], "kea_subnets": [], "reservations": 0, "leases": 0,
+                     "ra": False, "ra_prefixes": [], "link": link(dev),
+                     "mirror": {"vlans_json": dev in vf, "label": (vf.get(dev) or {}).get("label", "") if isinstance(vf.get(dev), dict) else ""},
+                     "policy": None, "aps": ap_carriers(aps, e.get("vlan"), e.get("label") or "")})
+    rows.sort(key=lambda r: (not r["managed"], int(r["vlan"]) if str(r["vlan"]).isdigit() else 0))
+    a = aps if isinstance(aps, dict) else {}
+    untagged = []
+    if a.get("vaps"):
+        tagged = {c["ssid"] for r in rows for c in r["aps"]}
+        lan_name = (t.get("lan") or {}).get("name") or "lan"
+        for c in ap_carriers({"vaps": a["vaps"]}, "lan", "lan" if lan_name.lower() == "lan" else lan_name):
+            if c["ssid"] not in tagged:
+                untagged.append(c)
+    return {"ok": True, "vlans": rows, "parents": sorted(d for d, i in inv.items() if i.get("kind") == "ethernet"),
+            "lan_ssids": untagged,
+            "aps": {"status": a.get("status", "absent"), "error": a.get("error", ""), "at": a.get("at"),
+                    "count": len({v.get("ap") for v in a.get("vaps") or [] if v.get("ap")}),
+                    "vlan_list": bool(a.get("vlans"))},
+            "legacy_policies": policy.get("legacy_policies") or [],
+            "apply_locked": t.get("apply_locked", True) is not False}
+
+
 # ---------------------------------------------------------------- build / plan
 
 def _norm_topology(cur, want):
@@ -1272,6 +1495,7 @@ def build(body, session_ip="", ctx=None):
     r_suricata(ctx, m, res)
     r_sqm(ctx, m, res)
     r_honeypot(ctx, m, res)
+    r_vlan_notes(ctx, m, res)
     if not res.errors:
         r_record(ctx, m, res, cur, body)
     _warn_session(m, res, session_ip)
@@ -1281,6 +1505,37 @@ def build(body, session_ip="", ctx=None):
     if any(f.get("old") and f.get("new") is None for f in res.files.values()):
         res.warn("Some files are removed; the snapshot keeps them.")
     return res
+
+
+def r_vlan_notes(ctx, m, res):
+    """Consequences of removing or re-tagging a VLAN network: its policy
+    cells go away, and access points may still put WiFi clients on it."""
+    gone = [i for i in m.removed if m.old[i].get("vlan") and m.old[i]["role"] == "opt"]
+    moved = [i for i in m.kept if m.old[i].get("vlan") and str(m.old[i].get("vlan")) != str(m.nw[i].get("vlan"))]
+    if not gone and not moved:
+        return
+    zones = len(m.old) + (0 if "wan" in m.old else 1)
+    for i in gone:
+        o = m.old[i]
+        res.change("ufw" if "ufw" in res.steps else "record",
+                   "Policy matrix: the %s (VLAN %s) row and column are removed (%d cells)." % (o["name"], o["vlan"], 2 * zones - 1))
+    aps = ctx.aps()
+    if aps is None or aps.get("status") in ("absent", "disabled", "unconfigured"):
+        return
+    if aps.get("status") not in ("ok", None) and not aps.get("vaps"):
+        res.warn("Could not check the access points for SSIDs on the changed VLAN(s) (OpenWrt plugin: %s)." % (
+            aps.get("error") or aps.get("status")))
+        return
+    for i in gone:
+        o = m.old[i]
+        for c in ap_carriers(aps, o["vlan"], o.get("name")):
+            res.warn("%s still tags VLAN %s (%s). Once the VLAN is removed those clients get no DHCP and no "
+                     "gateway; move or remove the SSID on the WiFi page first." % (_carrier_text(c), o["vlan"], o["name"]))
+    for i in moved:
+        o, n = m.old[i], m.nw[i]
+        for c in ap_carriers(aps, o["vlan"], o.get("name")):
+            res.warn("%s tags VLAN %s; %s moves to VLAN %s, so re-tag the SSID's network on the access points too."
+                     % (_carrier_text(c), o["vlan"], n["name"], n.get("vlan")))
 
 
 def _warn_session(m, res, ip):

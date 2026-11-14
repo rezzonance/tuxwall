@@ -13161,8 +13161,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/vlans":
             self._send(200, build_vlans())
 
-        elif path == "/api/interfaces" or path == "/api/interfaces/policy":
-            self._send(*interfaces_get(path))
+        elif path in ("/api/interfaces", "/api/interfaces/policy", "/api/interfaces/vlans", "/api/interfaces/lock"):
+            self._send(*interfaces_get(path, self.path))
 
         elif path == "/api/system/updates":
             self._send(200, updates_snapshot())
@@ -15340,8 +15340,68 @@ def _restore_nat_on_boot():
 VLAN_PERSIST_FILE = "/etc/tuxwall/vlans.json"
 
 
-def interfaces_get(path):
-    """GET /api/interfaces and /api/interfaces/policy (read-only)."""
+_IF_AP_CACHE = {"at": 0.0, "data": None, "busy": False}
+_IF_AP_LOCK = threading.Lock()
+_IF_AP_TTL = 300
+
+
+def _if_ap_fetch():
+    """Read-only OpenWrt plugin calls (vlan-list + overview SSH to the APs)."""
+    data = None
+    try:
+        if not os.path.isfile(os.path.join(PLUGINS_DIR, "openwrt", "plugin.json")):
+            data = {"status": "absent"}
+        elif not _plugin_load_config("openwrt").get("enabled", True):
+            data = {"status": "disabled"}
+        else:
+            vl = plugin_action("openwrt", "vlan-list", {})
+            ov = plugin_action("openwrt", "overview", {})
+            if ov.get("configured") is False or vl.get("configured") is False:
+                data = {"status": "unconfigured", "error": ov.get("error") or vl.get("error") or ""}
+            else:
+                vaps = []
+                for ap in ov.get("aps") or []:
+                    for v in ap.get("vaps") or []:
+                        vaps.append({"ap": ap.get("name") or ap.get("ip") or "", "ssid": v.get("ssid") or "",
+                                     "network": v.get("network") or "", "clients": v.get("clients") or 0,
+                                     "up": bool(v.get("up"))})
+                errs = [str(e.get("host", "")) + ": " + str(e.get("error", "")) for e in ov.get("errors") or []
+                        if isinstance(e, dict)]
+                if ov.get("error"):
+                    errs.append(str(ov["error"]))
+                data = {"status": "ok" if (vaps or ov.get("ok")) else "error",
+                        "error": "; ".join(errs)[:300],
+                        "vlans": vl.get("vlans") or [] if vl.get("ok") else [], "vaps": vaps}
+    except Exception as exc:
+        data = {"status": "error", "error": str(exc)[:300]}
+    data["at"] = int(time.time())
+    with _IF_AP_LOCK:
+        _IF_AP_CACHE.update(at=time.time(), data=data, busy=False)
+
+
+def _if_ap_info(wait=0.0, refresh=False):
+    """Cached AP/SSID data for the Interfaces -> VLANs tab and the plan.
+    Never blocks longer than `wait`; a refresh runs in the background."""
+    with _IF_AP_LOCK:
+        d = _IF_AP_CACHE["data"]
+        if d is not None and not refresh and time.time() - _IF_AP_CACHE["at"] < _IF_AP_TTL:
+            return d
+        if not _IF_AP_CACHE["busy"]:
+            _IF_AP_CACHE["busy"] = True
+            threading.Thread(target=_if_ap_fetch, name="if-ap-fetch", daemon=True).start()
+    end = time.time() + wait
+    while time.time() < end:
+        time.sleep(0.2)
+        with _IF_AP_LOCK:
+            if not _IF_AP_CACHE["busy"]:
+                return _IF_AP_CACHE["data"]
+    with _IF_AP_LOCK:
+        d = _IF_AP_CACHE["data"]
+    return dict(d, refreshing=True) if d is not None else {"status": "pending"}
+
+
+def interfaces_get(path, raw_path=""):
+    """GET /api/interfaces, /api/interfaces/policy|vlans|lock (read-only)."""
     if _topology is None:
         return 503, {"ok": False, "error": "Interface topology module is not installed"}
     try:
@@ -15351,6 +15411,13 @@ def interfaces_get(path):
             pass
         if path.endswith("/policy"):
             return 200, _topology.current_policy()
+        if path.endswith("/lock"):
+            return 200, {"ok": True, "apply_locked": _topology.load().get("apply_locked", True) is not False}
+        if path.endswith("/vlans"):
+            import assign_plan
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(raw_path or path).query)
+            aps = _if_ap_info(wait=1.5, refresh=(q.get("refresh") or [""])[0] == "1")
+            return 200, assign_plan.vlans(aps=aps)
         view = _topology.interfaces_view()
         try:
             import assign_apply
@@ -15368,7 +15435,8 @@ def interfaces_plan(body, session_ip=""):
     if _topology is None:
         return 503, {"ok": False, "error": "Interface topology module is not installed"}
     try:
-        res = _topology.plan(body if isinstance(body, dict) else {}, session_ip=session_ip)
+        res = _topology.plan(body if isinstance(body, dict) else {}, session_ip=session_ip,
+                             aps=lambda: _if_ap_info(wait=12))
         return (200 if res.get("ok") else 400), res
     except Exception as exc:
         return 500, {"ok": False, "error": str(exc)}
@@ -15530,6 +15598,7 @@ def add_vlan(body):
     persist[iface] = {"label": label, "address": address, "vlan_id": vid, "parent": parent}
     _save_vlan_persist(persist)
     _vlan_netplan_sync(persist)
+    _vlan_record_sync("add", iface, persist[iface])
 
     return {"ok": True, "iface": iface}
 
@@ -15575,6 +15644,7 @@ def edit_vlan(body):
     persist[iface]  = meta
     _save_vlan_persist(persist)
     _vlan_netplan_sync(persist)
+    _vlan_record_sync("edit", iface, meta)
 
     return {"ok": True}
 
@@ -15597,6 +15667,7 @@ def delete_vlan(body):
     persist.pop(iface, None)
     _save_vlan_persist(persist)
     _vlan_netplan_sync(persist)
+    _vlan_record_sync("delete", iface, {})
 
     return {"ok": True}
 
@@ -15668,6 +15739,17 @@ def delete_vlan_policy(body):
     persist["__policies__"] = [p for p in policies if p["id"] != pid]
     _save_vlan_persist(persist)
     return {"ok": True}
+
+
+def _vlan_record_sync(op, iface, meta):
+    """interfaces.json is the source of truth for VLANs (Interfaces -> VLANs);
+    this page changes the live interface directly, so keep the record in step."""
+    if _topology is None:
+        return
+    try:
+        _topology.sync_legacy_vlan(op, iface, meta)
+    except Exception as exc:
+        print("[vlans] interfaces.json sync failed for %s %s: %s" % (op, iface, exc), flush=True)
 
 
 def _vlan_netplan_sync(persist):
