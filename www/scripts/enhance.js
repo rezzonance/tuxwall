@@ -364,6 +364,7 @@
       var s = Math.max(0, Math.round((Date.now() - lastOk) / 1000));
       var ago = s < 5 ? "just now" : s < 60 ? s + "s ago" : Math.floor(s / 60) + "m ago";
       txt.textContent = paused ? "Paused · updated " + ago : "Updated " + ago;
+      live.title = txt.textContent;
       live.classList.toggle("stale", !paused && s > 90);
     };
     btn.addEventListener("click", function () {
@@ -810,6 +811,35 @@
     actions.insertBefore(b, live ? live.nextSibling : actions.firstChild);
   }
 
+  // Collapse the "Updated …" pill and the search button to icons (status
+  // dot + pause, magnifier). Remembered per browser; Ctrl+K keeps working.
+  function setHeaderCompact(on) {
+    document.documentElement.classList.toggle("tw-hdr-compact", !!on);
+    lsSet("tw.hdrCompact", on ? "1" : "0");
+    var t = document.getElementById("tw-hdr-toggle");
+    if (!t) return;
+    t.innerHTML = ICON(on ? '<path d="m15 6-6 6 6 6"/>' : '<path d="m9 6 6 6-6 6"/>');
+    t.setAttribute("aria-expanded", on ? "false" : "true");
+    t.title = on ? "Expand search and update status" : "Collapse search and update status";
+    t.setAttribute("aria-label", t.title);
+  }
+  function buildHeaderToggle() {
+    var actions = $(".topbar-actions");
+    if (!actions || document.getElementById("tw-hdr-toggle")) return;
+    var t = el("button", "tw-hdr-toggle", ICON('<path d="m9 6 6 6-6 6"/>'));
+    t.type = "button";
+    t.id = "tw-hdr-toggle";
+    t.setAttribute("aria-controls", "tw-live tw-search-btn");
+    var live = $(".tw-live", actions), sb = $(".tw-search-btn", actions);
+    if (live) live.id = "tw-live";
+    if (sb) sb.id = "tw-search-btn";
+    t.addEventListener("click", function () {
+      setHeaderCompact(!document.documentElement.classList.contains("tw-hdr-compact"));
+    });
+    actions.insertBefore(t, live || sb || actions.firstChild);
+    setHeaderCompact(lsGet("tw.hdrCompact", "0") === "1");
+  }
+
   /* ==========================================================================
      B5. Compact page headers + "Show mascot art"
      ======================================================================= */
@@ -941,6 +971,7 @@
     buildGroups();
     buildLive();
     buildSearchButton();
+    buildHeaderToggle();
     buildMascotSetting();
     initSvcSummary();
     initRuleComments();

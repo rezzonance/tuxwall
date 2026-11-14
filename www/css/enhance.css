@@ -157,12 +157,33 @@
   font: 600 10.5px/1 var(--tw-font-mono, monospace);
   white-space: nowrap;
 }
+/* collapsible: chevron toggle; compact = dot + pause icon, magnifier only */
+.tw-hdr-toggle {
+  display: inline-grid; place-items: center; flex: none;
+  width: 26px; height: 36px; margin-right: -4px; padding: 0;
+  border: 1px solid transparent; border-radius: var(--tw-radius-sm, 9px);
+  background: transparent; color: var(--muted); cursor: pointer;
+}
+.tw-hdr-toggle:hover { color: var(--text); border-color: var(--tw-card-border, var(--border)); }
+.tw-hdr-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tw-hdr-toggle .tw-ic { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.tw-search-btn, .tw-live-text, .tw-search-ph, .tw-search-btn .tw-kbd, .tw-live-btn span {
+  transition: min-width .25s ease, max-width .25s ease, opacity .2s ease, margin .25s ease;
+}
+.tw-live-text, .tw-search-ph, .tw-search-btn .tw-kbd, .tw-live-btn span { max-width: 14em; overflow: hidden; }
+.tw-hdr-compact .tw-search-btn { min-width: 0; }
+.tw-hdr-compact .tw-live-text { min-width: 0; max-width: 0; opacity: 0; margin-right: -9px; }
+.tw-hdr-compact .tw-search-ph, .tw-hdr-compact .tw-search-btn .tw-kbd { min-width: 0; max-width: 0; opacity: 0; margin-left: -8px; padding: 0; border-width: 0; }
+.tw-hdr-compact .tw-live-btn span { max-width: 0; opacity: 0; margin-left: -5px; }
+.tw-hdr-compact .tw-live { padding-left: 10px; }
+
 @media (max-width: 1200px) {
   .tw-search-btn { min-width: 0; }
   .tw-search-btn .tw-search-ph, .tw-search-btn .tw-kbd { display: none; }
   .tw-live-text { min-width: 0; }
 }
 @media (max-width: 760px) {
+  html:not(#_tw#_x) .topbar-actions .tw-hdr-toggle { display: none; }
   .tw-live-text { display: none; }
   .tw-live { padding: 0 4px 0 10px; }
   .tw-live-btn span { display: none; }
@@ -471,6 +492,7 @@ html.tw-mascots .fw-hero-sub #fw-logging-state { white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) {
   .tw-live-dot, .tw-skel, .tw-flash, .tw-pal, .tw-pal-backdrop, .tw-dialog, .tw-toast { animation: none !important; }
   .tw-nav-group-head .tw-chev, .tw-svc-sum .tw-chev { transition: none; }
+  .tw-search-btn, .tw-live-text, .tw-search-ph, .tw-search-btn .tw-kbd, .tw-live-btn span { transition: none; }
 }
 
 /* Dialogs inside firewall-styled views: firewall.css `.fw-view > *` set
