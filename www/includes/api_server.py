@@ -13146,6 +13146,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/vlans":
             self._send(200, build_vlans())
 
+        elif path == "/api/interfaces" or path == "/api/interfaces/policy":
+            self._send(*interfaces_get(path))
+
         elif path == "/api/system/updates":
             self._send(200, updates_snapshot())
 
@@ -14511,6 +14514,9 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
 
+        elif path == "/api/interfaces/plan":
+            self._send(*interfaces_plan(body))
+
         elif path == "/api/vlans/policy/add":
             try:
                 self._send(200, add_vlan_policy(body))
@@ -15314,6 +15320,33 @@ def _restore_nat_on_boot():
 # ─────────────────────────────────────────────────────────────────────────────
 
 VLAN_PERSIST_FILE = "/etc/tuxwall/vlans.json"
+
+
+def interfaces_get(path):
+    """GET /api/interfaces and /api/interfaces/policy (read-only)."""
+    if _topology is None:
+        return 503, {"ok": False, "error": "Interface topology module is not installed"}
+    try:
+        try:
+            _topology.ensure()  # first use: record the live roles (never overwrites)
+        except Exception:
+            pass
+        if path.endswith("/policy"):
+            return 200, _topology.current_policy()
+        return 200, _topology.interfaces_view()
+    except Exception as exc:
+        return 500, {"ok": False, "error": str(exc)}
+
+
+def interfaces_plan(body):
+    """POST /api/interfaces/plan (admin). Read-only: writes nothing."""
+    if _topology is None:
+        return 503, {"ok": False, "error": "Interface topology module is not installed"}
+    try:
+        res = _topology.plan(body if isinstance(body, dict) else {})
+        return (200 if res.get("ok") else 501), res
+    except Exception as exc:
+        return 500, {"ok": False, "error": str(exc)}
 
 
 def _load_vlan_persist():

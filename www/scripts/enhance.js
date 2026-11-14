@@ -124,7 +124,7 @@
      ======================================================================= */
   var GROUPS = [
     { id: "monitor", label: "Monitor", views: ["overview", "bandwidth", "security", "logs"] },
-    { id: "network", label: "Network", views: ["clients", "dns", "domains", "blocklists", "vlans", "wireguard"] },
+    { id: "network", label: "Network", views: ["clients", "dns", "domains", "blocklists", "interfaces", "vlans", "wireguard"] },
     { id: "protect", label: "Protect", views: ["firewall", "crowdsec"] },
     { id: "system", label: "System", views: ["system", "backups", "ai", "settings"] }
   ];
@@ -488,7 +488,7 @@
      ======================================================================= */
   var GO_KEYS = {
     o: "overview", d: "clients", n: "dns", m: "domains", x: "blocklists", f: "firewall",
-    v: "vlans", s: "security", w: "wireguard", c: "crowdsec", b: "bandwidth",
+    v: "vlans", i: "interfaces", s: "security", w: "wireguard", c: "crowdsec", b: "bandwidth",
     y: "system", k: "backups", l: "logs", a: "ai", ",": "settings"
   };
   var pal = null, palInput, palList, palItems = [], palSel = 0, palResults = [];

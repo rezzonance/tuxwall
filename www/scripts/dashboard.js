@@ -581,6 +581,7 @@
     blocklists: "Blocklists",
     firewall: "Firewall (UFW)",
     vlans: "VLANs",
+    interfaces: "Interfaces",
     security: "Security",
     wireguard: "WireGuard",
     crowdsec: "CrowdSec",
@@ -11334,7 +11335,7 @@
       : (VIEW_TITLES[view] || "Dashboard");
     setTimeout(() => { initSubtabs(); syncSubtabState(); enhanceCardHeads(); }, 0);
     state.activeView = view;
-    const implemented = view === "overview" || view === "clients" || view === "dns" || view === "domains" || view === "firewall" || view === "vlans" || view === "security" || view === "wireguard" || view === "crowdsec" || view === "bandwidth" || view === "blocklists" || view === "system" || view === "backups" || view === "logs" || view === "settings" || view === "ai" || !!pluginView;
+    const implemented = view === "overview" || view === "clients" || view === "dns" || view === "domains" || view === "firewall" || view === "vlans" || view === "interfaces" || view === "security" || view === "wireguard" || view === "crowdsec" || view === "bandwidth" || view === "blocklists" || view === "system" || view === "backups" || view === "logs" || view === "settings" || view === "ai" || !!pluginView;
     document.querySelectorAll(".view").forEach((v) => { v.hidden = true; });
     document.querySelectorAll(".pie-canvas").forEach((c) => {
       const st = donutStates.get(c);
