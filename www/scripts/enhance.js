@@ -516,6 +516,8 @@
     });
     out.push({ kind: "Action", label: "Add firewall rule…", hint: "opens the rule form",
       run: function () { go("firewall", "rules", { push: true }).then(function () { var b = $("#fw-add-open"); if (b) b.click(); }); } });
+    out.push({ kind: "Action", label: "Add VLAN…", hint: "Interfaces › VLANs, then Edit & plan",
+      run: function () { if (window.twIfVlanAdd) window.twIfVlanAdd(); } });
     out.push({ kind: "Action", label: "Add WireGuard client…", hint: "jumps to WireGuard",
       run: function () { go("wireguard", "", { push: true }).then(function () { focusFlash($("#wg-add-peer")); }); } });
     out.push({ kind: "Action", label: "Static DHCP reservation…", hint: "opens DHCP › Static",

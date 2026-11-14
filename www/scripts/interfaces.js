@@ -7,7 +7,8 @@
   if (!view) return;
 
   var state = { data: null, policy: null, at: 0, loading: false, sel: null,
-    draft: null, pedits: {}, presets: {}, plan: null, planning: false, pmEdit: false, pending: null, tick: 0 };
+    draft: null, pedits: {}, presets: {}, plan: null, planning: false, pmEdit: false, pending: null, tick: 0,
+    vlans: null, vlAt: 0, vlLoading: false, vlPolls: 0, vlTimer: 0, focusOpt: null };
   var $ = function (s, r) { return (r || view).querySelector(s); };
   var $$ = function (s, r) { return Array.prototype.slice.call((r || view).querySelectorAll(s)); };
 
@@ -240,6 +241,8 @@
       "<div class=\"if-sub\">Decided by" + (cell.default ? " the default policy" : "") + ":</div><ul class=\"if-list\">" + code(cell.rules || []) + "</ul>" +
       ((cell.exceptions || []).length ? '<div class="if-sub">Narrower rules (checked first):</div><ul class="if-list">' + code(cell.exceptions) + "</ul>" : "") +
       (cell.v6 ? '<div class="if-sub">IPv6: ' + esc(STATE_LABEL[cell.v6] || cell.v6) + "</div><ul class=\"if-list\">" + code(cell.v6_rules || []) + "</ul>" : "") +
+      ((cell.legacy || []).length ? '<div class="if-sub">Created on the old VLANs page (source: <code>/etc/tuxwall/vlans.json</code>):</div><ul class="if-list">' +
+        cell.legacy.map(function (lp) { return "<li>policy <code>" + esc(lp.id) + "</code> " + esc(lp.policy) + " · <code>" + esc(lp.rule) + "</code></li>"; }).join("") + "</ul>" : "") +
       (state.pmEdit ? cellEditor(sel, cell, rn, cn) : "");
   }
 
@@ -247,6 +250,7 @@
     if (!state.data) return;
     renderStats(); renderNics(); renderRoles(); renderServices(); renderPolicy();
     ensureEditUI(); renderPolicyBar(); renderEdit(); renderPending();
+    lockNav(state.data.apply_locked !== false);
   }
 
   /* ------------------------------------------------------------ editor (phase 3) */
@@ -269,6 +273,7 @@
   function locked() { return !state.data || state.data.apply_locked !== false; }
 
   function ensureEditUI() {
+    ensureVlanUI();
     if ($("#if-edit-tab")) return;
     var tabs = $("#if-subtabs");
     var b = document.createElement("button");
@@ -363,7 +368,7 @@
     cards.push('<div class="if-ed-card">' + '<div class="if-ed-head">' + roleChip("lan", "LAN") + ' <span class="if-sub">main network</span></div>' + netFields("lan", d.lan || {}, "lan") + "</div>");
     (d.opt || []).forEach(function (o, k) {
       var isNew = !o.id || !(state.data.topology.opt || []).some(function (x) { return x.id === o.id; });
-      cards.push('<div class="if-ed-card' + (isNew ? " is-new" : "") + '"><div class="if-ed-head">' + roleChip("opt", (o.id || "new").toUpperCase()) +
+      cards.push('<div class="if-ed-card' + (isNew ? " is-new" : "") + (state.focusOpt === o ? " if-focus" : "") + '" data-opt-card="' + k + '"><div class="if-ed-head">' + roleChip("opt", (o.id || "new").toUpperCase()) +
         (o.vlan != null ? ' <span class="if-sub">VLAN</span>' : "") + (isNew ? ' <span class="if-new">new</span>' : "") +
         '<span class="toolbar-spacer"></span><button type="button" class="btn btn-sm" data-rm-opt="' + k + '">Remove</button></div>' +
         netFields("opt." + k, o, "opt") +
@@ -612,6 +617,197 @@
   }
 
 
+
+  /* ------------------------------------------------------------ VLANs tab */
+  function ensureVlanUI() {
+    if ($("#if-vlan-tab")) return;
+    var first = $('.fw-subtab[data-if-pane="ports"]');
+    if (!first) return;
+    var b = document.createElement("button");
+    b.className = "fw-subtab"; b.type = "button"; b.id = "if-vlan-tab";
+    b.setAttribute("data-if-pane", "vlans"); b.setAttribute("role", "tab"); b.setAttribute("aria-selected", "false");
+    b.textContent = "VLANs";
+    first.parentNode.insertBefore(b, first.nextSibling);
+    var body = document.createElement("div");
+    body.setAttribute("data-if-body", "vlans"); body.hidden = true;
+    body.innerHTML = '<div class="card card-mt if-vl-card"><div class="card-head"><h2>VLANs</h2><span class="toolbar-spacer"></span>' +
+      '<button type="button" class="btn btn-sm" id="if-vl-aps">Re-check access points</button>' +
+      '<button type="button" class="btn btn-primary btn-sm" id="if-vl-add">Add VLAN</button></div>' +
+      '<p class="if-sub if-vl-intro">VLAN networks are part of the interface record (<code>/etc/tuxwall/interfaces.json</code>). Add, Edit and Remove open the Edit &amp; plan editor, so every change goes through the same plan review.</p>' +
+      '<div class="if-vl-apstat" id="if-vl-apstat" aria-live="polite"></div>' +
+      '<div class="if-vl-list" id="if-vl-list"><span class="muted">Loading VLANs…</span></div>' +
+      '<div class="if-vl-legacy" id="if-vl-legacy"></div></div>';
+    var ports = $('[data-if-body="ports"]');
+    ports.parentNode.insertBefore(body, ports.nextSibling);
+  }
+
+  function loadVlans(force, refreshAps) {
+    if (state.vlLoading) return;
+    if (!force && state.vlans && Date.now() - state.vlAt < 30000) return;
+    state.vlLoading = true;
+    getJSON("/api/interfaces/vlans" + (refreshAps ? "?refresh=1" : "")).then(function (d) {
+      state.vlans = d; state.vlAt = Date.now();
+      renderVlans();
+      var st = (d.aps || {}).status;
+      clearTimeout(state.vlTimer);
+      if ((st === "pending" || (d.aps || {}).refreshing) && state.vlPolls < 6) {
+        state.vlPolls++;
+        state.vlTimer = setTimeout(function () { loadVlans(true); }, 4000);
+      } else { state.vlPolls = 0; }
+    }).catch(function (e) {
+      var l = $("#if-vl-list"); if (l) l.innerHTML = '<p class="if-err">Could not load VLANs: ' + esc(e.message) + "</p>";
+    }).then(function () { state.vlLoading = false; });
+  }
+
+  function apStatus(d) {
+    var a = d.aps || {};
+    var when = a.at ? " · checked " + new Date(a.at * 1000).toLocaleTimeString() : "";
+    switch (a.status) {
+      case "ok":
+        return "WiFi: " + a.count + " access point" + (a.count === 1 ? "" : "s") + " via the OpenWrt plugin" + when +
+          (a.vlan_list ? "" : " · SSIDs are matched by their OpenWrt network name (the APs report no switch VLANs)") +
+          (a.error ? ' · <span class="if-warn">' + esc(a.error) + "</span>" : "") +
+          ((d.lan_ssids || []).length ? " · untagged on the LAN: " + d.lan_ssids.map(function (c) { return "<strong>" + esc(c.ssid) + "</strong>"; }).join(", ") : "");
+      case "pending": return '<span class="muted">Checking the access points…</span>';
+      case "absent": return '<span class="muted">OpenWrt plugin not installed: SSIDs per VLAN are not shown.</span>';
+      case "disabled": return '<span class="muted">OpenWrt plugin is disabled: SSIDs per VLAN are not shown.</span>';
+      case "unconfigured": return '<span class="muted">OpenWrt plugin has no access points configured.</span>';
+      default: return '<span class="if-warn">Access points could not be checked' + (a.error ? ": " + esc(a.error) : "") + "</span>" + when;
+    }
+  }
+
+  var PSHORT = { allow: "allow", block: "block", established: "return only", dns_dhcp: "DNS + DHCP", custom: "some ports" };
+  function vlanCard(v) {
+    var link = v.link || {};
+    var lk = !link.present ? '<span class="if-link down">missing</span>' : link.carrier ? '<span class="if-link up">up</span>' : '<span class="if-link down">' + esc(link.state || "down") + "</span>";
+    var rows = [];
+    var row = function (k, val) { rows.push('<div class="if-vl-k">' + esc(k) + '</div><div class="if-vl-v">' + val + "</div>"); };
+    row("Interface", "<code>" + esc(v.device) + "</code> on <code>" + esc(v.parent || "?") + "</code> · " + lk);
+    row("Subnet", v.subnet ? "<code>" + esc(v.subnet) + "</code> · gateway <code>" + esc(v.gateway) + "</code>" : '<span class="muted">no IPv4 address</span>');
+    row("DHCP", v.dhcp ? yesno(true) + " pool <code>" + esc((v.pools || []).join(", ") || "—") + "</code> · <strong>" + esc(v.leases) + "</strong> active lease" + (v.leases === 1 ? "" : "s") +
+      (v.reservations ? " · " + esc(v.reservations) + " reserved" : "") + (v.dhcp_listening === false ? ' <span class="if-warn">Kea not listening</span>' : "") : yesno(false));
+    row("IPv6 RA", v.ra ? yesno(true) + " " + (v.ra_prefixes || []).map(function (p) { return "<code>" + esc(p) + "</code>"; }).join(" ") : yesno(false));
+    var p = v.policy;
+    if (p) {
+      var chips = p.out.map(function (c) {
+        return '<span class="if-vl-pc st-' + esc(c.state) + '" title="' + esc(v.name + " → " + c.name + ": " + (STATE_LABEL[c.state] || c.state) + (c.source === "iptables" ? " (raw iptables rule)" : "") + (c.exceptions && c.dst !== "gw" ? "; " + c.exceptions + " narrower rule(s) checked first" : "")) + '">→ ' +
+          esc(c.dst === "gw" ? "Gateway" : c.dst === "wan" ? "Internet" : c.name) + " " + esc(PSHORT[c.state] || c.state) + (c.exceptions && c.dst !== "gw" ? " +" + c.exceptions : "") + "</span>";
+      }).concat(p["in"].filter(function (c) { return c.src !== "wan"; }).map(function (c) {
+        return '<span class="if-vl-pc in st-' + esc(c.state) + '" title="' + esc(c.name + " → " + v.name + ": " + (STATE_LABEL[c.state] || c.state)) + '">← ' + esc(c.name) + " " + esc(PSHORT[c.state] || c.state) + "</span>";
+      }));
+      row("Policy", '<div><strong>' + esc(p.preset.label) + '</strong> <button type="button" class="btn btn-sm if-vl-mx" data-vl-mx="' + esc(v.id) + '">Matrix</button></div><div class="if-vl-pcs">' + chips.join("") + "</div>" +
+        ((p.legacy || []).length ? '<div class="if-sub">' + p.legacy.length + " polic" + (p.legacy.length === 1 ? "y" : "ies") + " from the old VLANs page (shown in the matrix cells)</div>" : ""));
+    } else {
+      row("Policy", '<span class="muted">not in the policy matrix (not in the interface record)</span>');
+    }
+    var aps = v.aps || [];
+    var ast = ((state.vlans || {}).aps || {}).status;
+    row("WiFi", aps.length ? aps.map(function (c) {
+      return '<span class="if-vl-ssid"><strong>' + esc(c.ssid) + "</strong> on " + esc(c.aps.join(", ")) + ' <span class="if-sub">' + esc(c.clients) + " client" + (c.clients === 1 ? "" : "s") + " · network " + esc(c.network) + (c.match === "name" ? " (matched by name)" : "") + "</span></span>";
+    }).join("") : '<span class="muted">' + (ast === "ok" ? "no SSID carries this VLAN" : ast === "pending" ? "checking…" : "unknown") + "</span>");
+    var acts = v.managed
+      ? '<button type="button" class="btn btn-sm" data-vl-edit="' + esc(v.id) + '">Edit</button><button type="button" class="btn btn-sm btn-danger" data-vl-rm="' + esc(v.id) + '">Remove</button>'
+      : '<button type="button" class="btn btn-sm" data-vl-adopt="' + esc(v.device) + '">Add to record</button>';
+    return '<div class="if-vl-item' + (v.managed ? "" : " unmanaged") + '" data-vl="' + esc(v.device) + '"><div class="if-vl-head">' +
+      '<span class="if-chip if-role-opt">VLAN ' + esc(v.vlan) + '</span> <strong class="if-vl-name">' + esc(v.name) + "</strong>" +
+      (v.id ? ' <span class="if-sub">' + esc(String(v.id).toUpperCase()) + "</span>" : ' <span class="if-warn">not in interfaces.json</span>') +
+      '<span class="toolbar-spacer"></span>' + acts + '</div><div class="if-vl-grid">' + rows.join("") + "</div></div>";
+  }
+
+  function renderVlans() {
+    var d = state.vlans, list = $("#if-vl-list");
+    if (!d || !list) return;
+    $("#if-vl-apstat").innerHTML = apStatus(d);
+    list.innerHTML = (d.vlans || []).length ? d.vlans.map(vlanCard).join("") :
+      '<p class="muted">No VLANs yet. Use Add VLAN to tag a new network on a port.</p>';
+    var lp = d.legacy_policies || [];
+    $("#if-vl-legacy").innerHTML = '<p class="if-sub">' + (lp.length
+      ? "Policies from the old VLANs page: " + lp.map(function (x) {
+          return "<code>" + esc(x.rule || x.src + " → " + x.dst) + "</code>" + (x.cell ? " → matrix cell " + esc(x.cell[0]) + "→" + esc(x.cell[1]) : ' <span class="if-warn">(no matching networks)</span>');
+        }).join("; ")
+      : "No inter-VLAN policies were created on the old VLANs page; the matrix on the Policy tab shows the effective rules.") + "</p>";
+  }
+
+  function showPane(pane) {
+    var tab = $('.fw-subtab[data-if-pane="' + pane + '"]');
+    if (tab && !tab.classList.contains("active")) tab.click();
+    try { if (location.hash.indexOf("#interfaces") === 0) history.replaceState(null, "", "#interfaces/" + pane); } catch (_) { }
+  }
+  function withData(fn) {
+    if (state.data) { fn(); return; }
+    setStatus("Loading…");
+    var n = 0, t = setInterval(function () { if (state.data) { clearInterval(t); fn(); } else if (++n > 200) clearInterval(t); }, 150);
+    load(true);
+  }
+  function focusOptCard(k, field) {
+    var card = $('[data-opt-card="' + k + '"]');
+    if (!card) return;
+    card.scrollIntoView({ block: "center", behavior: "smooth" });
+    var el = $('[data-k="opt.' + k + "." + (field || "name") + '"]', card) || $("input, select", card);
+    if (el) el.focus({ preventScroll: true });
+  }
+  function optIndex(id) {
+    var opts = draft().opt || [];
+    for (var k = 0; k < opts.length; k++) if (opts[k].id === id) return k;
+    return -1;
+  }
+  function vlanAdd(meta) {
+    withData(function () {
+      var d = draft();
+      var o = meta || { name: "", vlan: "", parent: (d.lan || {}).device || "", address: "", dhcp: true, ra: false };
+      d.opt.push(o);
+      state.focusOpt = o;
+      showPane("edit"); renderEdit();
+      focusOptCard(d.opt.length - 1, meta ? "name" : "vlan");
+    });
+  }
+  function vlanEdit(id) {
+    withData(function () {
+      var k = optIndex(id);
+      if (k < 0) { setStatus("That VLAN is not in the editor's record; refresh the page.", true); return; }
+      state.focusOpt = draft().opt[k];
+      showPane("edit"); renderEdit(); focusOptCard(k, "name");
+    });
+  }
+  function vlanRemove(id) {
+    withData(function () {
+      var k = optIndex(id);
+      if (k < 0) return;
+      var o = draft().opt.splice(k, 1)[0];
+      state.focusOpt = null;
+      showPane("edit"); renderEdit();
+      setStatus("Removed " + (o.name || o.id) + " (VLAN " + o.vlan + ") from the draft. Review the plan below; nothing changes until Apply.");
+      review("#if-plan");
+      var pl = $("#if-plan"); if (pl) pl.scrollIntoView({ block: "start", behavior: "smooth" });
+    });
+  }
+  function vlanAdopt(dev) {
+    var v = ((state.vlans || {}).vlans || []).filter(function (x) { return x.device === dev; })[0];
+    if (!v) return;
+    vlanAdd({ name: v.name !== dev ? v.name : "", vlan: +v.vlan || v.vlan, parent: v.parent, device: dev, address: v.address, dhcp: false, ra: false });
+  }
+
+  /* Old VLANs page: while Apply is locked it is the live path; once unlocked it
+     redirects here and leaves the sidebar. */
+  var navLocked = null;
+  function lockNav(isLocked) {
+    navLocked = isLocked;
+    var ni = document.querySelector(".nav-item.ni-vlans");
+    if (ni) ni.hidden = !isLocked;
+    var old = document.getElementById("view-vlans");
+    if (!isLocked && old && !old.hidden && window.twGo) window.twGo("interfaces", "vlans");
+  }
+  (function watchOldPage() {
+    var old = document.getElementById("view-vlans");
+    var check = function () {
+      if (navLocked !== null) { lockNav(navLocked); return; }
+      getJSON("/api/interfaces/lock").then(function (j) { lockNav(j.apply_locked !== false); }).catch(function () { });
+    };
+    if (old) new MutationObserver(function () { if (!old.hidden) check(); }).observe(old, { attributes: true, attributeFilter: ["hidden"] });
+    if (/^#vlans(\/|$)/.test(location.hash) || !document.getElementById("login-gate") || document.getElementById("login-gate").hidden) check();
+  })();
+  window.twIfVlanAdd = function () { if (window.twGo) window.twGo("interfaces", "vlans").then(function () { vlanAdd(); }); };
+
   function setStatus(msg, err) {
     var s = $("#if-status");
     s.textContent = msg || "";
@@ -643,11 +839,12 @@
         t.setAttribute("aria-selected", on ? "true" : "false");
       });
       $$("[data-if-body]").forEach(function (p) { p.hidden = p.dataset.ifBody !== tab.dataset.ifPane; });
+      if (tab.dataset.ifPane === "vlans") loadVlans(false);
       return;
     }
     var cell = e.target.closest(".if-mx-cell");
     if (cell) { state.sel = { r: cell.dataset.r, c: cell.dataset.c }; showCell(state.sel); return; }
-    if (e.target.closest("#if-refresh")) { state.draft = null; load(true); return; }
+    if (e.target.closest("#if-refresh")) { state.draft = null; load(true); if (state.vlans) loadVlans(true); return; }
     var t = e.target.closest("button");
     if (!t) return;
     var d, inv, used, free;
@@ -663,7 +860,9 @@
         d = draft();
         d.opt.push({ name: "", vlan: "", parent: (d.lan || {}).device || "", address: "", dhcp: true, ra: false });
         renderEdit(); return;
-      case "if-reset": state.draft = null; state.plan = null; renderEdit(); renderPlan(); $("#if-plan").innerHTML = ""; return;
+      case "if-vl-add": vlanAdd(); return;
+      case "if-vl-aps": state.vlPolls = 0; loadVlans(true, true); return;
+      case "if-reset": state.draft = null; state.plan = null; state.focusOpt = null; renderEdit(); renderPlan(); $("#if-plan").innerHTML = ""; return;
       case "if-review": review("#if-plan"); return;
       case "if-apply": doApply(); return;
       case "if-confirm": pendingAction("confirm"); return;
@@ -674,7 +873,15 @@
       case "if-pm-review": review("#if-plan-pm"); return;
       case "if-cell-undo": if (state.sel) { setCell(state.sel.r, state.sel.c, ""); renderPolicy(); renderPolicyBar(); } return;
     }
-    if (t.hasAttribute("data-rm-opt")) { draft().opt.splice(+t.getAttribute("data-rm-opt"), 1); renderEdit(); }
+    if (t.hasAttribute("data-rm-opt")) { draft().opt.splice(+t.getAttribute("data-rm-opt"), 1); renderEdit(); return; }
+    if (t.hasAttribute("data-vl-edit")) { vlanEdit(t.getAttribute("data-vl-edit")); return; }
+    if (t.hasAttribute("data-vl-rm")) { vlanRemove(t.getAttribute("data-vl-rm")); return; }
+    if (t.hasAttribute("data-vl-adopt")) { vlanAdopt(t.getAttribute("data-vl-adopt")); return; }
+    if (t.hasAttribute("data-vl-mx")) {
+      var zid = t.getAttribute("data-vl-mx");
+      showPane("policy"); state.sel = { r: zid, c: "wan" }; showCell(state.sel);
+      var c0 = $('.if-mx-cell[data-r="' + zid + '"]'); if (c0) c0.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
   });
 
   function onField(e) {
@@ -708,7 +915,13 @@
     state.sel = { r: cell.dataset.r, c: cell.dataset.c }; showCell(state.sel);
   });
 
-  new MutationObserver(function () { if (!view.hidden) load(false); })
+  function onShow() {
+    load(false);
+    var vb = $('[data-if-body="vlans"]');
+    if (vb && !vb.hidden) loadVlans(false);
+  }
+  ensureEditUI();
+  new MutationObserver(function () { if (!view.hidden) onShow(); })
     .observe(view, { attributes: true, attributeFilter: ["hidden"] });
-  if (!view.hidden) load(false);
+  if (!view.hidden) onShow();
 })();
