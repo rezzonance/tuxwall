@@ -9,15 +9,29 @@
 #
 # The WAN interface comes from TUXWALL_WAN_IFACE (exotic setups: bonded WAN,
 # pppoe, ...), else the "wan" role in /etc/tuxwall/interfaces.json, else the
-# default route.
+# default route. At boot the ISP's DHCP lease (and so the default route) can
+# arrive after this oneshot runs; if nothing else names the WAN, wait up to
+# TUXWALL_NAT_WAIT seconds (default 90) for it instead of silently exiting
+# without NAT (field report 2026-11-14: LAN lost IPv4 for an hour).
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 WAN="${TUXWALL_WAN_IFACE:-}"
 if [ -z "$WAN" ] && [ -r /etc/tuxwall/interfaces.json ]; then
   WAN="$(python3 -c 'import json; print((json.load(open("/etc/tuxwall/interfaces.json")).get("wan") or {}).get("device") or "")' 2>/dev/null)"
 fi
-[ -n "$WAN" ] || WAN="$(ip route show default 2>/dev/null | head -1 | awk '{print $5; exit}')"
-[ -n "$WAN" ] || exit 0
+WAIT="${TUXWALL_NAT_WAIT:-90}"
+i=0
+while [ -z "$WAN" ]; do
+  WAN="$(ip route show default 2>/dev/null | head -1 | awk '{print $5; exit}')"
+  [ -n "$WAN" ] && break
+  if [ "$i" -ge "$WAIT" ]; then
+    echo "tuxwall-nat-ensure: no WAN interface after ${WAIT}s (no TUXWALL_WAN_IFACE," \
+         "no wan role in /etc/tuxwall/interfaces.json, no default route); LAN NAT not set" >&2
+    exit 1
+  fi
+  i=$((i + 1))
+  sleep 1
+done
 
 iptables -t nat -C POSTROUTING -o "$WAN" -j MASQUERADE 2>/dev/null || \
   iptables -t nat -A POSTROUTING -o "$WAN" -j MASQUERADE
