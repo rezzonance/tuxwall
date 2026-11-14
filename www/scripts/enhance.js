@@ -124,7 +124,7 @@
      ======================================================================= */
   var GROUPS = [
     { id: "monitor", label: "Monitor", views: ["overview", "bandwidth", "security", "logs"] },
-    { id: "network", label: "Network", views: ["clients", "dns", "domains", "blocklists", "vlans", "wireguard"] },
+    { id: "network", label: "Network", views: ["clients", "dns", "domains", "blocklists", "interfaces", "vlans", "wireguard"] },
     { id: "protect", label: "Protect", views: ["firewall", "crowdsec"] },
     { id: "system", label: "System", views: ["system", "backups", "ai", "settings"] }
   ];
@@ -493,7 +493,7 @@
      ======================================================================= */
   var GO_KEYS = {
     o: "overview", d: "clients", n: "dns", m: "domains", x: "blocklists", f: "firewall",
-    v: "vlans", s: "security", w: "wireguard", c: "crowdsec", b: "bandwidth",
+    v: "vlans", i: "interfaces", s: "security", w: "wireguard", c: "crowdsec", b: "bandwidth",
     y: "system", k: "backups", l: "logs", a: "ai", ",": "settings"
   };
   var pal = null, palInput, palList, palItems = [], palSel = 0, palResults = [];
@@ -521,6 +521,8 @@
     });
     out.push({ kind: "Action", label: "Add firewall rule…", hint: "opens the rule form",
       run: function () { go("firewall", "rules", { push: true }).then(function () { var b = $("#fw-add-open"); if (b) b.click(); }); } });
+    out.push({ kind: "Action", label: "Add VLAN…", hint: "Interfaces › VLANs, then Edit & plan",
+      run: function () { if (window.twIfVlanAdd) window.twIfVlanAdd(); } });
     out.push({ kind: "Action", label: "Add WireGuard client…", hint: "jumps to WireGuard",
       run: function () { go("wireguard", "", { push: true }).then(function () { focusFlash($("#wg-add-peer")); }); } });
     out.push({ kind: "Action", label: "Static DHCP reservation…", hint: "opens DHCP › Static",

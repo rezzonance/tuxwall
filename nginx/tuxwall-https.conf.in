@@ -111,7 +111,7 @@ server {
     }
 
     # Never serve Python source.
-    location ~ \.py$ {
+    location ~ (\.py$|\.pyc$|/__pycache__/) {
         return 404;
     }
 

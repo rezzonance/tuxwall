@@ -6,20 +6,22 @@
   <title>TuxWall - Network Dashboard</title>
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
-  <link rel="stylesheet" href="/css/style.css?v=20261111234908">
-  <link rel="stylesheet" href="/css/polish.css?v=202611110122">
-  <link rel="stylesheet" href="/css/firewall.css?v=202611110122">
-  <link rel="stylesheet" href="/css/bento.css?v=202611110122">
-  <link rel="stylesheet" href="/css/heroes.css?v=202611110122">
-  <link rel="stylesheet" href="/css/sidebar.css?v=202611110122">
-  <link rel="stylesheet" href="/css/action-icons.css?v=202611110122">
-  <link rel="stylesheet" href="/css/subtab-icons.css?v=202611110122">
-  <link rel="stylesheet" href="/css/themes.css?v=20261111195537">
+  <link rel="stylesheet" href="/css/style.css?v=202611120056">
+  <link rel="stylesheet" href="/css/polish.css?v=202611120056">
+  <link rel="stylesheet" href="/css/firewall.css?v=202611120056">
+  <link rel="stylesheet" href="/css/bento.css?v=202611120056">
+  <link rel="stylesheet" href="/css/heroes.css?v=202611120056">
+  <link rel="stylesheet" href="/css/sidebar.css?v=202611120056">
+  <link rel="stylesheet" href="/css/action-icons.css?v=202611120056">
+  <link rel="stylesheet" href="/css/subtab-icons.css?v=202611120056">
+  <link rel="stylesheet" href="/css/themes.css?v=202611120056">
   <link rel="stylesheet" href="/css/enhance.css?v=20261114075640">
-  <link rel="stylesheet" href="/css/netmap.css?v=20261111202556">
-  <link rel="stylesheet" href="/css/insights.css?v=20261111233113">
-  <link rel="stylesheet" href="/css/buttons.css?v=20261111224055">
-  <link rel="stylesheet" href="/css/worldmap.css?v=20261111234908">
+  <link rel="stylesheet" href="/css/netmap.css?v=202611120056">
+  <link rel="stylesheet" href="/css/insights.css?v=202611120056">
+  <link rel="stylesheet" href="/css/buttons.css?v=202611120056">
+  <link rel="stylesheet" href="/css/worldmap.css?v=202611120056">
+  <link rel="stylesheet" href="/css/interfaces.css?v=20261114030140">
+  <link rel="stylesheet" href="/css/firewall-plus.css?v=20261114054625">
 </head>
 <body>
 <div id="login-gate" class="login-gate" hidden>
@@ -70,6 +72,8 @@
         <svg class="nav-icon" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 20 5v6c0 5.2-3.4 8.7-8 11-4.6-2.3-8-5.8-8-11V5z"/><path d="M12.5 7c.5 2-2 3.3-1.5 5.5-1.3-.5-1.5-1.5-1.5-2.5C7 12 7.8 16.5 12 18c3.2-1 4.7-3.4 3-6.2-.2 1.1-1 1.5-1.5 1.7.6-2.5-.5-4.7-1-6.5z"/></svg><span>Firewall</span></a>
       <a class="nav-item ni-vlans" data-view="vlans" href="#vlans">
         <svg class="nav-icon" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="8" rx="1.5"/><rect x="2" y="13" width="20" height="8" rx="1.5"/><path d="M5 6h4v2H5zM11 6h4v2h-4zM17 6h2v2h-2zM5 16h4v2H5zM11 16h4v2h-4zM17 16h2v2h-2z"/></svg><span>VLANs</span></a>
+      <a class="nav-item ni-interfaces" data-view="interfaces" href="#interfaces">
+        <svg class="nav-icon" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8 15v-3h1.5V10h5v2H16v3z"/><path d="M10 15v-1.5M12 15v-1.5M14 15v-1.5"/></svg><span>Interfaces</span></a>
       <a class="nav-item ni-security" data-view="security" href="#security">
         <svg class="nav-icon" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 20 5v6c0 5.2-3.4 8.7-8 11-4.6-2.3-8-5.8-8-11V5z"/><rect x="9" y="11" width="6" height="6" rx="1"/><path d="M10 11V9a2 2 0 0 1 4 0v2M12 13.5v1"/></svg><span>Security</span></a>
       <a class="nav-item ni-wireguard" data-view="wireguard" href="#wireguard">
@@ -1012,6 +1016,7 @@
       <!-- ── Glass sub-tabs ──────────────────────────────────────────────── -->
       <div class="fw-subtabs" id="fw-subtabs">
         <button class="fw-subtab active" type="button" data-fw-pane="rules">Rules</button>
+        <button class="fw-subtab" type="button" data-fw-pane="findings">Findings</button>
         <button class="fw-subtab" type="button" data-fw-pane="traffic">Traffic</button>
         <button class="fw-subtab" type="button" data-fw-pane="nat">NAT / Port Forward</button>
         <button class="fw-subtab" type="button" data-fw-pane="settings">Settings</button>
@@ -1052,8 +1057,8 @@
           <div class="card-toolbar bl-toolbar fw-footbar">
             <span class="muted" id="fw-hint"></span>
             <span class="toolbar-spacer"></span>
-            <button id="fw-baseline" class="btn" type="button" title="Save the current live iptables/ip6tables ruleset as the restore baseline (re-capture after intentional rule changes)">Save baseline</button>
-            <button id="fw-reset" class="btn btn-act" type="button" title="Atomically restore all IPv4/IPv6 tables (filter/nat/mangle/raw) from the saved baseline. Current live rules are replaced — save a new baseline first if you've made changes you want to keep."><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v7c0 1.7 3.1 3 7 3h1"/><path d="M19 6v5"/><path d="M5 10c0 1.7 3.1 3 7 3"/><path d="M16 17h6m-3-3-3 3 3 3"/></svg><span>Restore baseline</span></button>
+            <button id="fw-baseline" class="btn" type="button" title="Save the current ufw configuration as a snapshot (Settings → Snapshots)">Save snapshot</button>
+            <button id="fw-reset" class="btn btn-act" type="button" title="Open the snapshot history (Settings → Snapshots): preview, firewall guard and a 60 s confirm before anything is restored"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v7c0 1.7 3.1 3 7 3h1"/><path d="M19 6v5"/><path d="M5 10c0 1.7 3.1 3 7 3"/><path d="M16 17h6m-3-3-3 3 3 3"/></svg><span>Restore</span></button>
           </div>
         </div>
       </div>
@@ -1219,6 +1224,8 @@
       </div><!-- /fw-pane nat -->
 
       <!-- ── Pane: Settings ──────────────────────────────────────────────── -->
+      <div class="fw-pane" data-fw-pane="findings" hidden></div>
+
       <div class="fw-pane" data-fw-pane="settings" hidden>
         <div class="card">
           <div class="card-head"><h2>Firewall Settings</h2></div>
@@ -1365,6 +1372,7 @@
         </div>
         <img class="page-hero-art" src="/css/heroes/vlan.webp" alt="" loading="lazy" decoding="async">
       </div>
+      <div class="if-moved" id="vlan-moved-banner" role="note">VLANs now live on <a href="#interfaces/vlans">Interfaces → VLANs</a>; this page remains until Apply is unlocked.</div>
 
       <!-- Stat cards -->
       <div class="stats-row">
@@ -1482,6 +1490,79 @@
             </thead>
             <tbody></tbody>
           </table>
+        </div>
+      </div>
+
+    </section>
+
+    <section id="view-interfaces" class="view if-view" hidden>
+
+      <div class="page-hero" data-hero="interfaces">
+        <div class="page-hero-copy">
+          <span class="page-hero-kicker">Interfaces</span>
+          <h2 class="page-hero-title">Ports, roles and policy</h2>
+          <p class="page-hero-sub">Which network card is WAN, LAN or an extra network, what each one serves, and what may talk to what.</p>
+        </div>
+        <img class="page-hero-art" src="/css/heroes/vlan.webp" alt="" loading="lazy" decoding="async">
+      </div>
+
+      <div class="stats-row">
+        <div class="stat-card stat-c stat-c-blue">
+          <div class="stat-value" id="if-stat-wan">—</div>
+          <div class="stat-label">WAN <span class="if-sub" id="if-stat-wan-sub"></span></div>
+        </div>
+        <div class="stat-card stat-c stat-c-green">
+          <div class="stat-value" id="if-stat-lan">—</div>
+          <div class="stat-label">LAN <span class="if-sub" id="if-stat-lan-sub"></span></div>
+        </div>
+        <div class="stat-card stat-c stat-c-amber">
+          <div class="stat-value" id="if-stat-opt">—</div>
+          <div class="stat-label">Extra networks (OPT)</div>
+        </div>
+        <div class="stat-card stat-c stat-c-purple">
+          <div class="stat-value" id="if-stat-nics">—</div>
+          <div class="stat-label">Ports with link</div>
+        </div>
+      </div>
+
+      <div class="if-bar">
+        <span class="if-source" id="if-source"></span>
+        <span class="toolbar-spacer"></span>
+        <span class="muted if-status" id="if-status" aria-live="polite"></span>
+        <button id="if-refresh" class="btn btn-sm" type="button">Refresh</button>
+      </div>
+      <div class="if-validation" id="if-validation" hidden></div>
+
+      <div class="fw-subtabs" id="if-subtabs">
+        <button class="fw-subtab active" type="button" data-if-pane="ports">Ports &amp; roles</button>
+        <button class="fw-subtab" type="button" data-if-pane="services">Bound services</button>
+        <button class="fw-subtab" type="button" data-if-pane="policy">Policy</button>
+      </div>
+
+      <div data-if-body="ports">
+        <div class="if-roles" id="if-roles"></div>
+        <div class="card card-mt">
+          <div class="card-head"><h2>Network ports</h2></div>
+          <div class="table-wrap">
+            <table id="if-nic-table" class="if-nic-table">
+              <thead><tr><th>Device</th><th>Role</th><th>MAC</th><th>Driver</th><th>Speed</th><th>Link</th><th>Addresses</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div data-if-body="services" hidden>
+        <div class="if-services" id="if-services"></div>
+      </div>
+
+      <div data-if-body="policy" hidden>
+        <div class="card">
+          <div class="card-head"><h2>Who may reach whom</h2></div>
+          <p class="if-sub if-mx-intro">Effective policy read from today's firewall rules. Rows are where traffic starts, columns where it goes.</p>
+          <div class="if-mx-wrap" id="if-matrix"></div>
+          <div class="if-mx-detail" id="if-mx-detail"></div>
+          <ul class="if-mx-notes" id="if-mx-notes"></ul>
         </div>
       </div>
 
@@ -3656,11 +3737,13 @@
     <p class="muted" id="cs-ban-status" style="margin-top:10px"></p>
   </div>
 </div>
-<script src="/scripts/worldmap.js?v=20261111235643"></script>
+<script src="/scripts/worldmap.js?v=202611120056"></script>
 <script src="/scripts/dashboard.js?v=20261114083855"></script>
 <script src="/scripts/enhance.js?v=20261114075640"></script>
-<script src="/scripts/netmap.js?v=20261112002528"></script>
+<script src="/scripts/netmap.js?v=202611120056"></script>
 <script src="/scripts/insights.js?v=20261112182249"></script>
+<script src="/scripts/interfaces.js?v=20261114030140"></script>
+<script src="/scripts/firewall-plus.js?v=20261114071838"></script>
 <script src="/scripts/buttons.js?v=20261114075640"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>

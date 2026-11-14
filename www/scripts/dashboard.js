@@ -581,6 +581,7 @@
     blocklists: "Blocklists",
     firewall: "Firewall (UFW)",
     vlans: "VLANs",
+    interfaces: "Interfaces",
     security: "Security",
     wireguard: "WireGuard",
     crowdsec: "CrowdSec",
@@ -1366,8 +1367,9 @@
     els.fwRulesBody.innerHTML = rows.map((r) => {
       const a = fwActionMeta(r.verb || (r.action || "").split(" ")[0]);
       const dir = fwRuleDirection(r);
+      // owner data for firewall-plus.js (lock, owner chip, group filter)
       return `
-      <tr>
+      <tr data-num="${r.number != null ? r.number : ""}" data-to="${esc(r.to || "")}" data-action="${esc(r.action || "")}" data-from="${esc(r.from || "")}" data-owner="${esc(r.owner || "")}" data-managed="${r.managed ? "1" : ""}" data-group="${esc(r.group || "")}" data-owner-label="${esc(r.owner_label || "")}" data-owner-reason="${esc(r.owner_reason || "")}">
         <td class="mono muted">${r.number != null ? r.number : "—"}</td>
         <td><span class="fw-act ${a.cls}">${a.label}</span></td>
         <td><span class="fw-dir fw-dir-${dir.toLowerCase()}">${dir}</span></td>
@@ -2037,8 +2039,11 @@
           "Rules are evaluated top-down — if the two rules overlap with different actions, the effective outcome changes."))) return;
         moveBtn.disabled = true;
         try {
+          const mrow = moveBtn.closest("tr");
           const res = await postJSON("/api/firewall/move",
-            { number: moveBtn.dataset.num, direction: moveBtn.dataset.dir });
+            { number: moveBtn.dataset.num, direction: moveBtn.dataset.dir,
+              to: mrow ? mrow.dataset.to : "", action: mrow ? mrow.dataset.action : "",
+              from: mrow ? mrow.dataset.from : "" });
           els.fwHint.textContent = res.move?.note
             ? "Rule moved" + res.move.note : "Rule moved.";
           await refreshFirewall();
@@ -11334,7 +11339,7 @@
       : (VIEW_TITLES[view] || "Dashboard");
     setTimeout(() => { initSubtabs(); syncSubtabState(); enhanceCardHeads(); }, 0);
     state.activeView = view;
-    const implemented = view === "overview" || view === "clients" || view === "dns" || view === "domains" || view === "firewall" || view === "vlans" || view === "security" || view === "wireguard" || view === "crowdsec" || view === "bandwidth" || view === "blocklists" || view === "system" || view === "backups" || view === "logs" || view === "settings" || view === "ai" || !!pluginView;
+    const implemented = view === "overview" || view === "clients" || view === "dns" || view === "domains" || view === "firewall" || view === "vlans" || view === "interfaces" || view === "security" || view === "wireguard" || view === "crowdsec" || view === "bandwidth" || view === "blocklists" || view === "system" || view === "backups" || view === "logs" || view === "settings" || view === "ai" || !!pluginView;
     document.querySelectorAll(".view").forEach((v) => { v.hidden = true; });
     document.querySelectorAll(".pie-canvas").forEach((c) => {
       const st = donutStates.get(c);
