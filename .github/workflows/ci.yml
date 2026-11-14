@@ -32,7 +32,7 @@ jobs:
         run: pip install ruff
 
       - name: Byte-compile
-        run: python3 -m py_compile www/includes/api_server.py
+        run: python3 -m py_compile www/includes/api_server.py www/includes/topology.py
 
       - name: Module-level name order (existing gate)
         run: python3 tools/py-name-check.py www/includes/api_server.py
@@ -40,7 +40,7 @@ jobs:
       - name: Undefined names, all scopes (the 3.2.0 bug class)
         # F821 only, isolated config: pre-existing style findings must not
         # fail this gate - an undefined name is always a release blocker.
-        run: ruff check --select F821 --isolated www/includes/api_server.py plugins/*/main.py
+        run: ruff check --select F821 --isolated www/includes/api_server.py www/includes/topology.py plugins/*/main.py
 
       - name: Import + behavior smoke test
         run: python3 tools/api_server_smoke.py

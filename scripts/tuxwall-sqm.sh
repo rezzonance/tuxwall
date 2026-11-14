@@ -13,6 +13,12 @@ UP_RATE="95mbit"
 # Set to ~92% of your provisioned download speed
 DOWN_RATE="920mbit"
 
+# The WAN role recorded in /etc/tuxwall/interfaces.json replaces the default.
+if [ -r /etc/tuxwall/interfaces.json ]; then
+    _w="$(python3 -c 'import json; print((json.load(open("/etc/tuxwall/interfaces.json")).get("wan") or {}).get("device") or "")' 2>/dev/null)"
+    [ -n "$_w" ] && WAN="$_w"
+fi
+
 # Dashboard-managed override: System > Traffic Shaping writes /etc/tuxwall/sqm.conf
 # (WAN=, UP_RATE=, DOWN_RATE=). Values there win over the defaults above.
 SQM_CONF="/etc/tuxwall/sqm.conf"

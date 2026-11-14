@@ -18,7 +18,12 @@ import sys
 TMPL = "/etc/opencanaryd/opencanary.conf.tmpl"
 CONF = "/etc/opencanaryd/opencanary.conf"
 TOKEN_FILE = "/var/lib/tuxwall/canary-token"
-WAN_IFACE = "enp5s0"
+WAN_IFACE = "enp5s0"  # fallback when interfaces.json has no WAN role
+try:
+    with open("/etc/tuxwall/interfaces.json") as _f:
+        WAN_IFACE = (json.load(_f).get("wan") or {}).get("device") or WAN_IFACE
+except Exception:
+    pass
 
 
 def wan_ip():

@@ -1419,6 +1419,17 @@ with open(sys.argv[1], "w") as f:
 PY
     chmod 644 "$PROFILE_JSON"
     ok "Install profile written to $PROFILE_JSON"
+
+    # Interface roles record (WAN/LAN/OPT/VPN) next to the profile. Never
+    # overwrites an existing file; best effort.
+    if [[ ! -e /etc/tuxwall/interfaces.json && -f /var/www/html/includes/topology.py ]]; then
+        if PYTHONDONTWRITEBYTECODE=1 python3 /var/www/html/includes/topology.py --write >/dev/null 2>&1 \
+                && [[ -f /etc/tuxwall/interfaces.json ]]; then
+            ok "Interface roles written to /etc/tuxwall/interfaces.json"
+        else
+            warn "Could not record interface roles yet; the dashboard creates /etc/tuxwall/interfaces.json on first use."
+        fi
+    fi
 }
 
 step_agent() {

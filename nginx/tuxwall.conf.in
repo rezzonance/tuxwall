@@ -86,7 +86,7 @@ server {
     }
 
     # Block access to Python source files
-    location ~ \.py$ {
+    location ~ (\.py$|\.pyc$|/__pycache__/) {
         return 404;
     }
 

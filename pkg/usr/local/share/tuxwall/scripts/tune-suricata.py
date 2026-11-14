@@ -56,8 +56,20 @@ def main():
     ):
         return 1  # valid (or nothing to tune) -> untouched
 
+    # WAN/LAN roles from /etc/tuxwall/interfaces.json when present.
+    roles = {}
+    try:
+        import json
+        with open("/etc/tuxwall/interfaces.json") as f:
+            roles = json.load(f)
+    except Exception:
+        roles = {}
+    r_wan = str((roles.get("wan") or {}).get("device") or "")
+    r_lan = str((roles.get("lan") or {}).get("device") or "")
+    r_addr = str((roles.get("lan") or {}).get("address") or "")
+
     # Detect WAN (default-route device) and LAN (private-address device).
-    wan = subprocess.run(
+    wan = r_wan or subprocess.run(
         ["bash", "-c", "ip route show default 2>/dev/null | awk '{print $5}' | head -n1"],
         capture_output=True, text=True,
     ).stdout.strip()
@@ -92,6 +104,13 @@ def main():
                 net = ".".join(host[:2] + ["0", "0"])
             lan_net = "%s/%d" % (net, plen)
             break
+
+    if r_lan and r_lan in known and r_lan != wan and r_addr:
+        import ipaddress
+        try:
+            lan, lan_net = r_lan, str(ipaddress.ip_interface(r_addr).network)
+        except ValueError:
+            pass
 
     bind = [wan] + ([lan] if lan else [])
     for k, (i, prefix) in enumerate(iface_lines[: len(bind)]):

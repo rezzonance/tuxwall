@@ -31,6 +31,25 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# Sibling modules live under the web root: never leave __pycache__ there.
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import topology as _topology
+except Exception as _exc:  # the API must still start without it
+    print("tuxwall: topology module unavailable: %r" % _exc, flush=True)
+    _topology = None
+
+
+def _topo(fn, default=""):
+    """Call a topology accessor; '' (or default) when unavailable."""
+    if _topology is None:
+        return default
+    try:
+        return getattr(_topology, fn)() or default
+    except Exception:
+        return default
+
 KEA_SOCKET = "/run/kea/kea4-ctrl-socket"
 LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = 8008
@@ -4541,6 +4560,9 @@ def _detect_wan_iface():
     conf = _net_conf()
     if conf.get("wan_iface"):
         return str(conf["wan_iface"])
+    topo = _topo("wan_device")
+    if topo:
+        return topo
     try:
         out = subprocess.run(["ip", "route", "show", "default"],
                              capture_output=True, text=True, timeout=5).stdout
@@ -5944,6 +5966,13 @@ def _wg_default_dns():
     if conf.get("lan_address"):
         WG_DEFAULT_DNS = str(conf["lan_address"])
         return WG_DEFAULT_DNS
+    addr = _topo("lan_address")
+    if addr:
+        try:
+            WG_DEFAULT_DNS = str(ipaddress.ip_interface(addr).ip)
+            return WG_DEFAULT_DNS
+        except ValueError:
+            pass
     # dynamic: first private v4 on the first non-WAN interface
     wan = _detect_wan_iface()
     try:
@@ -6044,7 +6073,10 @@ def get_wan_ip():
 
 
 def get_wan_interface():
-    """Name of the interface holding the default route (the WAN)."""
+    """The WAN interface: interfaces.json, else the default route's device."""
+    topo = _topo("wan_device")
+    if topo:
+        return topo
     try:
         route = subprocess.run(
             ["ip", "route", "show", "default"],
@@ -11268,6 +11300,9 @@ def _iface_ipv4_addrs():
 
 
 def _wan_ifname():
+    topo = _topo("wan_device")
+    if topo:
+        return topo
     try:
         proc = subprocess.run(["ip", "-j", "route", "show", "default"],
                               capture_output=True, text=True, timeout=5)
@@ -14837,7 +14872,10 @@ DMZ_PERSIST  = "/etc/tuxwall/dmz.json"
 
 
 def _wan_iface():
-    """Return the WAN interface name from the default route."""
+    """Return the WAN interface name: interfaces.json, else the default route."""
+    topo = _topo("wan_device")
+    if topo:
+        return topo
     try:
         r = subprocess.run(
             ["ip", "-j", "route", "show", "default"],
@@ -14852,7 +14890,10 @@ def _wan_iface():
 
 
 def _lan_iface():
-    """LAN interface — the one carrying 192.168.1.0/24."""
+    """LAN interface: interfaces.json, else the one carrying 192.168.1.0/24."""
+    topo = _topo("lan_device")
+    if topo:
+        return topo
     try:
         r = subprocess.run(
             ["ip", "-j", "addr"], capture_output=True, text=True, timeout=5
@@ -14867,7 +14908,13 @@ def _lan_iface():
 
 
 def _lan_subnet():
-    """e.g. '192.168.1.0/24'"""
+    """e.g. '192.168.1.0/24' (interfaces.json LAN, else legacy detection)"""
+    addr = _topo("lan_address")
+    if addr:
+        try:
+            return str(ipaddress.ip_interface(addr).network)
+        except ValueError:
+            pass
     try:
         r = subprocess.run(
             ["ip", "-j", "addr"], capture_output=True, text=True, timeout=5
@@ -14883,7 +14930,13 @@ def _lan_subnet():
 
 
 def _gateway_ip():
-    """Gateway's own LAN IP."""
+    """Gateway's own LAN IP (interfaces.json LAN, else legacy detection)."""
+    addr = _topo("lan_address")
+    if addr:
+        try:
+            return str(ipaddress.ip_interface(addr).ip)
+        except ValueError:
+            pass
     try:
         r = subprocess.run(
             ["ip", "-j", "addr"], capture_output=True, text=True, timeout=5

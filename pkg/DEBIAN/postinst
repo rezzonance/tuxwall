@@ -398,6 +398,12 @@ PY
       systemctl restart avahi-daemon >/dev/null 2>&1 || true
     fi
 
+    # Interface roles record: generated from the live box when missing (the
+    # dashboard and the system scripts read it). Never overwrites; never fails.
+    if [[ ! -e /etc/tuxwall/interfaces.json && -f $WWW/includes/topology.py ]]; then
+      PYTHONDONTWRITEBYTECODE=1 python3 "$WWW/includes/topology.py" --write >/dev/null 2>&1 || true
+    fi
+
     step 6c "Provisioning Suricata (guarded af-packet/HOME_NET tune)..."
     # Stock suricata.yaml ships placeholder NIC names that fail to bind on a
     # fresh install, so suricata.service can exit immediately. The guarded
