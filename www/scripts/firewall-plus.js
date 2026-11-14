@@ -52,16 +52,110 @@
   groups.setAttribute("role", "tablist");
   groups.setAttribute("aria-label", "Filter rules by owner");
   var ifChips = document.getElementById("fw-iface-chips");
-  if (ifChips && ifChips.parentNode) ifChips.parentNode.insertBefore(groups, ifChips.nextSibling);
+  // One labelled filter panel (grid: label | chips) for both chip rows.
+  var filters = document.createElement("div");
+  filters.className = "fwp-filters";
+  if (ifChips && ifChips.parentNode) {
+    ifChips.parentNode.insertBefore(filters, ifChips);
+    filters.innerHTML = '<span class="fwp-flabel" id="fwp-fl-if">Interface</span>';
+    filters.appendChild(ifChips);
+    ifChips.setAttribute("aria-labelledby", "fwp-fl-if");
+    var ownLabel = document.createElement("span");
+    ownLabel.className = "fwp-flabel";
+    ownLabel.id = "fwp-fl-own";
+    ownLabel.textContent = "Owner";
+    filters.appendChild(ownLabel);
+    filters.appendChild(groups);
+    groups.removeAttribute("aria-label");
+    groups.setAttribute("aria-labelledby", "fwp-fl-own");
+  }
 
+  // dot colours match the table: managed rows carry the accent bar,
+  // policy-matrix rules the green owner tag
+  var GROUP_C = { managed: "var(--accent)", policy: "var(--green)",
+    yours: "color-mix(in srgb, var(--muted) 80%, var(--text))" };
   function renderGroups(counts) {
-    var defs = [["", "All rules"], ["managed", "Managed"], ["policy", "Policy"], ["yours", "Yours"]];
-    groups.innerHTML = '<span class="fwp-groups-label muted">Owner</span>' + defs.map(function (d) {
+    var defs = [["", "All"], ["managed", "Managed"], ["policy", "Policy"], ["yours", "Yours"]];
+    groups.innerHTML = defs.map(function (d) {
       var n = d[0] ? counts[d[0]] || 0 : counts.all;
-      return '<button type="button" role="tab" class="fw-chip' + (state.group === d[0] ? " active" : "") +
-        '" aria-selected="' + (state.group === d[0]) + '" data-fwp-group="' + d[0] + '">' + esc(d[1]) +
+      var on = state.group === d[0];
+      return '<button type="button" role="tab" class="fw-chip' + (on ? " active" : "") + (!n && !on ? " is-empty" : "") +
+        '" aria-selected="' + on + '" data-fwp-group="' + d[0] + '"' +
+        (d[0] ? ' style="--fw-color:' + GROUP_C[d[0]] + '"' : "") + ">" +
+        (d[0] ? '<span class="fwp-dot" aria-hidden="true"></span>' : "") + esc(d[1]) +
         ' <span class="fw-chip-n">' + n + "</span></button>";
     }).join("");
+  }
+
+  // Interface chips (rendered by dashboard.js): role dot + tag from the
+  // interface record, in role order, colours as on the Interfaces page.
+  var ROLE_C = { wan: "var(--h-blue, #3b82f6)", lan: "var(--green)", opt: "var(--amber)", vpn: "var(--h-violet, #a78bfa)" };
+  var ROLE_ORDER = { wan: 0, lan: 1, opt: 2, vpn: 3 };
+  var roles = null;
+  var ifObs = null;
+  var rolesTry = 0;
+  // fetched once the chips are first rendered (i.e. after login), retried
+  // at most every 30 s if the request fails
+  function loadRoles() {
+    if (roles || Date.now() - rolesTry < 30000) return;
+    rolesTry = Date.now();
+    req("GET", "/api/interfaces").then(function (d) {
+      var t = d && d.topology;
+      if (!t) return;
+      var m = {};
+      if (t.wan && t.wan.device) m[t.wan.device] = { role: "wan", label: "WAN" };
+      if (t.lan && t.lan.device) m[t.lan.device] = { role: "lan", label: "LAN" };
+      (t.opt || []).forEach(function (o, i) {
+        if (o && o.device) m[o.device] = { role: "opt", n: i, label: o.name || String(o.id || "OPT").toUpperCase() };
+      });
+      (t.vpn || []).forEach(function (o) { if (o && o.device) m[o.device] = { role: "vpn", label: "VPN" }; });
+      roles = m;
+      decorateIfChips();
+    }).catch(function () { /* no role data: neutral dots, alphabetical */ });
+  }
+  function decorateIfChips() {
+    if (!ifChips) return;
+    if (ifChips.children.length) loadRoles();
+    if (ifObs) ifObs.disconnect();
+    var chips = [].slice.call(ifChips.querySelectorAll(":scope > .fw-chip"));
+    chips.forEach(function (c) {
+      var dev = c.getAttribute("data-fw-iface") || "";
+      if (!dev) return;
+      var old = c.querySelectorAll(".fwp-dot, .fwp-role");
+      for (var k = 0; k < old.length; k++) old[k].remove();
+      var r = dev !== "__none__" && roles ? roles[dev] : null;
+      c.style.setProperty("--fw-color", r ? ROLE_C[r.role] : "color-mix(in srgb, var(--muted) 80%, var(--text))");
+      var dot = document.createElement("span");
+      dot.className = "fwp-dot";
+      dot.setAttribute("aria-hidden", "true");
+      c.insertBefore(dot, c.firstChild);
+      if (r) {
+        var tag = document.createElement("span");
+        tag.className = "fwp-role";
+        tag.textContent = r.label;
+        c.insertBefore(tag, c.querySelector(".fw-chip-n"));
+        c.title = "Rules on " + dev + " (" + r.label + ")";
+      } else if (dev === "__none__") {
+        c.title = "Rules not tied to an interface: they apply on every interface";
+      }
+    });
+    if (roles) {
+      var key = function (c) {
+        var dev = c.getAttribute("data-fw-iface") || "";
+        if (!dev) return "0";
+        if (dev === "__none__") return "1";
+        var r = roles[dev];
+        return (r ? "2" + ROLE_ORDER[r.role] + String(100 + (r.n || 0)) : "9") + dev;
+      };
+      chips.sort(function (a, b) { var x = key(a), y = key(b); return x < y ? -1 : x > y ? 1 : 0; })
+        .forEach(function (c) { ifChips.appendChild(c); });
+    }
+    if (ifObs) ifObs.observe(ifChips, { childList: true });
+  }
+  if (ifChips) {
+    ifObs = new MutationObserver(decorateIfChips);
+    ifObs.observe(ifChips, { childList: true });
+    decorateIfChips();
   }
 
   function decorate() {
