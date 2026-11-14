@@ -39,6 +39,7 @@ UFW_USER = ("/etc/ufw/user.rules", "/etc/ufw/user6.rules")
 WG_DIR = "/etc/wireguard"
 HONEYPOT_CONF = "/var/lib/tuxwall/honeypot.json"
 NAT_DROPIN = "/etc/systemd/system/tuxwall-nat.service.d"
+SYS_NET = "/sys/class/net"
 
 VERSION = 1
 _cache = {"key": None, "data": None}
@@ -491,7 +492,22 @@ def validate(topo=None):
         errors.append("No WAN interface assigned.")
     if not (t.get("lan") or {}).get("device"):
         errors.append("No LAN interface assigned.")
-    present = set(os.listdir("/sys/class/net")) if os.path.isdir("/sys/class/net") else set()
+    w = t.get("wan") or {}
+    if w.get("mode") not in (None, "dhcp", "static"):
+        errors.append("WAN mode must be dhcp or static.")
+    if w.get("mode") == "static":
+        try:
+            ipaddress.ip_interface(str(w.get("address") or ""))
+            if "/" not in str(w.get("address")):
+                raise ValueError
+        except ValueError:
+            errors.append("WAN: a static WAN needs an address like 203.0.113.2/24.")
+        if w.get("gateway"):
+            try:
+                ipaddress.ip_address(str(w["gateway"]))
+            except ValueError:
+                errors.append("WAN: bad gateway %s." % w["gateway"])
+    present = set(os.listdir(SYS_NET)) if os.path.isdir(SYS_NET) else set()
     nets = []
     for rid, e in entries:
         dev = e.get("device")
@@ -520,7 +536,32 @@ def validate(topo=None):
                 errors.append("%s: %s is not a usable host address." % (rid, addr))
             if not ipi.ip.is_private:
                 warnings.append("%s: %s is not a private address." % (rid, addr))
+            if ipi.ip.is_loopback or ipi.ip.is_link_local or ipi.ip.is_multicast or \
+                    ipi.ip.is_unspecified or (ipi.version == 4 and ipi.ip in ipaddress.ip_network("0.0.0.0/8")):
+                errors.append("%s: %s is in a reserved range." % (rid, addr))
+            elif ipi.version == 4 and ipi.ip in ipaddress.ip_network("100.64.0.0/10"):
+                warnings.append("%s: %s is carrier-grade NAT space (100.64.0.0/10)." % (rid, addr))
+            if ipi.version == 4 and ipi.network.prefixlen > 30 and e.get("dhcp"):
+                errors.append("%s: /%d is too small for a DHCP pool." % (rid, ipi.network.prefixlen))
+            pool = e.get("pool")
+            if pool:
+                try:
+                    a, b = [ipaddress.ip_address(x.strip()) for x in str(pool).split("-", 1)]
+                except ValueError:
+                    errors.append("%s: DHCP pool must look like a.b.c.d-a.b.c.e." % rid); a = b = None
+                if a is not None:
+                    if a.version != ipi.version or a not in ipi.network or b not in ipi.network:
+                        errors.append("%s: DHCP pool %s is not inside %s." % (rid, pool, ipi.network))
+                    elif int(a) > int(b):
+                        errors.append("%s: DHCP pool start is after its end." % rid)
+                    elif int(a) <= int(ipi.ip) <= int(b):
+                        errors.append("%s: the gateway %s is inside the DHCP pool %s." % (rid, ipi.ip, pool))
+                    elif a == ipi.network.network_address or (
+                            ipi.version == 4 and b == ipi.network.broadcast_address):
+                        errors.append("%s: DHCP pool %s includes the network or broadcast address." % (rid, pool))
             nets.append((rid, ipi.network))
+        if vid is not None and e.get("parent") and e.get("parent") == (t.get("wan") or {}).get("device"):
+            warnings.append("%s: VLAN %s rides on the WAN interface %s." % (rid, vid, e["parent"]))
     for i, (a, na) in enumerate(nets):
         for b, nb in nets[i + 1:]:
             if na.overlaps(nb):
@@ -530,11 +571,12 @@ def validate(topo=None):
 
 # ---------------------------------------------------------------- firewall
 
-def _ufw_tuples():
-    """Parse '### tuple ###' lines of user.rules / user6.rules in file order."""
+def _ufw_tuples(texts=None):
+    """Parse '### tuple ###' lines of user.rules / user6.rules in file order.
+    texts: optional {"v4": text, "v6": text} instead of the live files."""
     rules = []
     for fam, path in zip(("v4", "v6"), UFW_USER):
-        for line in _read(path).splitlines():
+        for line in (texts[fam] if texts is not None else _read(path)).splitlines():
             if not line.startswith("### tuple ### "):
                 continue
             parts = line[len("### tuple ### "):].split()
@@ -620,15 +662,17 @@ def _before_forward_drops():
 _DNS_DHCP_PORTS = {"53", "67", "68", "546", "547", "5353"}
 
 
-def current_policy(topo=None):
+def current_policy(topo=None, rules=None, raw=None, wan_drop=None, nets=None):
     """The effective zone-to-zone matrix derived from today's rules.
 
     Cell states: allow | block | established (return traffic only) |
     dns_dhcp (gateway column) | custom (gateway column, other ports) | self.
     Each cell carries the rules that decided it, exceptions (narrower
-    rules seen first) and the v6 state when it differs."""
+    rules seen first) and the v6 state when it differs.
+    rules/raw/wan_drop/nets override the live sources (the plan engine
+    derives the matrix of a rendered, not yet applied, rule set)."""
     t = topo or load()
-    nets = networks(t)
+    nets = networks(t) if nets is None else nets
     w = (t.get("wan") or {}).get("device", "")
     zones = [{"id": n["id"], "role": n["role"], "name": n["name"], "device": n["device"],
               "subnet": n["subnet"], "subnets6": n["subnets6"]} for n in nets]
@@ -652,10 +696,10 @@ def current_policy(topo=None):
                     return z["id"]
         return None
 
-    rules = _ufw_tuples()
+    rules = _ufw_tuples() if rules is None else rules
     defaults = _ufw_defaults()
-    raw = _raw_forward()
-    wan_drop = set(_before_forward_drops())
+    raw = _raw_forward() if raw is None else raw
+    wan_drop = set(_before_forward_drops() if wan_drop is None else wan_drop)
     notes = []
 
     def fwd_cell(src, dst, fam):
@@ -911,18 +955,11 @@ def _norm(t):
     return json.dumps({k: (t or {}).get(k) for k in keep}, sort_keys=True)
 
 
-def plan(body):
-    """Skeleton for POST /api/interfaces/plan: compares the requested
-    topology/policy with the current one. Rendering of diffs is TODO."""
-    cur = load()
-    want = body.get("topology") if isinstance(body, dict) else None
-    if want is None or _norm(want) == _norm(cur):
-        return {"ok": True, "changes": [], "diffs": {}, "warnings": [],
-                "validation": validate(cur), "summary": "No changes",
-                "apply_locked": cur.get("apply_locked", True) is not False}
-    v = validate(want)
-    return {"ok": False, "error": "The plan engine is not available yet.",
-            "validation": v, "changes": None}
+def plan(body, session_ip=""):
+    """POST /api/interfaces/plan: render every affected config into a temp
+    dir, validate it and return the ordered changes (assign_plan.py)."""
+    import assign_plan
+    return assign_plan.plan(body if isinstance(body, dict) else {}, session_ip=session_ip)
 
 
 if __name__ == "__main__":

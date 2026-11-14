@@ -6088,6 +6088,18 @@ def get_wan_interface():
         return ""
 
 
+def _wg_raw_forward_disabled():
+    """True once an applied policy matrix took over WireGuard forwarding
+    (interfaces.json policy.wg_raw_forward == false)."""
+    if _topology is None or not _topology.has_file():
+        return False
+    try:
+        pol = _topology.load().get("policy")
+        return isinstance(pol, dict) and pol.get("wg_raw_forward") is False
+    except Exception:
+        return False
+
+
 def ensure_wg_routing():
     """Make sure VPN clients can reach the internet.
 
@@ -6123,6 +6135,9 @@ def ensure_wg_routing():
             ["ip6tables", "-A", "INPUT", "-i", WG_IFACE, "-s", v6subnet,
              "-p", "tcp", "--dport", "53", "-j", "ACCEPT"],
         ]
+        if _wg_raw_forward_disabled():
+            # the interface policy matrix replaced these with tagged ufw rules
+            adds = [a for a in adds if a[1:3] != ["-A", "FORWARD"]]
         for add in adds:
             check = ["-C" if x == "-A" else x for x in add]
             if subprocess.run(check, capture_output=True, text=True,
@@ -14515,7 +14530,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, {"ok": False, "error": str(exc)})
 
         elif path == "/api/interfaces/plan":
-            self._send(*interfaces_plan(body))
+            self._send(*interfaces_plan(body, _client_key(self)))
+
+        elif path in ("/api/interfaces/apply", "/api/interfaces/confirm", "/api/interfaces/rollback"):
+            self._send(*interfaces_apply(path.rsplit("/", 1)[1], body, identity, _client_key(self)))
 
         elif path == "/api/vlans/policy/add":
             try:
@@ -15333,18 +15351,55 @@ def interfaces_get(path):
             pass
         if path.endswith("/policy"):
             return 200, _topology.current_policy()
-        return 200, _topology.interfaces_view()
+        view = _topology.interfaces_view()
+        try:
+            import assign_apply
+            view["pending"] = assign_apply.pending()
+        except Exception:
+            view["pending"] = []
+        return 200, view
     except Exception as exc:
         return 500, {"ok": False, "error": str(exc)}
 
 
-def interfaces_plan(body):
-    """POST /api/interfaces/plan (admin). Read-only: writes nothing."""
+def interfaces_plan(body, session_ip=""):
+    """POST /api/interfaces/plan (admin). Read-only: renders and validates
+    in a temp dir, writes nothing to the live configuration."""
     if _topology is None:
         return 503, {"ok": False, "error": "Interface topology module is not installed"}
     try:
-        res = _topology.plan(body if isinstance(body, dict) else {})
-        return (200 if res.get("ok") else 501), res
+        res = _topology.plan(body if isinstance(body, dict) else {}, session_ip=session_ip)
+        return (200 if res.get("ok") else 400), res
+    except Exception as exc:
+        return 500, {"ok": False, "error": str(exc)}
+
+
+def interfaces_apply(action, body, identity, session_ip=""):
+    """POST /api/interfaces/apply|confirm|rollback (admin).
+
+    423 while /etc/tuxwall/interfaces.json does not say apply_locked=false
+    (only a root edit of that file unlocks it). The confirm window reuses
+    the firewall confirm-or-rollback timer (_fw_schedule_revert)."""
+    try:
+        import assign_apply
+    except Exception as exc:
+        return 503, {"ok": False, "error": "Interface apply module is not installed: %s" % exc}
+    body = body if isinstance(body, dict) else {}
+    try:
+        if assign_apply.is_locked() and not (action != "apply" and assign_apply.pending()):
+            return assign_apply.locked_response()
+        if action == "apply":
+            def schedule(aid, ttl):
+                _fw_schedule_revert("assign:" + aid, "interface assignment " + aid,
+                                    lambda: assign_apply.rollback(aid, "timeout"), ttl)
+            return assign_apply.apply(body, session_ip=session_ip,
+                                      user=(identity or {}).get("username", ""), schedule=schedule)
+        aid = str(body.get("id") or "")
+        with _FW_CONFIRM_LOCK:
+            _FW_PENDING.pop("assign:" + aid, None)
+        if action == "confirm":
+            return assign_apply.confirm(aid)
+        return assign_apply.rollback(aid or None, "manual")
     except Exception as exc:
         return 500, {"ok": False, "error": str(exc)}
 
