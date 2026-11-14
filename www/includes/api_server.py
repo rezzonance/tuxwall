@@ -8379,6 +8379,298 @@ def get_latency_monitor():
         return _LATENCY
 
 
+# ---- Router Insights history (Overview line charts) ----
+# One row per minute, collected server-side so the charts have history no
+# matter whether a browser was watching. Appended to a JSONL file (survives
+# API reloads; compacted to 24 h) and served by GET /api/insights/history.
+INSIGHTS_HISTORY_FILE = "/var/lib/tuxwall/insights-history.jsonl"
+INSIGHTS_KEYS = ("cpu", "mem", "temp", "load", "disk", "swap", "rx", "tx", "atk",
+                 "qpm", "blk", "hit", "sf", "v6", "fwa", "fwb")
+INSIGHTS_KEEP = 1440            # 24 h of 1-minute rows
+INSIGHTS_RANGES = {"15m": (900, 60), "1h": (3600, 60), "6h": (21600, 60), "24h": (86400, 300)}
+
+
+class InsightsHistory:
+    """Samples the Router Insights metrics once a minute (aligned to the
+    minute). Rates are averages over the minute: CPU from /proc/stat, WAN
+    from /proc/net/dev, DNS from unbound counters, firewall from the cached
+    iptables counters. Counter resets (unbound/ufw restart) leave that
+    minute empty instead of producing negative or huge values."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.rows = deque(maxlen=INSIGHTS_KEEP)
+        self.prev = {}
+        self.appended = 0
+        self.tick_ms = None
+        self.tick_cpu_ms = None
+        self.running = False
+
+    # -- persistence --
+    def _load(self):
+        cutoff = time.time() - 86400
+        rows = {}
+        try:
+            with open(INSIGHTS_HISTORY_FILE, "r") as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                        t = int(rec["t"])
+                    except (ValueError, KeyError, TypeError):
+                        continue
+                    if t >= cutoff:
+                        rows[t] = {k: rec[k] for k in INSIGHTS_KEYS
+                                   if isinstance(rec.get(k), (int, float))}
+        except OSError:
+            pass
+        with self.lock:
+            for t in sorted(rows):
+                self.rows.append((t, rows[t]))
+        self._compact()
+
+    def _compact(self):
+        with self.lock:
+            rows = list(self.rows)
+        tmp = INSIGHTS_HISTORY_FILE + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(INSIGHTS_HISTORY_FILE), exist_ok=True)
+            with open(tmp, "w") as f:
+                for t, v in rows:
+                    f.write(json.dumps(dict(v, t=t), separators=(",", ":")) + "\n")
+            os.replace(tmp, INSIGHTS_HISTORY_FILE)
+        except OSError as exc:
+            print("[insights] compact failed: %s" % exc, flush=True)
+        self.appended = 0
+
+    def _append(self, t, v):
+        try:
+            with open(INSIGHTS_HISTORY_FILE, "a") as f:
+                f.write(json.dumps(dict(v, t=t), separators=(",", ":")) + "\n")
+        except OSError:
+            pass
+        self.appended += 1
+        if self.appended >= 120:
+            self._compact()
+
+    # -- sources --
+    @staticmethod
+    def _cpu_times():
+        with open("/proc/stat", "r") as f:
+            parts = [int(x) for x in f.readline().split()[1:]]
+        return sum(parts), parts[3] + (parts[4] if len(parts) > 4 else 0)
+
+    @staticmethod
+    def _iface_bytes(iface):
+        with open("/proc/net/dev", "r") as f:
+            for line in f:
+                name, _, rest = line.partition(":")
+                if name.strip() == iface:
+                    p = rest.split()
+                    return int(p[0]), int(p[8])
+        return None
+
+    @staticmethod
+    def _gauges():
+        out = {}
+        mem = {}
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                p = line.split()
+                if p and p[0] in ("MemTotal:", "MemAvailable:", "SwapTotal:", "SwapFree:"):
+                    mem[p[0]] = int(p[1])
+        if mem.get("MemTotal:"):
+            out["mem"] = round((mem["MemTotal:"] - mem.get("MemAvailable:", 0)) * 100.0 / mem["MemTotal:"], 1)
+        out["swap"] = round((mem.get("SwapTotal:", 0) - mem.get("SwapFree:", 0)) * 100.0 / mem["SwapTotal:"], 1) \
+            if mem.get("SwapTotal:") else 0.0
+        st = os.statvfs("/")
+        if st.f_blocks:
+            out["disk"] = round((st.f_blocks - st.f_bfree) * 100.0 / st.f_blocks, 1)
+        out["load"] = round(os.getloadavg()[0] * 100.0 / (os.cpu_count() or 1), 1)
+        try:
+            for zone in sorted(os.listdir("/sys/class/thermal")):
+                if not zone.startswith("thermal_zone"):
+                    continue
+                base = "/sys/class/thermal/" + zone
+                with open(base + "/type") as f:
+                    ztype = f.read().strip()
+                if "pkg" in ztype or "x86" in ztype or "cpu" in ztype:
+                    with open(base + "/temp") as f:
+                        out["temp"] = round(int(f.read().strip()) / 1000.0, 1)
+                    break
+        except (OSError, ValueError):
+            pass
+        return out
+
+    @staticmethod
+    def _dns_counters():
+        proc = subprocess.run(["unbound-control", "stats_noreset"],
+                              capture_output=True, text=True, timeout=10)
+        if proc.returncode != 0:
+            return None
+        want = {"total.num.queries": "q", "num.answer.rcode.NXDOMAIN": "nx",
+                "total.num.cachehits": "h", "total.num.cachemiss": "m",
+                "num.query.ipv6": "v6", "num.answer.rcode.SERVFAIL": "sf"}
+        out = {"q": 0, "nx": 0, "h": 0, "m": 0, "v6": 0, "sf": 0}
+        for line in proc.stdout.splitlines():
+            k, _, val = line.partition("=")
+            if k in want:
+                try:
+                    out[want[k]] = float(val)
+                except ValueError:
+                    pass
+        return out
+
+    def _read_all(self):
+        """Raw readings: counters and gauges at this instant."""
+        now = time.time()
+        r = {"t": now}
+        for name, fn in (("cpu", self._cpu_times), ("gauges", self._gauges),
+                         ("dns", self._dns_counters)):
+            try:
+                r[name] = fn()
+            except Exception:
+                r[name] = None
+        try:
+            wan = _detect_wan_iface()
+            r["wan"] = wan
+            r["net"] = self._iface_bytes(wan) if wan else None
+        except Exception:
+            r["net"] = None
+        try:
+            c = _firewall_counters()
+            r["fw"] = (c["at"], c["allowed_packets"], c["blocked_packets"]) if c.get("ok") else None
+        except Exception:
+            r["fw"] = None
+        return r
+
+    def _sample(self):
+        cur = self._read_all()
+        prev, self.prev = self.prev, cur
+        v = dict(cur.get("gauges") or {})
+        if not prev:
+            return v
+        dt = cur["t"] - prev["t"]
+        if dt <= 1:
+            return v
+        if cur.get("cpu") and prev.get("cpu"):
+            tot = cur["cpu"][0] - prev["cpu"][0]
+            idle = cur["cpu"][1] - prev["cpu"][1]
+            if tot > 0:
+                v["cpu"] = round(max(0.0, min(100.0, (1 - idle / tot) * 100.0)), 1)
+        if cur.get("net") and prev.get("net") and cur.get("wan") == prev.get("wan"):
+            drx = cur["net"][0] - prev["net"][0]
+            dtx = cur["net"][1] - prev["net"][1]
+            if drx >= 0 and dtx >= 0:
+                v["rx"] = round(drx * 8 / dt)
+                v["tx"] = round(dtx * 8 / dt)
+        d, pd = cur.get("dns"), prev.get("dns")
+        if d and pd and all(d[k] >= pd[k] for k in d):
+            dq = d["q"] - pd["q"]
+            v["qpm"] = round(dq * 60.0 / dt, 1)
+            if dq > 0:
+                v["blk"] = round((d["nx"] - pd["nx"]) * 100.0 / dq, 1)
+                v["sf"] = round((d["sf"] - pd["sf"]) * 100.0 / dq, 2)
+                v["v6"] = round((d["v6"] - pd["v6"]) * 100.0 / dq, 1)
+            dh, dm = d["h"] - pd["h"], d["m"] - pd["m"]
+            if dh + dm > 0:
+                v["hit"] = round(dh * 100.0 / (dh + dm), 1)
+        f, pf = cur.get("fw"), prev.get("fw")
+        if f and pf and f[0] > pf[0] and f[1] >= pf[1] and f[2] >= pf[2]:
+            fdt = (f[0] - pf[0]) / 60.0
+            v["fwa"] = round((f[1] - pf[1]) / fdt, 1)
+            v["fwb"] = round((f[2] - pf[2]) / fdt, 1)
+        try:
+            mon = get_security_monitor()
+            with mon.lock:
+                buckets = list(mon.buckets)
+            end = int(cur["t"] // 60) * 60
+            v["atk"] = sum(c for b, c in buckets if end - 60 <= b < end)
+        except Exception:
+            pass
+        return v
+
+    def _tick(self):
+        t0, c0 = time.time(), time.thread_time()
+        if self.prev and t0 - self.prev["t"] < 20:
+            return
+        v = self._sample()
+        # the row covers the minute that just ended (labelled by its start)
+        t = int(time.time() // 60) * 60 - 60
+        if v:
+            with self.lock:
+                if not self.rows or self.rows[-1][0] < t:
+                    self.rows.append((t, v))
+                    added = True
+                else:
+                    added = False
+            if added:
+                self._append(t, v)
+        self.tick_ms = round((time.time() - t0) * 1000, 1)
+        self.tick_cpu_ms = round((time.thread_time() - c0) * 1000, 1)
+
+    def _loop(self):
+        self._load()
+        self._sample()          # baseline for the first minute's deltas
+        while self.running:
+            time.sleep(60.5 - time.time() % 60)
+            try:
+                self._tick()
+            except Exception as exc:
+                print("[insights] sample failed: %s" % exc, flush=True)
+
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        threading.Thread(target=self._loop, name="insights-history", daemon=True).start()
+
+    def series(self, rng):
+        span, step = INSIGHTS_RANGES.get(rng, INSIGHTS_RANGES["1h"])
+        now = time.time()
+        cutoff = now - span - 60
+        with self.lock:
+            rows = [r for r in self.rows if r[0] >= cutoff]
+            oldest = self.rows[0][0] if self.rows else None
+        if step > 60:
+            groups = {}
+            order = []
+            for t, v in rows:
+                g = int(t // step) * step
+                if g not in groups:
+                    groups[g] = {}
+                    order.append(g)
+                acc = groups[g]
+                for k, x in v.items():
+                    s = acc.setdefault(k, [0.0, 0])
+                    s[0] += x
+                    s[1] += 1
+            rows = [(g, {k: round(s[0] / s[1], 2) for k, s in groups[g].items()}) for g in order]
+        return {
+            "ok": True,
+            "range": rng if rng in INSIGHTS_RANGES else "1h",
+            "step": step,
+            "keys": list(INSIGHTS_KEYS),
+            "oldest": oldest,
+            "now": now,
+            "tick_ms": self.tick_ms,
+            "tick_cpu_ms": self.tick_cpu_ms,
+            "points": [[t] + [v.get(k) for k in INSIGHTS_KEYS] for t, v in rows],
+        }
+
+
+_INSIGHTS = None
+_INSIGHTS_LOCK = threading.Lock()
+
+
+def get_insights_history():
+    global _INSIGHTS
+    with _INSIGHTS_LOCK:
+        if _INSIGHTS is None:
+            _INSIGHTS = InsightsHistory()
+            _INSIGHTS.start()
+        return _INSIGHTS
+
+
 UI_CONF_FILE = "/etc/tuxwall/ui.json"
 THEMES_DIR = "/var/www/html/themes"
 
@@ -12736,6 +13028,9 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 hours = 24.0
             self._send(200, {"ok": True, "hours": hours, "series": get_latency_monitor().history_series(hours=hours)})
+        elif path == "/api/insights/history":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            self._send(200, get_insights_history().series(qs.get("range", ["1h"])[0]))
         elif path == "/api/baselines":
             self._send(200, load_baselines())
 
@@ -16677,6 +16972,7 @@ def main():
     get_security_monitor()
     get_system_monitor()
     get_latency_monitor()
+    get_insights_history()
     start_incident_monitor()
     get_community_auto_worker()   # community auto-ban sync (no-op until enabled)
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
