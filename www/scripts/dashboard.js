@@ -11598,34 +11598,61 @@
       ocRenderStatus();
     }
 
-    async function agentLoadModels() {
-      if (!elAgentModel || elAgentModel.dataset.loaded === "1") return;
+    // compact price/locality hint for model option labels
+    function agentModelHint(m) {
+      if (m.local) return "local";
+      if (m.free) return /free/i.test(m.name || "") ? "" : "free";
+      const c = m.cost;
+      if (c && (c.input || c.output)) {
+        const f = (n) => { n = Number(n) || 0; return n >= 10 ? String(Math.round(n)) : String(Math.round(n * 100) / 100); };
+        return "$" + f(c.input) + "/$" + f(c.output);
+      }
+      return "";
+    }
+    const AGENT_CONNECT_OPT = "__connect__";
+    let agentModelsLoading = null;
+    function agentLoadModels(force) {
+      if (!elAgentModel || (!force && elAgentModel.dataset.loaded === "1")) return Promise.resolve();
+      if (agentModelsLoading) return agentModelsLoading;
+      agentModelsLoading = agentFetchModels(force).finally(() => { agentModelsLoading = null; });
+      return agentModelsLoading;
+    }
+    async function agentFetchModels(force) {
+      const connectOpt = `<optgroup label="Providers"><option value="${AGENT_CONNECT_OPT}">Connect a provider…</option></optgroup>`;
+      const prev = force ? (agent.model || elAgentModel.value) : "";
       try {
         const d = await fetchJSON("/api/agent/models");
         if (!d.ok || !d.models || !d.models.length) {
-          elAgentModel.innerHTML = `<option value="">no models available</option>`;
+          elAgentModel.innerHTML = `<option value="">no models available</option>` + connectOpt;
           return;
         }
         const groups = {};
         d.models.forEach((m) => { (groups[m.provider] = groups[m.provider] || []).push(m); });
-        elAgentModel.innerHTML = Object.keys(groups).sort().map((prov) =>
-          `<optgroup label="${esc(prov)}">` + groups[prov].map((m) =>
-            `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join("") +
-          "</optgroup>").join("");
-        // preselect: last-used model (localStorage), else server default
+        // provider order from the server (built-in/free first); older servers: alphabetical
+        const order = (d.groups && d.groups.length) ? d.groups : Object.keys(groups).sort().map((id) => ({ id, name: id }));
+        const def = d.default || "";
+        elAgentModel.innerHTML = order.filter((g) => groups[g.id]).map((g) =>
+          `<optgroup label="${esc(g.name || g.id)}${g.local ? " (local)" : ""}">` + groups[g.id].map((m) => {
+            const hint = agentModelHint(m);
+            return `<option value="${esc(m.id)}" title="${esc(m.id)}">${esc(m.name)}${hint ? " · " + esc(hint) : ""}${m.id === def ? " (default)" : ""}</option>`;
+          }).join("") + "</optgroup>").join("") + connectOpt;
+        // preselect: current pick (on refresh), last-used (localStorage), else
+        // the model opencode really uses (the configured one may be missing)
+        const has = (id) => id && d.models.some((m) => m.id === id);
         const lastModel = localStorage.getItem("tuxwall.agent.model") || "";
-        if (lastModel && d.models.some((m) => m.id === lastModel)) {
-          elAgentModel.value = lastModel;
-        } else {
-          const defModel = (d.configured || "");
-          if (defModel && d.models.some((m) => m.id === defModel)) {
-            elAgentModel.value = defModel;
-          }
-        }
+        elAgentModel.value = has(prev) ? prev : has(lastModel) ? lastModel
+          : has(def) ? def : has(d.configured) ? d.configured : d.models[0].id;
+        agent.model = elAgentModel.value;
+        agent.modelInfo = d;
         elAgentModel.dataset.loaded = "1";
+        ocRenderStatus();
+        twModelSubs.forEach((fn) => { try { fn(elAgentModel.value, "reload"); } catch (_) { } });
       } catch (_) {
-        elAgentModel.innerHTML = `<option value="">failed to load models</option>`;
+        elAgentModel.innerHTML = `<option value="">failed to load models</option>` + connectOpt;
       }
+    }
+    function agentOpenModels(opts) {
+      if (window.twModels) window.twModels.open(opts || {});
     }
 
     async function agentLoadBootInfo() {
@@ -11744,7 +11771,10 @@
       elOcScreen.innerHTML = "";
       const boot = document.createElement("div");
       boot.className = "oc-boot";
-      const vcsBit = agent.vcs && agent.vcs.branch ? ` <b>${esc(agent.vcs.branch)}</b>` : "";
+      // opencode 2.x returns the branch as an object ({} outside a repo)
+      const vb = agent.vcs && agent.vcs.branch;
+      const vbName = typeof vb === "string" ? vb : (vb && typeof vb.name === "string" ? vb.name : "");
+      const vcsBit = vbName ? ` <b>${esc(vbName)}</b>` : "";
       boot.innerHTML = `
         <div class="oc-logo">${ocLogoHTML()}</div>
         <div class="oc-boot-meta">
@@ -12537,7 +12567,9 @@
       messages: twFetchMessages,
       normalizeMessages: twNormalizeMessages,
       parseContext: twParseContext,
-      async loadModels() { await agentLoadModels(); return elAgentModel; },
+      async loadModels(force) { await agentLoadModels(!!force); return elAgentModel; },
+      modelInfo: () => agent.modelInfo || null,
+      openModels: (opts) => agentOpenModels(opts),
       model: () => (elAgentModel ? elAgentModel.value : ""),
       setModel: (id) => twSetModel(id, "panel"),
       onModel(fn) { twModelSubs.add(fn); return () => twModelSubs.delete(fn); },
@@ -12683,7 +12715,10 @@
             await ocAbort();
             break;
           case "/models":
-            if (elAgentModel) {
+            if (window.twModels) {
+              agentOpenModels({ tab: "default" });
+              ocLine("models & providers opened — the side-panel picker switches this conversation", "oc-info");
+            } else if (elAgentModel) {
               elAgentModel.focus();
               ocLine("model picker focused in the side panel — it applies to the next message", "oc-info");
             }
@@ -13167,10 +13202,17 @@
       });
     }
     if (elAgentSessBtn) elAgentSessBtn.addEventListener("click", () => ocSessionsModal());
+    const elAgentModelsBtn = document.getElementById("agent-models-btn");
+    if (elAgentModelsBtn) elAgentModelsBtn.addEventListener("click", () => agentOpenModels());
     if (elOcSend) elOcSend.addEventListener("click", ocSubmit);
     if (elOcOverlay) elOcOverlay.addEventListener("click", (e) => { if (e.target === elOcOverlay) ocModalClose(); });
     if (elAgentModel) {
       elAgentModel.addEventListener("change", () => {
+        if (elAgentModel.value === AGENT_CONNECT_OPT) {
+          elAgentModel.value = agent.model || "";
+          agentOpenModels({ tab: "connect" });
+          return;
+        }
         agent.model = elAgentModel.value;
         try { localStorage.setItem("tuxwall.agent.model", elAgentModel.value); } catch (_) {}
         ocLine("model → " + (elAgentModel.value || "default"), "oc-muted");

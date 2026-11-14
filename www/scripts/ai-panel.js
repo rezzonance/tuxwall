@@ -1045,7 +1045,15 @@
       if (nav) nav.click();
     }
   });
-  elModel.addEventListener("change", () => { api().setModel(elModel.value); });
+  elModel.addEventListener("change", () => {
+    const a = api();
+    if (elModel.value === "__connect__") {
+      elModel.value = a ? a.model() : "";
+      if (a && a.openModels) a.openModels({ tab: "connect" });
+      return;
+    }
+    if (a) a.setModel(elModel.value);
+  });
   elSend.addEventListener("click", () => { if (S.busy) stop(); else send(elInput.value); });
   elInput.addEventListener("input", autosize);
   elInput.addEventListener("keydown", (e) => {
@@ -1111,7 +1119,10 @@
       if (S.busy) { S.turn = null; setBusy(false); }
       if (S.open) { elLog.innerHTML = ""; loadHistory(); }
     });
-    a.onModel((id) => { if (elModel.querySelector('option[value="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]')) elModel.value = id; });
+    a.onModel((id, from) => {
+      if (from === "reload") { syncModels(); return; }   // provider list changed
+      if (elModel.querySelector('option[value="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]')) elModel.value = id;
+    });
   }
   bindApi();
   if (!bindApi.done) document.addEventListener("DOMContentLoaded", bindApi);

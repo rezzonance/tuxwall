@@ -8769,6 +8769,247 @@ def _agent_ro_identity(handler, path):
     return {"username": "agent", "role": "agent-ro", "owner": False}
 
 
+# AI assistant phase E (2026-11-14): AI providers, API keys and models are
+# managed from the dashboard (admin only, like every /api/agent route).
+# - Catalog keys/OAuth go to opencode's own credential store via its API;
+#   the browser only ever sees a masked tail ("••••abcd").
+# - Custom OpenAI-compatible servers are written to /etc/tuxwall/opencode.json
+#   (world-readable) in the V2 "providers" shape; their keys live in
+#   /etc/tuxwall/agent/keys/<id>.key (0640 root:tuxwall-agent) referenced
+#   as "{file:...}" so the config file itself never holds a secret.
+# - Key material is never logged: credential calls use log_body=False and
+#   upstream error text is scrubbed of the submitted key.
+OPENCODE_CONF = "/etc/tuxwall/opencode.json"
+AGENT_KEYS_DIR = AGENT_API_TOKEN_DIR + "/keys"
+_OC_CONF_LOCK = threading.Lock()
+AGENT_PROVIDER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
+AGENT_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$")
+AGENT_KEY_RE = re.compile(r"^[\x21-\x7e]{8,512}$")
+AGENT_OBJ_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
+AGENT_INTEG_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+AGENT_OPENAI_COMPAT_PKG = "@opencode/ai/providers/openai-compatible"
+AGENT_POPULAR_INTEGRATIONS = (
+    "anthropic", "openai", "openrouter", "google", "opencode", "opencode-go",
+    "deepseek", "mistral", "groq", "xai", "togetherai", "fireworks-ai",
+    "github-copilot",
+)
+# Catalog IDs a custom server may reuse: local runtimes whose built-in entry
+# is only an endpoint (overriding it with a custom baseURL is the documented
+# V2 pattern). Every other catalog ID is reserved.
+AGENT_LOCAL_RUNTIME_IDS = ("lmstudio", "vllm", "unsloth")
+
+
+def _agent_mask_secret(value):
+    v = str(value or "")
+    return "••••" + v[-4:] if len(v) >= 12 else "••••"
+
+
+def _agent_scrub(text, secrets_list):
+    out = str(text or "")
+    for s in secrets_list or ():
+        if s and len(s) >= 4:
+            out = out.replace(s, "••••")
+    return out
+
+
+def _agent_redact(obj):
+    """Copy of a config/provider structure with secret-looking values masked
+    (opencode resolves {file:} references, so /api/config holds real keys)."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if (isinstance(v, str) and v
+                    and re.search(r"(?i)api.?key|token|secret|password|authorization", str(k))):
+                out[k] = v if v.startswith(("{file:", "{env:")) else _agent_mask_secret(v)
+            elif str(k).lower() == "headers" and isinstance(v, dict):
+                out[k] = {hk: "••••" for hk in v}
+            else:
+                out[k] = _agent_redact(v)
+        return out
+    if isinstance(obj, list):
+        return [_agent_redact(x) for x in obj]
+    return obj
+
+
+def _oc_conf_read():
+    with open(OPENCODE_CONF) as f:
+        conf = json.load(f)
+    if not isinstance(conf, dict):
+        raise ValueError("opencode.json is not a JSON object")
+    return conf
+
+
+def _oc_conf_write(conf):
+    """Atomic rewrite of /etc/tuxwall/opencode.json keeping owner/mode; the
+    previous version is kept as opencode.json.bak (0600). Caller holds
+    _OC_CONF_LOCK."""
+    st = os.stat(OPENCODE_CONF)
+    data = json.dumps(conf, indent=2, ensure_ascii=False) + "\n"
+    json.loads(data)
+    d = os.path.dirname(OPENCODE_CONF)
+    with open(OPENCODE_CONF, "rb") as f:
+        prev = f.read()
+    for target, payload, mode, uid, gid in (
+            (OPENCODE_CONF + ".bak", prev, 0o600, 0, 0),
+            (OPENCODE_CONF, data.encode("utf-8"), st.st_mode & 0o7777, st.st_uid, st.st_gid)):
+        fd, tmp = tempfile.mkstemp(prefix=".opencode.json.", dir=d)
+        try:
+            os.fchmod(fd, mode)
+            os.fchown(fd, uid, gid)
+            with os.fdopen(fd, "wb") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, target)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+
+def _agent_key_path(pid):
+    return os.path.join(AGENT_KEYS_DIR, pid + ".key")
+
+
+def _agent_key_write(pid, key):
+    import grp
+    gid = grp.getgrnam(AGENT_API_GROUP).gr_gid
+    os.makedirs(AGENT_KEYS_DIR, mode=0o750, exist_ok=True)
+    os.chown(AGENT_KEYS_DIR, 0, gid)
+    os.chmod(AGENT_KEYS_DIR, 0o750)
+    fd, tmp = tempfile.mkstemp(prefix=".key.", dir=AGENT_KEYS_DIR)
+    try:
+        os.fchmod(fd, 0o640)
+        os.fchown(fd, 0, gid)
+        with os.fdopen(fd, "w") as f:
+            f.write(key)
+        os.replace(tmp, _agent_key_path(pid))
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return _agent_key_path(pid)
+
+
+def _agent_key_read(pid):
+    try:
+        with open(_agent_key_path(pid)) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _agent_key_remove(pid):
+    try:
+        os.unlink(_agent_key_path(pid))
+    except FileNotFoundError:
+        pass
+
+
+def _agent_ip_blocked(ip):
+    if getattr(ip, "ipv4_mapped", None):
+        ip = ip.ipv4_mapped
+    if ip.is_loopback:
+        return False
+    return (ip.is_link_local or ip.is_multicast or ip.is_unspecified
+            or ip.is_reserved
+            or ip in ipaddress.ip_network("169.254.0.0/16")
+            or ip == ipaddress.ip_address("fd00:ec2::254"))
+
+
+def _agent_check_url(url, resolve=False):
+    """Validate a custom server base URL (http/https; no link-local or
+    metadata addresses). Returns the normalized URL. resolve=True also
+    rejects hostnames that resolve to blocked or no addresses."""
+    url = str(url or "").strip().rstrip("/")
+    if not url or len(url) > 300 or any(c.isspace() for c in url):
+        raise ValueError("Enter the server URL, e.g. http://192.168.1.20:11434/v1")
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port
+    except ValueError:
+        raise ValueError("Invalid URL")
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError("URL must start with http:// or https:// and include a host")
+    if parts.username or parts.password or parts.query or parts.fragment:
+        raise ValueError("URL must not contain credentials, a query or a fragment")
+    host = parts.hostname
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None and _agent_ip_blocked(literal):
+        raise ValueError("Link-local / metadata addresses are not allowed")
+    if host.lower() in ("metadata", "metadata.google.internal"):
+        raise ValueError("Metadata endpoints are not allowed")
+    if literal is None:
+        try:
+            infos = socket.getaddrinfo(host, port or (443 if parts.scheme == "https" else 80),
+                                       proto=socket.IPPROTO_TCP)
+        except socket.gaierror:
+            infos = []
+            if resolve:
+                raise ValueError("Cannot resolve host '{}'".format(host))
+        for info in infos:
+            try:
+                ip = ipaddress.ip_address(info[4][0].split("%")[0])
+            except ValueError:
+                continue
+            if _agent_ip_blocked(ip):
+                raise ValueError("Host resolves to a link-local / metadata address")
+    return url
+
+
+class _AgentNoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _agent_detect_models(base_url, key=""):
+    """GET {baseURL}/models on an OpenAI-compatible server (5 s, no
+    redirects, no proxy). Returns a list of model IDs."""
+    base_url = _agent_check_url(base_url, resolve=True)
+    headers = {"Accept": "application/json", "User-Agent": "TuxWall"}
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _AgentNoRedirect)
+    req = urllib.request.Request(base_url + "/models", headers=headers, method="GET")
+    try:
+        with opener.open(req, timeout=5) as resp:
+            body = resp.read(2000001)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (301, 302, 303, 307, 308):
+            raise ValueError("The server redirected (HTTP {}); enter the final URL".format(exc.code))
+        if exc.code in (401, 403):
+            raise ValueError("The server refused the request (HTTP {}): check the API key".format(exc.code))
+        raise ValueError("The server answered HTTP {} for /models: is the URL right "
+                         "(most servers need /v1 at the end)?".format(exc.code))
+    except (urllib.error.URLError, socket.timeout, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise ValueError("Could not reach the server: {}".format(_agent_scrub(reason, [key])))
+    if len(body) > 2000000:
+        raise ValueError("Model list too large")
+    try:
+        data = json.loads(body.decode("utf-8", "replace"))
+    except ValueError:
+        raise ValueError("The server did not return JSON for /models")
+    items = data
+    if isinstance(data, dict):
+        items = data.get("data") or data.get("models") or []
+    ids = []
+    for it in items if isinstance(items, list) else []:
+        mid = it if isinstance(it, str) else (
+            (it.get("id") or it.get("name") or it.get("model")) if isinstance(it, dict) else None)
+        mid = str(mid or "").strip()
+        if AGENT_MODEL_ID_RE.match(mid) and mid not in ids:
+            ids.append(mid)
+    return ids[:200]
+
+
 # 2026-11-03 audit: global failure cap. The per-source lockout was
 # bypassable by rotating the source key - a DIRECT loopback connection
 # (SSRF from the co-hosted public service, local malware) controls
@@ -10785,7 +11026,7 @@ SANITIZED_KEEP = 3
 # Name fragments that mark a member as secret -> dropped from sanitized export
 SANITIZE_DROP_SUBSTR = (
     "llm.json", "auth.json", "opencode.json", "credentials",
-    "cert.pem", "privatekey", "publickey", "agent/api.token",
+    "cert.pem", "privatekey", "publickey", "agent/api.token", "agent/keys/",
 )
 # (arc prefix, regex pattern, replacement) applied to text files
 SANITIZE_TEXT_RULES = [
@@ -11778,9 +12019,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._AGENT_V2
 
     def _agent_call_raw(self, method, path, payload=None, timeout=30,
-                        sse=False):
+                        sse=False, log_body=True):
         """HTTP call to the agent, verbatim (no translation). Raises
-        AgentError with upstream status/body on failure."""
+        AgentError with upstream status/body on failure. log_body=False
+        keeps upstream bodies out of the journal (credential calls)."""
         url = self.AGENT_BASE + path
         data = json.dumps(payload).encode() if payload is not None else None
         headers = {"Content-Type": "application/json"}
@@ -11805,7 +12047,8 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 body = ""
             self._agent_log("HTTP {} {} {} -> {} body={}".format(
-                method, path, status, exc.reason, body[:2000]))
+                method, path, status, exc.reason,
+                body[:2000] if log_body else "<{} bytes, not logged>".format(len(body))))
             detail = body.strip()
             if not detail:
                 detail = str(exc.reason or "no response body")
@@ -11830,7 +12073,7 @@ class Handler(BaseHTTPRequestHandler):
             return json.loads(body or "{}")
         except ValueError as exc:
             self._agent_log("HTTP {} {} -> non-JSON response: {}".format(
-                method, path, body[:500]))
+                method, path, body[:500] if log_body else "<not logged>"))
             raise AgentError("opencode returned invalid JSON ({}): {}".format(
                 exc, body[:500]), status=status, body=body[:2000])
 
@@ -12003,24 +12246,16 @@ class Handler(BaseHTTPRequestHandler):
                 text = "\n".join((pp.get("text") or "") for pp in
                                  ((payload or {}).get("parts") or [])
                                  if isinstance(pp, dict) and pp.get("type") == "text")
-                v2p = {"text": text}
-                model = (payload or {}).get("model") or {}
-                if isinstance(model, dict) and model.get("providerID"):
-                    v2p["model"] = {"id": model.get("modelID") or "",
-                                    "providerID": model.get("providerID")}
-                return ("POST", base + "/prompt", v2p)
+                # V2 prompts carry no model: the session model is switched
+                # beforehand (_agent_v2_apply_model).
+                return ("POST", base + "/prompt", {"text": text})
             if action == "shell":
                 v2p = {"command": (payload or {}).get("command") or ""}
                 return ("POST", base + "/shell", v2p)
             if action == "command":
                 pl = payload or {}
                 v2p = {"name": pl.get("command") or ""}
-                if pl.get("arguments"):
-                    v2p["text"] = " ".join(str(a) for a in pl["arguments"])
-                model = pl.get("model") or {}
-                if isinstance(model, dict) and model.get("providerID"):
-                    v2p["model"] = {"id": model.get("modelID") or "",
-                                     "providerID": model.get("providerID")}
+                v2p["text"] = " ".join(str(a) for a in (pl.get("arguments") or []))
                 return ("POST", base + "/command", v2p)
             if action == "abort":
                 return ("POST", base + "/interrupt", None)
@@ -12297,6 +12532,707 @@ class Handler(BaseHTTPRequestHandler):
             "error": str(exc),
             "hint": "see: journalctl -u tuxwall.service -t -n 50 | grep agent",
         }
+
+    # ── providers / API keys / models (phase E, see OPENCODE_CONF) ─────
+    _AGENT_INTEG_CACHE = {"t": 0.0, "data": None}
+
+    @staticmethod
+    def _agent_d(x):
+        return x.get("data") if isinstance(x, dict) and "data" in x else x
+
+    def _agent_secret_call(self, method, path, payload=None, secrets_list=(), timeout=30):
+        """Agent call whose request may carry a secret: bodies are not
+        logged and upstream error text is scrubbed of the secret."""
+        try:
+            return self._agent_call_raw(method, path, payload, timeout=timeout, log_body=False)
+        except AgentError as exc:
+            raise AgentError(_agent_scrub(str(exc), secrets_list), status=exc.status,
+                             body=_agent_scrub(exc.body, secrets_list))
+
+    @staticmethod
+    def _agent_err_text(exc):
+        """Readable message from an opencode V2 error body."""
+        body = getattr(exc, "body", "") or ""
+        msg = ""
+        try:
+            data = json.loads(body)
+            if isinstance(data, dict):
+                inner = data.get("data") if isinstance(data.get("data"), dict) else {}
+                msg = (data.get("message") or inner.get("message") or data.get("error")
+                       or data.get("name") or "")
+                if isinstance(msg, dict):
+                    msg = msg.get("message") or json.dumps(msg)[:300]
+        except ValueError:
+            msg = body
+        msg = str(msg or exc).strip()
+        return msg[:400] or "opencode request failed"
+
+    @staticmethod
+    def _agent_clean_text(value, limit=60):
+        v = re.sub(r"[\x00-\x1f\x7f]", "", str(value or "")).strip()
+        return v[:limit]
+
+    @staticmethod
+    def _agent_trim_form(form):
+        out = []
+        for f in form or []:
+            if not isinstance(f, dict) or not f.get("key"):
+                continue
+            g = {k: f[k] for k in ("key", "title", "description", "required", "type",
+                                   "placeholder", "default", "hidden", "pattern") if k in f}
+            if isinstance(f.get("options"), list):
+                g["options"] = [{"value": str(o.get("value", "")),
+                                 "label": str(o.get("label") or o.get("value") or ""),
+                                 "description": str(o.get("description") or "")}
+                                for o in f["options"] if isinstance(o, dict)]
+            if isinstance(f.get("when"), list):
+                g["when"] = [w for w in f["when"] if isinstance(w, dict)]
+            out.append(g)
+        return out
+
+    @staticmethod
+    def _agent_form_answer(form, answer):
+        """Keep only answers for the method's declared form fields."""
+        if not form or not isinstance(answer, dict):
+            return None
+        keys = {f.get("key") for f in form}
+        out = {}
+        for k, v in answer.items():
+            if k in keys and isinstance(v, (str, int, float, bool)) and v != "":
+                out[k] = re.sub(r"[\x00-\x1f\x7f]", "", v)[:300] if isinstance(v, str) else v
+        return out or None
+
+    def _agent_integrations(self, force=False):
+        c = self._AGENT_INTEG_CACHE
+        if not force and c["data"] is not None and time.time() - c["t"] < 600:
+            return c["data"]
+        raw = self._agent_d(self._agent_call_raw("GET", "/api/integration", timeout=20,
+                                                 log_body=False)) or []
+        out = []
+        for i in raw if isinstance(raw, list) else []:
+            if not isinstance(i, dict) or not i.get("id"):
+                continue
+            methods = []
+            for m in i.get("methods") or []:
+                if not isinstance(m, dict):
+                    continue
+                t = m.get("type")
+                if t == "key":
+                    methods.append({"type": "key", "label": m.get("label") or "API key",
+                                    "form": self._agent_trim_form(m.get("form"))})
+                elif t == "oauth":
+                    mid = str(m.get("id") or "")
+                    methods.append({"type": "oauth", "id": mid,
+                                    "label": m.get("label") or "Sign in",
+                                    "form": self._agent_trim_form(m.get("form")),
+                                    # device-code flows work from any device;
+                                    # browser flows redirect to the router's
+                                    # own localhost and cannot finish remotely
+                                    "usable": "device" in mid or "headless" in mid})
+                elif t == "env":
+                    methods.append({"type": "env",
+                                    "names": [str(n) for n in (m.get("names") or [])][:5]})
+            conns = []
+            for cn in i.get("connections") or []:
+                if isinstance(cn, dict):
+                    st = cn.get("status")
+                    conns.append({"type": cn.get("type") or "", "id": cn.get("id") or "",
+                                  "label": cn.get("label") or cn.get("name") or "",
+                                  "method": cn.get("method") or "",
+                                  "status": st.get("status") if isinstance(st, dict) else "",
+                                  "message": (st.get("message") or "")[:200] if isinstance(st, dict) else ""})
+            out.append({"id": i["id"], "name": i.get("name") or i["id"],
+                        "methods": methods, "connections": conns})
+        c["data"] = out
+        c["t"] = time.time()
+        return out
+
+    def _agent_find_integration(self, iid):
+        if not AGENT_INTEG_ID_RE.match(iid or ""):
+            raise ValueError("Unknown provider")
+        for i in self._agent_integrations():
+            if i["id"] == iid:
+                return i
+        raise ValueError("Unknown provider '{}'".format(iid))
+
+    @staticmethod
+    def _agent_is_local(pid, base):
+        if pid in ("ollama", "lmstudio", "vllm", "llamacpp", "llama.cpp"):
+            return True
+        host = ""
+        try:
+            host = urllib.parse.urlsplit(base or "").hostname or ""
+        except ValueError:
+            pass
+        if not host:
+            return False
+        try:
+            ip = ipaddress.ip_address(host)
+            return ip.is_private or ip.is_loopback
+        except ValueError:
+            return host == "localhost" or host.endswith((".local", ".lan", ".home", ".internal")) or "." not in host
+
+    def _agent_provider_list(self):
+        raw = self._agent_d(self._agent_call_raw("GET", "/api/provider", timeout=10,
+                                                 log_body=False)) or []
+        out = []
+        for p in raw if isinstance(raw, list) else []:
+            if not isinstance(p, dict) or not p.get("id"):
+                continue
+            base = str((p.get("settings") or {}).get("baseURL") or "")
+            local = self._agent_is_local(p["id"], base)
+            out.append({"id": p["id"], "name": p.get("name") or p["id"],
+                        "integrationID": p.get("integrationID") or "",
+                        "activation": p.get("activation") or "",
+                        "local": local, "baseURL": base if local else ""})
+        return out
+
+    def _agent_credentials(self):
+        raw = self._agent_d(self._agent_call_raw("GET", "/api/credential", timeout=10,
+                                                 log_body=False)) or []
+        out = []
+        for c in raw if isinstance(raw, list) else []:
+            if not isinstance(c, dict) or not c.get("id"):
+                continue
+            v = c.get("value") if isinstance(c.get("value"), dict) else {}
+            t = v.get("type") or ""
+            out.append({"id": c["id"], "integrationID": c.get("integrationID") or "",
+                        "label": c.get("label") or "", "active": bool(c.get("active")),
+                        "type": t,
+                        "masked": (_agent_mask_secret(v.get("key")) if t == "key"
+                                   else "signed in" if t == "oauth" else t)})
+        return out
+
+    @staticmethod
+    def _agent_custom_list():
+        try:
+            conf = _oc_conf_read()
+        except Exception:
+            return []
+        out = []
+        for block, legacy in (("providers", False), ("provider", True)):
+            provs = conf.get(block)
+            if not isinstance(provs, dict):
+                continue
+            for pid, p in provs.items():
+                if not isinstance(p, dict):
+                    continue
+                st = p.get("settings") if not legacy else p.get("options")
+                st = st if isinstance(st, dict) else {}
+                key = st.get("apiKey")
+                out.append({"id": pid, "name": p.get("name") or pid,
+                            "baseURL": st.get("baseURL") or "",
+                            "hasKey": bool(key),
+                            "keyInFile": isinstance(key, str) and key.startswith("{file:"),
+                            "models": list((p.get("models") or {}).keys())[:200],
+                            "legacy": legacy})
+        return out
+
+    def _agent_default_info(self, model_ids=None):
+        configured = ""
+        try:
+            m = _oc_conf_read().get("model")
+            if isinstance(m, str):
+                configured = m
+            elif isinstance(m, dict) and m.get("providerID"):
+                configured = "{}/{}".format(m.get("providerID"), m.get("model") or "")
+        except Exception:
+            pass
+        effective, effective_name = "", ""
+        try:
+            dd = self._agent_d(self._agent_call_raw("GET", "/api/model/default", timeout=5,
+                                                    log_body=False)) or {}
+            if isinstance(dd, dict) and dd.get("providerID"):
+                effective = dd["providerID"] + "/" + (dd.get("id") or dd.get("modelID") or "")
+                effective_name = dd.get("name") or ""
+        except AgentError:
+            pass
+        out = {"configured": configured, "effective": effective, "effective_name": effective_name}
+        if model_ids is not None:
+            out["configured_ok"] = (not configured) or configured in model_ids
+        return out
+
+    def _agent_models_view(self):
+        raw = self._agent_d(self._agent_call_raw("GET", "/api/model", timeout=10,
+                                                 log_body=False)) or []
+        try:
+            provs = {p["id"]: p for p in self._agent_provider_list()}
+        except AgentError:
+            provs = {}
+        models, groups, seen = [], [], set()
+        for m in raw if isinstance(raw, list) else []:
+            if not isinstance(m, dict) or m.get("enabled") is False:
+                continue
+            pid = m.get("providerID") or ""
+            mid = m.get("id") or m.get("modelID") or ""
+            if not pid or not mid:
+                continue
+            pinfo = provs.get(pid) or {}
+            local = bool(pinfo.get("local"))
+            costs = m.get("cost") or []
+            c0 = costs[0] if costs and isinstance(costs[0], dict) else None
+            cin = c0.get("input") if c0 else None
+            cout = c0.get("output") if c0 else None
+            if pid not in seen:
+                seen.add(pid)
+                groups.append({"id": pid, "name": pinfo.get("name") or pid, "local": local})
+            models.append({
+                "id": pid + "/" + mid, "provider": pid, "model": mid,
+                "name": m.get("name") or mid,
+                "provider_name": pinfo.get("name") or pid,
+                "free": bool(c0) and not local and not cin and not cout,
+                "local": local,
+                "cost": {"input": cin, "output": cout} if c0 else None,
+                "context": (m.get("limit") or {}).get("context"),
+                "tools": bool((m.get("capabilities") or {}).get("tools")),
+                "status": m.get("status") or "",
+            })
+        info = self._agent_default_info({x["id"] for x in models})
+        return {"ok": True, "models": models, "groups": groups,
+                "default": info["effective"], "effective_name": info["effective_name"],
+                "configured": info["configured"], "configured_ok": info["configured_ok"]}
+
+    def _agent_wait_provider(self, pid, present=True, expect_models=None, timeout=15.0):
+        """opencode hot-reloads its config a few seconds after a write; wait
+        until the provider shows up with the expected models (or
+        disappears). Returns (state_reached, model_count)."""
+        deadline = time.time() + timeout
+        count = 0
+        while True:
+            try:
+                ids = {p["id"] for p in self._agent_provider_list()}
+                ok = (pid in ids) == present
+                if ok and present:
+                    raw = self._agent_d(self._agent_call_raw("GET", "/api/model", timeout=10,
+                                                             log_body=False)) or []
+                    have = {m.get("id") for m in raw
+                            if isinstance(m, dict) and m.get("providerID") == pid}
+                    count = len(have)
+                    if expect_models is not None and have != set(expect_models):
+                        ok = False
+                if ok:
+                    return True, count
+            except AgentError:
+                pass
+            if time.time() >= deadline:
+                return False, count
+            time.sleep(0.5)
+
+    def _agent_v2_apply_model(self, session_id, model):
+        """V2 prompts carry no model: switch the session's model first when
+        the requested one differs from the session's current model.
+        Returns True when switched."""
+        model = (model or "").strip()
+        if not session_id or "/" not in model:
+            return False
+        pid, mid = model.split("/", 1)
+        cur = None
+        try:
+            s = self._agent_d(self._agent_call_raw(
+                "GET", "/api/session/" + urllib.parse.quote(session_id), timeout=10)) or {}
+            sm = s.get("model") if isinstance(s, dict) else None
+            if isinstance(sm, dict) and sm.get("providerID"):
+                cur = (sm.get("providerID"), sm.get("id") or "")
+        except AgentError:
+            pass
+        if cur is None:
+            # no explicit model yet: the session runs on the default
+            eff = self._agent_default_info().get("effective") or ""
+            if eff and eff == model:
+                return False
+        elif cur == (pid, mid):
+            return False
+        self._agent_call_raw("POST", "/api/session/" + urllib.parse.quote(session_id) + "/model",
+                             {"model": {"id": mid, "providerID": pid}}, timeout=15)
+        self._agent_log("session {} model -> {}".format(session_id, model))
+        return True
+
+    def _agent_providers_get(self, path):
+        """GET /api/agent/providers[/oauth/status]. Returns (code, payload)."""
+        if path == "/api/agent/providers":
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            integ = self._agent_integrations(force=bool(qs.get("refresh")))
+            by_id = {i["id"]: i for i in integ}
+            popular = [p for p in AGENT_POPULAR_INTEGRATIONS if p in by_id]
+            rank = {p: n for n, p in enumerate(popular)}
+            ordered = sorted(integ, key=lambda i: (rank.get(i["id"], 999), i["name"].lower()))
+            listed = []
+            for i in ordered:
+                methods = [m for m in i["methods"] if m["type"] in ("key", "oauth", "env")]
+                if not any(m["type"] == "key" or (m["type"] == "oauth" and m["usable"]) for m in methods):
+                    continue
+                listed.append({"id": i["id"], "name": i["name"], "popular": i["id"] in rank,
+                               "methods": methods})
+            creds = self._agent_credentials()
+            for c in creds:
+                c["integrationName"] = (by_id.get(c["integrationID"]) or {}).get("name") or c["integrationID"]
+            env_conns = []
+            for i in integ:
+                for cn in i["connections"]:
+                    if cn["type"] == "env":
+                        env_conns.append({"integrationID": i["id"], "integrationName": i["name"],
+                                          "name": cn["label"]})
+            try:
+                providers = self._agent_provider_list()
+            except AgentError:
+                providers = []
+            return 200, {"ok": True, "integrations": listed, "popular": popular,
+                         "credentials": creds, "env": env_conns,
+                         "providers": providers, "custom": self._agent_custom_list(),
+                         "default": self._agent_default_info(),
+                         "keysDir": AGENT_KEYS_DIR}
+        if path == "/api/agent/providers/oauth/status":
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            iid = (qs.get("integrationID") or [""])[0]
+            aid = (qs.get("attemptID") or [""])[0]
+            if not AGENT_INTEG_ID_RE.match(iid) or not AGENT_OBJ_ID_RE.match(aid):
+                return 400, {"ok": False, "error": "integrationID and attemptID required"}
+            try:
+                res = self._agent_d(self._agent_secret_call(
+                    "GET", "/api/integration/{}/connect/oauth/{}".format(
+                        urllib.parse.quote(iid), urllib.parse.quote(aid)), timeout=15)) or {}
+            except AgentError as exc:
+                if exc.status != 404:
+                    raise
+                res = {"status": "expired", "message": "The sign-in attempt is no longer active"}
+            st = res.get("status") or "pending"
+            if st == "complete":
+                self._AGENT_INTEG_CACHE["data"] = None
+            return 200, {"ok": True, "status": st, "message": (res.get("message") or "")[:300],
+                         "expires": (res.get("time") or {}).get("expires")}
+        return 404, {"ok": False, "error": "Not found"}
+
+    def _agent_providers_post(self, path, body):
+        """POST /api/agent/providers/* and /api/agent/models/default.
+        Returns (code, payload). Never echoes submitted keys."""
+        q = urllib.parse.quote
+        if path == "/api/agent/providers/connect":
+            iid = str(body.get("integrationID") or "").strip()
+            key = body.get("key")
+            key = key.strip() if isinstance(key, str) else ""
+            label = self._agent_clean_text(body.get("label"))
+            integ = self._agent_find_integration(iid)
+            km = next((m for m in integ["methods"] if m["type"] == "key"), None)
+            if not km:
+                raise ValueError("{} does not accept an API key".format(integ["name"]))
+            if not AGENT_KEY_RE.match(key):
+                raise ValueError("That does not look like an API key (8-512 printable characters, no spaces)")
+            replace = str(body.get("replaceCredentialID") or "")
+            before = self._agent_credentials()
+            if replace and not any(c["id"] == replace and c["integrationID"] == iid for c in before):
+                raise ValueError("The key to replace was not found")
+            payload = {"key": key}
+            if label:
+                payload["label"] = label
+            answer = self._agent_form_answer(km.get("form"), body.get("answer"))
+            if answer:
+                payload["answer"] = answer
+            try:
+                self._agent_secret_call("POST", "/api/integration/{}/connect/key".format(q(iid)),
+                                        payload, [key], timeout=60)
+            except AgentError as exc:
+                return 400 if 400 <= exc.status < 500 else 502, {
+                    "ok": False, "error": "{} rejected the key: {}".format(
+                        integ["name"], _agent_scrub(self._agent_err_text(exc), [key]))}
+            finally:
+                key = payload["key"] = ""
+            self._AGENT_INTEG_CACHE["data"] = None
+            after = self._agent_credentials()
+            old_ids = {c["id"] for c in before}
+            new = [c for c in after if c["id"] not in old_ids]
+            replaced = False
+            if replace:
+                try:
+                    self._agent_secret_call("DELETE", "/api/credential/" + q(replace), timeout=15)
+                    replaced = True
+                except AgentError as exc:
+                    self._agent_log("credential replace: removing old {} failed: {}".format(
+                        replace, exc.status))
+            self._agent_log("credential added for {} ({})".format(iid, "replace" if replace else "new"))
+            return 200, {"ok": True, "credential": new[0] if new else None, "replaced": replaced,
+                         "message": "{} connected".format(integ["name"])}
+        if path in ("/api/agent/providers/remove", "/api/agent/providers/rename",
+                    "/api/agent/providers/activate"):
+            cid = str(body.get("credentialID") or "")
+            if not AGENT_OBJ_ID_RE.match(cid):
+                raise ValueError("credentialID required")
+            cred = next((c for c in self._agent_credentials() if c["id"] == cid), None)
+            if not cred:
+                return 404, {"ok": False, "error": "Credential not found"}
+            if path.endswith("/remove"):
+                self._agent_secret_call("DELETE", "/api/credential/" + q(cid), timeout=15)
+                self._agent_log("credential removed for {}".format(cred["integrationID"]))
+            elif path.endswith("/rename"):
+                label = self._agent_clean_text(body.get("label"))
+                if not label:
+                    raise ValueError("Label required")
+                self._agent_secret_call("PATCH", "/api/credential/" + q(cid), {"label": label}, timeout=15)
+            else:
+                self._agent_secret_call("POST", "/api/credential/{}/activate".format(q(cid)), None, timeout=15)
+            self._AGENT_INTEG_CACHE["data"] = None
+            return 200, {"ok": True}
+        if path == "/api/agent/providers/oauth/start":
+            iid = str(body.get("integrationID") or "").strip()
+            mid = str(body.get("methodID") or "").strip()
+            integ = self._agent_find_integration(iid)
+            m = next((x for x in integ["methods"] if x["type"] == "oauth" and x["id"] == mid), None)
+            if not m:
+                raise ValueError("Unknown sign-in method")
+            if not m["usable"]:
+                raise ValueError("This sign-in method needs a browser on the router itself; "
+                                 "use an API key or a device-code sign-in instead")
+            payload = {"methodID": mid}
+            label = self._agent_clean_text(body.get("label"))
+            if label:
+                payload["label"] = label
+            answer = self._agent_form_answer(m.get("form"), body.get("answer"))
+            if answer:
+                payload["answer"] = answer
+            try:
+                res = self._agent_d(self._agent_secret_call(
+                    "POST", "/api/integration/{}/connect/oauth".format(q(iid)), payload, timeout=30)) or {}
+            except AgentError as exc:
+                return 502, {"ok": False, "error": self._agent_err_text(exc)}
+            url = str(res.get("url") or "")
+            aid = str(res.get("attemptID") or "")
+            redir = (urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get("redirect_uri") or [""])[0]
+            if re.match(r"^https?://(localhost|127\.0\.0\.1|\[::1\])[:/]", redir):
+                try:
+                    self._agent_secret_call("DELETE", "/api/integration/{}/connect/oauth/{}".format(
+                        q(iid), q(aid)), timeout=10)
+                except AgentError:
+                    pass
+                raise ValueError("This sign-in redirects to the router's own browser and cannot be "
+                                 "finished from here; use an API key instead")
+            instr = str(res.get("instructions") or "")[:300]
+            code = re.search(r"code:\s*([A-Za-z0-9-]{4,})", instr)
+            return 200, {"ok": True, "attemptID": aid, "url": url, "instructions": instr,
+                         "code": code.group(1) if code else "", "mode": res.get("mode") or "",
+                         "expires": (res.get("time") or {}).get("expires")}
+        if path in ("/api/agent/providers/oauth/complete", "/api/agent/providers/oauth/cancel"):
+            iid = str(body.get("integrationID") or "").strip()
+            aid = str(body.get("attemptID") or "").strip()
+            if not AGENT_INTEG_ID_RE.match(iid) or not AGENT_OBJ_ID_RE.match(aid):
+                raise ValueError("integrationID and attemptID required")
+            base = "/api/integration/{}/connect/oauth/{}".format(q(iid), q(aid))
+            if path.endswith("/cancel"):
+                try:
+                    self._agent_secret_call("DELETE", base, timeout=15)
+                except AgentError as exc:
+                    if exc.status != 404:
+                        raise
+                return 200, {"ok": True}
+            code = self._agent_clean_text(body.get("code"), 500)
+            try:
+                self._agent_secret_call("POST", base + "/complete", {"code": code or None},
+                                        [code], timeout=60)
+            except AgentError as exc:
+                return 400, {"ok": False, "error": _agent_scrub(self._agent_err_text(exc), [code])}
+            self._AGENT_INTEG_CACHE["data"] = None
+            return 200, {"ok": True}
+        if path == "/api/agent/providers/custom/detect":
+            key = body.get("apiKey")
+            key = key.strip() if isinstance(key, str) else ""
+            pid = str(body.get("id") or "").strip().lower()
+            if not key and AGENT_PROVIDER_ID_RE.match(pid):
+                key = _agent_key_read(pid)
+            try:
+                ids = _agent_detect_models(body.get("baseURL"), key)
+            except ValueError as exc:
+                return 400, {"ok": False, "error": _agent_scrub(str(exc), [key])}
+            return 200, {"ok": True, "models": ids}
+        if path == "/api/agent/providers/test":
+            return self._agent_provider_test(body)
+        if path == "/api/agent/providers/custom":
+            return self._agent_custom_save(body)
+        if path == "/api/agent/providers/custom/remove":
+            pid = str(body.get("id") or "").strip()
+            if not AGENT_PROVIDER_ID_RE.match(pid):
+                raise ValueError("Provider id required")
+            with _OC_CONF_LOCK:
+                conf = _oc_conf_read()
+                found = False
+                for block in ("providers", "provider"):
+                    provs = conf.get(block)
+                    if isinstance(provs, dict) and pid in provs:
+                        found = True
+                if not found:
+                    return 404, {"ok": False, "error": "Custom provider not found"}
+                m = conf.get("model")
+                cur = m if isinstance(m, str) else (m.get("providerID", "") + "/" if isinstance(m, dict) else "")
+                if cur.startswith(pid + "/"):
+                    return 409, {"ok": False, "error": "A model of this provider is the default; "
+                                                       "choose another default model first"}
+                for block in ("providers", "provider"):
+                    provs = conf.get(block)
+                    if isinstance(provs, dict) and pid in provs:
+                        del provs[pid]
+                        if not provs:
+                            conf.pop(block)
+                _oc_conf_write(conf)
+                _agent_key_remove(pid)
+            self._agent_log("custom provider {} removed".format(pid))
+            gone, _n = self._agent_wait_provider(pid, present=False)
+            return 200, {"ok": True, "unloaded": gone}
+        if path == "/api/agent/models/default":
+            model = str(body.get("model") or "").strip()
+            if model:
+                ids = {m["id"] for m in self._agent_models_view()["models"]}
+                if model not in ids:
+                    raise ValueError("Model '{}' is not available".format(model[:120]))
+            with _OC_CONF_LOCK:
+                conf = _oc_conf_read()
+                if model:
+                    conf["model"] = model
+                else:
+                    conf.pop("model", None)
+                _oc_conf_write(conf)
+            self._agent_log("default model -> {}".format(model or "(automatic)"))
+            eff = ""
+            deadline = time.time() + 15
+            while True:
+                eff = self._agent_default_info().get("effective") or ""
+                if not model or eff == model or time.time() >= deadline:
+                    break
+                time.sleep(0.5)
+            return 200, {"ok": True, "configured": model, "effective": eff,
+                         "applied": (not model) or eff == model}
+        return 404, {"ok": False, "error": "Not found"}
+
+    def _agent_provider_test(self, body):
+        """Send one tiny prompt ("Reply with OK") through a provider in a
+        throwaway session and report the outcome; opencode stores keys
+        without checking them, so this is how a bad key shows up."""
+        pid = str(body.get("provider") or "").strip()
+        model = str(body.get("model") or "").strip()
+        if not AGENT_PROVIDER_ID_RE.match(pid) and not AGENT_INTEG_ID_RE.match(pid):
+            raise ValueError("provider required")
+        cands = [m for m in self._agent_models_view()["models"] if m["provider"] == pid]
+        if model:
+            cands = [m for m in cands if m["id"] == model]
+        if not cands:
+            return 404, {"ok": False, "error": "No models available for '{}'".format(pid)}
+        def price(m):
+            c = m.get("cost") or {}
+            return (c.get("input") or 0) + (c.get("output") or 0)
+        pick = sorted(cands, key=price)[0]
+        sess = self._agent_d(self._agent_call_raw("POST", "/api/session", {}, timeout=15)) or {}
+        sid = sess.get("id") if isinstance(sess, dict) else None
+        if not sid:
+            return 502, {"ok": False, "error": "Could not create a test session"}
+        base = "/api/session/" + urllib.parse.quote(sid)
+        result = {"ok": True, "model": pick["id"], "passed": False, "message": ""}
+        try:
+            mp, mm = pick["id"].split("/", 1)
+            self._agent_call_raw("POST", base + "/model", {"model": {"id": mm, "providerID": mp}}, timeout=15)
+            self._agent_call_raw("POST", base + "/prompt",
+                                 {"text": "Connection test. Reply with just: OK"}, timeout=30)
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                time.sleep(1.0)
+                msgs = self._agent_d(self._agent_call_raw("GET", base + "/message", timeout=15,
+                                                          log_body=False)) or []
+                idle = [m for m in msgs if isinstance(m, dict) and m.get("type") == "idle"]
+                if not idle:
+                    continue
+                err = idle[0].get("error") if isinstance(idle[0].get("error"), dict) else None
+                if idle[0].get("outcome") == "succeeded" or (not err and idle[0].get("outcome") != "failed"):
+                    result.update(passed=True, message="{} answered".format(pick["name"]))
+                else:
+                    msg = (err or {}).get("message") or idle[0].get("outcome") or "failed"
+                    st = (err or {}).get("status")
+                    result["message"] = "{}{}".format(str(msg)[:300], " (HTTP {})".format(st) if st else "")
+                break
+            else:
+                result["message"] = "No answer within 60 s"
+        finally:
+            try:
+                self._agent_call_raw("POST", base + "/interrupt", None, timeout=10)
+            except AgentError:
+                pass
+            try:
+                self._agent_call_raw("DELETE", base, timeout=15)
+            except AgentError:
+                pass
+        return 200, result
+
+    def _agent_custom_save(self, body):
+        pid = str(body.get("id") or "").strip().lower()
+        if not AGENT_PROVIDER_ID_RE.match(pid):
+            raise ValueError("ID: 1-40 lowercase letters, digits, - or _ (e.g. lmstudio-pc)")
+        name = self._agent_clean_text(body.get("name")) or pid
+        base = _agent_check_url(body.get("baseURL"))
+        key = body.get("apiKey")
+        key = key.strip() if isinstance(key, str) else ""
+        clear = bool(body.get("clearKey"))
+        if key and not re.match(r"^[\x21-\x7e]{1,512}$", key):
+            raise ValueError("API key: printable characters only, no spaces")
+        raw_models = body.get("models")
+        if isinstance(raw_models, str):
+            raw_models = re.split(r"[\s,]+", raw_models)
+        models = []
+        for mid in raw_models if isinstance(raw_models, list) else []:
+            mid = str(mid or "").strip()
+            if not mid:
+                continue
+            if not AGENT_MODEL_ID_RE.match(mid):
+                raise ValueError("Invalid model ID '{}'".format(mid[:80]))
+            if mid not in models:
+                models.append(mid)
+        if not models:
+            raise ValueError("Add at least one model ID (or use Detect models)")
+        if len(models) > 200:
+            raise ValueError("Too many models (max 200)")
+        with _OC_CONF_LOCK:
+            conf = _oc_conf_read()
+            provs = conf.get("providers") if isinstance(conf.get("providers"), dict) else {}
+            legacy = conf.get("provider") if isinstance(conf.get("provider"), dict) else {}
+            existing = pid in provs or pid in legacy
+            if not existing:
+                try:
+                    integ_ids = {i["id"] for i in self._agent_integrations()}
+                    prov_ids = {p["id"] for p in self._agent_provider_list()}
+                except AgentError:
+                    integ_ids, prov_ids = set(), set()
+                if pid in prov_ids or (pid in integ_ids and pid not in AGENT_LOCAL_RUNTIME_IDS):
+                    raise ValueError("'{}' is already used by a built-in provider; choose another ID".format(pid))
+            prev = provs.get(pid) or legacy.get(pid) or {}
+            prev_settings = prev.get("settings") if pid in provs else prev.get("options")
+            prev_settings = prev_settings if isinstance(prev_settings, dict) else {}
+            prev_models = prev.get("models") if isinstance(prev.get("models"), dict) else {}
+            entry = {"name": name, "package": AGENT_OPENAI_COMPAT_PKG,
+                     "settings": {"baseURL": base}, "models": {}}
+            for mid in models:
+                pm = prev_models.get(mid)
+                entry["models"][mid] = pm if isinstance(pm, dict) and pm else {"name": mid}
+            keyref = ""
+            if key:
+                keyref = "{file:" + _agent_key_write(pid, key) + "}"
+            elif not clear:
+                old = prev_settings.get("apiKey")
+                if isinstance(old, str) and old.startswith("{file:"):
+                    keyref = old
+                elif isinstance(old, str) and old and not old.startswith("{env:"):
+                    keyref = "{file:" + _agent_key_write(pid, old) + "}"   # migrate plaintext
+                elif isinstance(old, str) and old:
+                    keyref = old
+            if keyref:
+                entry["settings"]["apiKey"] = keyref
+            key = ""
+            provs[pid] = entry
+            conf["providers"] = provs
+            if pid in legacy:
+                del legacy[pid]
+                if not legacy:
+                    conf.pop("provider", None)
+            _oc_conf_write(conf)
+            if clear:
+                _agent_key_remove(pid)
+        self._agent_log("custom provider {} saved ({} models)".format(pid, len(models)))
+        loaded, count = self._agent_wait_provider(pid, present=True, expect_models=models)
+        return 200, {"ok": True, "id": pid, "loaded": loaded, "models": count,
+                     "message": ("Saved; {} model(s) available".format(count) if loaded
+                                 else "Saved, but opencode has not loaded it yet")}
 
     def _agent_v2_event_to_v1(self, frame):
         """Translate one V2 /api/event frame into the V1 event objects the
@@ -12655,6 +13591,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, tripwire_status())
         elif path == "/api/agent/models":
             try:
+                if self._agent_is_v2():
+                    self._send(200, self._agent_models_view())
+                    return
                 data = self._agent_call("GET", "/config/providers", timeout=10)
                 models = []
                 for p in (data.get("providers") or []):
@@ -12673,10 +13612,19 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
                 self._send(200, {"ok": True, "models": models,
-                                 "default": data.get("default") or {},
+                                 "default": _agent_redact(data.get("default") or {}),
                                  "configured": configured})
             except Exception as exc:
                 self._send(500, self._agent_error(exc))
+        elif path.startswith("/api/agent/providers"):
+            try:
+                if not self._agent_is_v2():
+                    self._send(501, {"ok": False, "error": "Provider management needs the opencode 2.x agent"})
+                    return
+                code, res = self._agent_providers_get(path)
+                self._send(code, res)
+            except Exception as exc:
+                self._send(502, {"ok": False, "error": str(exc)[:500]})
         elif path == "/api/agent/status":
             try:
                 health = self._agent_call("GET", "/global/health", timeout=5)
@@ -12719,7 +13667,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 out["error"] = str(exc)
             try:
-                out["config"] = self._agent_call("GET", "/config", timeout=10) or {}
+                out["config"] = _agent_redact(self._agent_call("GET", "/config", timeout=10) or {})
             except Exception:
                 pass
             try:
@@ -13789,10 +14737,29 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
                 self._send(200, {"ok": True, "models": models,
-                                 "default": data.get("default") or {},
+                                 "default": _agent_redact(data.get("default") or {}),
                                  "configured": configured})
             except Exception as exc:
                 self._send(500, self._agent_error(exc))
+
+        elif path.startswith("/api/agent/providers") or path == "/api/agent/models/default":
+            # key/provider management: admin-only via the default-deny gate
+            # above (same rule as every /api/agent route); never logs bodies
+            try:
+                if not self._agent_is_v2():
+                    self._send(501, {"ok": False, "error": "Provider management needs the opencode 2.x agent"})
+                    return
+                code, res = self._agent_providers_post(path, body)
+                self._send(code, res)
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)[:400]})
+            except AgentError as exc:
+                self._send(502, {"ok": False, "error": self._agent_err_text(exc)})
+            except Exception as exc:
+                self._agent_log("provider admin {} failed: {}".format(path, type(exc).__name__))
+                self._send(500, {"ok": False, "error": "Internal error ({})".format(type(exc).__name__)})
+            finally:
+                body = None
 
         elif path == "/api/agent/permission":
             try:
@@ -13876,6 +14843,14 @@ class Handler(BaseHTTPRequestHandler):
                 provider_id, model_id = model.split("/", 1)
                 payload["model"] = {"providerID": provider_id, "modelID": model_id}
             try:
+                if model and self._agent_is_v2():
+                    try:
+                        self._agent_v2_apply_model(session_id, model)
+                    except AgentError as exc:
+                        self._send(400, {"ok": False,
+                                         "error": "Could not switch to model {}: {}".format(
+                                             model, self._agent_err_text(exc))})
+                        return
                 # async fire-and-forget: the browser follows progress via
                 # /api/agent/events (SSE) instead of waiting for this call
                 self._agent_call(
@@ -13921,6 +14896,8 @@ class Handler(BaseHTTPRequestHandler):
                 provider_id, model_id = model.split("/", 1)
                 payload["model"] = {"providerID": provider_id, "modelID": model_id}
             try:
+                if model and self._agent_is_v2():
+                    self._agent_v2_apply_model(session_id, model)
                 data = self._agent_call(
                     "POST",
                     "/session/" + urllib.parse.quote(session_id) + "/command",

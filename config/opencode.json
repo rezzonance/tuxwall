@@ -382,6 +382,26 @@
       "action": "tuxwall_insights",
       "resource": "*",
       "effect": "allow"
+    },
+    {
+      "action": "read",
+      "resource": "/etc/tuxwall/agent/keys/*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*/etc/tuxwall/agent/*",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "/home/tuxwall-agent/.local/share/opencode/opencode.db*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*opencode.db*",
+      "effect": "deny"
     }
   ],
   "instructions": [
