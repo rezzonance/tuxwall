@@ -177,3 +177,9 @@ html[data-theme-style]:not([data-theme-style=""]) .ni-interfaces { --ni-color: v
   .if-ed-actions { padding: 0 10px 12px; }
   .if-plan-card > :not(.card-head) { margin-left: 10px; margin-right: 10px; }
 }
+
+/* Matrix cells are <td>s: `.if-mx td { padding: 0 }` outranked .if-mx-cell's
+   padding, so labels sat on the cell edge. */
+.if-mx td.if-mx-cell { padding: 10px 14px; line-height: 1.3; }
+.if-mx td.if-mx-cell .if-mx-label { display: flex; align-items: center; gap: 6px; }
+@media (max-width: 760px) { .if-mx td.if-mx-cell { padding: 8px 10px; } }
