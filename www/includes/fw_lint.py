@@ -412,14 +412,13 @@ def dedupe_containment(text, fam):
         return text, 0
     drop = set()
     for m in marks[1:]:
-        j = m
-        block = [j]
-        j += 1
+        j, last = m + 1, m
         while j < len(lines) and ("--uid-owner opencanary" in lines[j] or
                                   (lines[j].startswith("#") and not lines[j].startswith("# ---"))):
-            block.append(j)
+            if "--uid-owner opencanary" in lines[j]:
+                last = j
             j += 1
-        drop.update(block)
+        drop.update(range(m, last + 1))
     new = [l for i, l in enumerate(lines) if i not in drop]
     if not CE.present("\n".join(new), fam):
         return text, 0

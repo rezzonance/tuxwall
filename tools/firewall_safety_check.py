@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "www", "includes"))
@@ -31,6 +32,9 @@ sys.dont_write_bytecode = True
 
 import fw_guard as G  # noqa: E402
 import fw_snap as S  # noqa: E402
+import fw_lint as L  # noqa: E402
+import fw_edit as E  # noqa: E402
+import fw_hits as H  # noqa: E402
 
 try:
     import ufw.frontend  # noqa: F401  (ufw's own rule parser, used by proposed_add)
@@ -209,9 +213,12 @@ class Runner:
         self.calls.append(list(cmd))
         c = " ".join(cmd)
         if cmd[0] == "iptables-save":
-            return 0, self.ipt
+            return 0, (self.ipt_c if "-c" in cmd and getattr(self, "ipt_c", None) is not None else self.ipt)
         if cmd[0] == "ip6tables-save":
-            return 0, self.ip6t
+            return 0, (self.ip6t_c if "-c" in cmd and getattr(self, "ip6t_c", None) is not None else self.ip6t)
+        if cmd[:4] == ["ip", "-o", "link", "show"]:
+            return 0, "".join("%d: %s: <UP> mtu 1500\n" % (i, n) for i, n in
+                              enumerate(["lo", WAN, LAN, "eth2", "eth1.10@eth1", "wg0"], 1))
         if cmd[:2] == ["ss", "-lntupH"]:
             return 0, self.ss
         if cmd[:2] == ["systemctl", "is-active"]:
@@ -610,6 +617,42 @@ def t_live():
           [v["id"] for v in inv if v["severity"] == "critical"])
     check(not S.validate_files({k: open(p).read() for k, p in S.UFW_FILES.items()}), "live files validate")
     print("live invariants:", [(v["severity"], v["id"]) for v in inv])
+    # session 2: findings on the real ruleset (read only)
+    for p in ("/etc/ufw/ufw.conf", "/etc/kea/kea-dhcp4.conf", "/var/lib/kea/kea-leases4.csv",
+              "/etc/tuxwall/portforward.json", "/etc/tuxwall/dmz.json"):
+        if os.path.exists(p):
+            os.makedirs(os.path.dirname(root + p), exist_ok=True)
+            shutil.copy(p, root + p)
+    def ro2(cmd, timeout=15):
+        if cmd[:3] == ["ip", "-o", "link"]:
+            return live_run(cmd, timeout)
+        return ro(cmd, timeout)
+    ctx2 = G.Ctx(root=root, run=ro2, client_ip="192.168.1.50")
+    rs2 = G.load_ruleset(ctx2)
+    fs = L.findings(rs2, ctx2)
+    print("live findings:", [(f["severity"], f["id"].split("|")[0][:40]) for f in fs])
+    check(not [f for f in fs if f["severity"] == "critical"], "live: no critical findings")
+    if ctx2.wg["iface"] and "-A FORWARD -i wg0 -j ACCEPT" in (rs2["raw"] or {}).get("v4", ""):
+        check(any(f["id"] == "raw-wg-forward" and f["severity"] == "high" for f in fs), "live: raw wg0 FORWARD finding")
+    eno = [r for r in rs2["v4"] if r["action"] == "deny" and r["in"] == "eno1" and r["proto"] == "any"]
+    if eno:
+        check(any(f["id"].startswith("deny-before-allow:v4") and f["rules"][0]["key"] == eno[0]["key"] for f in fs),
+              "live: eno1 deny before the worknet allows")
+    check(any(f["id"] == "honeypot-untagged" and f["severity"] == "info" for f in fs), "live: untagged honeypot = info")
+    cls = {r["key"]: G.classify_rule(r, ctx2) for r in rs2["v4"] + rs2["v6"]}
+    fp = [f["id"] for f in fs if f["category"] in ("order", "exposure", "stale", "asymmetry")
+          and not f["id"].startswith(("deny-before", "allow-before"))
+          and f["rules"] and cls[f["rules"][0]["key"]]["managed"]]
+    check(not fp, "live: no findings about managed/deception rules %s" % fp)
+    sg = L.suggestions(rs2, ctx2, "")
+    check({"tpl-ssh", "tpl-guest", "tpl-iot"} <= {s["id"] for s in sg}, "live: suggestion templates")
+    if HAVE_UFW:
+        bad = [b["rule"]["text"] for fam in ("v4", "v6") for b in rs2["blocks"][fam]
+               if E.blocks_from_text(b["rule"]["text"])[fam] != {"tuple": b["tuple"], "body": b["body"]}]
+        check(not bad, "live: every rule regenerates byte-identically %s" % bad[:3])
+    saves = {f: live_run([t, "-c"])[1] for f, t in (("v4", "iptables-save"), ("v6", "ip6tables-save"))}
+    m = H.map_hits(rs2, saves)
+    check(m["v4"] is not None and m["v6"] is not None, "live: hit counters map (%s)" % m["errors"])
     shutil.rmtree(root)
 
 
@@ -672,6 +715,36 @@ def t_netns():
         sched[res["needs_confirmation"]]()
         rc, reverted = ns(["iptables-save"])
         check("--dport 8080 -j ACCEPT" not in reverted, "netns: revert removed the restored rule")
+        if HAVE_UFW:
+            # session 2: edit-in-place + disable through apply_files, loaded into the netns
+            S._PENDING.clear()
+            rs = G.load_ruleset(ctx, raw={})
+            num = next(i for i, r in enumerate(G.numbered(rs), 1)
+                       if r["text"].startswith("allow in on wg0 from 10.0.0.0/24 to any port 22"))
+            prop, info = E.propose_edit(rs, ctx, num, "limit in on wg0 from 10.0.0.0/24 to any port 2222 proto tcp")
+            sched = {}
+            res = S.apply_files(ctx, rs, prop, "edit", schedule=lambda c, d, fn, t: sched.setdefault(c, fn))
+            rc, after = ns(["iptables-save"])
+            check(res["ok"] and "--dport 2222" in after and "-j ufw-user-limit-accept" in after
+                  and "-s 10.0.0.0/24 -i wg0 -p tcp -m tcp --dport 22 -j ACCEPT" not in after,
+                  "netns: edited rule loaded (limit 2222 replaces 22)")
+            sched[res["needs_confirmation"]]()
+            rc, rev = ns(["iptables-save"])
+            check("--dport 2222" not in rev and "--dport 22 -j ACCEPT" in rev, "netns: edit reverted")
+            rs = G.load_ruleset(ctx, raw={})
+            prop, info = E.propose_disable(rs, ctx, num)
+            res = S.apply_files(ctx, rs, prop, "disable", schedule=lambda c, d, fn, t: sched.setdefault(c, fn),
+                                side={E.DISABLED_FILE: E.disabled_text(info["records"])})
+            rc, dis = ns(["iptables-save"])
+            check("-s 10.0.0.0/24 -i wg0 -p tcp -m tcp --dport 22 -j ACCEPT" not in dis, "netns: disabled rule unloaded")
+            S.confirmed(res["needs_confirmation"])
+            rs = G.load_ruleset(ctx, raw={})
+            prop, info = E.propose_enable(rs, ctx, E.load_disabled(ctx)[0]["id"])
+            res = S.apply_files(ctx, rs, prop, "enable", schedule=lambda c, d, fn, t: sched.setdefault(c, fn),
+                                side={E.DISABLED_FILE: E.disabled_text(info["remaining"])})
+            rc, en = ns(["iptables-save"])
+            check("-s 10.0.0.0/24 -i wg0 -p tcp -m tcp --dport 22 -j ACCEPT" in en, "netns: re-enabled rule loaded")
+            S.confirmed(res["needs_confirmation"])
         shutil.rmtree(root)
     finally:
         subprocess.run(["ip", "netns", "del", NS])
@@ -680,7 +753,391 @@ def t_netns():
           "netns deleted")
 
 
+# ── session 2: canary containment, findings, editing, hit counters ──────────
+
+REPO = os.path.join(HERE, "..")
+CANARY_DUP = BEFORE.replace("# don't delete", "# --- Tuxwall canary (opencanary) egress containment ---\n"
+                            "-A ufw-before-output -m owner --uid-owner opencanary -j REJECT\n# don't delete")
+LINT_SPECS = BASE_SPECS + [
+    {"in": "eth2", "proto": "tcp", "dport": 53, "comment": "work DNS tcp"},
+    {"in": "eth2", "action": "deny", "comment": "work: block router"},
+    {"in": "eth2", "proto": "udp", "dport": 53, "comment": "work DNS udp"},
+    {"in": "eth2", "proto": "udp", "dport": 67},
+    {"in": "eth2", "proto": "udp", "dport": 5353, "comment": "mDNS reflector"},
+    {"in": LAN, "proto": "tcp", "dport": 22, "fam": "v6", "comment": "SSH LAN only"},
+    {"in": "wg0", "proto": "tcp", "dport": 8080},
+    {"in": "wg0", "proto": "tcp", "dport": 8080},
+]
+TOPO = {"version": 1, "wan": {"device": WAN}, "lan": {"device": LAN, "address": "192.168.1.1/24"},
+        "opt": [{"id": "opt1", "name": "IoT", "device": "eth1.10", "address": "192.168.10.1/24"},
+                {"id": "opt2", "name": "Work", "device": "eth2", "address": "192.168.2.1/24"}],
+        "vpn": [{"id": "wg0", "name": "WireGuard", "device": "wg0", "address": "10.0.0.1/24"}]}
+
+
+def lint_root(specs=LINT_SPECS, before=BEFORE):
+    root = make_root(specs=specs, before=before)
+    with open(root + "/etc/tuxwall/interfaces.json", "w") as f:
+        json.dump(TOPO, f)
+    with open(root + "/etc/ufw/ufw.conf", "w") as f:
+        f.write("ENABLED=yes\nLOGLEVEL=low\n")
+    return root
+
+
+def fids(fs):
+    return {f["id"].split(":")[0] for f in fs}
+
+
+def t_canary():
+    import canary_egress as CE
+    # missing (v4 + v6) -> critical, with the exact insertion as repair preview
+    root = make_root(before=BEFORE_OLD)
+    ctx, _ = mkctx(root)
+    rs = G.load_ruleset(ctx)
+    inv = {v["id"]: v for v in G.invariants(rs, ctx, rs)}
+    check(inv.get("canary-egress-missing", {}).get("severity") == "critical", "canary: v4 missing = critical")
+    check(inv.get("canary-egress-missing-v6", {}).get("severity") == "critical", "canary: v6 missing = critical")
+    rep = inv["canary-egress-missing"]["repair"]
+    check(rep["kind"] == "before-rules-insert" and rep["applicable"] and
+          "+-A ufw-before-output -m owner --uid-owner opencanary -j REJECT" in rep["diff"], "canary: repair diff")
+    fx = [f for f in L.findings(rs, ctx) if f["id"] == "guard:canary-egress-missing"]
+    check(fx and fx[0]["fix"]["kind"] == "manual" and "canary_egress.py --apply" in fx[0]["fix"]["steps"][0],
+          "canary: finding offers the insertion")
+    # apply in the temp root (never ufw): idempotent, anchor kept, then no violation
+    changed = CE.apply(root, reload=False, log=lambda *a: None)
+    check(changed == ["v4", "v6"], "canary: apply inserts both families")
+    t1 = open(root + "/etc/ufw/before.rules").read()
+    check(CE.apply(root, reload=False, log=lambda *a: None) == [] and open(root + "/etc/ufw/before.rules").read() == t1,
+          "canary: apply is idempotent")
+    check(t1.index("--uid-owner opencanary -j REJECT") < t1.index("-A ufw-before-output -o lo -j ACCEPT"),
+          "canary: inserted before the lo-ACCEPT anchor")
+    check(CE.copies(t1, "v4") == 1 and CE.has_log(t1, "v4"), "canary: one copy, with the tripwire log line")
+    rs2 = G.load_ruleset(ctx)
+    check(not [v for v in G.invariants(rs2, ctx, rs2) if v["id"].startswith("canary-egress")],
+          "canary: present -> no violation")
+    check(CE.main(["--check", "--root", root]) == 0, "canary: --check after apply")
+    # fixture with containment -> none; numeric uid in a save counts too
+    ctxb, _ = mkctx(make_root())
+    rsb = G.load_ruleset(ctxb)
+    check(not [v for v in G.invariants(rsb, ctxb, rsb) if v["id"].startswith("canary-egress")],
+          "canary: fixture with containment -> none")
+    check(CE.present("-A ufw-before-output -m owner --uid-owner 995 -j REJECT --reject-with icmp-port-unreachable",
+                     "v4", "995"), "canary: numeric uid (iptables-save form)")
+    check(not CE.present("-A ufw-before-output -m owner --uid-owner opencanary -d 10.0.0.0/8 -j REJECT", "v4"),
+          "canary: a partial REJECT is not containment")
+    # kernel state: files fine, iptables has no REJECT for the uid -> not loaded
+    ctxk, _ = mkctx(make_root(), run=Runner(ipt=IPT_SAVE.replace(
+        "-A ufw-before-output -m owner --uid-owner 995 -j REJECT --reject-with icmp-port-unreachable\n", "")))
+    rsk = G.load_ruleset(ctxk)
+    check("canary-egress-not-loaded" in ids(G.invariants(rsk, ctxk, rsk)), "canary: not loaded in the kernel")
+    # no opencanary user -> nothing required, apply is a no-op
+    rootn = make_root(before=BEFORE_OLD)
+    with open(rootn + "/etc/passwd", "w") as f:
+        f.write("root:x:0:0::/root:/bin/bash\n")
+    ctxn, _ = mkctx(rootn)
+    rsn = G.load_ruleset(ctxn)
+    check(not [v for v in G.invariants(rsn, ctxn, rsn) if v["id"].startswith("canary-egress")] and
+          CE.apply(rootn, reload=False, log=lambda *a: None) == [], "canary: no user -> nothing")
+    # duplicated block -> low hygiene finding with a dedupe preview
+    ctxd, _ = mkctx(make_root(before=CANARY_DUP))
+    fd = [f for f in L.findings(G.load_ruleset(ctxd), ctxd) if f["id"] == "before-dup:v4"]
+    check(fd and fd[0]["severity"] == "low" and fd[0]["fix"] and "-# --- Tuxwall canary" in fd[0]["fix"]["diff"],
+          "canary: duplicate block finding + preview")
+    new, n = L.dedupe_containment(CANARY_DUP, "v4")
+    check(n == 2 and CE.copies(new, "v4") == 1, "canary: dedupe keeps the first copy")
+    # regression (3.3.1): the installer's marker never matched its own comment
+    check("Tuxwall canary egress" not in CE.MARK, "canary: old marker string is not in the comment")
+    for rel in ("tuxwall-install.sh", "pkg/DEBIAN/postinst", "scripts/opencanary/deploy-opencanary.sh"):
+        txt = open(os.path.join(REPO, rel)).read()
+        check("canary_egress.py" in txt and 'grep -q "Tuxwall canary egress"' not in txt,
+              "canary: %s uses canary_egress.py" % rel)
+    for r in (root, rootn):
+        shutil.rmtree(r)
+
+
+def t_lint():
+    root = lint_root()
+    ctx, run = mkctx(root)
+    rs = G.load_ruleset(ctx)
+    fs = L.findings(rs, ctx)
+    by = {f["id"].split(":")[0] + ":" + f["id"].split("|")[0].split(":")[-1]: f for f in fs}
+    dba = [f for f in fs if f["id"].startswith("deny-before-allow")]
+    check(len(dba) == 2 and all(f["severity"] == "medium" for f in dba), "lint: eno1-style deny before allows (v4+v6)")
+    d4 = next(f for f in dba if f["rules"][0]["family"] == "v4")
+    check(len(d4["rules"]) == 4 and d4["fix"]["op"] == "move", "lint: 3 shadowed allows + move fix")
+    check("managed" in d4["detail"], "lint: shadowed managed mDNS rule named as managed")
+    wg = [f for f in fs if f["id"] == "raw-wg-forward"]
+    check(wg and wg[0]["severity"] == "high" and "IoT (eth1.10) → WireGuard (wg0)" in wg[0]["detail"]
+          and wg[0]["fix"]["href"] == "#interfaces", "lint: raw wg0 FORWARD bypass (high) + policy link")
+    hu = [f for f in fs if f["id"] == "honeypot-untagged"]
+    check(hu and hu[0]["severity"] == "info" and len(hu[0]["rules"]) == 4, "lint: untagged honeypot = info")
+    check(any(f["id"].startswith("redundant:v6") for f in fs), "lint: v6 SSH rule redundant after LAN allow-all")
+    check(any(f["id"].startswith("duplicate:") for f in fs), "lint: duplicate rule")
+    check(not [f for f in fs if f["id"].startswith("guard:")], "lint: fixture has no guard violations")
+    # no false positives on managed / deception rules
+    cls = {r["key"]: G.classify_rule(r, ctx) for r in rs["v4"] + rs["v6"]}
+    fp = [f["id"] for f in fs if f["category"] in ("order", "exposure", "stale", "asymmetry")
+          and not f["id"].startswith(("deny-before", "allow-before"))
+          and f["rules"] and cls[f["rules"][0]["key"]]["managed"]]
+    check(not fp, "lint: no ordering/exposure findings on managed rules %s" % fp)
+    check(not [f for f in fs if f["severity"] in ("critical",)], "lint: nothing critical in the fixture")
+    # applying the suggested move removes the finding (and the guard passes)
+    prop, info = E.propose_move_to(rs, ctx, d4["fix"]["number"], d4["fix"]["to"], d4["fix"]["expect"])
+    check(G.check(rs, prop, ctx)["ok"], "lint: move fix passes the guard")
+    check(not [f for f in L.findings(prop, ctx) if f["id"].startswith("deny-before-allow:v4")],
+          "lint: move fix resolves the v4 finding")
+    # allow without interface, stale host, missing interface, risky port forward
+    root2 = lint_root(specs=BASE_SPECS + [{"proto": "tcp", "dport": 8443},
+                                          {"route": True, "in": LAN, "out": "eth9", "comment": "gone"},
+                                          {"route": True, "in": "eth1.10", "out": LAN, "dst": "192.168.1.99", "fam": "v4"}])
+    with open(root2 + "/etc/tuxwall/portforward.json", "w") as f:
+        json.dump([{"id": "p1", "ext_port": 3389, "int_ip": "192.168.1.50", "int_port": 3389, "proto": "tcp",
+                    "enabled": True}], f)
+    ctx2, _ = mkctx(root2)
+    f2 = fids(L.findings(G.load_ruleset(ctx2), ctx2))
+    for k in ("no-iface", "no-iface-dev", "stale-host", "pf-risky", "pf-noreserve"):
+        check(k in f2, "lint: %s" % k)
+    # zero-hit: needs history
+    rs2 = G.load_ruleset(ctx2)
+    user = next(r for r in rs2["v4"] if G.classify_rule(r, ctx2)["owner"] == "user")
+    zh = L.findings(rs2, ctx2, hits={user["key"]: {"first": time.time() - 8 * 86400, "total": 0}})
+    check("zero-hit" in fids(zh), "lint: zero-hit after 7 days")
+    zh2 = L.findings(rs2, ctx2, hits={user["key"]: {"first": time.time() - 86400, "total": 0}})
+    check("zero-hit" not in fids(zh2), "lint: no zero-hit with < 7 days of data")
+    # logging off
+    with open(root2 + "/etc/ufw/ufw.conf", "w") as f:
+        f.write("ENABLED=yes\nLOGLEVEL=off\n")
+    check("logging-off" in fids(L.findings(rs2, ctx2)), "lint: logging off")
+    # suggestions: scanners -> honeypot port, LAN device blocked, templates
+    log = []
+    for i in range(12):
+        log.append("2026-11-14T04:00:%02d host kernel: [UFW BLOCK] IN=eth0 OUT= MAC=x SRC=198.51.100.%d "
+                   "DST=203.0.113.5 LEN=44 PROTO=TCP SPT=4000 DPT=8081 WINDOW=1 SYN URGP=0" % (i, i + 1))
+        log.append("2026-11-14T04:01:%02d host kernel: [UFW BLOCK] IN=eth0 OUT= MAC=x SRC=198.51.100.%d "
+                   "DST=203.0.113.5 LEN=44 PROTO=TCP SPT=4000 DPT=23 WINDOW=1 SYN URGP=0" % (i, i + 1))
+    for i in range(6):
+        log.append("2026-11-14T04:02:%02d host kernel: [UFW BLOCK] IN=eth2 OUT= MAC=x SRC=192.168.2.77 "
+                   "DST=192.168.2.1 LEN=44 PROTO=TCP SPT=4000 DPT=9100 WINDOW=1 SYN URGP=0" % i)
+    sg = L.suggestions(rs, ctx, "\n".join(log))
+    hp = [s for s in sg if s["kind"] == "honeypot"]
+    check(len(hp) == 1 and hp[0]["plan"]["port"] == 8081, "suggest: scanned WAN port -> honeypot (not 23)")
+    lb = [s for s in sg if s["kind"] == "blocked"]
+    check(lb and lb[0]["plan"]["op"] == "insert" and "from 192.168.2.77" in lb[0]["plan"]["rule"]
+          and lb[0]["plan"]["before"], "suggest: LAN device blocked -> scoped allow before the deny")
+    check({"tpl-ssh", "tpl-guest", "tpl-iot"} <= {s["id"] for s in sg}, "suggest: templates")
+    check(next(s for s in sg if s["id"] == "tpl-iot")["href"] == "#interfaces", "suggest: template links the policy matrix")
+    if HAVE_UFW:
+        pl = E.blocks_from_text(lb[0]["plan"]["rule"])
+        check(pl["v4"] and not pl["v6"], "suggest: plan rule parses (v4 only)")
+    for r in (root, root2):
+        shutil.rmtree(r)
+
+
+def t_edit():
+    root = lint_root()
+    run = Runner()
+    ctx, _ = mkctx(root, run=run)
+    rs = G.load_ruleset(ctx)
+    orig = {n: open(root + "/etc/ufw/" + n).read() for n in ("user.rules", "user6.rules")}
+    num = next(i for i, r in enumerate(G.numbered(rs), 1) if r["text"].startswith("allow in on wg0 from 10.0.0.0/24 to any port 22"))
+    key = G.numbered(rs)[num - 1]["key"]
+    # every block regenerates byte-identically with ufw's formatter
+    same = all(E.blocks_from_text(b["rule"]["text"])[fam] == {"tuple": b["tuple"], "body": b["body"]}
+               for fam in ("v4", "v6") for b in rs["blocks"][fam] if b["rule"]["text"].startswith(("allow", "deny", "route")))
+    check(same, "edit: blocks regenerate identically")
+    prop, info = E.propose_edit(rs, ctx, num, "allow in on wg0 from 10.0.0.0/24 to any port 2222 proto tcp "
+                                "comment 'SSH over WireGuard'", expect=key)
+    d = E.describe(rs, prop, info, ctx)
+    check(d["guard"]["ok"] and d["writes"] == ["user.rules"], "edit: plan ok, writes user.rules only")
+    check(any(c["kind"] == "add" and "Allow TCP port 2222 from 10.0.0.0/24 arriving on WireGuard (wg0) to this router"
+              in c["plain"] for c in d["changes"]), "edit: plain-language preview %s" % [c["plain"] for c in d["changes"]])
+    check(G.numbered(prop)[num - 1]["dport"] == "2222", "edit: same position")
+    sched = {}
+    res = S.apply_files(ctx, rs, prop, "edit %d" % num, who="t", schedule=lambda c, de, fn, t: sched.setdefault(c, fn))
+    check(res["ok"] and res["needs_confirmation"] in sched, "edit: applied with confirm window")
+    check("--dport 2222" in open(root + "/etc/ufw/user.rules").read(), "edit: file written")
+    check(["ufw", "reload"] in run.calls, "edit: mocked ufw reload")
+    try:
+        S.apply_files(ctx, G.load_ruleset(ctx), prop, "second", schedule=lambda *a: None)
+        check(False, "edit: second change while pending refused")
+    except S.Refused as exc:
+        check(exc.status == 409, "edit: second change while pending refused")
+    sched[res["needs_confirmation"]]()
+    check(all(open(root + "/etc/ufw/" + n).read() == t for n, t in orig.items()), "edit: revert restores the files")
+    # stale / managed / lockout
+    for bad, code in (((num, "allow 1/tcp", "nope"), 409),):
+        try:
+            E.propose_edit(rs, ctx, *bad)
+            check(False, "edit: stale refused")
+        except E.EditError as exc:
+            check(exc.status == code, "edit: stale expect -> 409")
+    hp = next(i for i, r in enumerate(G.numbered(rs), 1) if G.classify_rule(r, ctx)["owner"] == "honeypot")
+    try:
+        E.propose_edit(rs, ctx, hp, "allow in on eth0 to any port 2323 proto tcp")
+        check(False, "edit: managed refused")
+    except E.EditError as exc:
+        check(exc.status == 403 and exc.payload.get("managed"), "edit: managed rule refused (403)")
+    lan = next(i for i, r in enumerate(G.numbered(rs), 1) if r["text"].startswith("allow in on eth1 from any to any"))
+    p2, i2 = E.propose_edit(rs, ctx, lan, "deny in on eth1 comment 'Allow all LAN traffic'")
+    check(not E.describe(rs, p2, i2, ctx)["guard"]["ok"], "edit: lockout edit refused by the guard")
+    try:
+        S.apply_files(ctx, rs, p2, "lockout", schedule=lambda *a: None)
+        check(False, "edit: apply refuses lockout")
+    except S.Refused as exc:
+        check(exc.status == 409 and exc.payload["guard"]["blocking"], "edit: apply refuses lockout (409)")
+    # disable (with v6 twin) -> enable restores the exact files
+    S._PENDING.clear()
+    rs = G.load_ruleset(ctx)
+    mnum = next(i for i, r in enumerate(G.numbered(rs), 1) if r["text"].startswith("allow in on wg0 from any to any port 5353"))
+    # mdns is managed: refused
+    try:
+        E.propose_disable(rs, ctx, mnum)
+        check(False, "disable: managed refused")
+    except E.EditError as exc:
+        check(exc.status == 403, "disable: managed refused")
+    dnum = next(i for i, r in enumerate(G.numbered(rs), 1) if r["text"].startswith("allow in on eth2 from any to any port 53 proto udp"))
+    prop, info = E.propose_disable(rs, ctx, dnum, who="t")
+    check(len(info["records"]) == 2 and len(prop["v4"]) == len(rs["v4"]) - 1 and len(prop["v6"]) == len(rs["v6"]) - 1,
+          "disable: rule and its v6 twin removed")
+    side = {E.DISABLED_FILE: E.disabled_text(E.load_disabled(ctx) + info["records"])}
+    sched = {}
+    res = S.apply_files(ctx, rs, prop, "disable", schedule=lambda c, de, fn, t: sched.setdefault(c, fn), side=side)
+    check(res["ok"] and len(E.load_disabled(ctx)) == 2, "disable: stored in fw-disabled.json")
+    S.confirmed(res["needs_confirmation"])
+    rs_d = G.load_ruleset(ctx)
+    prop, info = E.propose_enable(rs_d, ctx, E.load_disabled(ctx)[0]["id"])
+    check(prop["texts"]["user.rules"] == orig["user.rules"] and prop["texts"]["user6.rules"] == orig["user6.rules"],
+          "enable: re-inserted at the same positions (files identical)")
+    res = S.apply_files(ctx, rs_d, prop, "enable", schedule=lambda c, de, fn, t: sched.setdefault(c, fn),
+                        side={E.DISABLED_FILE: E.disabled_text(info["remaining"])})
+    check(not E.load_disabled(ctx), "enable: removed from fw-disabled.json")
+    sched[res["needs_confirmation"]]()
+    check(len(E.load_disabled(ctx)) == 2, "enable revert: disabled list restored too")
+    S._PENDING.clear()
+    # insert before / move_to
+    rs = G.load_ruleset(ctx)
+    p3, i3 = E.propose_insert(rs, ctx, "allow in on eth2 to any port 123 proto udp comment 'NTP'", before=dnum - 1)
+    check(G.numbered(p3)[dnum - 2]["dport"] == "123", "insert: at the requested position")
+    check(E.plain(G.parse_tuple("### tuple ### route:allow any any 0.0.0.0/0 any 0.0.0.0/0 in_eth1!out_eth0", "v4"), ctx)
+          .startswith("Allow forwarded all traffic from anywhere arriving on the LAN (eth1)"), "plain: route rule")
+    try:
+        E.parse_argv("allow 22/tcp; reboot")
+        check(False, "edit: shell chars refused")
+    except E.EditError:
+        check(True, "edit: shell chars refused")
+    check(E.parse_argv("allow 22/tcp comment 'a -> b'")[-1] == "a -> b", "edit: comment kept")
+    shutil.rmtree(root)
+
+
+def _save_with_counters(rs, fam, mult=1, drop=False):
+    pre = "ufw" if fam == "v4" else "ufw6"
+    out = ["*filter"]
+    n = 0
+    for b in rs["blocks"][fam]:
+        for l in b["body"]:
+            if l.split()[1] in ("%s-user-input" % pre, "%s-user-forward" % pre, "%s-user-output" % pre):
+                n += 1
+                if drop and n == 2:
+                    continue
+                out.append("[%d:%d] %s" % (n * mult, n * mult * 60, l))
+    out.append("[9:9] -A %s-user-limit -j REJECT" % pre)
+    out.append("COMMIT")
+    return "\n".join(out) + "\n"
+
+
+def t_hits():
+    root = lint_root()
+    ctx, run = mkctx(root)
+    rs = G.load_ruleset(ctx, raw={})
+    saves = {f: _save_with_counters(rs, f) for f in ("v4", "v6")}
+    m = H.map_hits(rs, saves)
+    check(m["v4"] and len(m["v4"]) == len(rs["v4"]) and m["v4"][0]["pkts"] == 1, "hits: v4 mapped in order")
+    lim = sum(len([l for l in b["body"] if l.startswith("-A ufw-user-")]) for b in rs["blocks"]["v4"])
+    check(m["v4"][-1]["pkts"] == lim, "hits: last block gets the last counter line")
+    bad = H.map_hits(rs, {"v4": _save_with_counters(rs, "v4", drop=True), "v6": saves["v6"]})
+    check(bad["v4"] is None and "v4" in bad["errors"] and bad["v6"], "hits: mismatch -> unmapped, not guessed")
+    # sampler: deltas, reset detection, sparkline, zero-hit state
+    run.ipt_c, run.ip6t_c = saves["v4"], saves["v6"]
+    t0 = 1_800_000_000
+    rec, _ = H.sample(ctx, rs, now=t0)
+    H.record(ctx, rec)
+    run.ipt_c = _save_with_counters(rs, "v4", mult=3)
+    rec2, _ = H.sample(ctx, rs, now=t0 + 300)
+    st = H.record(ctx, rec2)
+    h0 = H.hkey(rs["v4"][0]["key"])
+    check(st["rules"][h0]["total"] == 2 and st["rules"][h0]["last_hit"] == t0 + 300, "hits: delta folded")
+    run.ipt_c = _save_with_counters(rs, "v4", mult=1)   # counters reset (ufw reload)
+    rec3, _ = H.sample(ctx, rs, now=t0 + 600)
+    st = H.record(ctx, rec3)
+    check(st["rules"][h0]["total"] == 3, "hits: reset detected (delta = new value)")
+    v = H.view(ctx, rs, now=t0 + 650)
+    r0 = v["rules"][0]
+    check(r0["number"] == 1 and r0["total"] == 3 and sum(r0["spark"]) == 3 and r0["hits"] == 1, "hits: view + sparkline")
+    check(v["mapped"] == {"v4": True, "v6": True}, "hits: both families mapped")
+    sk = H.state_by_key(ctx, rs)
+    check(sk[rs["v4"][0]["key"]]["total"] == 3, "hits: state by rule key for findings")
+    check(len(open(root + H.HITS_FILE).read().splitlines()) == 3, "hits: jsonl appended")
+    shutil.rmtree(root)
+
+
+def t_api():
+    """api_server glue in-process: temp root, mocked runner, no host commands."""
+    import importlib
+    api = importlib.import_module("api_server")
+    root = lint_root()
+    run = Runner()
+    real_sub = subprocess.run
+
+    def guarded(cmd, *a, **k):
+        c = cmd if isinstance(cmd, list) else [cmd]
+        if c and c[0] in ("ufw", "iptables", "ip6tables", "iptables-restore", "ip6tables-restore", "nft"):
+            raise AssertionError("host firewall command in API test: %s" % c)
+        return real_sub(cmd, *a, **k)
+    api.subprocess.run = guarded
+    api._fw_ctx = lambda client_ip="", raw=True: G.Ctx(root=root, run=run, run_in=run.run_in,
+                                                       client_ip=client_ip or "192.168.1.50", raw=raw)
+    api._fw_reapply_owned = lambda: []
+    sched = {}
+    api._fw_snap_schedule = lambda cid, d, fn, ttl: sched.setdefault(cid, fn)
+    api._fw_ufw_log_tail = lambda limit=0: ""
+    try:
+        code, f = api.fw_findings_view("findings", "192.168.1.50")
+        check(code == 200 and f["counts"]["high"] >= 1, "api: findings")
+        code, s = api.fw_findings_view("suggestions", "192.168.1.50")
+        check(code == 200 and s["suggestions"], "api: suggestions")
+        rs = G.load_ruleset(api._fw_ctx())
+        num = next(i for i, r in enumerate(G.numbered(rs), 1) if r["text"].startswith("allow in on eth2 from any to any port 53 proto udp"))
+        code, p = api.fw_plan_view({"op": "disable", "number": str(num)}, "192.168.1.50")
+        check(code == 200 and p["dry_run"] and p["guard"]["ok"] and len(p["changes"]) == 2, "api: plan (dry run)")
+        check(not run.mutations(), "api: plan ran no ufw")
+        code, r = api.fw_apply({"op": "disable", "number": num}, {"username": "t"}, "192.168.1.50")
+        check(code == 200 and r["needs_confirmation"] in sched and ["ufw", "reload"] in run.calls, "api: apply disable")
+        code, dl = api.fw_disabled_view()
+        check(code == 200 and len(dl["rules"]) == 2 and dl["rules"][0]["plain"], "api: disabled list")
+        sched[r["needs_confirmation"]]()
+        api._fw_snap.confirmed(r["needs_confirmation"])
+        code, dl = api.fw_disabled_view()
+        check(not dl["rules"], "api: revert empties the disabled list")
+        hp = next(i for i, r in enumerate(G.numbered(rs), 1) if G.classify_rule(r, api._fw_ctx())["owner"] == "honeypot")
+        code, r = api.fw_apply({"op": "disable", "number": hp}, {"username": "t"}, "192.168.1.50")
+        check(code == 403 and r.get("managed"), "api: managed rule -> 403")
+        code, r = api.fw_plan_view({"op": "honeypot-add", "port": "8008"}, "192.168.1.50")
+        check(code == 200 and not r["guard"]["ok"], "api: honeypot port 8008 refused by guard")
+        code, h = api.fw_hits_view()
+        check(code == 200 and "rules" in h, "api: hits view")
+    finally:
+        api.subprocess.run = real_sub
+        shutil.rmtree(root)
+
+
 def main():
+    t_canary()
+    t_lint()
+    if HAVE_UFW:
+        t_edit()
+        t_api()
+    else:
+        print("SKIP t_edit/t_api: python3 ufw module not installed")
+    t_hits()
     t_classify()
     if HAVE_UFW:
         t_invariants()
