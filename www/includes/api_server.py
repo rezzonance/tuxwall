@@ -2171,7 +2171,15 @@ def fw_hits_view():
     if _fw_hits is None or _fw_guard is None:
         return 503, {"ok": False, "error": "Hit counters unavailable"}
     ctx = _fw_ctx(raw=False)
-    return 200, _fw_hits.view(ctx, _fw_guard.load_ruleset(ctx, raw={}))
+    rs = _fw_guard.load_ruleset(ctx, raw={})
+    res = _fw_hits.view(ctx, rs)
+    rules = _fw_guard.numbered(rs)
+    for row in res["rules"]:
+        r = rules[row["number"] - 1]
+        row["text"] = r["text"]
+        if _fw_edit is not None:
+            row["plain"] = _fw_edit.plain(r, ctx)
+    return 200, res
 
 
 def fw_disabled_view():

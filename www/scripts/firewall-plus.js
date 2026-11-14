@@ -424,4 +424,469 @@
     if (t && !state.list) load();
   });
   if (pane && !pane.hidden && !view.hidden) load();
+
+  // ══ Session 2: findings, suggestions, edit / enable-disable, hit counters ══
+  var SVG = {
+    edit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L9 17l-4 1 1-4Z"/></svg>',
+    power: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v10"/><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/></svg>',
+    explain: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/><path d="M11 8v3l2 1"/></svg>',
+    tab: '<path d="M12 3 2 20h20Z"/><path d="M12 10v4"/><path d="M12 17h.01"/>'
+  };
+  var SEV = ["critical", "high", "medium", "low", "info"];
+  var s2 = { findings: null, sugg: null, sev: "", hits: null, hitsAt: 0, byNum: {}, pend: null, ptimer: 0 };
+
+  // navigation helpers (dashboard.js is an IIFE: go through the DOM)
+  function go(href) {
+    var parts = String(href || "").replace(/^#/, "").split("/");
+    var nav = document.querySelector('.nav-item[data-view="' + parts[0] + '"]');
+    if (nav) nav.click();
+    if (parts[1]) setTimeout(function () {
+      var v = document.getElementById("view-" + parts[0]);
+      var t = v && v.querySelector('.fw-subtab[data-fw-pane="' + parts[1] + '"], .fw-subtab[data-sec-pane="' + parts[1] + '"]');
+      if (t) t.click();
+      if (parts[0] === "interfaces") {
+        var m = document.getElementById("if-matrix");
+        if (m) m.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+    }, 60);
+  }
+  function explain(target) {
+    go("#security/traffic");
+    setTimeout(function () {
+      var inp = document.getElementById("diag-target");
+      if (!inp) return;
+      inp.value = target || "";
+      inp.scrollIntoView({ block: "center", behavior: "smooth" });
+      inp.focus();
+      if (target) { var b = document.getElementById("diag-btn"); if (b) b.click(); }
+    }, 160);
+  }
+  window.twFwExplain = explain;
+  function showRule(num) {
+    var tab = document.querySelector('#fw-subtabs .fw-subtab[data-fw-pane="rules"]');
+    if (tab) tab.click();
+    state.group = "";
+    decorate();
+    var fi = document.querySelector('#fw-iface-chips [data-fw-iface=""]');
+    if (fi && !fi.classList.contains("active")) fi.click();
+    var srch = document.getElementById("fw-search");
+    if (srch && srch.value) { srch.value = ""; srch.dispatchEvent(new Event("input", { bubbles: true })); }
+    setTimeout(function () {
+      var row = tbody.querySelector('tr[data-num="' + num + '"]');
+      if (!row) return;
+      var old = tbody.querySelectorAll("tr.fwp-flash");
+      for (var i = 0; i < old.length; i++) old[i].classList.remove("fwp-flash");
+      row.classList.add("fwp-flash");
+      row.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 80);
+  }
+  function refreshRules() {
+    s2.hitsAt = 0;
+    var nav = document.querySelector('.nav-item[data-view="firewall"]');
+    if (nav) nav.click();
+  }
+
+  // ── plan preview + apply + confirm (shared by Fix…, suggestions, edit, toggle) ──
+  function qs(o) {
+    return Object.keys(o).filter(function (k) { return o[k] != null && o[k] !== ""; }).map(function (k) {
+      return encodeURIComponent(k) + "=" + encodeURIComponent(o[k]);
+    }).join("&");
+  }
+  function planHtml(p, params) {
+    var g = p.guard || {};
+    var ch = (p.changes || []).map(function (c) {
+      return '<li class="fwp-pc fwp-pc-' + esc(c.kind) + '"><b>' + (c.kind === "add" ? "+" : c.kind === "remove" ? "−" : "↕") +
+        "</b> " + esc(c.plain) + '<div class="mono muted fwp-sub">' + esc(c.text) + "</div></li>";
+    }).join("");
+    var can = g.ok && !p.no_changes;
+    return guardHtml(g) + '<div class="fwp-lockout">' + esc(p.lockout_warning || "") + "</div>" +
+      (ch ? '<ul class="fwp-plan-changes">' + ch + "</ul>" : "") +
+      ((p.actions || []).length ? '<div class="muted fwp-sub">Steps: ' + esc(p.actions.join(" → ")) + "</div>" : "") +
+      '<div class="fwp-plan-foot">' + (can
+        ? '<button type="button" class="btn btn-danger btn-sm" data-s2="apply" data-params="' + esc(JSON.stringify(params)) +
+          '">Apply (60 s to confirm)</button>'
+        : '<button type="button" class="btn btn-sm" disabled>Apply</button>') +
+      ' <button type="button" class="btn btn-sm" data-s2="close-plan">Cancel</button></div>';
+  }
+  function openPlan(host, params) {
+    host.hidden = false;
+    host.innerHTML = '<div class="muted">Preparing preview…</div>';
+    return req("GET", "/api/firewall/plan?" + qs(params)).then(function (p) {
+      host.innerHTML = planHtml(p, params);
+    }).catch(function (e) {
+      var d = e.data || {};
+      host.innerHTML = '<div class="fwp-guard fwp-refused">' + esc(e.message) + "</div>" + guardHtml(d.guard) +
+        ' <button type="button" class="btn btn-sm" data-s2="close-plan">Close</button>';
+    });
+  }
+  function applyPlan(btn) {
+    var params = {};
+    try { params = JSON.parse(btn.getAttribute("data-params") || "{}"); } catch (_) { return; }
+    var host = btn.closest(".fwp-plan");
+    confirmBox("Apply this firewall change now?\n\nAn automatic snapshot is taken first. You then have 60 seconds " +
+      "to confirm; without confirmation the previous rules come back automatically.").then(function (ok) {
+      if (!ok) return;
+      btn.disabled = true;
+      req("POST", "/api/firewall/apply", params).then(function (r) {
+        if (host) host.innerHTML = '<div class="fwp-guard fwp-ok">' + esc(r.message || "Applied.") + "</div>";
+        if (r.needs_confirmation) startConfirm(r.needs_confirmation, r.confirm_within_s || 60);
+        s2.findings = s2.sugg = null;
+        refreshRules();
+      }).catch(function (e) {
+        btn.disabled = false;
+        if (host) host.innerHTML = '<div class="fwp-guard fwp-refused">' + esc(e.message) + "</div>" +
+          guardHtml((e.data || {}).guard) + ' <button type="button" class="btn btn-sm" data-s2="close-plan">Close</button>';
+      });
+    });
+  }
+  var bar = document.createElement("div");
+  bar.className = "fwp-confirm";
+  bar.hidden = true;
+  bar.setAttribute("role", "status");
+  view.appendChild(bar);
+  function startConfirm(cid, secs) {
+    s2.pend = { id: cid, until: Date.now() + secs * 1000 };
+    bar.hidden = false;
+    clearInterval(s2.ptimer);
+    var tick = function () {
+      var p = s2.pend;
+      if (!p) return;
+      var left = Math.max(0, Math.round((p.until - Date.now()) / 1000));
+      if (!left) {
+        clearInterval(s2.ptimer);
+        s2.pend = null;
+        bar.innerHTML = "<b>Not confirmed.</b> The previous rules were restored automatically.";
+        setTimeout(function () { bar.hidden = true; refreshRules(); }, 2500);
+        return;
+      }
+      bar.innerHTML = "<b>Firewall changed.</b> Keep it? Reverting in <span class=\"mono\">" + left + " s</span> " +
+        '<button type="button" class="btn btn-primary btn-sm" data-s2="keep">Keep the change</button>';
+    };
+    tick();
+    s2.ptimer = setInterval(tick, 1000);
+  }
+  bar.addEventListener("click", function (e) {
+    if (!e.target.closest('[data-s2="keep"]') || !s2.pend) return;
+    req("POST", "/api/firewall/confirm", { id: s2.pend.id }).then(function () {
+      clearInterval(s2.ptimer);
+      s2.pend = null;
+      bar.innerHTML = "Change kept.";
+      setTimeout(function () { bar.hidden = true; }, 3000);
+    }).catch(function (err) { bar.innerHTML = "Confirm failed: " + esc(err.message); });
+  });
+
+  // ── Findings pane ─────────────────────────────────────────────────────────
+  var fpane = view.querySelector('.fw-pane[data-fw-pane="findings"]');
+  var ftab = document.querySelector('#fw-subtabs .fw-subtab[data-fw-pane="findings"]');
+  if (ftab && !ftab.querySelector(".tab-ic")) {
+    var ic = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    ic.setAttribute("class", "tab-ic");
+    ic.setAttribute("viewBox", "0 0 24 24");
+    ic.setAttribute("aria-hidden", "true");
+    ic.setAttribute("fill", "none");
+    ic.setAttribute("stroke", "currentColor");
+    ic.innerHTML = SVG.tab;
+    ftab.insertBefore(ic, ftab.firstChild);
+  }
+  if (fpane) {
+    fpane.innerHTML =
+      '<div class="card fwp-findings" id="fw-findings"><div class="card-head"><h2>Findings</h2>' +
+      '<span class="muted">What the ruleset actually does that you may not intend. Nothing is changed until you apply a previewed fix.</span></div>' +
+      '<div class="fw-chip-row fwp-sevs" role="tablist" aria-label="Filter findings by severity"></div>' +
+      '<div class="fwp-flist" id="fwp-flist"><div class="muted fwp-pad">Loading…</div></div></div>' +
+      '<div class="card fwp-sugg" id="fw-suggestions"><div class="card-head"><h2>Suggestions</h2>' +
+      '<span class="muted">Plans built from listening services, blocked traffic and templates. Preview first; nothing applies automatically.</span></div>' +
+      '<div class="fwp-flist" id="fwp-slist"><div class="muted fwp-pad">Loading…</div></div></div>';
+  }
+  function refChips(rules) {
+    return (rules || []).filter(function (r) { return r.number; }).map(function (r) {
+      return '<button type="button" class="fwp-ref mono" data-s2="ref" data-num="' + r.number + '" title="' + esc(r.text) +
+        '">#' + r.number + (r.family === "v6" ? " v6" : "") + "</button>";
+    }).join("");
+  }
+  function fixBtn(f, idx, list) {
+    var x = f.fix;
+    var ex = f.explain ? '<button type="button" class="btn btn-sm" data-s2="explain" data-target="' + esc(f.explain) + '">Explain</button>' : "";
+    if (!x) return ex;
+    if (x.kind === "link") return '<button type="button" class="btn btn-sm" data-s2="link" data-href="' + esc(x.href) + '">' + esc(x.label || "Open") + "</button>" + ex;
+    return '<button type="button" class="btn btn-sm btn-primary" data-s2="fix" data-list="' + list + '" data-idx="' + idx + '">Fix…</button>' + ex;
+  }
+  function findingHtml(f, i) {
+    var long = (f.detail || "").length > 220 || (f.raw || []).length;
+    return '<div class="fwp-f fwp-sev-' + esc(f.severity) + '" data-id="' + esc(f.id) + '">' +
+      '<div class="fwp-f-head"><span class="fwp-sev">' + esc(f.severity) + '</span><span class="fwp-f-title">' + esc(f.title) + "</span></div>" +
+      (f.detail ? (long ? '<details class="fwp-f-more"><summary>' + esc(f.detail.split("\n")[0].slice(0, 160)) + "</summary>" +
+        '<div class="fwp-f-detail">' + esc(f.detail) + "</div>" +
+        ((f.raw || []).length ? '<pre class="fwp-raw">' + esc(f.raw.join("\n")) + "</pre>" : "") + "</details>"
+        : '<div class="fwp-f-detail">' + esc(f.detail) + "</div>") : "") +
+      '<div class="fwp-f-foot">' + refChips(f.rules) + '<span class="fwp-sp"></span>' + fixBtn(f, i, "f") + "</div>" +
+      '<div class="fwp-plan" hidden></div></div>';
+  }
+  function renderFindings() {
+    var d = s2.findings;
+    var box = document.getElementById("fwp-flist");
+    if (!d || !box) return;
+    var c = d.counts || {};
+    var sevs = fpane.querySelector(".fwp-sevs");
+    sevs.innerHTML = '<button type="button" role="tab" class="fw-chip' + (!s2.sev ? " active" : "") + '" aria-selected="' + !s2.sev +
+      '" data-s2="sev" data-sev="">All <span class="fw-chip-n">' + (d.findings || []).length + "</span></button>" +
+      SEV.filter(function (s) { return c[s]; }).map(function (s) {
+        return '<button type="button" role="tab" class="fw-chip fwp-chip-' + s + (s2.sev === s ? " active" : "") + '" aria-selected="' +
+          (s2.sev === s) + '" data-s2="sev" data-sev="' + s + '">' + s + ' <span class="fw-chip-n">' + c[s] + "</span></button>";
+      }).join("");
+    var list = (d.findings || []).map(function (f, i) { return [f, i]; }).filter(function (x) { return !s2.sev || x[0].severity === s2.sev; });
+    box.innerHTML = list.length ? list.map(function (x) { return findingHtml(x[0], x[1]); }).join("")
+      : '<div class="muted fwp-pad">' + ((d.findings || []).length ? "No findings at this severity." : "No findings — the ruleset does what it says.") + "</div>";
+    if (ftab) {
+      var top = (c.critical || 0) + (c.high || 0);
+      var badge = ftab.querySelector(".fwp-tabn");
+      if (!badge) { badge = document.createElement("span"); badge.className = "fwp-tabn"; ftab.appendChild(badge); }
+      badge.textContent = top ? String(top) : "";
+      badge.hidden = !top;
+    }
+  }
+  function suggHtml(s, i) {
+    var plan = s.plan || {};
+    var st = s.status ? '<span class="fwp-st fwp-st-' + esc(s.status) + '">' + esc(s.status === "ok" ? "in place" : s.status) + "</span>" : "";
+    var btns = "";
+    if (plan.op && plan.op !== "template") btns += '<button type="button" class="btn btn-sm btn-primary" data-s2="fix" data-list="s" data-idx="' + i + '">Preview…</button>';
+    if (plan.op === "template") btns += '<button type="button" class="btn btn-sm" data-s2="tpl" data-idx="' + i + '">Show rules</button>';
+    if (s.href) btns += '<button type="button" class="btn btn-sm" data-s2="link" data-href="' + esc(s.href) + '">' + (s.href === "#interfaces" ? "Policy matrix" : "Open") + "</button>";
+    if (s.explain) btns += '<button type="button" class="btn btn-sm" data-s2="explain" data-target="' + esc(s.explain) + '">Explain</button>';
+    return '<div class="fwp-f fwp-s fwp-k-' + esc(s.kind) + '"><div class="fwp-f-head"><span class="fwp-kind">' + esc(s.kind) + "</span>" +
+      '<span class="fwp-f-title">' + esc(s.title) + "</span>" + st + "</div>" +
+      (s.detail ? '<div class="fwp-f-detail">' + esc(s.detail) + "</div>" : "") +
+      '<div class="fwp-f-foot">' + refChips(s.rules) + '<span class="fwp-sp"></span>' + btns + "</div>" +
+      '<div class="fwp-plan" hidden></div></div>';
+  }
+  function renderSugg() {
+    var box = document.getElementById("fwp-slist");
+    if (!s2.sugg || !box) return;
+    var l = s2.sugg.suggestions || [];
+    box.innerHTML = l.length ? l.map(suggHtml).join("") : '<div class="muted fwp-pad">No suggestions right now.</div>';
+  }
+  function loadFindings(force) {
+    if (!fpane) return;
+    if (force || !s2.findings) {
+      req("GET", "/api/firewall/findings").then(function (d) { s2.findings = d; renderFindings(); })
+        .catch(function (e) { document.getElementById("fwp-flist").innerHTML = '<div class="muted fwp-pad">Findings unavailable: ' + esc(e.message) + "</div>"; });
+    } else renderFindings();
+    if (force || !s2.sugg) {
+      req("GET", "/api/firewall/suggestions").then(function (d) { s2.sugg = d; renderSugg(); })
+        .catch(function (e) { document.getElementById("fwp-slist").innerHTML = '<div class="muted fwp-pad">Suggestions unavailable: ' + esc(e.message) + "</div>"; });
+    } else renderSugg();
+  }
+  function fixParams(x) {
+    var p = { op: x.op };
+    ["number", "to", "expect", "rule", "before", "id", "port"].forEach(function (k) { if (x[k] != null) p[k] = x[k]; });
+    return p;
+  }
+  function manualHtml(x) {
+    return '<div class="fwp-guard">Preview only — this file is not edited from the dashboard.</div>' +
+      ((x.steps || []).length ? '<ol class="fwp-steps">' + x.steps.map(function (s) { return "<li>" + esc(s) + "</li>"; }).join("") + "</ol>" : "") +
+      (x.diff ? '<pre class="fwp-raw">' + x.diff.split("\n").map(function (l) {
+        var c = l.charAt(0) === "+" && l.indexOf("+++") ? "fwp-add" : (l.charAt(0) === "-" && l.indexOf("---") ? "fwp-del" : "");
+        return '<span class="' + c + '">' + esc(l) + "</span>";
+      }).join("\n") + "</pre>" : "") + '<button type="button" class="btn btn-sm" data-s2="close-plan">Close</button>';
+  }
+
+  view.addEventListener("click", function (e) {
+    var b = e.target.closest("[data-s2]");
+    if (!b || !view.contains(b)) return;
+    var act = b.getAttribute("data-s2");
+    var item = b.closest(".fwp-f");
+    if (act === "ref") showRule(b.getAttribute("data-num"));
+    else if (act === "sev") { s2.sev = b.getAttribute("data-sev"); renderFindings(); }
+    else if (act === "link") go(b.getAttribute("data-href"));
+    else if (act === "explain") explain(b.getAttribute("data-target"));
+    else if (act === "close-plan") { var h = b.closest(".fwp-plan"); if (h) { h.hidden = true; h.innerHTML = ""; } }
+    else if (act === "apply") applyPlan(b);
+    else if (act === "tpl" && item) {
+      var s = (s2.sugg.suggestions || [])[+b.getAttribute("data-idx")];
+      var host = item.querySelector(".fwp-plan");
+      host.hidden = false;
+      host.innerHTML = '<div class="muted fwp-sub">Equivalent ufw rules (for reference; the policy matrix writes managed versions):</div><pre class="fwp-raw">' +
+        esc((s.plan.rules || []).join("\n")) + '</pre><button type="button" class="btn btn-sm" data-s2="close-plan">Close</button>';
+    } else if (act === "fix" && item) {
+      var src = b.getAttribute("data-list") === "s" ? (s2.sugg.suggestions || []) : (s2.findings.findings || []);
+      var f = src[+b.getAttribute("data-idx")];
+      var x = f.fix || f.plan;
+      var host2 = item.querySelector(".fwp-plan");
+      if (!x || !host2) return;
+      if (x.kind === "manual") { host2.hidden = false; host2.innerHTML = manualHtml(x); }
+      else if (x.kind === "edit") { showRule(x.number); setTimeout(function () { openEditor(x.number); }, 150); }
+      else openPlan(host2, fixParams(x));
+    }
+  });
+  if (ftab) ftab.addEventListener("click", function () { loadFindings(false); });
+  if (fpane && !fpane.hidden && !view.hidden) loadFindings(false);
+
+  // ── Rules tab: hit counters, Edit / Disable / Explain per row ─────────────
+  function ago(t) {
+    if (!t) return "never";
+    var s = Math.max(0, Date.now() / 1000 - t);
+    return s < 90 ? "just now" : s < 5400 ? Math.round(s / 60) + " min ago" : s < 129600 ? Math.round(s / 3600) + " h ago" : Math.round(s / 86400) + " d ago";
+  }
+  function fmtN(n) { return n == null ? "–" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? Math.round(n / 1e3) + "k" : String(n); }
+  function spark(a) {
+    var max = Math.max.apply(null, a.concat([1]));
+    var pts = a.map(function (v, i) { return (i * 40 / (a.length - 1)).toFixed(1) + "," + (11 - v / max * 10).toFixed(1); }).join(" ");
+    return '<svg class="fwp-spark" viewBox="0 0 40 12" aria-hidden="true"><polyline points="' + pts + '"/></svg>';
+  }
+  function hitsHtml(h) {
+    if (!h || h.hits == null) return "";
+    var tip = "Matched " + (h.hits || 0) + " packets since the last firewall reload" +
+      (h.total != null ? "; " + h.total + " since " + new Date((h.first || 0) * 1000).toLocaleDateString() : "") +
+      ". Last hit: " + ago(h.last_hit) + ". Sparkline: last 24 h.";
+    return '<span class="fwp-hits' + (h.hits ? "" : " fwp-zero") + '" title="' + esc(tip) + '">' + spark(h.spark || [0, 0]) +
+      '<span class="mono">' + fmtN(h.hits) + "</span></span>";
+  }
+  function rowTarget(row) {
+    var c = [(row.dataset.from || "").split(" ")[0], (row.dataset.to || "").split(" ")[0]];
+    for (var i = 0; i < c.length; i++) if (/^\d{1,3}(\.\d{1,3}){3}$/.test(c[i])) return c[i];
+    return "";
+  }
+  function decorateS2() {
+    var rows = tbody.querySelectorAll("tr[data-num]");
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i], num = row.dataset.num;
+      if (!num || row.dataset.fwpS2 === String(s2.hitsAt)) continue;
+      row.dataset.fwpS2 = String(s2.hitsAt);
+      var cell = row.cells[row.cells.length - 1];
+      if (!cell) continue;
+      var h = s2.byNum[num];
+      var span = cell.querySelector(".fwp-rowx");
+      if (!span) {
+        span = document.createElement("span");
+        span.className = "fwp-rowx";
+        var managed = row.dataset.managed === "1";
+        var tgt = rowTarget(row);
+        span.innerHTML = '<span class="fwp-hslot"></span>' +
+          (managed ? "" : '<button type="button" class="act-btn fwp-act" data-s2r="edit" title="Edit this rule (preview, guard, 60 s confirm)" aria-label="Edit rule ' + esc(num) + '">' + SVG.edit + "</button>" +
+            '<button type="button" class="act-btn fwp-act" data-s2r="disable" title="Disable (removed from ufw, kept under Disabled rules)" aria-label="Disable rule ' + esc(num) + '">' + SVG.power + "</button>") +
+          '<button type="button" class="act-btn fwp-act" data-s2r="explain" data-target="' + esc(tgt) + '" title="Explain: open Security → Traffic → Diagnose' + (tgt ? " for " + esc(tgt) : "") + '" aria-label="Explain rule ' + esc(num) + '">' + SVG.explain + "</button>";
+        cell.appendChild(span);
+      }
+      var slot = span.querySelector(".fwp-hslot");
+      if (h && slot) slot.innerHTML = hitsHtml(h);
+    }
+  }
+  function loadHits() {
+    if (Date.now() - s2.hitsAt < 60000 && s2.hits) { decorateS2(); return; }
+    req("GET", "/api/firewall/hits").then(function (d) {
+      s2.hits = d;
+      s2.hitsAt = Date.now();
+      s2.byNum = {};
+      (d.rules || []).forEach(function (r) { s2.byNum[r.number] = r; });
+      decorateS2();
+    }).catch(function () { /* counters optional */ });
+  }
+  new MutationObserver(function () {
+    if (tbody.querySelector("tr[data-num]:not([data-fwp-s2])")) {
+      if (s2.hits) decorateS2();
+      loadHits();
+    }
+  }).observe(tbody, { childList: true });
+  if (tbody.querySelector("tr[data-num]")) loadHits();
+
+  function editorRow(row) {
+    var n = row.nextElementSibling;
+    if (n && n.classList.contains("fwp-edrow")) return n;
+    n = document.createElement("tr");
+    n.className = "fwp-edrow";
+    n.innerHTML = '<td colspan="9"><div class="fwp-ed"></div></td>';
+    row.parentNode.insertBefore(n, row.nextSibling);
+    return n;
+  }
+  function openEditor(num) {
+    var row = tbody.querySelector('tr[data-num="' + num + '"]');
+    var h = s2.byNum[num];
+    if (!row || !h) return;
+    var tr = editorRow(row);
+    var box = tr.querySelector(".fwp-ed");
+    var text = h.text || "";
+    var m = text.match(/^(.*?)(?: comment '(.*)')?$/);
+    box.innerHTML = '<div class="fwp-ed-grid"><label>Rule <input type="text" class="mono fwp-ed-rule" value="' + esc(m ? m[1] : text) + '" spellcheck="false" autocomplete="off"></label>' +
+      '<label>Comment <input type="text" class="fwp-ed-com" maxlength="120" value="' + esc(m && m[2] ? m[2] : "") + '" placeholder="why this rule exists"></label></div>' +
+      '<div class="muted fwp-sub">Now: ' + esc(h.plain || "") + "</div>" +
+      '<div class="fwp-ed-btns"><button type="button" class="btn btn-sm btn-primary" data-s2e="preview" data-num="' + num + '">Preview</button>' +
+      ' <button type="button" class="btn btn-sm" data-s2e="cancel">Cancel</button></div><div class="fwp-plan" hidden></div>';
+    box.querySelector(".fwp-ed-rule").focus();
+  }
+  tbody.addEventListener("click", function (e) {
+    var b = e.target.closest("[data-s2r], [data-s2e]");
+    if (!b) return;
+    var row = b.closest("tr[data-num]");
+    var act = b.getAttribute("data-s2r") || b.getAttribute("data-s2e");
+    if (act === "explain") { explain(b.getAttribute("data-target")); return; }
+    if (act === "cancel") { var er = b.closest("tr.fwp-edrow"); if (er) er.remove(); return; }
+    if (act === "edit" && row) { openEditor(row.dataset.num); return; }
+    var hh = row ? s2.byNum[row.dataset.num] : null;
+    if (act === "disable" && row) {
+      var tr = editorRow(row);
+      var host = tr.querySelector(".fwp-ed");
+      host.innerHTML = '<div class="fwp-plan"></div>';
+      openPlan(host.querySelector(".fwp-plan"), { op: "disable", number: row.dataset.num, expect: hh ? hh.key : "" });
+      return;
+    }
+    if (act === "preview") {
+      var ed = b.closest(".fwp-ed");
+      var rule = ed.querySelector(".fwp-ed-rule").value.trim();
+      var com = ed.querySelector(".fwp-ed-com").value.trim();
+      var num = b.getAttribute("data-num");
+      var h2 = s2.byNum[num];
+      openPlan(ed.querySelector(".fwp-plan"), { op: "edit", number: num, expect: h2 ? h2.key : "",
+        rule: rule + (com ? " comment '" + com.replace(/'/g, "") + "'" : "") });
+    }
+  });
+
+  // disabled rules (stored in /etc/tuxwall/fw-disabled.json)
+  var rulesCard = table.closest(".card");
+  var dis = document.createElement("details");
+  dis.className = "fwp-disabled";
+  dis.hidden = true;
+  if (rulesCard) rulesCard.appendChild(dis);
+  function loadDisabled() {
+    req("GET", "/api/firewall/disabled").then(function (d) {
+      var l = d.rules || [];
+      dis.hidden = !l.length;
+      if (!l.length) { dis.innerHTML = ""; return; }
+      dis.innerHTML = "<summary>Disabled rules (" + l.length + ")</summary><ul>" + l.map(function (r) {
+        return '<li><div><span class="mono">' + esc(r.text) + '</span><div class="muted fwp-sub">' + esc(r.plain) +
+          " · disabled " + esc(ago(r.disabled_at)) + (r.who ? " by " + esc(r.who) : "") + "</div></div>" +
+          '<button type="button" class="btn btn-sm" data-s2d="' + esc(r.id) + '">Enable…</button><div class="fwp-plan" hidden></div></li>';
+      }).join("") + "</ul>";
+    }).catch(function () { dis.hidden = true; });
+  }
+  dis.addEventListener("click", function (e) {
+    var b = e.target.closest("[data-s2d]");
+    if (!b) return;
+    openPlan(b.parentNode.querySelector(".fwp-plan"), { op: "enable", id: b.getAttribute("data-s2d") });
+  });
+  if (rulesCard) rulesCard.addEventListener("click", function (e) {
+    var b = e.target.closest('[data-s2="apply"], [data-s2="close-plan"]');
+    if (!b || b.closest("#fw-findings, #fw-suggestions")) return;
+    if (b.getAttribute("data-s2") === "close-plan") { var er = b.closest("tr.fwp-edrow"); if (er) er.remove(); }
+  });
+  new MutationObserver(function (m) {
+    for (var i = 0; i < m.length; i++) if (m[i].addedNodes.length) { loadDisabled(); return; }
+  }).observe(tbody, { childList: true });
+
+  // Explain per blocked event (Firewall → Traffic → recent events)
+  var evBody = document.querySelector("#fw-events tbody");
+  if (evBody) new MutationObserver(function () {
+    var btns = evBody.querySelectorAll(".fw-block-src[data-ip]:not([data-fwp-x])");
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].setAttribute("data-fwp-x", "1");
+      var x = document.createElement("button");
+      x.type = "button";
+      x.className = "act-btn fwp-act";
+      x.setAttribute("data-s2", "explain");
+      x.setAttribute("data-target", btns[i].getAttribute("data-ip"));
+      x.title = "Explain: why was this blocked? (Security → Traffic → Diagnose)";
+      x.setAttribute("aria-label", x.title);
+      x.innerHTML = SVG.explain;
+      btns[i].parentNode.appendChild(x);
+    }
+  }).observe(evBody, { childList: true });
 })();
