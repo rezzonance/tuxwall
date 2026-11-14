@@ -211,3 +211,30 @@ html[data-theme-style]:not([data-theme-style=""]) .ni-interfaces { --ni-color: v
   .if-vl-grid { grid-template-columns: 1fr; gap: 2px; }
   .if-vl-k { padding-top: 6px; }
 }
+
+/* ---- spacing aligned with the shared .fw-pane strips (Nov 14) ---- */
+/* panes start 18px below the sub-tab strip, like every other view */
+#view-interfaces > [data-if-body] { padding-top: 18px; }
+#view-interfaces > [data-if-body] > .if-roles,
+#view-interfaces > [data-if-body] > .if-services,
+#view-interfaces > [data-if-body] > .card-mt:first-child { margin-top: 0; }
+/* stretch the role cards across the row instead of leaving an empty track */
+.if-roles { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.if-lockbar, .if-pending { margin-bottom: 14px; }
+/* card intro lines: 12px below the header, body-size text (as Plugins/Settings) */
+#view-interfaces .card > .card-head + .if-sub { margin-top: 12px; font-size: inherit; line-height: 1.5; }
+@media (max-width: 760px) {
+  .if-roles { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+}
+/* policy card: matrix cells (4px border-spacing) line up with the intro and buttons */
+.if-mx-wrap { padding: 0 12px 6px; }
+@media (max-width: 760px) {
+  .if-mx-intro { margin-left: 10px; margin-right: 10px; }
+  .if-mx-wrap { padding: 0 6px 6px; }
+  .if-mx-detail { margin-left: 10px; margin-right: 10px; }
+  .if-mx-notes { margin-left: 10px; margin-right: 10px; }
+}
+/* role cards use the same gaps as the stat cards above them */
+.if-roles { gap: 14px; }
+@media (max-width: 760px) { .if-roles { gap: 8px; } }
+@media (max-width: 420px) { .if-roles { gap: 6px; } }

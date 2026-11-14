@@ -272,8 +272,36 @@
   function clone(o) { return JSON.parse(JSON.stringify(o == null ? null : o)); }
   function locked() { return !state.data || state.data.apply_locked !== false; }
 
+  // Sub-tab glyphs in the shared 24px / 1.8 stroke style (dashboard.js
+  // SUBTAB_ICONS covers the other views; these tabs are partly built here).
+  var TAB_ICONS = {
+    ports: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7.5 15.5v-4h2v-2h5v2h2v4z"/>',
+    vlans: '<path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L3 13.2V3h10.2l7.4 7.6a2 2 0 0 1 0 2.8z"/><circle cx="7.6" cy="7.6" r="1.4"/>',
+    services: '<path d="M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0zM12 17v5"/>',
+    policy: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/>',
+    edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/>'
+  };
+  function tabIcons() {
+    var strip = $("#if-subtabs");
+    if (!strip) return;
+    var added = false;
+    $$(".fw-subtab[data-if-pane]", strip).forEach(function (t) {
+      var body = TAB_ICONS[t.getAttribute("data-if-pane")];
+      if (!body || t.querySelector(".tab-ic")) return;
+      var i = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      i.setAttribute("class", "tab-ic"); i.setAttribute("viewBox", "0 0 24 24"); i.setAttribute("aria-hidden", "true");
+      i.setAttribute("fill", "none"); i.setAttribute("stroke", "currentColor");
+      i.innerHTML = body;
+      t.insertBefore(i, t.firstChild);
+      added = true;
+    });
+    // tabs got wider: let the shared strip re-measure its sliding pill
+    if (added) strip.dispatchEvent(new Event("scroll"));
+  }
+
   function ensureEditUI() {
     ensureVlanUI();
+    tabIcons();
     if ($("#if-edit-tab")) return;
     var tabs = $("#if-subtabs");
     var b = document.createElement("button");
@@ -282,6 +310,7 @@
     b.textContent = "Edit & plan";
     tabs.appendChild(b);
     $$(".fw-subtab[data-if-pane]").forEach(function (t) { t.setAttribute("role", "tab"); });
+    tabIcons();
     var body = document.createElement("div");
     body.setAttribute("data-if-body", "edit"); body.hidden = true;
     body.innerHTML = '<div class="if-lockbar" id="if-lockbar" hidden></div>' +

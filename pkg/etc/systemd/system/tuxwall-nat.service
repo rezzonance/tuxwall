@@ -7,6 +7,8 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=/usr/local/sbin/tuxwall-nat-ensure
 RemainAfterExit=yes
+# the script may wait up to 90 s for the WAN default route at boot
+TimeoutStartSec=150
 
 [Install]
 WantedBy=multi-user.target
