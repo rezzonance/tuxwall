@@ -144,7 +144,8 @@ def pending():
                  "after_reboot": v["after_reboot"], "user": v["user"]} for k, v in _pending.items()]
 
 
-def apply(body, session_ip="", user="", root="", runner=None, schedule=None, ttl=CONFIRM_S, raw=None):
+def apply(body, session_ip="", user="", root="", runner=None, schedule=None, ttl=CONFIRM_S, raw=None,
+          guard=None):
     """Returns (http_status, payload)."""
     if is_locked(root):
         return locked_response()
@@ -167,6 +168,10 @@ def apply(body, session_ip="", user="", root="", runner=None, schedule=None, ttl
         if res.lockout and not body.get("ack_lockout"):
             return 409, {"ok": False, "lockout": True, "warnings": res.warnings,
                          "error": "This change affects the network you are connected through; confirm the warning first."}
+        if guard is not None:
+            refused = guard(res)
+            if refused:
+                return refused
         after_reboot = bool(body.get("after_reboot"))
         aid = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         ordered = P._ordered(res)

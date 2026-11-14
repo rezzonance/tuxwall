@@ -39,6 +39,12 @@ try:
 except Exception as _exc:  # the API must still start without it
     print("tuxwall: topology module unavailable: %r" % _exc, flush=True)
     _topology = None
+try:
+    import fw_guard as _fw_guard
+    import fw_snap as _fw_snap
+except Exception as _exc:
+    print("tuxwall: firewall guard/snapshot modules unavailable: %r" % _exc, flush=True)
+    _fw_guard = _fw_snap = None
 
 
 def _topo(fn, default=""):
@@ -1453,6 +1459,7 @@ def build_firewall():
         for k, v in sorted(ports.items(), key=lambda x: -x[1])[:10]
     ]
     traffic["recent"] = events[-25:]
+    _fw_annotate_rules(rules)
 
     return {
         "ok": True,
@@ -1523,7 +1530,7 @@ def _firewall_counters():
     return out
 
 
-def add_firewall_rule(rule_text):
+def add_firewall_rule(rule_text, client_ip=""):
     """Add a ufw rule, e.g. 'allow 8080/tcp' or
     'allow in on wg0 from 10.0.0.0/24 to any port 53 proto udp'."""
     args = (rule_text or "").split()
@@ -1549,11 +1556,13 @@ def add_firewall_rule(rule_text):
             raise RuntimeError("Flag-style tokens are not allowed in firewall rules")
         if any(c in tok for c in ";|&$`!(){}<>\\\n\r"):
             raise RuntimeError("Invalid character in firewall rule")
+    _fw_guard_run(lambda cur: _fw_guard.proposed_add(cur, args)[0], client_ip,
+                  "add " + " ".join(args))
     _ufw(args)
     return build_firewall()
 
 
-def delete_firewall_rule(spec):
+def delete_firewall_rule(spec, client_ip=""):
     """Delete a ufw rule by its CONTENT, not its number.
 
     2026-11-09 audit: numbers in 'ufw status numbered' shift whenever any
@@ -1565,6 +1574,8 @@ def delete_firewall_rule(spec):
     delete the rule that matches the spec. A stale number is fine (it
     just means things shifted); a stale SPEC that matches nothing is a
     clean 'already deleted' error, never a wrong-rule deletion."""
+    if not isinstance(spec, dict):
+        raise RuntimeError("Rule spec is incomplete")
     to = str(spec.get("to") or "").strip()
     action = str(spec.get("action") or "").strip()
     frm = str(spec.get("from") or "").strip()
@@ -1596,6 +1607,9 @@ def delete_firewall_rule(spec):
             raise RuntimeError(
                 "Rule not found in the current ruleset - it may already "
                 "have been deleted. Refresh the firewall page.")
+        _fw_managed_check(found, "deleted")
+        _fw_guard_run(lambda cur: _fw_guard.proposed_delete(cur, found), client_ip,
+                      "delete rule %d" % found)
         _ufw(["--force", "delete", str(found)])
     return build_firewall()
 
@@ -1629,7 +1643,7 @@ def _ufw_rule_key(r):
             r.src, r.dst, r.interface_in, r.interface_out, r.comment)
 
 
-def move_firewall_rule(number, direction, expected_spec=None):
+def move_firewall_rule(number, direction, expected_spec=None, client_ip=""):
     """Swap the numbered rule with the adjacent rule in its family
     (IPv4/IPv6) list. Numbering matches `ufw status numbered`."""
     if direction not in ("up", "down"):
@@ -1656,12 +1670,15 @@ def move_firewall_rule(number, direction, expected_spec=None):
             if m and int(m.group(1)) == num:
                 cur = m.group(2).strip()
                 break
-        if cur is None or cur != exp:
+        if cur is None or " ".join(cur.split()) != " ".join(exp.split()):
             raise RuntimeError(
                 "Ruleset changed since the page was rendered (rule %d no "
                 "longer matches what you saw). Refresh the firewall page "
                 "and retry." % num)
 
+    _fw_managed_check(num, "moved")
+    _fw_guard_run(lambda cur: _fw_guard.proposed_move(cur, num, direction), client_ip,
+                  "move rule %d %s" % (num, direction))
     with _fw_move_lock:
         b = _ufw_backend()
         rules = b.get_rules()
@@ -1788,7 +1805,7 @@ def confirm_fw_change(change_id):
     return {"ok": True, "confirmed": pending["desc"], "was_remaining_s": remaining}
 
 
-def set_firewall_default(direction, policy):
+def set_firewall_default(direction, policy, client_ip=""):
     """Set a default policy: `ufw default <policy> <direction>`.
 
     Setting incoming/routed to allow/accept is the classic lockout-
@@ -1800,6 +1817,8 @@ def set_firewall_default(direction, policy):
         raise RuntimeError("Invalid direction (incoming/outgoing/routed)")
     if policy not in _UFW_POLICIES:
         raise RuntimeError("Invalid policy (allow/deny/reject)")
+    _fw_guard_run(lambda cur: _fw_guard.proposed_default(cur, direction, policy), client_ip,
+                  "default %s %s" % (policy, direction))
 
     dangerous = direction in ("incoming", "routed") and policy in ("allow", "accept")
     if dangerous:
@@ -1892,6 +1911,210 @@ def restore_firewall_baseline():
             if _norm_ruleset(live.stdout) != _norm_ruleset(f.read()):
                 verified = False
     return {"ok": True, "restored": paths, "verified": verified}
+
+
+# --- Firewall guard + snapshot history (fw_guard.py / fw_snap.py) ----------
+# Every mutating firewall endpoint asks the guard first: managed rules
+# (honeypot, canary, policy, WireGuard, NAT, ...) can't be deleted or moved
+# from the Rules tab, and a change that adds a new critical/high invariant
+# violation (lockout, WAN management port, default allow, missing deception
+# or containment rules) is refused. An automatic snapshot is taken first.
+class _FwRefused(Exception):
+    def __init__(self, status, payload):
+        Exception.__init__(self, payload.get("error", "refused"))
+        self.status = status
+        self.payload = payload
+
+
+def _fw_ctx(client_ip="", raw=True):
+    return _fw_guard.Ctx(client_ip=client_ip, raw=raw)
+
+
+def _fw_guard_run(propose, client_ip, what):
+    """Run the guard for a proposed change; raise _FwRefused when it blocks.
+    A crash inside the guard is logged and does not block (fail-open) - the
+    managed-rule lock is checked separately and fails closed."""
+    if _fw_guard is None:
+        return None
+    try:
+        ctx = _fw_ctx(client_ip)
+        cur = _fw_guard.load_ruleset(ctx)
+        prop = propose(cur)
+        res = _fw_guard.check(cur, prop, ctx)
+    except _FwRefused:
+        raise
+    except Exception as exc:
+        print("[fw] guard error (%s): %r" % (what, exc), flush=True)
+        return {"ok": True, "guard_error": str(exc)}
+    if not res["ok"]:
+        print("[fw] FW-GUARD-REFUSED %s: %s" % (what, res["summary"]), flush=True)
+        raise _FwRefused(409, {"ok": False, "error": res["summary"], "guard": res})
+    return res
+
+
+def _fw_managed_check(number, verb):
+    """403 when the numbered rule is managed by a TuxWall component."""
+    if _fw_guard is None:
+        return
+    try:
+        ctx = _fw_ctx(raw=False)
+        rule = _fw_guard.rule_by_number(_fw_guard.load_ruleset(ctx), number)
+    except Exception as exc:
+        raise _FwRefused(503, {"ok": False, "error": "Firewall guard unavailable: %s" % exc})
+    if rule is None:
+        return
+    c = _fw_guard.classify_rule(rule, ctx)
+    if c["managed"]:
+        raise _FwRefused(403, {"ok": False, "managed": True, "owner": c["owner"],
+                               "owner_label": c["label"],
+                               "error": _fw_guard.managed_refusal(c, verb)})
+
+
+def _fw_annotate_rules(rules):
+    """Attach owner/managed/group to the build_firewall() rows (by number)."""
+    if _fw_guard is None:
+        return
+    try:
+        ctx = _fw_ctx(raw=False)
+        numbered = _fw_guard.numbered(_fw_guard.load_ruleset(ctx))
+    except Exception as exc:
+        print("[fw] classify failed: %r" % exc, flush=True)
+        return
+    for row in rules:
+        n = row.get("number")
+        if not n or n > len(numbered):
+            continue
+        r = numbered[n - 1]
+        port = (row.get("port") or "").split("/")[0]
+        if r["dport"] != "any" and port and port != r["dport"]:
+            continue  # numbering drifted; leave the row unclassified
+        c = _fw_guard.classify_rule(r, ctx)
+        row.update({"owner": c["owner"], "managed": c["managed"], "owner_label": c["label"],
+                    "owner_reason": c["reason"], "group": c["group"]})
+
+
+def _fw_autosnap(reason, identity=None):
+    if _fw_snap is None:
+        return None
+    try:
+        return _fw_snap.create(_fw_ctx(raw=False), kind="auto", reason=reason,
+                               who=(identity or {}).get("username", ""),
+                               version=TUXWALL_VERSION, dedupe=True)
+    except Exception as exc:
+        print("[fw] auto snapshot failed (%s): %r" % (reason, exc), flush=True)
+        return None
+
+
+def _fw_reapply_owned():
+    """Owned raw rules from their CURRENT configs, after a ufw reload. The
+    CrowdSec chain is left to the bouncer; ufw-file rules (honeypot, canary,
+    policy, ...) were merged into the restored files by fw_snap."""
+    hooks = []
+    if os.path.exists("/etc/wireguard/wg0.conf"):
+        hooks.append(("WireGuard routing", ensure_wg_routing))
+    hooks.append(("Port forwards / DMZ", _restore_nat_on_boot))
+    if os.path.exists("/usr/local/sbin/tuxwall-nat-ensure"):
+        hooks.append(("NAT (tuxwall-nat-ensure)", lambda: subprocess.run(
+            ["/usr/local/sbin/tuxwall-nat-ensure"], capture_output=True, timeout=30)))
+    try:
+        with open(TRIPWIRE_STATE) as f:
+            tripped = bool(json.load(f).get("tripped"))
+    except Exception:
+        tripped = False
+    if tripped:
+        hooks.append(("Tripwire lockdown", lambda: subprocess.run(
+            ["/usr/local/sbin/tuxwall-tripwire", "enforce"], capture_output=True, timeout=30)))
+    return hooks
+
+
+def _fw_snap_schedule(change_id, desc, revert_fn, ttl):
+    _fw_schedule_revert(change_id, desc, revert_fn, ttl)
+
+
+def fw_snapshot_get(path, identity, client_ip=""):
+    """GET /api/firewall/snapshots[/<id>/diff|/<id>/download|/<id>/plan]."""
+    if _fw_snap is None:
+        return 503, {"ok": False, "error": "Snapshot module unavailable"}
+    ctx = _fw_ctx(client_ip)
+    parts = path.rstrip("/").split("/")[4:]  # after /api/firewall/snapshots
+    try:
+        if not parts:
+            return 200, _fw_snap.listing(ctx)
+        if parts[0] == "legacy" and len(parts) == 2 and parts[1] == "plan":
+            p = _fw_snap.legacy_restore_plan(ctx)
+            p.pop("files", None)
+            return 200, p
+        if len(parts) == 2 and parts[1] == "diff":
+            return 200, _fw_snap.diff(ctx, parts[0])
+        if len(parts) == 2 and parts[1] == "plan":
+            return 200, _fw_snap._public(_fw_snap.plan_restore(ctx, parts[0]))
+        if len(parts) == 2 and parts[1] == "download":
+            data, name = _fw_snap.download(ctx, parts[0])
+            return 200, ("__bytes__", data, name)
+        return 404, {"ok": False, "error": "Unknown snapshot endpoint"}
+    except _fw_snap.Refused as exc:
+        return exc.status, exc.payload
+
+
+def fw_snapshot_post(path, body, identity, client_ip=""):
+    """POST /api/firewall/snapshots (create), /upload, /import-legacy,
+    /<id>/restore {dry_run}, /<id>/delete."""
+    if _fw_snap is None:
+        return 503, {"ok": False, "error": "Snapshot module unavailable"}
+    who = (identity or {}).get("username", "")
+    ctx = _fw_ctx(client_ip)
+    parts = path.rstrip("/").split("/")[4:]
+    try:
+        if not parts:
+            m = _fw_snap.create(ctx, note=str(body.get("note") or "")[:200], kind="manual",
+                                who=who, version=TUXWALL_VERSION)
+            return 200, {"ok": True, "snapshot": m}
+        if parts == ["upload"]:
+            return 200, _fw_snap.upload(ctx, body.get("data") or "", note=str(body.get("note") or "")[:200],
+                                        who=who, version=TUXWALL_VERSION)
+        if parts == ["import-legacy"]:
+            return 200, _fw_snap.import_legacy(ctx, who=who, version=TUXWALL_VERSION)
+        if len(parts) == 2 and parts[1] == "delete":
+            return 200, _fw_snap.delete(ctx, parts[0])
+        if len(parts) == 2 and parts[1] == "restore":
+            if body.get("dry_run", True):
+                return 200, dict(_fw_snap._public(_fw_snap.plan_restore(ctx, parts[0])), dry_run=True)
+            with _fw_move_lock:
+                res = _fw_snap.restore(ctx, parts[0], who=who, version=TUXWALL_VERSION,
+                                       reapply=_fw_reapply_owned(), schedule=_fw_snap_schedule)
+            print("[fw] FW-SNAPSHOT-RESTORE %s by %s (confirm id %s)" % (
+                parts[0], who, res.get("needs_confirmation")), flush=True)
+            return 200, res
+        return 404, {"ok": False, "error": "Unknown snapshot endpoint"}
+    except _fw_snap.Refused as exc:
+        return exc.status, exc.payload
+
+
+def fw_legacy_restore(identity, client_ip=""):
+    """The old 'Restore baseline' button. Never a raw restore of all tables:
+    with snapshot history present it points there; otherwise the legacy raw
+    baseline is restored (user chains only, confirm-or-revert) only if the
+    guard finds no managed rule it would roll back."""
+    if _fw_snap is None:
+        return 503, {"ok": False, "error": "Snapshot module unavailable"}
+    ctx = _fw_ctx(client_ip)
+    snaps = [m for m in _fw_snap.list_snaps(ctx) if m.get("restorable", True)]
+    if snaps:
+        return 409, {"ok": False, "use_snapshots": True, "latest": snaps[0],
+                     "error": "Restores now go through Firewall → Settings → Snapshots (preview, guard, "
+                              "60 s confirm). The legacy raw baseline is no longer restored directly."}
+    try:
+        return 200, _fw_snap.legacy_restore(ctx, who=(identity or {}).get("username", ""),
+                                            version=TUXWALL_VERSION, schedule=_fw_snap_schedule)
+    except _fw_snap.Refused as exc:
+        return exc.status, exc.payload
+
+
+def fw_managed_view(client_ip=""):
+    if _fw_guard is None:
+        return 503, {"ok": False, "error": "Guard module unavailable"}
+    ctx = _fw_ctx(client_ip)
+    return 200, _fw_guard.summary(_fw_guard.load_ruleset(ctx), ctx)
 
 
 CROWDSEC_BIN = shutil.which("cscli") or "/usr/bin/cscli"
@@ -4959,10 +5182,27 @@ def _honey_watchdog():
                     HONEY_STATE["error"] = "rebind failed: %r" % (exc,)
                     _honey_log(HONEY_STATE["error"])
 
-def _honey_ufw_allow(port):
+def _honey_rule_present(port):
+    """True if a WAN allow for this port exists already (tagged or not).
+    Existing untagged rules are left as they are: ufw would otherwise
+    rewrite them just to add the comment."""
+    if _fw_guard is None:
+        return False
     try:
+        rs = _fw_guard.load_ruleset(_fw_ctx(raw=False))
+        return _fw_guard._has_allow(rs["v4"], _honey_wan_iface(), "tcp", int(port))
+    except Exception:
+        return False
+
+
+def _honey_ufw_allow(port):
+    if _honey_rule_present(port):
+        return True
+    try:
+        # tagged so the firewall guard can tell honeypot rules apart
         _ufw(["allow", "in", "on", _honey_wan_iface(),
-              "to", "any", "port", str(port), "proto", "tcp"])
+              "to", "any", "port", str(port), "proto", "tcp",
+              "comment", _fw_guard.HONEYPOT_TAG if _fw_guard else "tuxwall-honeypot"])
     except Exception as exc:
         _honey_log("ufw allow port {}: {}".format(port, exc))
         return False
@@ -8921,6 +9161,7 @@ VIEWER_POST_PATHS = frozenset({
 # /api/backups/** ships raw archives containing auth.json and WireGuard
 # private keys; /api/agent/** reaches the opencode agent.
 ADMIN_GET_PREFIXES = (
+    "/api/firewall/snapshots",
     "/api/backups",
     "/api/agent",
     "/api/alerts",
@@ -12800,6 +13041,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_bytes(self, data, download_name):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/gzip")
+        self.send_header("Content-Disposition", 'attachment; filename="{}"'.format(download_name))
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
     def _send_auth(self, code, payload, cookie=None, clear_cookie=False):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(code)
@@ -12858,6 +13108,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_firewall())
         elif path == "/api/firewall/interfaces":
             self._send(200, build_interfaces())
+        elif path == "/api/firewall/managed":
+            code, res = fw_managed_view(_client_key(self))
+            self._send(code, res)
+        elif path.startswith("/api/firewall/snapshots"):
+            code, res = fw_snapshot_get(path, identity, _client_key(self))
+            if isinstance(res, tuple) and res and res[0] == "__bytes__":
+                self._send_bytes(res[1], res[2])
+            else:
+                self._send(code, res)
         elif path == "/api/security":
             self._send(200, get_security_monitor().snapshot())
         elif path == "/api/traffic-monitor":
@@ -13251,6 +13510,8 @@ class Handler(BaseHTTPRequestHandler):
         if length:
             maxlen = 104857600 if path in ("/api/backups/restore",
                                            "/api/backups/system/upload") else 262144
+            if path == "/api/firewall/snapshots/upload":
+                maxlen = 4 * 1024 * 1024
             if length > maxlen:
                 self._send(413, {"ok": False, "error": "Payload too large"})
                 return
@@ -13678,64 +13939,63 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
 
-        elif path == "/api/firewall/allow":
+        elif path in ("/api/firewall/allow", "/api/firewall/delete", "/api/firewall/move",
+                      "/api/firewall/enable", "/api/firewall/default", "/api/firewall/logging"):
+            cip = _client_key(self)
+            _fw_autosnap(path.rsplit("/", 1)[-1], identity)
             try:
-                self._send(200, add_firewall_rule(body.get("rule") or ""))
-            except Exception as exc:
-                self._send(500, {"ok": False, "error": str(exc)})
-
-        elif path == "/api/firewall/delete":
-            try:
-                self._send(200, delete_firewall_rule(body.get("number")))
-            except Exception as exc:
-                self._send(500, {"ok": False, "error": str(exc)})
-
-        elif path == "/api/firewall/move":
-            try:
-                self._send(200, move_firewall_rule(body.get("number"),
-                                                   body.get("direction")))
-            except Exception as exc:
-                self._send(500, {"ok": False, "error": str(exc)})
-
-        elif path == "/api/firewall/enable":
-            try:
-                self._send(200, set_firewall_enabled(bool(body.get("enabled"))))
-            except Exception as exc:
-                self._send(500, {"ok": False, "error": str(exc)})
-
-        elif path == "/api/firewall/default":
-            try:
-                self._send(200, set_firewall_default(
-                    body.get("direction"), body.get("policy")))
-            except Exception as exc:
-                self._send(500, {"ok": False, "error": str(exc)})
-
-        elif path == "/api/firewall/logging":
-            try:
-                self._send(200, set_firewall_logging(body.get("level")))
+                if path == "/api/firewall/allow":
+                    res = add_firewall_rule(body.get("rule") or "", client_ip=cip)
+                elif path == "/api/firewall/delete":
+                    res = delete_firewall_rule(body, client_ip=cip)
+                elif path == "/api/firewall/move":
+                    spec = body if body.get("to") and body.get("action") and body.get("from") else None
+                    res = move_firewall_rule(body.get("number"), body.get("direction"),
+                                             expected_spec=spec, client_ip=cip)
+                elif path == "/api/firewall/enable":
+                    res = set_firewall_enabled(bool(body.get("enabled")))
+                elif path == "/api/firewall/default":
+                    res = set_firewall_default(body.get("direction"), body.get("policy"), client_ip=cip)
+                else:
+                    res = set_firewall_logging(body.get("level"))
+                self._send(200, res)
+            except _FwRefused as exc:
+                self._send(exc.status, exc.payload)
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
 
         elif path == "/api/firewall/confirm":
-            self._send(200, confirm_fw_change(str(body.get("id") or "")))
+            cid = str(body.get("id") or "")
+            if _fw_snap is not None:
+                _fw_snap.confirmed(cid)
+            try:
+                self._send(200, confirm_fw_change(cid))
+            except Exception as exc:
+                self._send(409, {"ok": False, "error": str(exc)})
 
         elif path == "/api/firewall/reset":
+            # Legacy Save/Restore baseline buttons: "save" now records a manual
+            # snapshot (the Sep 1 /etc/tuxwall/fw-baseline is kept untouched);
+            # "restore" goes through the guarded snapshot flow.
             action = (body.get("action") or "").lower()
             if action == "save":
-                try:
-                    self._send(200, save_firewall_baseline())
-                except Exception as exc:
-                    self._send(500, {"ok": False, "error": str(exc)})
+                code, res = fw_snapshot_post("/api/firewall/snapshots",
+                                             {"note": "Saved with the Rules tab button"},
+                                             identity, _client_key(self))
+                self._send(code, res)
             elif action == "restore":
-                try:
-                    self._send(200, restore_firewall_baseline())
-                except Exception as exc:
-                    self._send(500, {"ok": False, "error": str(exc)})
+                _fw_autosnap("legacy restore", identity)
+                code, res = fw_legacy_restore(identity, _client_key(self))
+                self._send(code, res)
             else:
                 self._send(400, {
                     "ok": False,
                     "error": "unknown action; use 'save' or 'restore'",
                 })
+
+        elif path.startswith("/api/firewall/snapshots"):
+            code, res = fw_snapshot_post(path, body, identity, _client_key(self))
+            self._send(code, res)
 
         elif path == "/api/crowdsec/ban":
             try:
@@ -15442,6 +15702,32 @@ def interfaces_plan(body, session_ip=""):
         return 500, {"ok": False, "error": str(exc)}
 
 
+def _assign_fw_guard(res, client_ip=""):
+    """Firewall guard for an interface/policy plan: refuse (409) when the
+    rendered ufw files add a critical/high invariant violation."""
+    if _fw_guard is None:
+        return None
+    names = {"/etc/ufw/" + n: n for n in _fw_guard.UFW_FILES}
+    names["/etc/default/ufw"] = "default"
+    new = {names[p]: f.get("new") or "" for p, f in (res.files or {}).items() if p in names}
+    if not new:
+        return None
+    try:
+        ctx = _fw_ctx(client_ip)
+        rec = (res.files or {}).get("/etc/tuxwall/interfaces.json")
+        if rec and rec.get("new"):
+            ctx._wan = ((json.loads(rec["new"]).get("wan") or {}).get("device")) or None
+        cur = _fw_guard.load_ruleset(ctx)
+        prop = _fw_guard.load_ruleset(ctx, files=new, raw=cur.get("raw"))
+        g = _fw_guard.check(cur, prop, ctx)
+    except Exception as exc:
+        print("[fw] interfaces guard error: %r" % exc, flush=True)
+        return None
+    if g["ok"]:
+        return None
+    return 409, {"ok": False, "error": g["summary"], "guard": g}
+
+
 def interfaces_apply(action, body, identity, session_ip=""):
     """POST /api/interfaces/apply|confirm|rollback (admin).
 
@@ -15460,8 +15746,10 @@ def interfaces_apply(action, body, identity, session_ip=""):
             def schedule(aid, ttl):
                 _fw_schedule_revert("assign:" + aid, "interface assignment " + aid,
                                     lambda: assign_apply.rollback(aid, "timeout"), ttl)
+            _fw_autosnap("interfaces apply", identity)
             return assign_apply.apply(body, session_ip=session_ip,
-                                      user=(identity or {}).get("username", ""), schedule=schedule)
+                                      user=(identity or {}).get("username", ""), schedule=schedule,
+                                      guard=lambda res: _assign_fw_guard(res, session_ip))
         aid = str(body.get("id") or "")
         with _FW_CONFIRM_LOCK:
             _FW_PENDING.pop("assign:" + aid, None)

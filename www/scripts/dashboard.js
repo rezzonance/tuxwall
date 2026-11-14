@@ -1367,8 +1367,9 @@
     els.fwRulesBody.innerHTML = rows.map((r) => {
       const a = fwActionMeta(r.verb || (r.action || "").split(" ")[0]);
       const dir = fwRuleDirection(r);
+      // owner data for firewall-plus.js (lock, owner chip, group filter)
       return `
-      <tr>
+      <tr data-num="${r.number != null ? r.number : ""}" data-to="${esc(r.to || "")}" data-action="${esc(r.action || "")}" data-from="${esc(r.from || "")}" data-owner="${esc(r.owner || "")}" data-managed="${r.managed ? "1" : ""}" data-group="${esc(r.group || "")}" data-owner-label="${esc(r.owner_label || "")}" data-owner-reason="${esc(r.owner_reason || "")}">
         <td class="mono muted">${r.number != null ? r.number : "—"}</td>
         <td><span class="fw-act ${a.cls}">${a.label}</span></td>
         <td><span class="fw-dir fw-dir-${dir.toLowerCase()}">${dir}</span></td>
@@ -2038,8 +2039,11 @@
           "Rules are evaluated top-down — if the two rules overlap with different actions, the effective outcome changes."))) return;
         moveBtn.disabled = true;
         try {
+          const mrow = moveBtn.closest("tr");
           const res = await postJSON("/api/firewall/move",
-            { number: moveBtn.dataset.num, direction: moveBtn.dataset.dir });
+            { number: moveBtn.dataset.num, direction: moveBtn.dataset.dir,
+              to: mrow ? mrow.dataset.to : "", action: mrow ? mrow.dataset.action : "",
+              from: mrow ? mrow.dataset.from : "" });
           els.fwHint.textContent = res.move?.note
             ? "Rule moved" + res.move.note : "Rule moved.";
           await refreshFirewall();
