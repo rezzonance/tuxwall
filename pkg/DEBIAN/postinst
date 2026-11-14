@@ -360,6 +360,13 @@ EOF
       ufw status 2>/dev/null | grep -q "5353.* on ${iface}" || \
         ufw allow in on "$iface" to any port 5353 proto udp comment 'mDNS reflector' >/dev/null 2>&1 || true
     done
+    # Canary egress containment: when OpenCanary is deployed (opencanary user),
+    # make sure before.rules/before6.rules carry the owner-match REJECT (inserted
+    # before the lo-ACCEPT anchor; idempotent - detects existing containment by
+    # the rule itself, never by a marker). Best-effort: never fails the install.
+    if id opencanary >/dev/null 2>&1 && [[ -f $WWW/includes/canary_egress.py ]]; then
+      PYTHONDONTWRITEBYTECODE=1 python3 "$WWW/includes/canary_egress.py" --apply >/dev/null 2>&1 || true
+    fi
 
     step 6b "Configuring Avahi mDNS reflector (Music Assistant discovery)..."
     # Best-effort: avahi-daemon is a hard Depends, but don't fail upgrades.

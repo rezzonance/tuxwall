@@ -87,6 +87,22 @@ if ss -uln | grep -q ":161 "; then
     echo "   udp/161 allowed (snmp canary bound)"
 fi
 
+echo "== egress containment: the canary user may only reach the webhook + local DNS =="
+# Same definition as the installer/postinst (owner-match REJECT in
+# ufw-before-output, before the lo-ACCEPT anchor). Idempotent; best-effort.
+CE=""
+for cand in "$HERE/../../www/includes/canary_egress.py" "$API_WWW/includes/canary_egress.py"; do
+    [ -f "$cand" ] && { CE="$cand"; break; }
+done
+if [ -n "$CE" ]; then
+    PYTHONDONTWRITEBYTECODE=1 python3 "$CE" --apply || true
+    PYTHONDONTWRITEBYTECODE=1 python3 "$CE" --check >/dev/null 2>&1 \
+        && echo "   containment present (before.rules + before6.rules)" \
+        || echo "   WARNING: containment not confirmed - check /etc/ufw/before*.rules"
+else
+    echo "   WARNING: canary_egress.py not found - containment not checked"
+fi
+
 echo
 echo "DONE. Canary emulators live on the WAN address only."
 echo "Events: /var/log/opencanary/opencanary.log - every global source is"

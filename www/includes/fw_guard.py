@@ -19,6 +19,14 @@ import os
 import re
 import subprocess
 
+try:
+    import canary_egress as _CE
+except ImportError:  # pragma: no cover
+    try:
+        from . import canary_egress as _CE
+    except ImportError:
+        _CE = None
+
 HONEYPOT_TAG = "tuxwall-honeypot"
 CANARY_PORTS = (22, 5900, 1433, 6379)
 CANARY_SNMP_PORT = 161
@@ -682,6 +690,24 @@ def deception_ports(rs, ctx):
     return out
 
 
+def canary_egress_repair(text, fam):
+    """Repair hint for missing canary containment: the exact insertion the
+    installer/postinst make (preview only; applied via canary_egress.py)."""
+    rep = {"kind": "before-rules-insert", "owner": "canary-egress", "family": fam,
+           "file": "/etc/ufw/before.rules" if fam == "v4" else "/etc/ufw/before6.rules",
+           "cmd": ["python3", "/var/www/html/includes/canary_egress.py", "--apply"]}
+    if _CE is not None:
+        new, changed = _CE.insert(text or "", fam)
+        rep["lines"] = _CE.LINES[fam]
+        rep["anchor"] = _CE.ANCHORS[fam]
+        rep["applicable"] = changed
+        if changed:
+            import difflib
+            rep["diff"] = "".join(difflib.unified_diff(
+                (text or "").splitlines(True), new.splitlines(True), rep["file"], rep["file"], n=2))
+    return rep
+
+
 def invariants(rs, ctx, cur=None):
     """Violations of the safety invariants for ruleset rs. ``cur`` (the live
     ruleset) supplies the canary ports that must stay open."""
@@ -734,18 +760,35 @@ def invariants(rs, ctx, cur=None):
                 v.append(_v("deception-everywhere:%s" % r["key"], "high",
                             "Rule opens deception port %s on every interface" % ", ".join(hit),
                             r["text"], {"kind": "refuse"}, "honeypot"))
-    # 3. canary egress containment
+    # 3. canary egress containment (files, both families)
     if ctx.opencanary_user:
-        b = rs["texts"].get("before.rules", "")
-        uid = ctx.opencanary_uid or "opencanary"
-        ok = any(("--uid-owner opencanary" in l or "--uid-owner %s " % uid in l + " ")
-                 and "-j REJECT" in l for l in b.splitlines() if l.startswith("-A "))
-        if not ok:
-            v.append(_v("canary-egress-missing", "critical",
-                        "Canary egress containment is missing from before.rules",
-                        "The opencanary user exists; without the owner-match REJECT a compromised "
-                        "canary can reach the LAN and the internet.",
-                        {"kind": "keep-before-rules", "owner": "canary-egress"}, "canary-egress"))
+        uid = ctx.opencanary_uid
+        for fam, name, vid in (("v4", "before.rules", "canary-egress-missing"),
+                               ("v6", "before6.rules", "canary-egress-missing-v6")):
+            b = rs["texts"].get(name, "")
+            if fam == "v6" and not b:
+                continue
+            if _CE is not None:
+                ok = _CE.present(b, fam, uid)
+            else:
+                ok = any(("--uid-owner opencanary" in l or "--uid-owner %s " % uid in l + " ")
+                         and "-j REJECT" in l for l in b.splitlines() if l.startswith("-A "))
+            if not ok:
+                v.append(_v(vid, "critical",
+                            "Canary egress containment is missing from %s" % name,
+                            "The opencanary user exists; without the owner-match REJECT in "
+                            "%s a compromised canary can reach the LAN and the internet (%s)."
+                            % ("ufw-before-output" if fam == "v4" else "ufw6-before-output", fam),
+                            canary_egress_repair(b, fam), "canary-egress"))
+        # loaded in the kernel? (files right but `ufw reload` never ran)
+        save = (rs.get("raw") or {}).get("v4") or ""
+        if uid and ":ufw-before-output" in save and _CE is not None and _CE.present(rs["texts"].get("before.rules", ""), "v4", uid):
+            if not _CE.present(save, "v4", uid):
+                v.append(_v("canary-egress-not-loaded", "high",
+                            "Canary egress containment is in before.rules but not active",
+                            "iptables has no owner-match REJECT for uid %s in ufw-before-output; "
+                            "`ufw reload` loads it." % uid,
+                            {"kind": "run", "cmd": ["ufw", "reload"]}, "canary-egress"))
     # 4. tripwire
     tw = ctx.tripwire
     raw = rs.get("raw") or {}

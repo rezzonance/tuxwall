@@ -1363,30 +1363,15 @@ step_post() {
         if q nginx -t; then ok "nginx dashboard site enabled"; else warn "nginx -t failed: check $vhost"; fi
     fi
 
-    # Canary egress containment (only when OpenCanary is deployed).
-    if id opencanary >/dev/null 2>&1 && ! grep -q "Tuxwall canary egress" /etc/ufw/before.rules 2>/dev/null; then
-        python3 - <<'PYCANARY' && q ufw reload && ok "Canary egress containment applied"
-def insert(path, anchor, lines):
-    s = open(path).read()
-    if "Tuxwall canary egress" in s or s.count(anchor) != 1:
-        return
-    open(path, "w").write(s.replace(anchor, "\n".join(lines) + "\n" + anchor))
-insert("/etc/ufw/before.rules", "-A ufw-before-output -o lo -j ACCEPT", [
-    "# --- Tuxwall canary (opencanary) egress containment ---",
-    "-A ufw-before-output -m owner --uid-owner opencanary -p tcp -d 127.0.0.1 --dport 8008 -j ACCEPT",
-    "-A ufw-before-output -m owner --uid-owner opencanary -p udp -d 127.0.0.1 --dport 53 -j ACCEPT",
-    "-A ufw-before-output -m owner --uid-owner opencanary -p tcp -d 127.0.0.1 --dport 53 -j ACCEPT",
-    "-A ufw-before-output -m owner --uid-owner opencanary -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
-    "-A ufw-before-output -m owner --uid-owner opencanary -j REJECT",
-])
-insert("/etc/ufw/before6.rules", "-A ufw6-before-output -o lo -j ACCEPT", [
-    "# --- Tuxwall canary (opencanary) egress containment (IPv6) ---",
-    "-A ufw6-before-output -m owner --uid-owner opencanary -p udp -d ::1 --dport 53 -j ACCEPT",
-    "-A ufw6-before-output -m owner --uid-owner opencanary -p tcp -d ::1 --dport 53 -j ACCEPT",
-    "-A ufw6-before-output -m owner --uid-owner opencanary -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
-    "-A ufw6-before-output -m owner --uid-owner opencanary -j REJECT",
-])
-PYCANARY
+    # Canary egress containment (only when OpenCanary is deployed). Shared
+    # with postinst/deploy-opencanary: www/includes/canary_egress.py detects
+    # the owner-match REJECT itself (the old marker test never matched its own
+    # comment, so every run added another copy) and is idempotent.
+    if id opencanary >/dev/null 2>&1 && [[ -f /var/www/html/includes/canary_egress.py ]]; then
+        if ! PYTHONDONTWRITEBYTECODE=1 python3 /var/www/html/includes/canary_egress.py --check >/dev/null 2>&1; then
+            PYTHONDONTWRITEBYTECODE=1 python3 /var/www/html/includes/canary_egress.py --apply >/dev/null 2>&1 || true
+            ok "Canary egress containment applied"
+        fi
     fi
 
     # Agent home: the package creates ~/.config as root; give it back.
