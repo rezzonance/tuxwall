@@ -716,6 +716,44 @@
       '<div class="fwp-f-foot">' + refChips(f.rules) + '<span class="fwp-sp"></span>' + fixBtn(f, i, "f") + "</div>" +
       '<div class="fwp-plan" hidden></div></div>';
   }
+  // "Ask AI" (scripts/ai-panel.js; admins only): pre-fills the assistant
+  function clip(s, n) { s = String(s == null ? "" : s).trim(); return s.length > n ? s.slice(0, n) + "…" : s; }
+  function askRefs(rules) {
+    return (rules || []).filter(function (r) { return r.number || r.text; }).slice(0, 8).map(function (r) {
+      return "- #" + (r.number || "?") + (r.family === "v6" ? " (v6)" : "") + ": " + (r.text || "");
+    });
+  }
+  function askFindingText(f) {
+    var l = ["Explain this firewall finding: is it a real risk on my network, and what is the safest way to fix it?", "",
+      "Finding: " + f.title, "Severity: " + f.severity];
+    if (f.detail) l.push("Detail: " + clip(f.detail, 1200));
+    var refs = askRefs(f.rules);
+    if (refs.length) l.push("Rules involved:\n" + refs.join("\n"));
+    if ((f.raw || []).length) l.push("Raw rules:\n" + clip(f.raw.slice(0, 12).join("\n"), 1200));
+    if (f.fix) l.push("Fix offered by the dashboard: " + (f.fix.label || f.fix.op || f.fix.kind));
+    return l.join("\n");
+  }
+  function askSuggText(s) {
+    var p = s.plan || {};
+    var l = ["Explain this firewall suggestion: what would it change, what are the risks, and do you recommend applying it?", "",
+      "Suggestion: " + s.title, "Kind: " + s.kind + (s.status ? " · status: " + (s.status === "ok" ? "in place" : s.status) : "")];
+    if (s.detail) l.push("Detail: " + clip(s.detail, 1200));
+    if (p.op) l.push("Proposed change: " + p.op + (p.rule ? " `" + p.rule + "`" : "") + (p.before ? " (before rule #" + p.before + ")" : ""));
+    if ((p.rules || []).length) l.push("Rules:\n" + clip(p.rules.join("\n"), 1000));
+    var refs = askRefs(s.rules);
+    if (refs.length) l.push("Rules involved:\n" + refs.join("\n"));
+    return l.join("\n");
+  }
+  function addAsk(box, items, title, textFn, ctx) {
+    if (!window.twAskButton || !box) return;
+    var nodes = box.querySelectorAll(":scope > .fwp-f");
+    for (var i = 0; i < nodes.length && i < items.length; i++) {
+      var it = items[i];
+      var b = window.twAskButton({ title: "Ask AI about " + title + ": " + it.title, text: textFn(it), context: ctx + " › " + it.title });
+      var sp = b && nodes[i].querySelector(".fwp-f-foot > .fwp-sp");
+      if (sp) sp.parentNode.insertBefore(b, sp.nextSibling);
+    }
+  }
   function renderFindings() {
     var d = s2.findings;
     var box = document.getElementById("fwp-flist");
@@ -731,6 +769,7 @@
     var list = (d.findings || []).map(function (f, i) { return [f, i]; }).filter(function (x) { return !s2.sev || x[0].severity === s2.sev; });
     box.innerHTML = list.length ? list.map(function (x) { return findingHtml(x[0], x[1]); }).join("")
       : '<div class="muted fwp-pad">' + ((d.findings || []).length ? "No findings at this severity." : "No findings — the ruleset does what it says.") + "</div>";
+    addAsk(box, list.map(function (x) { return x[0]; }), "finding", askFindingText, "Firewall › Findings");
     if (ftab) {
       var top = (c.critical || 0) + (c.high || 0);
       var badge = ftab.querySelector(".fwp-tabn");
@@ -758,6 +797,7 @@
     if (!s2.sugg || !box) return;
     var l = s2.sugg.suggestions || [];
     box.innerHTML = l.length ? l.map(suggHtml).join("") : '<div class="muted fwp-pad">No suggestions right now.</div>';
+    addAsk(box, l, "suggestion", askSuggText, "Firewall › Suggestions");
   }
   function loadFindings(force) {
     if (!fpane) return;
@@ -841,6 +881,36 @@
     for (var i = 0; i < c.length; i++) if (/^\d{1,3}(\.\d{1,3}){3}$/.test(c[i])) return c[i];
     return "";
   }
+  function askRuleText(row, num) {
+    var h = s2.byNum[num] || {};
+    var text = h.text || [row.dataset.action, "from", row.dataset.from, "to", row.dataset.to].join(" ");
+    var cm = /\scomment\s+'?(.*?)'?$/.exec(text);
+    var owner = row.dataset.ownerLabel || row.dataset.owner || "user";
+    var l = ["Explain firewall rule #" + num + ": what does it allow or block, do I still need it, and is it safe?", "",
+      "ufw rule: " + text, "Comment: " + (cm ? cm[1] : "(none)")];
+    if (h.plain) l.push("Meaning (dashboard): " + h.plain);
+    l.push("Owner: " + owner + (row.dataset.managed === "1" ? " (managed — change it there, not by hand)" : "") +
+      (row.dataset.ownerReason ? " — " + row.dataset.ownerReason : ""));
+    if (h.hits != null) {
+      l.push("Hits: " + h.hits + " since the last firewall reload" +
+        (h.total != null ? ", " + h.total + " since " + new Date((h.first || 0) * 1000).toLocaleDateString() : "") +
+        "; last hit " + ago(h.last_hit));
+    }
+    return l.join("\n");
+  }
+  // zero-width wrapper (css/ai-panel.css): never widens the column
+  function addRuleAsk(meta, row, num) {
+    var b = window.twAskButton && window.twAskButton({
+      title: "Ask AI about rule " + num,
+      text: function () { return askRuleText(row, num); },
+      context: "Firewall › Rules › #" + num
+    });
+    if (!b) return;
+    var fit = document.createElement("span");
+    fit.className = "tw-ask-fit";
+    fit.appendChild(b);
+    meta.appendChild(fit);
+  }
   function decorateS2() {
     var rows = tbody.querySelectorAll("tr[data-num]");
     for (var i = 0; i < rows.length; i++) {
@@ -856,6 +926,7 @@
         meta.className = "fwp-meta";
         meta.innerHTML = '<span class="fwp-hslot"></span><a href="#security" class="fwp-link" data-s2r="explain" data-target="' + esc(tgt) +
           '" title="Open Security → Traffic → Diagnose' + (tgt ? " for " + esc(tgt) : "") + '">Explain</a>';
+        addRuleAsk(meta, row, num);
         src.appendChild(meta);
         var chipEl = cell.querySelector(".fwp-owner");
         if (row.dataset.managed === "1") {
