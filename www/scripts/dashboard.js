@@ -3371,7 +3371,7 @@
 
     function communityTitle(sev) {
       if (sev === "none")    return "No community reports yet — open tuxwall.org report card";
-      if (sev === "unknown") return "tuxwall.org unreachable — open report card";
+      if (sev === "unknown") return "Couldn't check tuxwall.org (will retry) — open report card";
       if (!sev)              return "Checking tuxwall.org community severity…";
       return `Community severity: ${sev.toUpperCase()} — open tuxwall.org report card`;
     }
@@ -3392,20 +3392,59 @@
       });
     }
 
+    // tuxwall.org rate-limits /api/public (300/min, burst 50) and a page of
+    // IP rows used to fire one lookup per row at once, so the overflow got
+    // 429s (shown by browsers as CORS errors) that were then cached as "no
+    // reports". Lookups now go through a small queue; a 429/5xx pauses it,
+    // shows "unknown" and retries after a minute instead of caching "none".
+    const COMMUNITY_MAX_INFLIGHT = 3;
+    const COMMUNITY_RETRY_MS = 60 * 1000;
+    const communityQueue = [];
+    let communityActive = 0, communityPauseUntil = 0, communityTimer = 0;
+
     function communityLookup(ip) {
       if (communityInFlight.has(ip)) return;
       communityInFlight.add(ip);
-      fetch(`https://tuxwall.org/api/public/bans/${encodeURIComponent(ip)}`,
-            { headers: { "Accept": "application/json" } })
-        .then(r => r.ok ? r.json() : { reported: false })
-        .then(d => {
-          const raw = d && d.report ? String(d.report.severity || "").toLowerCase() : "";
-          const sev = COMMUNITY_SEV.includes(raw) ? raw : "none";
-          communityCache.set(ip, { ts: Date.now(), sev });
-          applyCommunitySev(ip, sev);
-        })
-        .catch(() => applyCommunitySev(ip, "unknown"))
-        .finally(() => communityInFlight.delete(ip));
+      communityQueue.push(ip);
+      communityPump();
+    }
+
+    function communityPump() {
+      const wait = communityPauseUntil - Date.now();
+      if (wait > 0) {
+        if (!communityTimer) communityTimer = setTimeout(() => { communityTimer = 0; communityPump(); }, wait);
+        return;
+      }
+      while (communityActive < COMMUNITY_MAX_INFLIGHT && communityQueue.length) {
+        const ip = communityQueue.shift();
+        communityActive++;
+        fetch(`https://tuxwall.org/api/public/bans/${encodeURIComponent(ip)}`,
+              { headers: { "Accept": "application/json" } })
+          .then(r => {
+            if (r.status === 429 || r.status >= 500) {
+              const ra = parseInt(r.headers.get("Retry-After") || "", 10);
+              communityPauseUntil = Date.now() + (ra > 0 ? ra * 1000 : COMMUNITY_RETRY_MS);
+              throw new Error("tuxwall.org busy (" + r.status + ")");
+            }
+            return r.ok ? r.json() : { reported: false };
+          })
+          .then(d => {
+            const raw = d && d.report ? String(d.report.severity || "").toLowerCase() : "";
+            const sev = COMMUNITY_SEV.includes(raw) ? raw : "none";
+            communityCache.set(ip, { ts: Date.now(), sev });
+            applyCommunitySev(ip, sev);
+          })
+          .catch(() => {
+            // fresh for one minute only, then the next render looks it up again
+            communityCache.set(ip, { ts: Date.now() - COMMUNITY_TTL + COMMUNITY_RETRY_MS, sev: "unknown" });
+            applyCommunitySev(ip, "unknown");
+          })
+          .finally(() => {
+            communityActive--;
+            communityInFlight.delete(ip);
+            communityPump();
+          });
+      }
     }
 
     // Build a full <tr> string for a given IP entry
