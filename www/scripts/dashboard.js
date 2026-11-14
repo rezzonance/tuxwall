@@ -7298,11 +7298,104 @@
     return `source=${encodeURIComponent(els.logSource.value)}&lines=${els.logLines.value}&priority=${encodeURIComponent(els.logPriority.value)}`;
   }
 
+  // Admins get the log as one element per line so a single "Ask AI" control
+  // (scripts/ai-panel.js) can sit on the hovered or keyboard-picked line:
+  // Tab reaches it, Up/Down/Home/End move it between lines.
+  const logAsk = { raw: "", btn: null, line: null };
+  const logSourceName = () => {
+    const o = els.logSource.options[els.logSource.selectedIndex];
+    return o ? o.text : (els.logSource.value || "journal");
+  };
+  function logAskText() {
+    const line = logAsk.line ? logAsk.line.textContent.trim() : "";
+    const lvl = els.logPriority.value ? els.logPriority.options[els.logPriority.selectedIndex].text : "";
+    return "Explain this log line from " + logSourceName() + (lvl ? " (level filter: " + lvl + ")" : "") +
+      ": what does it mean, is it a problem, and what should I do about it?\n\n```\n" + line.slice(0, 1500) + "\n```";
+  }
+  function logAskAttach(line, focus) {
+    const b = logAsk.btn;
+    if (!b || !line) return;
+    if (logAsk.line && logAsk.line !== line) logAsk.line.classList.remove("is-cur");
+    logAsk.line = line;
+    if (b.parentNode !== line) line.appendChild(b);
+    b.setAttribute("aria-label", "Ask AI about log line: " + line.textContent.trim().slice(0, 90));
+    if (focus) {
+      line.classList.add("is-cur");
+      b.focus({ preventScroll: true });
+      line.scrollIntoView({ block: "nearest" });
+    }
+  }
+  function logAskInit() {
+    if (logAsk.btn || !window.twAskButton) return logAsk.btn;
+    const b = window.twAskButton({
+      iconOnly: true,
+      className: "log-ask",
+      title: "Ask AI about this log line",
+      text: logAskText,
+      context: () => "Logs › " + logSourceName(),
+    });
+    if (!b) return null;
+    b.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown Home End");
+    b.addEventListener("keydown", (e) => {
+      const cur = logAsk.line;
+      if (!cur) return;
+      let next = null;
+      if (e.key === "ArrowUp") next = cur.previousElementSibling;
+      else if (e.key === "ArrowDown") next = cur.nextElementSibling;
+      else if (e.key === "Home") next = els.logView.firstElementChild;
+      else if (e.key === "End") next = els.logView.lastElementChild;
+      else return;
+      e.preventDefault();
+      if (next && next.classList.contains("log-ln")) logAskAttach(next, true);
+    });
+    b.addEventListener("blur", () => { if (logAsk.line) logAsk.line.classList.remove("is-cur"); });
+    els.logView.addEventListener("mouseover", (e) => {
+      const ln = e.target.closest && e.target.closest(".log-ln");
+      if (ln && ln !== logAsk.line && document.activeElement !== logAsk.btn) logAskAttach(ln, false);
+    });
+    els.logView.addEventListener("click", (e) => {
+      const ln = e.target.closest && e.target.closest(".log-ln");
+      if (!ln || logAsk.btn.contains(e.target)) return;
+      logAskAttach(ln, false);
+      ln.classList.add("is-cur");
+    });
+    logAsk.btn = b;
+    return b;
+  }
+  function renderLogLines(content) {
+    const view = els.logView;
+    if (content === logAsk.raw && view.firstChild) return;
+    logAsk.raw = content;
+    const btn = content && window.twAskAllowed && window.twAskAllowed() ? logAskInit() : null;
+    if (!btn) {
+      logAsk.line = null;
+      view.classList.remove("has-ask");
+      view.textContent = content || "(no log entries)";
+      return;
+    }
+    const had = !!logAsk.line && logAsk.line.parentNode === view;
+    const fromEnd = had ? view.children.length - Array.prototype.indexOf.call(view.children, logAsk.line) : 1;
+    const focused = document.activeElement === btn;
+    const lines = content.replace(/\n+$/, "").split("\n");
+    const frag = document.createDocumentFragment();
+    lines.forEach((t) => {
+      const ln = document.createElement("span");
+      ln.className = "log-ln";
+      ln.textContent = t || " ";
+      frag.appendChild(ln);
+    });
+    view.textContent = "";
+    view.classList.add("has-ask");
+    view.appendChild(frag);
+    logAsk.line = null;
+    logAskAttach(view.children[Math.max(0, view.children.length - fromEnd)] || view.lastElementChild, focused);
+  }
+
   async function refreshLog() {
     try {
       const d = await fetchJSON(`/api/logs/tail?${logQuery()}`);
       const atBottom = els.logView.scrollHeight - els.logView.scrollTop - els.logView.clientHeight < 40;
-      els.logView.textContent = d.content || "(no log entries)";
+      renderLogLines(d.content || "");
       els.logMeta.textContent = `${d.lines} line(s) · ${els.logSource.options[els.logSource.selectedIndex].text}`;
       if (els.logFollow.checked || atBottom) els.logView.scrollTop = els.logView.scrollHeight;
     } catch (err) {
@@ -7378,7 +7471,7 @@
     });
     if (els.logCopy) {
       els.logCopy.addEventListener("click", async () => {
-        const ok = await copyLogText(els.logView.textContent || "");
+        const ok = await copyLogText(els.logView.classList.contains("has-ask") ? logAsk.raw : (els.logView.textContent || ""));
         const prev = els.logCopy.textContent;
         els.logCopy.textContent = ok ? "Copied" : "Copy failed";
         setTimeout(() => { els.logCopy.textContent = prev; }, 1400);
@@ -9445,6 +9538,20 @@
         }).join("") +
           (more > 0 ? `<li class="ov-issue sev-more"><span class="ov-issue-dot"></span>` +
             `<span class="ov-issue-text">+${more} more item${more === 1 ? "" : "s"}</span></li>` : "");
+        if (window.twAskButton) {
+          listEl.querySelectorAll(".ov-issue:not(.sev-more)").forEach((li, k) => {
+            const i = shown[k];
+            const sev = SEV[i.severity] || "Notice";
+            const b = window.twAskButton({
+              iconOnly: true,
+              title: "Ask AI about: " + i.text,
+              context: "Overview › Health › " + i.text,
+              text: "My Overview health card (score " + score + "/100, " + band[1] + ") lists this item as " + sev.toLowerCase() +
+                ":\n\n\"" + i.text + "\"\n\nWhat does it mean, what is the likely cause, and how do I fix it?",
+            });
+            if (b) li.insertBefore(b, li.querySelector(".ov-issue-sev"));
+          });
+        }
       }
     }
   }
@@ -13721,6 +13828,34 @@
       html += resolved.map(incidentItemHtml).join("");
     }
     els.incidentList.innerHTML = html;
+    if (window.twAskButton) {
+      const byId = new Map(items.map((i) => [String(i.id), i]));
+      els.incidentList.querySelectorAll(".incident-item").forEach((el) => {
+        const inc = byId.get(el.dataset.id);
+        const meta = el.querySelector(".incident-item-meta");
+        const b = inc && meta && window.twAskButton({
+          title: "Ask AI about incident: " + (inc.title || "Incident"),
+          text: incidentAskText(inc),
+          context: "Incidents › " + (inc.title || "Incident"),
+          onAsk: () => setIncidentPanel(false),
+        });
+        if (b) meta.appendChild(b);
+      });
+    }
+  }
+
+  function incidentAskText(inc) {
+    const when = (t) => (t ? new Date(t * 1000).toLocaleString() : "—");
+    const sev = (inc.severity || "info").toLowerCase();
+    const l = ["Explain this TuxWall incident: what caused it, is it still a problem, and what should I do?", "",
+      "Incident: " + (inc.title || "Incident")];
+    if (inc.detail) l.push("Detail: " + inc.detail);
+    l.push("Severity: " + (INCIDENT_SEV_LABEL[sev] || sev) + " · status: " + (inc.status === "active" ? "active" : "resolved") +
+      (inc.acknowledged ? " (acknowledged)" : ""));
+    l.push("First seen: " + when(inc.first_seen) + " · last seen: " + when(inc.last_seen) +
+      (inc.resolved_at ? " · resolved: " + when(inc.resolved_at) : ""));
+    if (inc.key) l.push("Source check: " + inc.key);
+    return l.join("\n");
   }
 
   async function refreshIncidents() {

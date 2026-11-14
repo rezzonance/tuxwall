@@ -1076,6 +1076,7 @@
   // a permission/question is waiting
   document.addEventListener("pointerdown", (e) => {
     if (!S.open || S.busy || panel.contains(e.target) || btn.contains(e.target)) return;
+    if (e.target.closest && e.target.closest(".tw-ask")) return;
     if (window.matchMedia("(max-width: 640px)").matches) return;
     if (elLog.querySelector(".aip-card:not(.is-done)")) return;
     if (e.target.closest(".modal, .tw-pal-backdrop, .tw-dialog-backdrop, .tw-toasts, .topbar")) return;
@@ -1119,5 +1120,35 @@
     opts = opts || {};
     if (opts.context != null && String(opts.context).trim()) { S.ctxOverride = String(opts.context); S.ctxOff = false; }
     open({ text: opts.text != null ? opts.text : "" });
+  };
+
+  // ── "Ask AI" shortcuts (one control for every page) ─────────────────
+  // window.twAskButton({ text, context, title, iconOnly, className, onAsk })
+  // returns a button (null for non-admins) that pre-fills the panel.
+  // text/context may be functions, read at click time so counters are fresh.
+  const askGate = () => document.documentElement.classList.toggle("tw-ask-on", !btn.hidden);
+  askGate();
+  document.addEventListener("tw:role", askGate);
+  window.twAskAllowed = () => !!api() && !btn.hidden;
+  window.twAskButton = function (o) {
+    o = o || {};
+    if (!window.twAskAllowed()) return null;
+    const val = (v) => (typeof v === "function" ? v() : v);
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "tw-ask aip-raw" + (o.iconOnly ? " tw-ask-icon" : "") + (o.className ? " " + o.className : "");
+    const label = o.title || "Ask AI";
+    b.setAttribute("aria-label", label);
+    b.title = label + " — opens the assistant with the question filled in";
+    b.innerHTML = IC.spark + (o.iconOnly ? "" : '<span class="tw-ask-t">Ask AI</span>');
+    b.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (o.onAsk) o.onAsk();
+      window.twAsk({ text: val(o.text) || "", context: val(o.context) || "" });
+    });
+    // keep Enter/Space on the button from reaching row handlers (role=button rows)
+    b.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") e.stopPropagation(); });
+    return b;
   };
 })();

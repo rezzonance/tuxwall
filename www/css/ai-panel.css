@@ -491,3 +491,89 @@ html:not(#_tw#_x) #ai-panel .aip-send[data-btn-tone] { --b-h: 32px; --b-ico: 16p
   .ai-panel-btn.is-busy::after, .aip-dots i, .aip-tool[data-status="running"] .aip-tool-dot { animation: none; }
   .aip-tools-group > summary::before, .aip-tool > summary::after { transition: none; }
 }
+
+/* ---- "Ask AI" shortcuts (window.twAskButton) ----------------------------
+   Link-styled like the Firewall "Explain" link; .tw-ask-icon is the compact
+   icon-only form. html.tw-ask-on is set for admins by scripts/ai-panel.js. */
+html:not(.tw-ask-on) .tw-ask { display: none !important; }
+.tw-ask {
+  flex: none;
+  display: inline-flex; align-items: center; gap: 4px;
+  margin: 0; padding: 1px 3px;
+  border: 0; border-radius: 6px;
+  background: none;
+  color: var(--accent);
+  font: inherit; font-size: 11.5px; line-height: 1.3;
+  white-space: nowrap;
+  vertical-align: middle;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.tw-ask svg { flex: none; width: 13px; height: 13px; }
+.tw-ask-t {
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  text-underline-offset: 2px;
+}
+.tw-ask:hover .tw-ask-t, .tw-ask:focus-visible .tw-ask-t { text-decoration-color: currentColor; }
+.tw-ask:focus { outline: none; }
+.tw-ask:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tw-ask-icon {
+  justify-content: center;
+  width: 22px; height: 20px; padding: 0;
+  color: var(--muted);
+}
+.tw-ask-icon:hover, .tw-ask-icon:focus-visible {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+/* Firewall → Findings / Suggestions: before the card's buttons */
+#view-firewall .fwp-f-foot > .tw-ask { font-size: 12px; padding: 4px 4px; }
+/* phones: last, so a full row wraps this link instead of the buttons */
+@media (max-width: 640px) {
+  #view-firewall .fwp-f-foot > .tw-ask { order: 9; margin-left: auto; }
+}
+
+/* Firewall → Rules: zero intrinsic width, so the column (and the action
+   buttons) never move; text when the cell has room, icon otherwise */
+#view-firewall .fwp-meta > .tw-ask-fit {
+  flex: 1 1 0; min-width: 0;
+  margin-left: -8px;
+  display: flex; align-items: center;
+  container-type: inline-size;
+}
+#view-firewall .fwp-meta > .tw-ask-fit > .tw-ask { margin-left: 5px; padding: 0 3px; }
+@container (max-width: 70px) {
+  #view-firewall .fwp-meta .tw-ask-fit .tw-ask { margin-left: 4px; padding: 0; }
+  #view-firewall .fwp-meta .tw-ask-fit .tw-ask-t { display: none; }
+}
+
+/* Incident bell panel: on the meta line */
+.incident-item-meta > .tw-ask { margin: -3px 0 -3px 6px; padding: 0 3px; font-size: 10.5px; line-height: 1.2; }
+.incident-item-meta > .tw-ask svg { width: 12px; height: 12px; }
+
+/* Overview attention list: icon before the severity pill */
+.ov-issue > .tw-ask-icon { margin: -2px -2px -2px 0; }
+@media (hover: hover) {
+  .ov-issue > .tw-ask-icon { opacity: 0; transition: opacity .12s ease; }
+  .ov-issue:hover > .tw-ask-icon, .ov-issue:focus-within > .tw-ask-icon { opacity: 1; }
+}
+
+/* Logs: one shared control on the hovered / picked line */
+.log-view.has-ask .log-ln { display: block; position: relative; margin: 0 -6px; padding: 0 6px; border-radius: 4px; }
+.log-view.has-ask .log-ln:hover,
+.log-view.has-ask .log-ln.is-cur,
+.log-view.has-ask .log-ln:focus-within { background: color-mix(in srgb, var(--text) 6%, transparent); color: var(--text); }
+.log-view.has-ask .log-ask {
+  position: absolute; top: 0; right: 2px;
+  height: 1.65em;
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg));
+  color: var(--accent);
+  opacity: 0;
+  pointer-events: none;
+}
+.log-view.has-ask .log-ln:hover > .log-ask,
+.log-view.has-ask .log-ln.is-cur > .log-ask,
+.log-view.has-ask .log-ask:focus-visible { opacity: 1; pointer-events: auto; }
