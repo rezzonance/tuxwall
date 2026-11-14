@@ -594,7 +594,7 @@ Description: TuxWall Network Firewall Dashboard
  for fresh installs. The packaged opencode.json no longer points at the
  maintainer's LAN address (a fresh install's AI agent was broken out of
  the box); it now defaults to opencode's free hosted models
- (deepseek-v4-flash-free + ling-3.0-flash-free, zero setup) with a
+ (iceman-free for chat and background tasks, zero setup) with a
  conservative read-only permission allowlist - the agent can inspect
  everything and changes nothing without permission. Existing installs
  keep their configured copy (conffile). The package also ships
