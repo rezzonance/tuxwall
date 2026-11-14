@@ -556,6 +556,67 @@ def restore(ctx, sid, who="", version="", reapply=None, schedule=None, ttl=CONFI
                 "message": "Restored. Confirm within %d s or the previous firewall comes back." % ttl}
 
 
+def _write_side(ctx, path, text):
+    """Small state file (e.g. /etc/tuxwall/fw-disabled.json); None = delete."""
+    p = ctx.path(path)
+    if text is None:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+        return
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    _write_private(p, text)
+
+
+def apply_files(ctx, cur_rs, prop, desc, who="", version="", reapply=None, schedule=None,
+                ttl=CONFIRM_S, side=None):
+    """Guarded rule change (edit / enable / disable / reorder / insert):
+    guard -> auto snapshot -> write user*.rules (+ side state files) -> ufw
+    reload -> confirm-or-revert. Only user.rules/user6.rules are written."""
+    with _lock:
+        for cid, p in list(_PENDING.items()):
+            if p["expires"] > time.time():
+                raise Refused(409, {"ok": False, "pending": cid,
+                                    "error": "Another firewall change is waiting for confirmation (%s). "
+                                             "Confirm it or let it revert first." % cid})
+            _PENDING.pop(cid, None)
+        guard = G.check(cur_rs, prop, ctx)
+        if not guard["ok"]:
+            raise Refused(409, {"ok": False, "error": guard["summary"], "guard": guard})
+        writes = {k: prop["texts"][k] for k in ("user.rules", "user6.rules")
+                  if prop["texts"][k] != cur_rs["texts"][k]}
+        side = dict(side or {})
+        if not writes and not side:
+            return {"ok": True, "no_changes": True, "guard": guard, "message": "Nothing to change."}
+        pre = create(ctx, note="Before " + desc, kind="auto", who=who, reason=desc, version=version)
+        _m, pre_all = load_files(ctx, pre["id"])
+        pre_files = {k: v for k, v in pre_all.items() if k in writes}
+        pre_side = {p: (ctx.read(p, None) if os.path.exists(ctx.path(p)) else None) for p in side}
+        for p, t in side.items():
+            _write_side(ctx, p, t)
+        ok, log = _apply(ctx, writes, reapply)
+        if not ok:
+            _apply(ctx, pre_files, reapply)
+            for p, t in pre_side.items():
+                _write_side(ctx, p, t)
+            raise Refused(500, {"ok": False, "error": "ufw reload failed; the previous rules were put back.",
+                                "log": log})
+        change_id = "fwedit:%s" % uuid.uuid4().hex[:8]
+
+        def revert():
+            _PENDING.pop(change_id, None)
+            _apply(ctx, pre_files, reapply)
+            for p, t in pre_side.items():
+                _write_side(ctx, p, t)
+        _PENDING[change_id] = {"expires": time.time() + ttl, "pre": pre["id"], "desc": desc}
+        if schedule:
+            schedule(change_id, desc, revert, ttl)
+        return {"ok": True, "needs_confirmation": change_id, "confirm_within_s": ttl,
+                "revert_snapshot": pre["id"], "guard": guard, "log": log,
+                "message": "Applied. Confirm within %d s or the previous rules come back." % ttl}
+
+
 def confirmed(change_id):
     _PENDING.pop(change_id, None)
 
