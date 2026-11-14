@@ -5,7 +5,38 @@ serves the entire home network: DHCP, DNS, firewall/NAT, VPN, IDS, and
 the tuxwall dashboard itself. Treat every command as an operation on
 live network infrastructure.
 
-## Canonical context (fetch this, don't guess)
+## Know the box first: facts file + skills (no fetch needed for basics)
+
+1. `/var/lib/tuxwall/agent/facts.md` is loaded into your instructions
+   automatically: roles, interfaces/subnets, zone policy, NAT, firewall
+   (rule counts, Findings, latest snapshot), deception, services, DHCP,
+   WireGuard, CrowdSec, recent incidents. Refreshed every 5 minutes by the
+   TuxWall API. Answer status questions from it; for fresher detail use the
+   `tuxwall_*` tools (below), and run live commands before acting (live
+   output wins if they disagree).
+2. Skills hold the procedures - load the matching one with the `skill` tool
+   before acting: `tuxwall-firewall-change`, `tuxwall-connectivity`,
+   `tuxwall-interfaces`, `tuxwall-deception`, `tuxwall-dashboard-dev`.
+3. Only when you need deeper detail than facts + skills (architecture,
+   healthy-state values, log signatures), use the canonical JSON below.
+
+## Live state: the read-only `tuxwall_*` tools (use before shell commands)
+
+For CURRENT state, call these tools first. They read the dashboard's own API,
+cannot change anything, run without an approval prompt, and return trimmed,
+redacted summaries (use their filter/limit arguments to narrow output):
+- `tuxwall_overview` - the facts file, freshly read
+- `tuxwall_firewall_rules` - rules with owner/group/interfaces + counts per
+  interface/owner; filters `interface`, `owner`, `group`, `text`; `include_hits`
+- `tuxwall_firewall_findings` - open Findings (+ suggestions)
+- `tuxwall_interfaces` - roles, addresses, link, apply_locked, zone policy matrix
+- `tuxwall_dhcp_leases` (`search`, `online_only`), `tuxwall_dns_stats`
+- `tuxwall_crowdsec_decisions` (`ip` to check one address), `tuxwall_security_events`
+- `tuxwall_incidents`, `tuxwall_insights` (`range` 15m/1h/6h/24h metrics summary)
+Use shell commands for detail these tools do not cover, and to verify right
+before a change. Changes still follow the skills and the safety rules below.
+
+## Canonical context (deeper detail)
 
 Full architecture, healthy-state reference values, log signatures, CLI
 fallbacks and a downtime playbook live in a machine-readable JSON:
@@ -13,8 +44,8 @@ fallbacks and a downtime playbook live in a machine-readable JSON:
     https://tuxwall.org/agent/tuxwall.json
 
 Rules:
-1. When asked what tuxwall is, how it works, or how to fix downtime /
-   connectivity / any network fault: webfetch that URL FIRST. Cache the
+1. When facts + skills are not enough (what tuxwall is, how it works,
+   healthy-state values, log signatures): webfetch that URL. Cache the
    fetched copy at `~/.config/opencode/tuxwall-context.json` (write it
    there every time you fetch) so it still works when tuxwall.org is
    unreachable (e.g. WAN down — read the cache instead).
@@ -25,7 +56,7 @@ Rules:
    restarting unbound/kea/networkd/wireguard/suricata; never disable
    security services to troubleshoot.
 
-## Network topology (detect it, don't assume it)
+## Network topology (detect it, don't assume it - the facts file has this install's values)
 
 - WAN interface — the default-route interface (`ip route show default`);
   dynamic IPv4 + delegated IPv6 prefix. NEVER hardcode its addresses.
@@ -49,9 +80,13 @@ Backend services (Linux layer — usually manage via dashboard, not by hand):
 - Kea DHCP: `/etc/kea/kea-dhcp4.conf` · leases `/var/lib/kea/`
 - Unbound DNS: config fragments in `/var/lib/unbound/` (blocklist, RPZ, local domains)
 - WireGuard: `/etc/wireguard/wg0.conf`
-- Firewall baseline: `/etc/tuxwall/fw-baseline`
+- Interface roles: `/etc/tuxwall/interfaces.json` (wan/lan/opt/vpn, policy,
+  apply_locked)
+- Firewall snapshots: `/var/lib/tuxwall/fw-snapshots` (the old
+  `/etc/tuxwall/fw-baseline` is superseded - never restore it by hand)
 - Automation: `/usr/local/sbin/tuxwall-sqm.sh`,
   `/usr/local/sbin/system-backup.sh`, `/usr/local/sbin/tuxwall-nat-ensure`
+  (tuxwall-nat.service)
 
 Never edit the wrong file: match the request to the file map above and READ
 the target file before editing it. If you can't tell where a change belongs,
@@ -62,8 +97,10 @@ ask instead of guessing.
 1. NEVER apply a firewall/route/NAT change that could sever your own
    management session. Destructive ops (iptables flush, rule deletions,
    ifdown) require explicit user confirmation.
-2. Stage risky changes with counters or a timed revert
-   (`sleep 60 && restore`). Verify with `iptables -C` after applying.
+2. Firewall changes go through a snapshot first, then the guarded
+   preview and the 60 s confirm-or-rollback (dashboard Firewall, API
+   `POST /api/firewall/snapshots`, `/api/firewall/plan`, `/api/firewall/apply`,
+   `/api/firewall/confirm`). Load `tuxwall-firewall-change` first.
 3. Do not restart unbound, kea, networkd, wireguard, or suricata casually —
    that takes down the whole LAN. Confirm first. Restarting `tuxwall`,
    `nginx`, or `tuxwall-agent` (dashboard-only) IS safe.
@@ -73,6 +110,25 @@ ask instead of guessing.
    under /var/www/html.
 6. Read the current ruleset/config first and modify incrementally — never
    regenerate a whole ruleset or config from scratch unless asked.
+
+## TuxWall conventions (always)
+
+- Never cut LAN/IPv4 access or the admin's session. Ask the owner before
+  any risky network change (firewall, NAT, routes, interfaces, DHCP/DNS).
+- Deception layer must never lose protection: honeypot ports
+  (`tuxwall-honeypot` rules), OpenCanary (`tuxwall-canary*` rules) and its
+  egress containment in `/etc/ufw/before*.rules`, the tripwire, CrowdSec +
+  bouncer. Don't remove, disable or route around them.
+- Interface Assignments "Apply" stays locked (`apply_locked: true` in
+  interfaces.json): produce a plan only; never unlock or hand-apply it.
+- Never change the dashboard theme (no `POST /api/themes/active`, no
+  `active_theme` edits).
+- LAN NAT masquerade is owned by tuxwall-nat.service. After a reboot or
+  any IPv4 outage check `sudo iptables -t nat -S POSTROUTING` for
+  `-o <wan> -j MASQUERADE`; missing -> `sudo systemctl restart tuxwall-nat`
+  (a missing rule after boot has caused LAN IPv4 outages).
+- ufw rule comments document purpose: every new rule gets one. Raw iptables
+  ACCEPTs outside ufw are discouraged (Findings flags them).
 
 ## Useful read-only commands (pre-approved)
 

@@ -105,7 +105,7 @@ chmod 755 /var/www/html/includes/api_server.py /var/www/html/scripts/*.sh 2>/dev
 # ── 7. Restricted sudo for read-only gateway diagnostics ────────────────────
 # NOTE: Ubuntu 26.04 ships sudo-rs, which rejects wildcards in sudoers
 # command arguments — so every allowed invocation is enumerated exactly
-# (no `*`). Mirrors the "allow" list in opencode.json permission.bash.
+# (no `*`). Mirrors the shell "allow" rules in opencode.json `permissions`.
 SUDOERS_FILE=/etc/sudoers.d/tuxwall-agent
 cat > "$SUDOERS_FILE" <<'EOF'
 Cmnd_Alias TUXWALL_SVC = /usr/bin/systemctl status tuxwall, /usr/bin/systemctl status tuxwall-agent, /usr/bin/systemctl status unbound, /usr/bin/systemctl status kea-dhcp4-server, /usr/bin/systemctl status nginx, /usr/bin/systemctl status suricata, /usr/bin/systemctl status crowdsec, /usr/bin/systemctl status crowdsec-firewall-bouncer, /usr/bin/systemctl status systemd-networkd, /usr/bin/systemctl status tuxwall-nat, /usr/bin/systemctl is-active tuxwall, /usr/bin/systemctl is-active tuxwall-agent, /usr/bin/systemctl is-active unbound, /usr/bin/systemctl is-active kea-dhcp4-server, /usr/bin/systemctl is-active nginx, /usr/bin/systemctl is-active suricata, /usr/bin/systemctl is-active crowdsec, /usr/bin/systemctl is-active systemd-networkd

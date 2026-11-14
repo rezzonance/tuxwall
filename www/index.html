@@ -6,7 +6,7 @@
   <title>TuxWall - Network Dashboard</title>
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
-  <link rel="stylesheet" href="/css/style.css?v=202611120056">
+  <link rel="stylesheet" href="/css/style.css?v=20261114083639">
   <link rel="stylesheet" href="/css/polish.css?v=202611120056">
   <link rel="stylesheet" href="/css/firewall.css?v=202611120056">
   <link rel="stylesheet" href="/css/bento.css?v=202611120056">
@@ -20,6 +20,8 @@
   <link rel="stylesheet" href="/css/insights.css?v=202611120056">
   <link rel="stylesheet" href="/css/buttons.css?v=202611120056">
   <link rel="stylesheet" href="/css/worldmap.css?v=202611120056">
+  <link rel="stylesheet" href="/css/ai-panel.css?v=20261114071838">
+  <link rel="stylesheet" href="/css/ai-models.css?v=20261114082554">
   <link rel="stylesheet" href="/css/interfaces.css?v=20261114053507">
   <link rel="stylesheet" href="/css/firewall-plus.css?v=20261114054625">
 </head>
@@ -100,6 +102,9 @@
     <header class="topbar">
       <h1 id="page-title">DHCP Clients</h1>
       <div class="topbar-actions">
+        <button class="ai-panel-btn" id="ai-panel-btn" type="button" hidden aria-label="Assistant" aria-haspopup="dialog" aria-expanded="false" aria-controls="ai-panel" aria-keyshortcuts="Control+/" title="Assistant (Ctrl+/)">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3Z"/><path d="m18.5 15 .8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2Z"/></svg>
+        </button>
         <div class="incident-wrap" id="incident-wrap" hidden>
           <button class="incident-bell" id="incident-bell" type="button" aria-label="Incidents" aria-haspopup="dialog" aria-expanded="false" title="Incidents">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg>
@@ -3531,6 +3536,7 @@
                 <option value="">Loading…</option>
               </select>
               <div id="agent-status" class="agent-status"></div>
+              <button class="btn btn-ghost btn-sm ai-side-models-btn" id="agent-models-btn" type="button" aria-haspopup="dialog"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg>Models &amp; providers</button>
             </div>
             <div class="ai-side-section">
               <div class="ai-side-label">Session Usage</div>
@@ -3539,10 +3545,6 @@
                 <div class="agent-stat"><span class="agent-stat-v" id="agent-cost">$0.00</span><span class="agent-stat-l">spent</span></div>
                 <div class="agent-stat"><span class="agent-stat-v" id="agent-msgs">0</span><span class="agent-stat-l">messages</span></div>
               </div>
-            </div>
-            <div class="ai-side-section ai-side-prompts">
-              <div class="ai-side-label">Try asking</div>
-              <div class="ai-prompt-list" id="ai-prompt-list"></div>
             </div>
             <div class="ai-side-section ai-side-actions">
               <p class="ai-side-hint"><b>opencode</b> has shell + file access on this gateway. Every command or edit needs your approval before it runs.</p>
@@ -3742,6 +3744,8 @@
 <script src="/scripts/enhance.js?v=20261114075640"></script>
 <script src="/scripts/netmap.js?v=202611120056"></script>
 <script src="/scripts/insights.js?v=20261112182249"></script>
+<script src="/scripts/ai-panel.js?v=20261114082554"></script>
+<script src="/scripts/ai-models.js?v=20261114082554"></script>
 <script src="/scripts/interfaces.js?v=20261114053147"></script>
 <script src="/scripts/firewall-plus.js?v=20261114071838"></script>
 <script src="/scripts/buttons.js?v=20261114075640"></script>

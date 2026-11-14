@@ -7303,11 +7303,104 @@
     return `source=${encodeURIComponent(els.logSource.value)}&lines=${els.logLines.value}&priority=${encodeURIComponent(els.logPriority.value)}`;
   }
 
+  // Admins get the log as one element per line so a single "Ask AI" control
+  // (scripts/ai-panel.js) can sit on the hovered or keyboard-picked line:
+  // Tab reaches it, Up/Down/Home/End move it between lines.
+  const logAsk = { raw: "", btn: null, line: null };
+  const logSourceName = () => {
+    const o = els.logSource.options[els.logSource.selectedIndex];
+    return o ? o.text : (els.logSource.value || "journal");
+  };
+  function logAskText() {
+    const line = logAsk.line ? logAsk.line.textContent.trim() : "";
+    const lvl = els.logPriority.value ? els.logPriority.options[els.logPriority.selectedIndex].text : "";
+    return "Explain this log line from " + logSourceName() + (lvl ? " (level filter: " + lvl + ")" : "") +
+      ": what does it mean, is it a problem, and what should I do about it?\n\n```\n" + line.slice(0, 1500) + "\n```";
+  }
+  function logAskAttach(line, focus) {
+    const b = logAsk.btn;
+    if (!b || !line) return;
+    if (logAsk.line && logAsk.line !== line) logAsk.line.classList.remove("is-cur");
+    logAsk.line = line;
+    if (b.parentNode !== line) line.appendChild(b);
+    b.setAttribute("aria-label", "Ask AI about log line: " + line.textContent.trim().slice(0, 90));
+    if (focus) {
+      line.classList.add("is-cur");
+      b.focus({ preventScroll: true });
+      line.scrollIntoView({ block: "nearest" });
+    }
+  }
+  function logAskInit() {
+    if (logAsk.btn || !window.twAskButton) return logAsk.btn;
+    const b = window.twAskButton({
+      iconOnly: true,
+      className: "log-ask",
+      title: "Ask AI about this log line",
+      text: logAskText,
+      context: () => "Logs › " + logSourceName(),
+    });
+    if (!b) return null;
+    b.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown Home End");
+    b.addEventListener("keydown", (e) => {
+      const cur = logAsk.line;
+      if (!cur) return;
+      let next = null;
+      if (e.key === "ArrowUp") next = cur.previousElementSibling;
+      else if (e.key === "ArrowDown") next = cur.nextElementSibling;
+      else if (e.key === "Home") next = els.logView.firstElementChild;
+      else if (e.key === "End") next = els.logView.lastElementChild;
+      else return;
+      e.preventDefault();
+      if (next && next.classList.contains("log-ln")) logAskAttach(next, true);
+    });
+    b.addEventListener("blur", () => { if (logAsk.line) logAsk.line.classList.remove("is-cur"); });
+    els.logView.addEventListener("mouseover", (e) => {
+      const ln = e.target.closest && e.target.closest(".log-ln");
+      if (ln && ln !== logAsk.line && document.activeElement !== logAsk.btn) logAskAttach(ln, false);
+    });
+    els.logView.addEventListener("click", (e) => {
+      const ln = e.target.closest && e.target.closest(".log-ln");
+      if (!ln || logAsk.btn.contains(e.target)) return;
+      logAskAttach(ln, false);
+      ln.classList.add("is-cur");
+    });
+    logAsk.btn = b;
+    return b;
+  }
+  function renderLogLines(content) {
+    const view = els.logView;
+    if (content === logAsk.raw && view.firstChild) return;
+    logAsk.raw = content;
+    const btn = content && window.twAskAllowed && window.twAskAllowed() ? logAskInit() : null;
+    if (!btn) {
+      logAsk.line = null;
+      view.classList.remove("has-ask");
+      view.textContent = content || "(no log entries)";
+      return;
+    }
+    const had = !!logAsk.line && logAsk.line.parentNode === view;
+    const fromEnd = had ? view.children.length - Array.prototype.indexOf.call(view.children, logAsk.line) : 1;
+    const focused = document.activeElement === btn;
+    const lines = content.replace(/\n+$/, "").split("\n");
+    const frag = document.createDocumentFragment();
+    lines.forEach((t) => {
+      const ln = document.createElement("span");
+      ln.className = "log-ln";
+      ln.textContent = t || " ";
+      frag.appendChild(ln);
+    });
+    view.textContent = "";
+    view.classList.add("has-ask");
+    view.appendChild(frag);
+    logAsk.line = null;
+    logAskAttach(view.children[Math.max(0, view.children.length - fromEnd)] || view.lastElementChild, focused);
+  }
+
   async function refreshLog() {
     try {
       const d = await fetchJSON(`/api/logs/tail?${logQuery()}`);
       const atBottom = els.logView.scrollHeight - els.logView.scrollTop - els.logView.clientHeight < 40;
-      els.logView.textContent = d.content || "(no log entries)";
+      renderLogLines(d.content || "");
       els.logMeta.textContent = `${d.lines} line(s) · ${els.logSource.options[els.logSource.selectedIndex].text}`;
       if (els.logFollow.checked || atBottom) els.logView.scrollTop = els.logView.scrollHeight;
     } catch (err) {
@@ -7383,7 +7476,7 @@
     });
     if (els.logCopy) {
       els.logCopy.addEventListener("click", async () => {
-        const ok = await copyLogText(els.logView.textContent || "");
+        const ok = await copyLogText(els.logView.classList.contains("has-ask") ? logAsk.raw : (els.logView.textContent || ""));
         const prev = els.logCopy.textContent;
         els.logCopy.textContent = ok ? "Copied" : "Copy failed";
         setTimeout(() => { els.logCopy.textContent = prev; }, 1400);
@@ -9450,6 +9543,20 @@
         }).join("") +
           (more > 0 ? `<li class="ov-issue sev-more"><span class="ov-issue-dot"></span>` +
             `<span class="ov-issue-text">+${more} more item${more === 1 ? "" : "s"}</span></li>` : "");
+        if (window.twAskButton) {
+          listEl.querySelectorAll(".ov-issue:not(.sev-more)").forEach((li, k) => {
+            const i = shown[k];
+            const sev = SEV[i.severity] || "Notice";
+            const b = window.twAskButton({
+              iconOnly: true,
+              title: "Ask AI about: " + i.text,
+              context: "Overview › Health › " + i.text,
+              text: "My Overview health card (score " + score + "/100, " + band[1] + ") lists this item as " + sev.toLowerCase() +
+                ":\n\n\"" + i.text + "\"\n\nWhat does it mean, what is the likely cause, and how do I fix it?",
+            });
+            if (b) li.insertBefore(b, li.querySelector(".ov-issue-sev"));
+          });
+        }
       }
     }
   }
@@ -11454,22 +11561,6 @@
     ];
     const OC_PLACEHOLDERS = OC_SUGGESTIONS.slice(0, 4);
 
-    // The sidebar had ~400px of dead space below the usage stats; these fill
-    // it with something useful and give a one-click way into the agent.
-    function ocRenderSuggestions() {
-      const list = document.getElementById("ai-prompt-list");
-      if (!list || list.dataset.ready) return;
-      list.dataset.ready = "1";
-      list.innerHTML = OC_SUGGESTIONS.map((q) =>
-        `<button type="button" class="ai-prompt-chip">${esc(q)}</button>`).join("");
-      list.addEventListener("click", (ev) => {
-        const chip = ev.target.closest(".ai-prompt-chip");
-        if (!chip || !elOcInput) return;
-        elOcInput.value = chip.textContent;
-        elOcInput.focus();
-        elOcInput.dispatchEvent(new Event("input", { bubbles: true }));
-      });
-    }
     const OC_COMMANDS = [
       { cmd: "/new",      desc: "start a new session",                       alias: "/clear" },
       { cmd: "/sessions", desc: "list and switch sessions",                  alias: "/resume" },
@@ -11496,34 +11587,61 @@
       ocRenderStatus();
     }
 
-    async function agentLoadModels() {
-      if (!elAgentModel || elAgentModel.dataset.loaded === "1") return;
+    // compact price/locality hint for model option labels
+    function agentModelHint(m) {
+      if (m.local) return "local";
+      if (m.free) return /free/i.test(m.name || "") ? "" : "free";
+      const c = m.cost;
+      if (c && (c.input || c.output)) {
+        const f = (n) => { n = Number(n) || 0; return n >= 10 ? String(Math.round(n)) : String(Math.round(n * 100) / 100); };
+        return "$" + f(c.input) + "/$" + f(c.output);
+      }
+      return "";
+    }
+    const AGENT_CONNECT_OPT = "__connect__";
+    let agentModelsLoading = null;
+    function agentLoadModels(force) {
+      if (!elAgentModel || (!force && elAgentModel.dataset.loaded === "1")) return Promise.resolve();
+      if (agentModelsLoading) return agentModelsLoading;
+      agentModelsLoading = agentFetchModels(force).finally(() => { agentModelsLoading = null; });
+      return agentModelsLoading;
+    }
+    async function agentFetchModels(force) {
+      const connectOpt = `<optgroup label="Providers"><option value="${AGENT_CONNECT_OPT}">Connect a provider…</option></optgroup>`;
+      const prev = force ? (agent.model || elAgentModel.value) : "";
       try {
         const d = await fetchJSON("/api/agent/models");
         if (!d.ok || !d.models || !d.models.length) {
-          elAgentModel.innerHTML = `<option value="">no models available</option>`;
+          elAgentModel.innerHTML = `<option value="">no models available</option>` + connectOpt;
           return;
         }
         const groups = {};
         d.models.forEach((m) => { (groups[m.provider] = groups[m.provider] || []).push(m); });
-        elAgentModel.innerHTML = Object.keys(groups).sort().map((prov) =>
-          `<optgroup label="${esc(prov)}">` + groups[prov].map((m) =>
-            `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join("") +
-          "</optgroup>").join("");
-        // preselect: last-used model (localStorage), else server default
+        // provider order from the server (built-in/free first); older servers: alphabetical
+        const order = (d.groups && d.groups.length) ? d.groups : Object.keys(groups).sort().map((id) => ({ id, name: id }));
+        const def = d.default || "";
+        elAgentModel.innerHTML = order.filter((g) => groups[g.id]).map((g) =>
+          `<optgroup label="${esc(g.name || g.id)}${g.local ? " (local)" : ""}">` + groups[g.id].map((m) => {
+            const hint = agentModelHint(m);
+            return `<option value="${esc(m.id)}" title="${esc(m.id)}">${esc(m.name)}${hint ? " · " + esc(hint) : ""}${m.id === def ? " (default)" : ""}</option>`;
+          }).join("") + "</optgroup>").join("") + connectOpt;
+        // preselect: current pick (on refresh), last-used (localStorage), else
+        // the model opencode really uses (the configured one may be missing)
+        const has = (id) => id && d.models.some((m) => m.id === id);
         const lastModel = localStorage.getItem("tuxwall.agent.model") || "";
-        if (lastModel && d.models.some((m) => m.id === lastModel)) {
-          elAgentModel.value = lastModel;
-        } else {
-          const defModel = (d.configured || "");
-          if (defModel && d.models.some((m) => m.id === defModel)) {
-            elAgentModel.value = defModel;
-          }
-        }
+        elAgentModel.value = has(prev) ? prev : has(lastModel) ? lastModel
+          : has(def) ? def : has(d.configured) ? d.configured : d.models[0].id;
+        agent.model = elAgentModel.value;
+        agent.modelInfo = d;
         elAgentModel.dataset.loaded = "1";
+        ocRenderStatus();
+        twModelSubs.forEach((fn) => { try { fn(elAgentModel.value, "reload"); } catch (_) { } });
       } catch (_) {
-        elAgentModel.innerHTML = `<option value="">failed to load models</option>`;
+        elAgentModel.innerHTML = `<option value="">failed to load models</option>` + connectOpt;
       }
+    }
+    function agentOpenModels(opts) {
+      if (window.twModels) window.twModels.open(opts || {});
     }
 
     async function agentLoadBootInfo() {
@@ -11554,8 +11672,15 @@
       agentCheckHealth();
       agentLoadModels();
       agentUpdateStats();
-      ocRenderSuggestions();
-      if (!agent.booted) { agent.booted = true; ocBootScreen(); agentLoadBootInfo(); }
+      if (!agent.booted) {
+        agent.booted = true;
+        const stored = twStoredSession();
+        ocBootScreen(!!stored);
+        agentLoadBootInfo();
+        if (stored) ocLoadSession(stored);
+      } else {
+        twSyncPage();
+      }
       if (elOcInput) setTimeout(() => elOcInput.focus(), 50);
     }
 
@@ -11616,23 +11741,28 @@
     }
 
     function ocLogoHTML() {
-      // faithful to the TUI: "open" muted, "code" bright+bold,
-      // _ ^ ~ , rendered as their block equivalents
-      const fix = (s) => s.replace(/_/g, " ").replace(/\^/g, "▀").replace(/~/g, "▀").replace(/,/g, "▄");
+      // faithful to the TUI: "open" muted, "code" bright+bold, one column
+      // between the halves. _ ^ , are block equivalents; ~ is the TUI's
+      // shadow cell (a dim ▀) - drawing it solid closed the "n" into an "o".
+      const fix = (s) => esc(s.replace(/_/g, " ").replace(/\^/g, "▀").replace(/,/g, "▄"))
+        .replace(/~/g, '<span class="oc-sh">▀</span>');
       let html = "";
       for (let i = 0; i < OC_LOGO.left.length; i++) {
-        html += `<span class="oc-l">${esc(fix(OC_LOGO.left[i]))}</span><span class="oc-r">${esc(fix(OC_LOGO.right[i]))}</span>\n`;
+        html += `<span class="oc-l">${fix(OC_LOGO.left[i])}</span> <span class="oc-r">${fix(OC_LOGO.right[i])}</span>\n`;
       }
       return html;
     }
 
     function ocBootScreen(keepSession) {
       if (!elOcScreen) return;
-      if (!keepSession) { agent.sessionID = null; agent.tokens = 0; agent.cost = 0; agent.msgs = 0; }
+      if (!keepSession) { agent.sessionID = null; agent.tokens = 0; agent.cost = 0; agent.msgs = 0; twSetSession(null, "page"); }
       elOcScreen.innerHTML = "";
       const boot = document.createElement("div");
       boot.className = "oc-boot";
-      const vcsBit = agent.vcs && agent.vcs.branch ? ` <b>${esc(agent.vcs.branch)}</b>` : "";
+      // opencode 2.x returns the branch as an object ({} outside a repo)
+      const vb = agent.vcs && agent.vcs.branch;
+      const vbName = typeof vb === "string" ? vb : (vb && typeof vb.name === "string" ? vb.name : "");
+      const vcsBit = vbName ? ` <b>${esc(vbName)}</b>` : "";
       boot.innerHTML = `
         <div class="oc-logo">${ocLogoHTML()}</div>
         <div class="oc-boot-meta">
@@ -11697,7 +11827,16 @@
           <span class="oc-msg-time">${ocTime()}</span>
         </div>
         <div class="oc-msg-body"></div>`;
-      el.querySelector(".oc-msg-body").textContent = text;
+      const ctx = twParseContext(text);
+      const msgBody = el.querySelector(".oc-msg-body");
+      msgBody.textContent = ctx.text;
+      if (ctx.context) {
+        const chip = document.createElement("span");
+        chip.className = "tw-ctx-chip";
+        chip.title = "Page context sent with this question";
+        chip.textContent = ctx.context;
+        msgBody.insertBefore(chip, msgBody.firstChild);
+      }
       if (elOcScreen) elOcScreen.appendChild(el);
       ocScroll();
       return el;
@@ -11904,6 +12043,7 @@
         await postJSON("/api/agent/permission/reply", { requestID, response });
         const card = btn.closest(".oc-perm");
         if (card) ocPermResolve(card, response === "reject" ? "denied" : "approved");
+        twEmit({ type: "tw.permission.resolved", properties: { requestID, note: response === "reject" ? "denied" : "approved" } });
       } catch (err) {
         // The request was already resolved server-side (duplicate card from
         // a re-render, or auto-allowed by an earlier "always"): settle the
@@ -12096,6 +12236,7 @@
         try {
           await postJSON("/api/agent/question/reply", { requestID: rid, answers });
           ocPermResolve(card, "answered");
+          twEmit({ type: "tw.question.resolved", properties: { requestID: rid, note: "answered" } });
         } catch (err) {
           sent = false;
           const errEl = card.querySelector(".oc-q-err");
@@ -12173,6 +12314,7 @@
         try {
           await postJSON("/api/agent/question/reject", { requestID: rid });
           ocPermResolve(card, "skipped");
+          twEmit({ type: "tw.question.resolved", properties: { requestID: rid, note: "skipped" } });
         } catch (err) {
           sent = false;
           const errEl = card.querySelector(".oc-q-err");
@@ -12208,18 +12350,20 @@
     }
 
     async function agentEnsureSession() {
-      if (agent.sessionID) return agent.sessionID;
-      const d = await postJSON("/api/agent/session/new", {});
-      const sid = d.id;
-      if (!sid) throw new Error(d.error || "could not create agent session");
-      agent.sessionID = sid;
+      if (!agent.sessionID) {
+        const d = await postJSON("/api/agent/session/new", {});
+        const sid = d.id;
+        if (!sid) throw new Error(d.error || "could not create agent session");
+        agent.sessionID = sid;
+        twSetSession(sid, "page");
+      }
       // start permission polling while a session is active
       if (!agent.pollTimer) {
           agent.pollTimer = setInterval(() => {
             if (agent.busy) { agentPollPermissions(); ocPollQuestions(); }
           }, 2000);
         }
-      return sid;
+      return agent.sessionID;
     }
 
     // ── live event stream (SSE) from opencode ──────────────────────
@@ -12231,16 +12375,201 @@
       try {
         const es = new EventSource("/api/agent/events");
         es.onmessage = (ev) => {
-          if (!agent.onEvent) return;
           let d = null;
           try { d = JSON.parse(ev.data); } catch (_) { return; }
-          agent.onEvent(d);
+          if (agent.onEvent) agent.onEvent(d);
+          else ocFollowEvent(d);
+          twEmit(d);
         };
         es.onerror = () => { /* EventSource auto-reconnects */ };
         agent.es = es;
       } catch (_) { agent.es = null; }
       return agent.es;
     }
+
+    // ── shared conversation (header panel, scripts/ai-panel.js) ─────
+    // One current session for the AI page and the header panel, kept in
+    // localStorage; the panel subscribes to the SSE stream above instead
+    // of opening its own EventSource.
+    const TW_SESSION_KEY = "tuxwall.agent.session";
+    const twListeners = new Set();
+    const twSessionSubs = new Set();
+    const twModelSubs = new Set();
+    let twExtBusy = false;
+
+    function twStoredSession() {
+      try { return localStorage.getItem(TW_SESSION_KEY) || null; } catch (_) { return null; }
+    }
+    function twSetSession(sid, from) {
+      sid = sid || null;
+      if (sid === twStoredSession()) return;
+      try {
+        if (sid) localStorage.setItem(TW_SESSION_KEY, sid);
+        else localStorage.removeItem(TW_SESSION_KEY);
+      } catch (_) { /* private mode: in-memory only */ }
+      twSessionSubs.forEach((fn) => { try { fn(sid, from || "panel"); } catch (_) { } });
+    }
+    function twEmit(d) {
+      twListeners.forEach((fn) => { try { fn(d); } catch (_) { } });
+    }
+    function twReleaseEvents() {
+      if (twListeners.size || agent.onEvent || agent.busy || !agent.es) return;
+      try { agent.es.close(); } catch (_) { }
+      agent.es = null;
+    }
+    // first line "[TuxWall context: …]" + blank line, added by the panel
+    function twParseContext(text) {
+      const m = /^\[TuxWall context: ([^\]\n]*)\]\n\n?/.exec(String(text || ""));
+      return m ? { context: m[1].trim(), text: String(text).slice(m[0].length) } : { context: "", text: String(text || "") };
+    }
+    // opencode V2 returns {type, content[]} newest first; V1 {info, parts}.
+    // Normalise both to V1 shape, oldest first.
+    function twNormalizeMessages(list) {
+      const out = (Array.isArray(list) ? list : []).map((m) => {
+        if (m && m.info) return m;
+        if (!m || (m.type !== "user" && m.type !== "assistant")) return null;
+        const info = { id: m.id, role: m.type, time: m.time || {}, tokens: m.tokens, cost: m.cost,
+          modelID: (m.model && (m.model.id || m.model.modelID)) || "", error: m.error || null };
+        if (m.type === "user") return { info, parts: [{ type: "text", text: m.text || "" }] };
+        const parts = (m.content || []).map((c) => {
+          if (!c || c.type !== "tool") return c;
+          const st = Object.assign({}, c.state || {});
+          if (Array.isArray(st.content) && st.output == null) {
+            st.output = st.content.map((x) => (x && x.type === "text" ? x.text : typeof x === "string" ? x : "")).join("");
+          }
+          if (st.error && typeof st.error === "object") st.error = st.error.message || JSON.stringify(st.error);
+          if (st.metadata && !st.meta) st.meta = st.metadata;
+          return { type: "tool", id: c.id, tool: c.name, name: c.name, state: st };
+        });
+        return { info, parts };
+      }).filter(Boolean);
+      const t = (m) => (m.info.time && (m.info.time.created || m.info.time.start)) || 0;
+      return out.map((m, i) => [m, i]).sort((a, b) => (t(a[0]) - t(b[0])) || (a[1] - b[1])).map((x) => x[0]);
+    }
+    async function twFetchMessages(sid) {
+      const res = await fetch("/api/agent/session/messages?id=" + encodeURIComponent(sid), { cache: "no-store" });
+      if (res.status === 401) handleSessionExpired();
+      let d = {};
+      try { d = await res.json(); } catch (_) { }
+      if (!res.ok || !d.ok) {
+        const err = new Error(d.error || ("HTTP " + res.status));
+        err.notFound = d.status === 404 || /not ?found/i.test(d.error || "");
+        throw err;
+      }
+      return twNormalizeMessages(d.messages);
+    }
+    function twSetModel(id, from) {
+      if (elAgentModel && id != null && [...elAgentModel.options].some((o) => o.value === id)) {
+        elAgentModel.value = id;
+        agent.model = id;
+        try { localStorage.setItem("tuxwall.agent.model", id); } catch (_) { }
+        ocRenderStatus();
+      }
+      twModelSubs.forEach((fn) => { try { fn(elAgentModel ? elAgentModel.value : id, from || "panel"); } catch (_) { } });
+    }
+    // remote turn (started from the panel) shown on the AI page
+    function ocFollowEvent(d) {
+      if (!d || agent.busy || !agent.booted) return;
+      const props = d.properties || {};
+      const onPage = state.activeView === "ai";
+      if (d.type === "permission.asked") {
+        const rid = props.id || props.requestID;
+        if (onPage && twExtBusy && rid && !document.querySelector(`.oc-perm[data-perm-id="${rid}"]`)) ocPermCard(props);
+        return;
+      }
+      if (d.type === "question.asked" || d.type === "question.v2.asked") {
+        if (onPage && (props.sessionID || "") === agent.sessionID) ocQuestionCard(props);
+        return;
+      }
+      if (!agent.sessionID || props.sessionID !== agent.sessionID) return;
+      if (d.type === "session.idle") {
+        if (!agent.remote && !twExtBusy) return;
+        agent.remote = false;
+        if (onPage) { agent.stale = false; ocLoadSession(agent.sessionID); ocSetState("idle"); }
+        else agent.stale = true;
+      } else if (d.type === "message.part.delta" || d.type === "message.part.updated") {
+        agent.remote = true;
+        if (onPage && elOcState && elOcState.textContent !== "busy") ocSetState("busy");
+      }
+    }
+    function ocLocalEvent(d) {
+      const p = (d && d.properties) || {};
+      if (d.type === "tw.permission.resolved") {
+        const c = document.querySelector(`.oc-perm[data-perm-id="${p.requestID}"]`);
+        if (c) ocPermResolve(c, p.note || "answered");
+      } else if (d.type === "tw.question.resolved") {
+        const c = document.querySelector(`.oc-question[data-qid="${p.requestID}"]`);
+        if (c) ocPermResolve(c, p.note || "answered");
+      }
+    }
+    // bring the AI page in line with the shared session
+    function twSyncPage() {
+      if (!agent.booted || agent.busy) return;
+      const sid = twStoredSession();
+      if (sid === agent.sessionID && !agent.stale) return;
+      agent.stale = false;
+      ocToolEls.clear(); ocToolGroups.clear();
+      if (sid) {
+        ocLoadSession(sid).then(() => {
+          if (twExtBusy) { agentPollPermissions(); ocPollQuestions(); }
+        });
+      } else {
+        ocBootScreen(false);
+      }
+    }
+    twSessionSubs.add((sid, from) => {
+      if (from === "page") return;
+      if (state.activeView === "ai") twSyncPage();
+      else agent.stale = true;
+    });
+
+    window.twAgent = {
+      session: twStoredSession,
+      setSession: (sid) => twSetSession(sid, "panel"),
+      async ensureSession() {
+        const sid = twStoredSession();
+        if (sid) return sid;
+        agent.sessionID = null;
+        return agentEnsureSession();
+      },
+      newSession() {
+        if (agent.busy) return false;
+        twSetSession(null, "panel");
+        return true;
+      },
+      onSession(fn) { twSessionSubs.add(fn); return () => twSessionSubs.delete(fn); },
+      subscribe(fn) {
+        twListeners.add(fn);
+        agentEvents();
+        return () => { twListeners.delete(fn); twReleaseEvents(); };
+      },
+      // resolves once the shared stream is connected (or after `ms`)
+      ready(ms) {
+        const es = agentEvents();
+        if (!es || es.readyState === 1) return Promise.resolve(!!es);
+        return new Promise((resolve) => {
+          const done = (ok) => { clearTimeout(t); es.removeEventListener("open", onOpen); resolve(ok); };
+          const onOpen = () => done(true);
+          const t = setTimeout(() => done(false), ms || 4000);
+          es.addEventListener("open", onOpen);
+        });
+      },
+      emitLocal(d) { ocLocalEvent(d); twEmit(d); },
+      messages: twFetchMessages,
+      normalizeMessages: twNormalizeMessages,
+      parseContext: twParseContext,
+      async loadModels(force) { await agentLoadModels(!!force); return elAgentModel; },
+      modelInfo: () => agent.modelInfo || null,
+      openModels: (opts) => agentOpenModels(opts),
+      model: () => (elAgentModel ? elAgentModel.value : ""),
+      setModel: (id) => twSetModel(id, "panel"),
+      onModel(fn) { twModelSubs.add(fn); return () => twModelSubs.delete(fn); },
+      isAdmin: () => isAdminUser(),
+      pageBusy: () => agent.busy,
+      setExternalBusy(on) { twExtBusy = !!on; if (!on) twReleaseEvents(); },
+      get: fetchJSON,
+      post: postJSON,
+    };
 
     // ── agent prompt pipeline (terminal) ────────────────────────────
     function ocClearInput() {
@@ -12377,7 +12706,10 @@
             await ocAbort();
             break;
           case "/models":
-            if (elAgentModel) {
+            if (window.twModels) {
+              agentOpenModels({ tab: "default" });
+              ocLine("models & providers opened — the side-panel picker switches this conversation", "oc-info");
+            } else if (elAgentModel) {
               elAgentModel.focus();
               ocLine("model picker focused in the side panel — it applies to the next message", "oc-info");
             }
@@ -12480,6 +12812,7 @@
               await postJSON("/api/agent/session/delete", { sessionID: s.id });
               row.remove();
               if (s.id === agent.sessionID) agent.sessionID = null;
+              if (s.id === twStoredSession()) twSetSession(null, "page");
             } catch (err) { ocLine("delete failed: " + err.message, "oc-error"); }
           });
           row.appendChild(del);
@@ -12495,15 +12828,22 @@
       ocToolEls.clear(); ocToolGroups.clear();
       if (elOcScreen) elOcScreen.innerHTML = "";
       agent.sessionID = sid;
+      twSetSession(sid, "page");
       try {
-        const d = await fetchJSON("/api/agent/session/messages?id=" + encodeURIComponent(sid));
-        const msgs = d.messages || [];
+        const msgs = await twFetchMessages(sid);
+        if (agent.sessionID !== sid) return;
         if (elOcScreen) elOcScreen.innerHTML = "";
+        ocToolEls.clear(); ocToolGroups.clear();
         if (!msgs.length) { ocLine("(empty session)", "oc-muted"); return; }
         msgs.forEach((m) => ocRenderHistoryMsg(m.info, m.parts));
         ocLine("— session restored · " + msgs.length + " messages —", "oc-muted");
         ocScroll();
       } catch (err) {
+        if (err.notFound && agent.sessionID === sid) {
+          ocToolEls.clear(); ocToolGroups.clear();
+          ocBootScreen(false);
+          return;
+        }
         ocLine("failed to load session: " + err.message, "oc-error");
       }
     }
@@ -12542,6 +12882,8 @@
       const tokEl = el.querySelector(".oc-msg-tok-v");
       if (tokEl && totalTok) tokEl.textContent = totalTok.toLocaleString() + " tokens";
       if (!body.childNodes.length && anchor === el) el.remove();
+      const er = info && info.error;
+      if (er) ocLine("Agent error: " + (er.message || (er.data && er.data.message) || er.name || "failed"), "oc-error");
       ocScroll();
     }
 
@@ -12649,6 +12991,7 @@
       if (text.startsWith("/")) return ocRunCommand(text);
       if (text.startsWith("!")) return ocShell(text.slice(1).trim());
       if (agent.busy) { ocLine("a task is already running — press esc to abort", "oc-muted"); return; }
+      if (twExtBusy) { ocLine("the header assistant panel is still running a task — wait or stop it there", "oc-muted"); return; }
 
       ocUserMsg(text);
       agent.busy = true;
@@ -12850,14 +13193,22 @@
       });
     }
     if (elAgentSessBtn) elAgentSessBtn.addEventListener("click", () => ocSessionsModal());
+    const elAgentModelsBtn = document.getElementById("agent-models-btn");
+    if (elAgentModelsBtn) elAgentModelsBtn.addEventListener("click", () => agentOpenModels());
     if (elOcSend) elOcSend.addEventListener("click", ocSubmit);
     if (elOcOverlay) elOcOverlay.addEventListener("click", (e) => { if (e.target === elOcOverlay) ocModalClose(); });
     if (elAgentModel) {
       elAgentModel.addEventListener("change", () => {
+        if (elAgentModel.value === AGENT_CONNECT_OPT) {
+          elAgentModel.value = agent.model || "";
+          agentOpenModels({ tab: "connect" });
+          return;
+        }
         agent.model = elAgentModel.value;
         try { localStorage.setItem("tuxwall.agent.model", elAgentModel.value); } catch (_) {}
         ocLine("model → " + (elAgentModel.value || "default"), "oc-muted");
         ocRenderStatus();
+        twModelSubs.forEach((fn) => { try { fn(elAgentModel.value, "page"); } catch (_) { } });
       });
     }
     if (elOcInput) {
@@ -13145,8 +13496,9 @@
     // The AI Assistant reaches the opencode agent, which runs shell commands
     // and holds sudo, so it is admin-only server-side. Hide it for viewers
     // rather than leaving a panel that only returns 403.
-    document.querySelectorAll('.nav-item[data-view="settings"], .nav-item[data-view="ai"]')
+    document.querySelectorAll('.nav-item[data-view="settings"], .nav-item[data-view="ai"], #ai-panel-btn')
       .forEach((el) => { el.hidden = !isAdmin; });
+    document.dispatchEvent(new CustomEvent("tw:role", { detail: { admin: isAdmin } }));
     const pluginTab = document.querySelector('#sys-subtabs [data-sys-pane="plugins"]');
     if (pluginTab) pluginTab.hidden = !isAdmin;
     if (!isAdmin && pluginTab && pluginTab.classList.contains("active")) setSysTab("status");
@@ -13511,6 +13863,34 @@
       html += resolved.map(incidentItemHtml).join("");
     }
     els.incidentList.innerHTML = html;
+    if (window.twAskButton) {
+      const byId = new Map(items.map((i) => [String(i.id), i]));
+      els.incidentList.querySelectorAll(".incident-item").forEach((el) => {
+        const inc = byId.get(el.dataset.id);
+        const meta = el.querySelector(".incident-item-meta");
+        const b = inc && meta && window.twAskButton({
+          title: "Ask AI about incident: " + (inc.title || "Incident"),
+          text: incidentAskText(inc),
+          context: "Incidents › " + (inc.title || "Incident"),
+          onAsk: () => setIncidentPanel(false),
+        });
+        if (b) meta.appendChild(b);
+      });
+    }
+  }
+
+  function incidentAskText(inc) {
+    const when = (t) => (t ? new Date(t * 1000).toLocaleString() : "—");
+    const sev = (inc.severity || "info").toLowerCase();
+    const l = ["Explain this TuxWall incident: what caused it, is it still a problem, and what should I do?", "",
+      "Incident: " + (inc.title || "Incident")];
+    if (inc.detail) l.push("Detail: " + inc.detail);
+    l.push("Severity: " + (INCIDENT_SEV_LABEL[sev] || sev) + " · status: " + (inc.status === "active" ? "active" : "resolved") +
+      (inc.acknowledged ? " (acknowledged)" : ""));
+    l.push("First seen: " + when(inc.first_seen) + " · last seen: " + when(inc.last_seen) +
+      (inc.resolved_at ? " · resolved: " + when(inc.resolved_at) : ""));
+    if (inc.key) l.push("Source check: " + inc.key);
+    return l.join("\n");
   }
 
   async function refreshIncidents() {

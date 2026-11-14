@@ -486,6 +486,19 @@ PY
       echo "     WARNING: opencode agent setup failed (offline?). Re-run later:"
       echo "       sudo bash $AGENT_SETUP"
     fi
+    # Read-only TuxWall MCP tool for the agent: the API creates
+    # /etc/tuxwall/agent/api.token at start (root:tuxwall-agent 0640) - make
+    # sure the group is right now that the agent user exists.
+    chmod 755 /usr/local/lib/tuxwall/tuxwall_mcp.py 2>/dev/null || true
+    if getent group tuxwall-agent >/dev/null 2>&1; then
+      install -d -m 0750 -o root -g tuxwall-agent /etc/tuxwall/agent || true
+      if [[ -f /etc/tuxwall/agent/api.token ]]; then
+        chown root:tuxwall-agent /etc/tuxwall/agent/api.token || true
+        chmod 0640 /etc/tuxwall/agent/api.token || true
+      else
+        systemctl try-restart tuxwall.service >/dev/null 2>&1 || true
+      fi
+    fi
 
     echo
     echo "tuxwall installed. Dashboard: http://<this-host>/"
