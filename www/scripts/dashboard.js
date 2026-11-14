@@ -11726,12 +11726,14 @@
     }
 
     function ocLogoHTML() {
-      // faithful to the TUI: "open" muted, "code" bright+bold,
-      // _ ^ ~ , rendered as their block equivalents
-      const fix = (s) => s.replace(/_/g, " ").replace(/\^/g, "▀").replace(/~/g, "▀").replace(/,/g, "▄");
+      // faithful to the TUI: "open" muted, "code" bright+bold, one column
+      // between the halves. _ ^ , are block equivalents; ~ is the TUI's
+      // shadow cell (a dim ▀) - drawing it solid closed the "n" into an "o".
+      const fix = (s) => esc(s.replace(/_/g, " ").replace(/\^/g, "▀").replace(/,/g, "▄"))
+        .replace(/~/g, '<span class="oc-sh">▀</span>');
       let html = "";
       for (let i = 0; i < OC_LOGO.left.length; i++) {
-        html += `<span class="oc-l">${esc(fix(OC_LOGO.left[i]))}</span><span class="oc-r">${esc(fix(OC_LOGO.right[i]))}</span>\n`;
+        html += `<span class="oc-l">${fix(OC_LOGO.left[i])}</span> <span class="oc-r">${fix(OC_LOGO.right[i])}</span>\n`;
       }
       return html;
     }

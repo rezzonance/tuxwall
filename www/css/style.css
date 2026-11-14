@@ -3682,6 +3682,7 @@ body.light-theme .stat-card.stat-c:hover {
 .oc-logo { font-family: var(--mono, monospace); font-size: 17px; line-height: 1.2; white-space: pre; margin: 0 0 14px; user-select: none; }
 .oc-logo .oc-l { color: var(--oc-muted); }
 .oc-logo .oc-r { color: var(--oc-text); font-weight: 700; }
+.oc-logo .oc-sh { opacity: .22; }
 .oc-boot-meta { color: var(--oc-muted); font-size: 12.5px; }
 .oc-boot-meta b { color: var(--oc-text); font-weight: 600; }
 .oc-boot-meta .oc-bootline { display: block; margin: 2px 0; }
