@@ -111,7 +111,7 @@
     if (cl.contains("oc-no") || cl.contains("modal-close") || cl.contains("oc-modal-x") ||
         cl.contains("tw-toast-x") || cl.contains("tw-sheet-x") || cl.contains("host-cancel") ||
         cl.contains("incident-bell") || cl.contains("user-menu-btn") || cl.contains("nav-toggle") ||
-        cl.contains("tw-search-btn") || cl.contains("tw-live-btn")) return "neutral";
+        cl.contains("tw-search-btn") || cl.contains("tw-live-btn") || cl.contains("tw-refresh-btn")) return "neutral";
     if (cl.contains("host-save") || cl.contains("oc-send") || cl.contains("oc-q-send")) return "primary";
     if (cl.contains("ip-copy-btn") || cl.contains("card-edit") || cl.contains("host-edit")) return "info";
     if (cl.contains("plugin-power")) return cl.contains("is-on") ? "danger" : "success";

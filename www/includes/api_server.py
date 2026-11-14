@@ -8218,6 +8218,8 @@ def get_system_monitor():
 LATENCY_TARGET = "1.1.1.1"
 LATENCY_WINDOW = 48 * 3600
 LATENCY_HISTORY_FILE = "/var/lib/tuxwall/latency_history.jsonl"
+LATENCY_HISTORY_KEEP = 7 * 86400
+LATENCY_TRIM_EVERY = 3600
 
 _LATENCY = None
 _LATENCY_LOCK = threading.Lock()
@@ -8233,6 +8235,7 @@ class LatencyMonitor:
         self.history = deque(maxlen=self.max_samples)
         self.running = False
         self.thread = None
+        self._last_trim = 0.0
         self._load_history()
 
     def _load_history(self):
@@ -8315,6 +8318,37 @@ class LatencyMonitor:
                 )
         except OSError:
             pass
+        if time.time() - self._last_trim >= LATENCY_TRIM_EVERY:
+            self._trim_history()
+
+    def _trim_history(self):
+        """Drop on-disk samples older than LATENCY_HISTORY_KEEP (the file
+        used to grow forever: ~8 MB a month). Only rewrites when the oldest
+        line is out of range; this thread is the only writer."""
+        self._last_trim = time.time()
+        cutoff = self._last_trim - LATENCY_HISTORY_KEEP
+        tmp = LATENCY_HISTORY_FILE + ".tmp"
+        try:
+            with open(LATENCY_HISTORY_FILE, "r") as f:
+                try:
+                    if json.loads(f.readline()).get("ts", 0) >= cutoff:
+                        return
+                except (ValueError, AttributeError):
+                    pass
+                f.seek(0)
+                with open(tmp, "w") as out:
+                    for line in f:
+                        try:
+                            if json.loads(line).get("ts", 0) >= cutoff:
+                                out.write(line)
+                        except (ValueError, AttributeError):
+                            continue
+            os.replace(tmp, LATENCY_HISTORY_FILE)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
     def stats(self):
         with self.lock:

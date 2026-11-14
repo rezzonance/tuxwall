@@ -106,45 +106,24 @@
    Topbar: search button + live indicator
    ------------------------------------------------------------------------ */
 .topbar-actions { gap: 10px; }
-.tw-search-btn, .tw-live {
-  display: inline-flex; align-items: center; gap: 8px;
-  height: 36px;
-  padding: 0 10px 0 12px;
-  border-radius: var(--tw-radius-sm, 9px);
-  border: 1px solid var(--tw-card-border, var(--border));
-  background: color-mix(in srgb, var(--card) 70%, transparent);
-  color: var(--muted);
-  font: 500 12.5px/1 var(--tw-font-sys, inherit);
-}
-.tw-search-btn { cursor: pointer; min-width: 220px; }
-.tw-search-btn:hover { color: var(--text); border-color: var(--tw-card-border-hover, var(--accent)); }
-.tw-search-btn .tw-search-ph { flex: 1; text-align: left; }
+/* search + auto-refresh: icon buttons (size/border from buttons.js, as the
+   assistant and incident buttons next to them) */
+.tw-search-btn, .tw-refresh-btn { position: relative; flex: none; }
 .tw-ic { width: 15px; height: 15px; flex: none; }
-.tw-live { padding: 0 4px 0 12px; gap: 9px; }
+.tw-refresh-btn .tw-ic { transition: opacity .2s ease; }
+.tw-refresh-btn.paused .tw-ic { opacity: .5; }
 .tw-live-dot {
-  width: 8px; height: 8px; border-radius: 50%;
+  position: absolute; top: 4px; right: 4px;
+  width: 7px; height: 7px; border-radius: 50%;
   background: var(--green);
   box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 60%, transparent);
   animation: tw-live-pulse 2.4s ease-out infinite;
 }
-.tw-live.stale .tw-live-dot { background: var(--amber); animation: none; }
-.tw-live.paused .tw-live-dot { background: var(--muted); animation: none; }
-.tw-live-text { font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 9.5em; }
-.tw-live-btn {
-  display: inline-flex; align-items: center; gap: 5px;
-  height: 28px; padding: 0 9px;
-  border-radius: calc(var(--tw-radius-sm, 9px) - 2px);
-  border: 1px solid transparent;
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent);
-  font: 600 12px/1 var(--tw-font-sys, inherit);
-  cursor: pointer;
-}
-.tw-live-btn:hover { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
-.tw-live-btn .tw-ic { width: 12px; height: 12px; fill: currentColor; stroke: none; }
+.tw-refresh-btn.stale .tw-live-dot { background: var(--amber); animation: none; }
+.tw-refresh-btn.paused .tw-live-dot { background: var(--muted); animation: none; }
 @keyframes tw-live-pulse {
   0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 55%, transparent); }
-  70%, 100% { box-shadow: 0 0 0 7px transparent; }
+  70%, 100% { box-shadow: 0 0 0 5px transparent; }
 }
 .tw-kbd {
   display: inline-flex; align-items: center; justify-content: center;
@@ -156,16 +135,6 @@
   color: var(--muted);
   font: 600 10.5px/1 var(--tw-font-mono, monospace);
   white-space: nowrap;
-}
-@media (max-width: 1200px) {
-  .tw-search-btn { min-width: 0; }
-  .tw-search-btn .tw-search-ph, .tw-search-btn .tw-kbd { display: none; }
-  .tw-live-text { min-width: 0; }
-}
-@media (max-width: 760px) {
-  .tw-live-text { display: none; }
-  .tw-live { padding: 0 4px 0 10px; }
-  .tw-live-btn span { display: none; }
 }
 
 /* ---------------------------------------------------------------------------

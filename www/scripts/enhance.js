@@ -342,29 +342,34 @@
     set("dl-wireguard-dot", on("wg-quick@wg0.service"));
   }
 
-  // "Updated Ns ago" + Pause / Resume (drives the existing auto-refresh toggle)
+  // Auto-refresh toggle as an icon button (drives the existing #auto-refresh
+  // checkbox). A corner dot shows the state: green = live, amber = stale
+  // (no successful update for 90 s), grey = paused; "Updated Ns ago" lives
+  // in the tooltip.
   function buildLive() {
     var actions = $(".topbar-actions");
     var auto = document.getElementById("auto-refresh");
-    if (!actions || $(".tw-live", actions)) return;
-    var live = el("div", "tw-live",
-      '<span class="tw-live-dot" aria-hidden="true"></span>' +
-      '<span class="tw-live-text" aria-live="off">Updated just now</span>' +
-      '<button type="button" class="tw-live-btn" aria-pressed="false"></button>');
-    actions.insertBefore(live, actions.firstChild);
-    var txt = $(".tw-live-text", live), btn = $(".tw-live-btn", live);
+    if (!actions || $(".tw-refresh-btn", actions)) return;
+    var btn = el("button", "tw-refresh-btn",
+      ICON('<path d="M20 11a8 8 0 0 0-14.7-4.4L4 8"/><path d="M4 3.5V8h4.5"/><path d="M4 13a8 8 0 0 0 14.7 4.4L20 16"/><path d="M20 20.5V16h-4.5"/>') +
+      '<span class="tw-live-dot" aria-hidden="true"></span>');
+    btn.type = "button";
+    btn.setAttribute("aria-pressed", "true");
+    actions.insertBefore(btn, actions.firstChild);
+    var wasPaused = null;
     var paint = function () {
-      var paused = auto && !auto.checked;
-      live.classList.toggle("paused", !!paused);
-      btn.innerHTML = paused
-        ? ICON('<path d="M8 5v14l11-7z"/>') + "<span>Resume</span>"
-        : ICON('<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>') + "<span>Pause</span>";
-      btn.title = paused ? "Resume auto-refresh" : "Pause auto-refresh";
-      btn.setAttribute("aria-pressed", paused ? "true" : "false");
+      var paused = !!(auto && !auto.checked);
       var s = Math.max(0, Math.round((Date.now() - lastOk) / 1000));
       var ago = s < 5 ? "just now" : s < 60 ? s + "s ago" : Math.floor(s / 60) + "m ago";
-      txt.textContent = paused ? "Paused · updated " + ago : "Updated " + ago;
-      live.classList.toggle("stale", !paused && s > 90);
+      btn.classList.toggle("paused", paused);
+      btn.classList.toggle("stale", !paused && s > 90);
+      btn.title = (paused ? "Auto-refresh paused" : "Auto-refresh on") + " · updated " + ago +
+        (paused ? " · click to resume" : " · click to pause");
+      if (paused !== wasPaused) {
+        wasPaused = paused;
+        btn.setAttribute("aria-pressed", paused ? "false" : "true");
+        btn.setAttribute("aria-label", "Auto-refresh " + (paused ? "(paused)" : "(on)"));
+      }
     };
     btn.addEventListener("click", function () {
       if (!auto) return;
@@ -522,7 +527,7 @@
       run: function () { go("clients", "static", { push: true }).then(function () { var i = $("#res-mac"); if (i) i.focus(); }); } });
     var auto = document.getElementById("auto-refresh");
     out.push({ kind: "Action", label: (auto && !auto.checked ? "Resume" : "Pause") + " auto-refresh",
-      run: function () { var b = $(".tw-live-btn"); if (b) b.click(); } });
+      run: function () { var b = $(".tw-refresh-btn"); if (b) b.click(); } });
     out.push({ kind: "Action", label: (document.documentElement.classList.contains("tw-mascots") ? "Hide" : "Show") + " mascot art",
       run: function () { setMascots(!document.documentElement.classList.contains("tw-mascots")); } });
     out.push({ kind: "Action", label: "Keyboard shortcuts", keys: "?", run: function () { openSheet(); } });
@@ -800,13 +805,13 @@
   function buildSearchButton() {
     var actions = $(".topbar-actions");
     if (!actions || $(".tw-search-btn", actions)) return;
-    var b = el("button", "tw-search-btn",
-      ICON('<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>') + '<span class="tw-search-ph">Search…</span><kbd class="tw-kbd">Ctrl K</kbd>');
+    var b = el("button", "tw-search-btn", ICON('<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>'));
     b.type = "button";
-    b.title = "Command palette (Ctrl+K)";
-    b.setAttribute("aria-label", "Open command palette");
+    b.title = "Search (Ctrl+K)";
+    b.setAttribute("aria-label", "Search");
+    b.setAttribute("aria-keyshortcuts", "Control+K");
     b.addEventListener("click", function () { openPalette(); });
-    var live = $(".tw-live", actions);
+    var live = $(".tw-refresh-btn", actions);
     actions.insertBefore(b, live ? live.nextSibling : actions.firstChild);
   }
 
