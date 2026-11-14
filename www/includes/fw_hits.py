@@ -175,7 +175,8 @@ def record(ctx, rec):
     _write_atomic(ctx.path(STATE_FILE), json.dumps(st, separators=(",", ":")))
     p = ctx.path(HITS_FILE)
     os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "a") as f:
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o640)
+    with os.fdopen(fd, "a") as f:
         f.write(json.dumps(rec, separators=(",", ":")) + "\n")
     try:
         if os.path.getsize(p) > 64 * 1024:
