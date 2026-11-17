@@ -942,10 +942,10 @@ table .btn { margin-left: 8px; }
   font-size: 12px;
   line-height: 1.7;
   color: color-mix(in srgb, var(--text) 80%, var(--muted));
-  background: linear-gradient(180deg, rgba(56,139,253,0.09) 0%, rgba(56,139,253,0.04) 100%);
-  border: 1px solid rgba(56,139,253,0.16);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 9%, transparent) 0%, color-mix(in srgb, var(--accent) 4%, transparent) 100%);
+  border: 1px solid color-mix(in srgb, var(--accent) 16%, transparent);
   border-radius: 10px;
-  box-shadow: 0 0 20px rgba(56,139,253,0.06), inset 0 1px 0 rgba(255,255,255,0.03);
+  box-shadow: 0 0 20px color-mix(in srgb, var(--accent) 6%, transparent), inset 0 1px 0 rgba(255,255,255,0.03);
   transition: border-color 0.2s;
   overflow: hidden;
 }
@@ -956,24 +956,24 @@ table .btn { margin-left: 8px; }
   left: 0; top: 8px; bottom: 8px; width: 3px;
   border-radius: 0 3px 3px 0;
   background: linear-gradient(180deg, var(--accent) 0%, color-mix(in srgb, var(--accent) 30%, transparent) 100%);
-  box-shadow: 0 0 8px rgba(79,140,255,0.35);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 35%, transparent);
   pointer-events: none;
   transition: box-shadow 0.2s, top 0.2s, bottom 0.2s;
 }
 .bl-note:hover,
-.sec-note:hover { border-color: rgba(79,140,255,0.35); }
+.sec-note:hover { border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
 .bl-note:hover::before,
 .sec-note:hover::before {
   top: 5px; bottom: 5px;
-  box-shadow: 0 0 14px rgba(79,140,255,0.55);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 55%, transparent);
 }
 .bl-note b, .sec-note b { color: var(--text); font-weight: 600; }
 .bl-note a, .sec-note a { color: var(--accent); }
 .bl-note code, .sec-note code {
   font-family: var(--mono);
   font-size: 11px;
-  background: rgba(56,139,253,0.12);
-  border: 1px solid rgba(56,139,253,0.18);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
   border-radius: 5px;
   padding: 1px 5px;
   color: var(--text);
