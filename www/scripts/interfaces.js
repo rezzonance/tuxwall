@@ -662,8 +662,8 @@
     body.innerHTML = '<div class="card card-mt if-vl-card"><div class="card-head"><h2>VLANs</h2><span class="toolbar-spacer"></span>' +
       '<button type="button" class="btn btn-sm" id="if-vl-aps">Re-check access points</button>' +
       '<button type="button" class="btn btn-primary btn-sm" id="if-vl-add">Add VLAN</button></div>' +
-      '<p class="if-sub if-vl-intro">VLAN networks are part of the interface record (<code>/etc/tuxwall/interfaces.json</code>). Add, Edit and Remove open the Edit &amp; plan editor, so every change goes through the same plan review.</p>' +
-      '<div class="if-vl-apstat" id="if-vl-apstat" aria-live="polite"></div>' +
+      '<div class="if-vl-info"><p class="if-sub if-vl-intro">VLAN networks are part of the interface record (<code>/etc/tuxwall/interfaces.json</code>). Add, Edit and Remove open the Edit &amp; plan editor, so every change goes through the same plan review.</p>' +
+      '<div class="if-vl-apstat" id="if-vl-apstat" aria-live="polite"></div></div>' +
       '<div class="if-vl-list" id="if-vl-list"><span class="muted">Loading VLANs…</span></div>' +
       '<div class="if-vl-legacy" id="if-vl-legacy"></div></div>';
     var ports = $('[data-if-body="ports"]');
@@ -746,7 +746,9 @@
   function renderVlans() {
     var d = state.vlans, list = $("#if-vl-list");
     if (!d || !list) return;
-    $("#if-vl-apstat").innerHTML = apStatus(d);
+    var apEl = $("#if-vl-apstat"), apSt = (d.aps || {}).status;
+    apEl.innerHTML = apStatus(d);
+    apEl.dataset.state = ["ok", "pending", "absent", "disabled", "unconfigured"].indexOf(apSt) >= 0 ? apSt : "error";
     list.innerHTML = (d.vlans || []).length ? d.vlans.map(vlanCard).join("") :
       '<p class="muted">No VLANs yet. Use Add VLAN to tag a new network on a port.</p>';
     var lp = d.legacy_policies || [];
