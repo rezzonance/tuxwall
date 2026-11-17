@@ -202,12 +202,33 @@ html[data-theme-style]:not([data-theme-style=""]) .ni-interfaces { --ni-color: v
 .if-vl-ssid { display: block; margin-bottom: 3px; }
 .if-vl-legacy { margin: 10px 16px 16px; }
 .if-vl-legacy p { margin: 0; }
+/* intro as an amber callout (same look as Backups' .bk-warn); footer uses the shared .bl-note */
+#view-interfaces .if-vl-card > p.if-sub.if-vl-intro {
+  position: relative;
+  margin-bottom: 10px;
+  background: color-mix(in srgb, var(--amber, #d29922) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber, #d29922) 38%, transparent);
+  border-radius: 10px;
+  padding: 12px 14px 10px 42px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+#view-interfaces .if-vl-card > p.if-vl-intro::before {
+  content: "\26A0";
+  position: absolute;
+  left: 20px;
+  top: 8px;
+  font-size: 16px;
+  line-height: 1.55;
+  color: var(--amber, #d29922);
+}
 .if-ed-card.if-focus { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent); }
 .if-moved { margin: 0 0 14px; padding: 10px 14px; border-radius: var(--tw-radius-sm, 9px); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); background: color-mix(in srgb, var(--accent) 8%, var(--card)); color: var(--text); font-size: .9rem; }
 .if-moved a { color: var(--accent); font-weight: 600; }
 @media (max-width: 760px) {
   .if-vl-list { padding: 0 10px; }
-  .if-vl-intro, .if-vl-apstat { margin-left: 10px; margin-right: 10px; }
+  .if-vl-intro, .if-vl-apstat, .if-vl-legacy { margin-left: 10px; margin-right: 10px; }
   .if-vl-grid { grid-template-columns: 1fr; gap: 2px; }
   .if-vl-k { padding-top: 6px; }
 }

@@ -750,7 +750,7 @@
     list.innerHTML = (d.vlans || []).length ? d.vlans.map(vlanCard).join("") :
       '<p class="muted">No VLANs yet. Use Add VLAN to tag a new network on a port.</p>';
     var lp = d.legacy_policies || [];
-    $("#if-vl-legacy").innerHTML = '<p class="if-sub">' + (lp.length
+    $("#if-vl-legacy").innerHTML = '<p class="bl-note">' + (lp.length
       ? "Policies from the old VLANs page: " + lp.map(function (x) {
           return "<code>" + esc(x.rule || x.src + " → " + x.dst) + "</code>" + (x.cell ? " → matrix cell " + esc(x.cell[0]) + "→" + esc(x.cell[1]) : ' <span class="if-warn">(no matching networks)</span>');
         }).join("; ")
