@@ -17,7 +17,7 @@
     ".fw-chip", ".tl-chip", ".ai-prompt-chip", ".ov-post-chip", ".theme-card",
     ".sec-feed-row", ".oc-tools-head", ".oc-perm-diff-toggle", ".oc-q-opt",
     ".tl-ip", ".tw-svc-sum", ".tw-pal-item", '[role="tab"]', '[role="switch"]',
-    '[role="option"]', '[role="menuitemradio"]', ".leaflet-container *", ".aip-raw",
+    '[role="option"]', '[role="menuitemradio"]', ".leaflet-container *", ".aip-raw", ".bk-group-toggle",
   ].join(",");
 
   const ICON_RULES = [
@@ -64,6 +64,7 @@
     up: "neutral", down: "neutral", edit: "info", delete: "danger", active: "danger",
     ban: "primary", config: "info", download: "info", export: "info", import: "primary",
     backup: "success", restart: "warning", reload: "warning", start: "success", stop: "danger",
+    verify: "success", pin: "info",
   };
   const ACTION_TONES = { restart: "warning", reload: "warning", start: "success", stop: "danger", enable: "success", disable: "danger" };
   const CLOSE_ONLY = /^[✕×✖x]$/;

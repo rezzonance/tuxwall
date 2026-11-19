@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
   <link rel="stylesheet" href="/css/style.css?v=20261118202024">
-  <link rel="stylesheet" href="/css/polish.css?v=20261118210051">
+  <link rel="stylesheet" href="/css/polish.css?v=20261118212902">
   <link rel="stylesheet" href="/css/firewall.css?v=202611120056">
   <link rel="stylesheet" href="/css/bento.css?v=202611120056">
   <link rel="stylesheet" href="/css/heroes.css?v=202611120056">
@@ -3146,112 +3146,290 @@
         </div>
         <img class="page-hero-art" src="/css/heroes/backup.webp" alt="" loading="lazy" decoding="async">
       </div>
-       <div class="card">
-        <div class="card-head">
-          <h2>System Configuration Backup</h2>
-          <div class="card-toolbar">
-            <button class="btn btn-sm btn-primary btn-act" id="bk-sys-create" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v7c0 1.7 3.1 3 7 3h1"/><path d="M19 6v5"/><path d="M5 10c0 1.7 3.1 3 7 3"/><path d="M16 17h6m-3-3-3 3 3 3"/></svg><span>Create system backup</span></button>
-          </div>
+
+      <div class="stats-row bk-stats" id="bk-stats" role="group" aria-label="Backup status">
+        <div class="stat-card stat-c stat-c-blue" id="bk-st-last-card">
+          <div class="stat-value" id="bk-st-last">—</div>
+          <div class="stat-label">Last backup <span class="bk-st-sub" id="bk-st-last-sub"></span></div>
         </div>
-        <p class="muted">Snapshot of the items selected below into a single archive (root-only), saved to <code>/var/lib/tuxwall/backups/system</code> on this server, plus installed-package lists and a reference dump of the live firewall rules. Not included: databases (CrowdSec, reports), GeoIP data, logs and caches. Older backups are pruned automatically (7 daily, 4 weekly, 3 monthly; the newest is always kept). Download and store a copy on another computer.</p>
-        <p class="bk-warn"><b>Warning:</b> archives contain secrets (WireGuard, SSH host and TLS keys, tokens, passwords) — never share them as-is; use <b>Export sanitized</b> instead.</p>
-        <div class="bk-lasterr" id="bk-sys-lasterr" role="alert" hidden></div>
-        <div class="upd-progress" id="bk-sys-progress" hidden>
-          <div class="bar upd-bar"><div class="bar-fill" id="bk-sys-bar" style="width:0%"></div></div>
-          <p class="muted upd-status" id="bk-sys-status"></p>
+        <div class="stat-card stat-c stat-c-blue" id="bk-st-size-card">
+          <div class="stat-value" id="bk-st-size">—</div>
+          <div class="stat-label">Stored <span class="bk-st-sub" id="bk-st-size-sub"></span></div>
         </div>
-        <h3>Schedule &amp; settings</h3>
-        <div class="bk-settings" id="bk-sched">
-          <div class="bk-form-row">
-            <label class="bk-check"><input type="checkbox" id="bk-sched-on"> <span>Automatic backups</span></label>
-            <label class="bk-field"><span>Every</span>
-              <select id="bk-sched-freq"><option value="daily">day</option><option value="weekly">week</option></select></label>
-            <label class="bk-field" id="bk-sched-wd-wrap" hidden><span>on</span>
-              <select id="bk-sched-wd"><option value="0">Monday</option><option value="1">Tuesday</option><option value="2">Wednesday</option><option value="3">Thursday</option><option value="4">Friday</option><option value="5">Saturday</option><option value="6">Sunday</option></select></label>
-            <label class="bk-field"><span>at</span> <input type="time" id="bk-sched-time" value="03:30" step="60" required></label>
-          </div>
-          <div class="bk-form-row">
-            <label class="bk-field"><span>Warn when the newest backup is older than</span>
-              <input type="number" id="bk-stale-days" min="1" max="90" step="1" value="8"> <span>days</span></label>
-            <label class="bk-check"><input type="checkbox" id="bk-usb-after"> <span>Copy to the USB stick after each scheduled backup (when it is attached)</span></label>
-          </div>
-          <div class="card-toolbar">
-            <button class="btn btn-sm btn-primary" id="bk-settings-save" type="button">Save settings</button>
-            <span class="muted bk-sched-status" id="bk-sched-status"></span>
-          </div>
-          <p class="muted bk-note">Scheduled backups capture every item, run the retention policy afterwards and never overlap a manual run. If the router is off at the scheduled time, the backup runs once shortly after it starts again. A failed run opens an incident (and an alert, if alerts are set up). The age warning above is used by the incident check, the Overview tile and the sidebar badge.</p>
+        <div class="stat-card stat-c stat-c-purple" id="bk-st-next-card">
+          <div class="stat-value" id="bk-st-next">—</div>
+          <div class="stat-label">Next run <span class="bk-st-sub" id="bk-st-next-sub"></span></div>
         </div>
-        <h3>Encryption</h3>
-        <div class="bk-settings" id="bk-enc">
-          <p class="bk-enc-status" id="bk-enc-status">Loading…</p>
-          <div class="bk-form-row">
-            <input type="password" id="bk-enc-pw" autocomplete="new-password" placeholder="New passphrase (10+ characters)" maxlength="512">
-            <input type="password" id="bk-enc-pw2" autocomplete="new-password" placeholder="Repeat passphrase" maxlength="512">
-            <button class="btn btn-sm btn-primary" id="bk-enc-set" type="button">Set passphrase</button>
-            <button class="btn btn-sm" id="bk-enc-remove" type="button" hidden>Remove encryption</button>
-          </div>
-          <p class="muted bk-note">With a passphrase, downloads and USB copies are encrypted (GnuPG, OpenPGP AES-256, tamper-evident) and named <code>….tar.gz.gpg</code>; uploads of such files are decrypted with it. Archives on this router stay unencrypted (root-only, next to the live config they mirror) so browsing and restoring keep working. The passphrase is stored root-only in <code>/etc/tuxwall/backup-passphrase</code>, never shown again and never put in a backup: keep it in your password manager, encrypted copies cannot be restored without it. Decrypt elsewhere with <code>gpg -d file.tar.gz.gpg &gt; file.tar.gz</code>.</p>
+        <div class="stat-card stat-c stat-c-teal" id="bk-st-ret-card">
+          <div class="stat-value" id="bk-st-ret">7 · 4 · 3</div>
+          <div class="stat-label">Retention <span class="bk-st-sub" id="bk-st-ret-sub">daily · weekly · monthly</span></div>
         </div>
-        <h3>USB copy</h3>
-        <div class="bk-settings" id="bk-usb">
-          <p class="bk-usb-status" id="bk-usb-status">Checking for the stick…</p>
-          <div class="card-toolbar">
-            <button class="btn btn-sm btn-primary" id="bk-usb-copy" type="button">Copy latest backup to USB</button>
-            <button class="btn btn-sm" id="bk-usb-check" type="button">Check stick</button>
-          </div>
-          <div class="table-wrap" id="bk-usb-files" hidden></div>
-          <p class="muted bk-note">Only a stick whose filesystem label is <code>TUXWALL-BACKUP</code> is used, and it is never formatted. The latest backup (encrypted when a passphrase is set) is copied into <code>tuxwall-backups/</code> on it with a <code>.sha256</code> file, read back to verify, then the stick is unmounted; the newest 10 copies are kept there. Other files on the stick are never touched.</p>
+        <div class="stat-card stat-c stat-c-purple" id="bk-st-usb-card">
+          <div class="stat-value" id="bk-st-usb">—</div>
+          <div class="stat-label">USB copy <span class="bk-st-sub" id="bk-st-usb-sub"></span></div>
         </div>
-        <h3>Include in backup</h3>
-        <div class="card-toolbar">
-          <button class="btn btn-sm" id="bk-sys-all" type="button">Select all</button>
-          <button class="btn btn-sm" id="bk-sys-none" type="button">Select none</button>
-          <span class="toolbar-spacer"></span>
-          <span class="muted bk-sel" id="bk-sys-sel"></span>
-        </div>
-        <div class="bk-items" id="bk-sys-items"><p class="muted">Loading…</p></div>
-        <h3>Existing backups <span class="muted bk-h3-meta" id="bk-sys-count"></span></h3>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Backup</th><th>Size</th><th>Created</th><th class="td-right">Actions</th></tr></thead>
-            <tbody id="bk-sys-body"></tbody>
-          </table>
-        </div>
-        <div id="bk-sys-contents" hidden>
-          <h3 id="bk-sys-contents-title"></h3>
-          <p class="muted">Download any file, or restore a single file to its live location: you see a preview (diff against the live file) first, the current file is copied to <code>/var/lib/tuxwall/backups/pre-restore/</code>, and the write is atomic. Firewall files are imported as a firewall snapshot instead (guard check, 60 s confirm-or-revert). To restore several files at once, tick them or pick a service: one preview lists every change, one restore applies them (rolled back if any file fails). Restores never auto-restart services — afterwards you are offered the reload/restart of just the affected services.</p>
-          <div class="card-toolbar bk-files-toolbar">
-            <input type="search" id="bk-sys-files-search" placeholder="Filter files or services…" autocomplete="off" spellcheck="false">
-            <span class="toolbar-spacer"></span>
-            <span class="muted" id="bk-sys-files-count"></span>
-          </div>
-          <div class="card-toolbar bk-files-toolbar bk-multi-toolbar">
-            <select id="bk-sys-svc" aria-label="Restore a service"><option value="">Select a service's files…</option></select>
-            <button class="btn btn-sm" id="bk-sys-pick-none" type="button">Clear selection</button>
-            <button class="btn btn-sm btn-primary" id="bk-sys-multi" type="button" disabled>Preview selected</button>
-            <span class="muted" id="bk-sys-integrity"></span>
-          </div>
-          <div class="table-wrap" style="max-height:340px;overflow:auto">
-            <table>
-              <thead><tr><th>File</th><th>Size</th><th>Service</th><th class="td-right">Actions</th></tr></thead>
-              <tbody id="bk-sys-files"></tbody>
-            </table>
-          </div>
-          <p class="muted bk-files-empty" id="bk-sys-files-empty" hidden>No files match that filter.</p>
-          <div class="bk-preview" id="bk-sys-preview" hidden></div>
-        </div>
-        <h3>Restore from uploaded backup</h3>
-        <div class="bk-upload" id="bk-sys-drop">
-          <p class="muted">Upload a system backup <b>.tar.gz</b> (or an encrypted <b>.tar.gz.gpg</b>) to examine it and choose which files to restore (e.g. KEA config, Unbound config, firewall rules). Uploads are checked (size and member limits, no unsafe paths, SHA256SUMS); the last two are kept on this server.</p>
-          <div class="bk-upload-row">
-            <input type="file" id="bk-sys-file" accept=".tar.gz,.gz,.gpg,.pgp,application/gzip">
-            <input type="password" id="bk-sys-upload-pw" autocomplete="off" placeholder="Passphrase (encrypted uploads, if not the stored one)" maxlength="512">
-            <button class="btn btn-sm" id="bk-sys-upload" type="button" disabled>Upload &amp; examine</button>
-          </div>
-          <p class="muted bk-file-hint" id="bk-sys-file-hint">Choose a .tar.gz — or drop one here.</p>
+        <div class="stat-card stat-c stat-c-amber" id="bk-st-enc-card">
+          <div class="stat-value" id="bk-st-enc">—</div>
+          <div class="stat-label">Encryption <span class="bk-st-sub" id="bk-st-enc-sub"></span></div>
         </div>
       </div>
-      <p class="muted" id="bk-sys-msg" role="status" aria-live="polite"></p>
+      <p class="bk-sr" id="bk-live" role="status" aria-live="polite"></p>
+
+      <div class="fw-subtabs" id="bk-subtabs" aria-label="Backups sections">
+        <button class="fw-subtab active" type="button" data-bk-pane="archives">Backups</button>
+        <button class="fw-subtab" type="button" data-bk-pane="schedule">Schedule &amp; copies</button>
+        <button class="fw-subtab" type="button" data-bk-pane="restore">Restore</button>
+        <button class="fw-subtab" type="button" data-bk-pane="settings">Settings</button>
+        <span class="fw-subtabs-fill"></span>
+      </div>
+
+      <!-- ── Pane: Backups (create + unified list) ─────────────────────── -->
+      <div class="fw-pane" data-bk-pane="archives">
+        <div class="card bk-card" id="bk-create-card">
+          <div class="card-head">
+            <h2>Create a backup</h2>
+            <span class="muted">Pick a preset or open a group to fine-tune what goes into the archive</span>
+          </div>
+          <div class="card-toolbar bk-create-bar">
+            <div class="bk-chips" id="bk-presets" role="group" aria-label="Selection presets"></div>
+            <span class="toolbar-spacer"></span>
+            <span class="muted bk-sel" id="bk-sys-sel" aria-live="polite"></span>
+            <button class="btn btn-sm btn-primary btn-act" id="bk-sys-create" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v7c0 1.7 3.1 3 7 3h1"/><path d="M19 6v5"/><path d="M5 10c0 1.7 3.1 3 7 3"/><path d="M16 17h6m-3-3-3 3 3 3"/></svg><span>Create backup</span></button>
+          </div>
+          <div class="bk-groups" id="bk-sys-items"><p class="muted">Loading…</p></div>
+          <div class="upd-progress bk-progress" id="bk-sys-progress" hidden>
+            <div class="bar upd-bar" role="progressbar" aria-label="Backup progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="bk-sys-pbar"><div class="bar-fill" id="bk-sys-bar" style="width:0%"></div></div>
+            <p class="muted upd-status" id="bk-sys-status"></p>
+          </div>
+          <div class="bk-lasterr" id="bk-sys-lasterr" role="alert" hidden></div>
+        </div>
+
+        <div class="card bk-card" id="bk-list-card">
+          <div class="card-head">
+            <h2>All backups</h2>
+            <span class="muted" id="bk-sys-count">System backups, sanitized exports, uploads and USB copies</span>
+          </div>
+          <div class="card-toolbar bk-list-bar">
+            <div class="bk-chips" id="bk-list-filter" role="group" aria-label="Show backups of type"></div>
+          </div>
+          <div class="table-wrap">
+            <table class="bk-list" id="bk-list-table">
+              <thead><tr><th>Backup</th><th>Size</th><th>Created</th><th>Checksums</th><th class="td-right">Actions</th></tr></thead>
+              <tbody id="bk-sys-body"></tbody>
+            </table>
+          </div>
+          <p class="bk-warn"><b>Archives contain secrets</b> (WireGuard, SSH host and TLS keys, tokens, passwords) — never share them as-is; share a <b>sanitized export</b> instead.</p>
+        </div>
+      </div>
+
+      <!-- ── Pane: Schedule & copies ───────────────────────────────────── -->
+      <div class="fw-pane" data-bk-pane="schedule" hidden>
+        <div class="bk-grid">
+          <div class="card bk-card" id="bk-sched-card">
+            <div class="card-head">
+              <h2>Automatic backups</h2>
+              <span class="muted">Scheduled full backups, run by the dashboard service</span>
+            </div>
+            <div class="bk-form" id="bk-sched">
+              <div class="bk-switch-row">
+                <div>
+                  <div class="bk-switch-title" id="bk-sched-on-label">Run automatic backups</div>
+                  <div class="muted">Every item is captured; retention runs afterwards</div>
+                </div>
+                <label class="fw-switch"><input type="checkbox" id="bk-sched-on" aria-labelledby="bk-sched-on-label"><span class="fw-switch-slider"></span></label>
+              </div>
+              <div class="bk-fields">
+                <label class="fw-field"><span>Frequency</span>
+                  <select id="bk-sched-freq"><option value="daily">Every day</option><option value="weekly">Every week</option></select></label>
+                <label class="fw-field" id="bk-sched-wd-wrap" hidden><span>Weekday</span>
+                  <select id="bk-sched-wd"><option value="0">Monday</option><option value="1">Tuesday</option><option value="2">Wednesday</option><option value="3">Thursday</option><option value="4">Friday</option><option value="5">Saturday</option><option value="6">Sunday</option></select></label>
+                <label class="fw-field"><span>Time (router clock)</span>
+                  <input type="time" id="bk-sched-time" value="03:30" step="60" required></label>
+              </div>
+              <div class="bk-switch-row">
+                <div>
+                  <div class="bk-switch-title" id="bk-usb-after-label">Copy to the USB stick afterwards</div>
+                  <div class="muted">After each scheduled backup, when the stick is attached</div>
+                </div>
+                <label class="fw-switch"><input type="checkbox" id="bk-usb-after" aria-labelledby="bk-usb-after-label"><span class="fw-switch-slider"></span></label>
+              </div>
+              <p class="bk-text bk-note">Scheduled runs never overlap a manual one. If the router is off at that time, the backup runs once shortly after it starts again. A failed run opens an incident (and sends an alert, if alerts are set up).</p>
+            </div>
+            <div class="card-toolbar bk-foot">
+              <span class="muted bk-sched-status" id="bk-sched-status" aria-live="polite"></span>
+              <span class="toolbar-spacer"></span>
+              <button class="btn btn-sm btn-primary" id="bk-settings-save" type="button">Save schedule</button>
+            </div>
+          </div>
+
+          <div class="card bk-card" id="bk-ret-card">
+            <div class="card-head">
+              <h2>Retention</h2>
+              <span class="muted">Applied after every backup</span>
+            </div>
+            <div class="bk-ret">
+              <div class="bk-ret-tile"><b id="bk-ret-daily">7</b><span>daily</span></div>
+              <div class="bk-ret-tile"><b id="bk-ret-weekly">4</b><span>weekly</span></div>
+              <div class="bk-ret-tile"><b id="bk-ret-monthly">3</b><span>monthly</span></div>
+            </div>
+            <p class="bk-text">The newest backup of each of the last 7 days, 4 weeks and 3 months is kept. The newest backup and <b>pinned</b> backups are never deleted. Sanitized exports: newest 3; uploads: newest 2.</p>
+            <p class="bk-text" id="bk-ret-pinned"></p>
+          </div>
+
+          <div class="card bk-card" id="bk-usb-card">
+            <div class="card-head">
+              <h2>USB copy</h2>
+              <span class="muted">Off-box copy on the stick labelled TUXWALL-BACKUP</span>
+            </div>
+            <dl class="bk-kv" id="bk-usb-status" aria-live="polite"><dt>Stick</dt><dd>Checking…</dd></dl>
+            <div class="table-wrap bk-usb-files" id="bk-usb-files" hidden></div>
+            <p class="bk-text bk-note">The latest backup (encrypted when a passphrase is set) is copied into <code>tuxwall-backups/</code> with a <code>.sha256</code> file, read back to verify, then the stick is unmounted. The newest 10 copies are kept there.</p>
+            <div class="card-toolbar bk-foot">
+              <span class="muted bk-hint">Never formatted; other files on it are left alone</span>
+              <span class="toolbar-spacer"></span>
+              <button class="btn btn-sm" id="bk-usb-check" type="button">Check stick</button>
+              <button class="btn btn-sm btn-primary" id="bk-usb-copy" type="button">Copy latest backup to USB</button>
+            </div>
+          </div>
+
+          <div class="card bk-card" id="bk-enc-card">
+            <div class="card-head">
+              <h2>Encryption</h2>
+              <span class="muted">Passphrase for downloads and USB copies</span>
+            </div>
+            <div class="bk-form" id="bk-enc">
+              <p class="bk-enc-status" id="bk-enc-status" aria-live="polite">Loading…</p>
+              <div class="bk-fields">
+                <label class="fw-field"><span>New passphrase</span>
+                  <input type="password" id="bk-enc-pw" autocomplete="new-password" placeholder="10+ characters" maxlength="512"></label>
+                <label class="fw-field"><span>Repeat passphrase</span>
+                  <input type="password" id="bk-enc-pw2" autocomplete="new-password" maxlength="512"></label>
+              </div>
+              <p class="bk-text bk-note">Stored root-only in <code>/etc/tuxwall/backup-passphrase</code> and never put in a backup. Archives on this router stay unencrypted (root-only) so browsing and restoring keep working. Decrypt elsewhere with <code>gpg -d file.tar.gz.gpg &gt; file.tar.gz</code>.</p>
+            </div>
+            <div class="card-toolbar bk-foot">
+              <span class="muted bk-hint">Never shown again — keep it in your password manager</span>
+              <span class="toolbar-spacer"></span>
+              <button class="btn btn-sm" id="bk-enc-remove" type="button" hidden>Remove encryption</button>
+              <button class="btn btn-sm btn-primary" id="bk-enc-set" type="button">Set passphrase</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Pane: Restore ─────────────────────────────────────────────── -->
+      <div class="fw-pane" data-bk-pane="restore" hidden>
+        <div class="card bk-card" id="bk-upload-card">
+          <div class="card-head">
+            <h2>Upload a backup</h2>
+            <span class="muted">Examine a .tar.gz (or encrypted .tar.gz.gpg) from another computer</span>
+          </div>
+          <div class="bk-upload" id="bk-sys-drop">
+            <div class="bk-upload-row">
+              <label class="fw-field bk-file-field"><span>Backup file</span>
+                <input type="file" id="bk-sys-file" accept=".tar.gz,.gz,.gpg,.pgp,application/gzip"></label>
+              <label class="fw-field"><span>Passphrase (encrypted files only)</span>
+                <input type="password" id="bk-sys-upload-pw" autocomplete="off" placeholder="Leave empty to use the stored one" maxlength="512"></label>
+              <button class="btn btn-sm btn-primary" id="bk-sys-upload" type="button" disabled>Upload &amp; examine</button>
+            </div>
+            <p class="muted bk-file-hint" id="bk-sys-file-hint">Choose a .tar.gz — or drop one here.</p>
+          </div>
+        </div>
+
+        <div class="card bk-card" id="bk-browse-card">
+          <div class="card-head">
+            <h2>Browse &amp; restore</h2>
+            <span class="muted">Preview first, then restore single files, a selection or a whole service</span>
+          </div>
+          <div class="card-toolbar bk-browse-bar">
+            <label class="fw-field bk-browse-field"><span>Backup</span>
+              <select id="bk-browse-pick"><option value="">No backups yet</option></select></label>
+            <button class="btn btn-sm" id="bk-browse-go" type="button">Browse</button>
+            <span class="muted bk-hint bk-browse-empty" id="bk-browse-empty">Or use <b>Browse</b> in the list on the Backups tab.</span>
+          </div>
+          <div id="bk-sys-contents" hidden>
+            <div class="bk-contents-head">
+              <h3 id="bk-sys-contents-title"></h3>
+              <span class="muted" id="bk-sys-integrity"></span>
+            </div>
+            <div class="card-toolbar bk-files-toolbar">
+              <input type="search" id="bk-sys-files-search" placeholder="Filter files or services…" aria-label="Filter files or services" autocomplete="off" spellcheck="false">
+              <select id="bk-sys-svc" aria-label="Select every file of a service"><option value="">Select a service's files…</option></select>
+              <span class="toolbar-spacer"></span>
+              <span class="muted" id="bk-sys-files-count"></span>
+              <button class="btn btn-sm" id="bk-sys-pick-none" type="button">Select none</button>
+              <button class="btn btn-sm btn-primary" id="bk-sys-multi" type="button" disabled>Preview selected</button>
+            </div>
+            <div class="table-wrap bk-files-wrap">
+              <table class="bk-files">
+                <thead><tr><th>File</th><th>Size</th><th>Service</th><th class="td-right">Actions</th></tr></thead>
+                <tbody id="bk-sys-files"></tbody>
+              </table>
+            </div>
+            <p class="muted bk-files-empty" id="bk-sys-files-empty" hidden>No files match that filter.</p>
+            <div class="bk-preview" id="bk-sys-preview" hidden></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Pane: Settings ────────────────────────────────────────────── -->
+      <div class="fw-pane" data-bk-pane="settings" hidden>
+        <div class="bk-grid">
+          <div class="card bk-card" id="bk-stale-card">
+            <div class="card-head">
+              <h2>Backup age warning</h2>
+              <span class="muted">One threshold for the sidebar badge, Overview tile and incidents</span>
+            </div>
+            <div class="bk-form">
+              <div class="bk-fields">
+                <label class="fw-field"><span>Warn when the newest backup is older than (days)</span>
+                  <input type="number" id="bk-stale-days" min="1" max="90" step="1" value="8"></label>
+              </div>
+              <p class="bk-text bk-note">The sidebar badge, the Overview backup tile and the incident check all use this one value. A failed backup raises an incident right away, whatever its age.</p>
+            </div>
+            <div class="card-toolbar bk-foot">
+              <span class="muted bk-hint" id="bk-stale-status"></span>
+              <span class="toolbar-spacer"></span>
+              <button class="btn btn-sm btn-primary" id="bk-stale-save" type="button">Save threshold</button>
+            </div>
+          </div>
+
+          <div class="card bk-card" id="bk-san-card">
+            <div class="card-head">
+              <h2>Sanitized export</h2>
+              <span class="muted">A shareable copy with every secret removed</span>
+            </div>
+            <div class="bk-form">
+              <p class="bk-text">Only config files go in (no dashboard code, DHCP leases or binaries). Private keys, tokens, passwords, API keys, webhook URLs and plugin secrets are removed or redacted, and the export is re-scanned before it is written. Use it for support requests or to compare configs; it cannot fully restore this router.</p>
+              <div class="bk-fields">
+                <label class="fw-field"><span>From backup</span>
+                  <select id="bk-san-pick"><option value="">No system backups yet</option></select></label>
+              </div>
+            </div>
+            <div class="card-toolbar bk-foot">
+              <span class="muted bk-hint">Downloads automatically; the newest 3 stay listed</span>
+              <span class="toolbar-spacer"></span>
+              <button class="btn btn-sm btn-primary" id="bk-san-go" type="button">Export sanitized</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card bk-card" id="bk-audit-card">
+          <div class="card-head">
+            <h2>Backup activity</h2>
+            <span class="muted">Who created, restored, pinned or deleted what (newest first)</span>
+          </div>
+          <div class="table-wrap bk-audit-wrap">
+            <table class="bk-audit">
+              <thead><tr><th>When</th><th>Action</th><th>Details</th><th>By</th></tr></thead>
+              <tbody id="bk-audit-body"><tr><td colspan="4" class="muted">Loading…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <p class="muted bl-note bk-about"><b>About this page.</b> A backup is one root-only archive of the router's configuration (network, DHCP, DNS, firewall, VPN, security sensors, dashboard and its state) plus package lists and a firewall dump, kept in <code>/var/lib/tuxwall/backups/system</code>; databases, logs and caches are not included. Automatic backups follow the schedule and keep 7 daily, 4 weekly and 3 monthly copies (pinned and the newest are never pruned); every archive carries SHA256SUMS so it can be verified. With a passphrase, downloads and USB copies are encrypted (GnuPG AES-256) — keep one copy off this machine. Sanitized exports strip secrets so a config can be shared safely.</p>
+      <div class="bk-msg" id="bk-sys-msg" hidden></div>
     </section>
 
     <section id="view-logs" class="view" hidden>
@@ -3791,7 +3969,7 @@
   </div>
 </div>
 <script src="/scripts/worldmap.js?v=202611120056"></script>
-<script src="/scripts/dashboard.js?v=20261118204958"></script>
+<script src="/scripts/dashboard.js?v=20261118212629"></script>
 <script src="/scripts/enhance.js?v=20261118204958"></script>
 <script src="/scripts/netmap.js?v=202611120056"></script>
 <script src="/scripts/insights.js?v=20261112182249"></script>
@@ -3799,7 +3977,7 @@
 <script src="/scripts/firewall-plus.js?v=20261114071838"></script>
 <script src="/scripts/ai-panel.js?v=20261114082554"></script>
 <script src="/scripts/ai-models.js?v=20261114082554"></script>
-<script src="/scripts/buttons.js?v=20261114075640"></script>
+<script src="/scripts/buttons.js?v=20261118212240"></script>
 <!-- IP hover card (global, positioned by JS) -->
 <div id="ip-hover-card" class="ip-hover-card" hidden></div>
 </body>

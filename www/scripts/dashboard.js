@@ -325,8 +325,6 @@
     bkSysBar: document.getElementById("bk-sys-bar"),
     bkSysStatus: document.getElementById("bk-sys-status"),
     bkSysItems: document.getElementById("bk-sys-items"),
-    bkSysAll: document.getElementById("bk-sys-all"),
-    bkSysNone: document.getElementById("bk-sys-none"),
     bkSysContents: document.getElementById("bk-sys-contents"),
     bkSysFile: document.getElementById("bk-sys-file"),
     bkSysUpload: document.getElementById("bk-sys-upload"),
@@ -365,6 +363,22 @@
     bkSysMulti: document.getElementById("bk-sys-multi"),
     bkSysIntegrity: document.getElementById("bk-sys-integrity"),
     bkSysUploadPw: document.getElementById("bk-sys-upload-pw"),
+    bkSysPbar: document.getElementById("bk-sys-pbar"),
+    bkLive: document.getElementById("bk-live"),
+    bkPresets: document.getElementById("bk-presets"),
+    bkListFilter: document.getElementById("bk-list-filter"),
+    bkCreateCard: document.getElementById("bk-create-card"),
+    bkUploadCard: document.getElementById("bk-upload-card"),
+    bkBrowseCard: document.getElementById("bk-browse-card"),
+    bkBrowsePick: document.getElementById("bk-browse-pick"),
+    bkBrowseGo: document.getElementById("bk-browse-go"),
+    bkBrowseEmpty: document.getElementById("bk-browse-empty"),
+    bkSanPick: document.getElementById("bk-san-pick"),
+    bkSanGo: document.getElementById("bk-san-go"),
+    bkStaleSave: document.getElementById("bk-stale-save"),
+    bkStaleStatus: document.getElementById("bk-stale-status"),
+    bkRetPinned: document.getElementById("bk-ret-pinned"),
+    bkAuditBody: document.getElementById("bk-audit-body"),
     sysCpu: document.getElementById("sys-cpu"),
     sysMem: document.getElementById("sys-mem"),
     sysUptime: document.getElementById("sys-uptime"),
@@ -6848,18 +6862,49 @@
   }
 
   let bkMsgTimer = null;
+  let bkMsgCard = null;
 
-  function setBkSysMsg(msg, err) {
-    els.bkSysMsg.textContent = msg || "";
-    els.bkSysMsg.className = "muted" + (err ? " bk-msg-err" : msg ? " bk-msg-ok" : "");
-    if (bkMsgTimer) { clearTimeout(bkMsgTimer); bkMsgTimer = null; }
-    if (msg) {
-      bkMsgTimer = setTimeout(() => {
-        els.bkSysMsg.textContent = "";
-        els.bkSysMsg.className = "muted";
-        bkMsgTimer = null;
-      }, err ? 14000 : 7000);
+  const bkSmooth = () => (window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth");
+
+  function bkActivePane() {
+    return document.querySelector('#view-backups .fw-pane[data-bk-pane]:not([hidden])');
+  }
+
+  // Messages are shown inline in the card the user last worked in (or the
+  // given card), never as a floating toast. Errors stay until dismissed or
+  // replaced; confirmations clear themselves after a while.
+  function bkMsgHost(host) {
+    let card = host || bkMsgCard;
+    if (!card || !card.isConnected || card.closest("[hidden]")) {
+      const pane = bkActivePane();
+      card = pane ? pane.querySelector(".bk-card") : null;
     }
+    return card;
+  }
+
+  function setBkSysMsg(msg, err, host) {
+    const box = els.bkSysMsg;
+    if (!box) return;
+    if (bkMsgTimer) { clearTimeout(bkMsgTimer); bkMsgTimer = null; }
+    if (!msg) {
+      box.hidden = true;
+      box.innerHTML = "";
+      box.className = "bk-msg";
+      return;
+    }
+    const card = bkMsgHost(host);
+    if (card && box.parentElement !== card) card.appendChild(box);
+    box.className = "bk-msg " + (err ? "bk-msg-err" : "bk-msg-ok");
+    box.innerHTML = `<span class="bk-msg-text"></span><button type="button" class="bk-msg-x" aria-label="Dismiss message">✕</button>`;
+    box.firstElementChild.textContent = msg;
+    box.hidden = false;
+    if (els.bkLive) {
+      els.bkLive.setAttribute("aria-live", err ? "assertive" : "polite");
+      els.bkLive.textContent = msg;
+    }
+    if (!err) bkMsgTimer = setTimeout(() => setBkSysMsg(""), 15000);
+    const r = box.getBoundingClientRect();
+    if (card && (r.bottom > window.innerHeight || r.top < 70)) box.scrollIntoView({ block: "nearest", behavior: bkSmooth() });
   }
 
   function updateBackupFileHint() {
@@ -6877,6 +6922,7 @@
     damaged: ["Damaged", "err", "Does not match its checksums: do not restore from it"],
     "no-manifest": ["No checksums", "muted", "Older backup without SHA256SUMS: readable, but its files cannot be checked"],
     unchecked: ["Unchecked", "muted", "Not verified yet: use Verify"],
+    unverified: ["No .sha256", "muted", "Copy on the stick without a .sha256 file"],
   };
 
   function bkIntegBadge(status, checked) {
@@ -6889,7 +6935,8 @@
     return ts ? new Date(ts * 1000).toLocaleString() : "—";
   }
 
-  let bkFormDirty = false;
+  let bkSchedDirty = false;
+  let bkStaleDirty = false;
   let bkLastStatus = null;
 
   function syncBkSchedForm() {
@@ -6900,106 +6947,333 @@
 
   function renderBkSettings(d) {
     const sc = d.schedule || {};
-    if (!bkFormDirty && sc.time) {
+    if (!bkSchedDirty && sc.time) {
       els.bkSchedOn.checked = !!sc.enabled;
       els.bkSchedFreq.value = sc.freq || "daily";
       els.bkSchedWd.value = String(sc.weekday != null ? sc.weekday : 6);
       els.bkSchedTime.value = sc.time;
-      els.bkStaleDays.value = d.stale_days || 8;
       els.bkUsbAfter.checked = !!d.usb_after;
       syncBkSchedForm();
     }
-    let st = sc.enabled && sc.next ? `Next backup: ${bkWhen(sc.next)}` : "Automatic backups are off";
+    if (!bkStaleDirty) els.bkStaleDays.value = d.stale_days || 8;
+    if (els.bkStaleStatus) els.bkStaleStatus.textContent = `Now: ${d.stale_days || 8} days`;
+    let st = sc.enabled && sc.next ? `Next: ${bkWhen(sc.next)}` : "Automatic backups are off";
     if (sc.last_attempt) {
-      st += ` · last scheduled run ${bkWhen(sc.last_attempt)}: ` +
-        (sc.last_ok ? "succeeded" : `failed (${sc.last_error || "see above"})`);
+      st += ` · last run ${bkWhen(sc.last_attempt)}: ` +
+        (sc.last_ok ? "succeeded" : `failed (${sc.last_error || "see the Backups tab"})`);
     }
     els.bkSchedStatus.textContent = st;
+    els.bkSchedStatus.classList.toggle("bk-msg-err", !!(sc.last_attempt && !sc.last_ok));
 
     const e = d.encryption || {};
     els.bkEncStatus.innerHTML = !e.available && !e.enabled
-      ? `<b class="bk-msg-err">gpg is not installed</b> — install the <code>gnupg</code> package to enable encryption.`
+      ? `<span class="bk-pill bk-pill-err">Unavailable</span> gpg is not installed — install the <code>gnupg</code> package to enable encryption.`
       : e.enabled
-        ? `<b class="bk-on">Encryption on</b> — passphrase set ${esc(bkWhen(e.set_at))}. Downloads and USB copies are encrypted.`
-        : `<b>Encryption off</b> — downloads and USB copies are not encrypted. Set a passphrase to encrypt them.`;
+        ? `<span class="bk-pill bk-pill-ok">On</span> Passphrase set ${esc(bkWhen(e.set_at))}. Downloads and USB copies are encrypted (<code>….tar.gz.gpg</code>); archives on this router stay readable for browsing and restore.`
+        : `<span class="bk-pill bk-pill-warn">Off</span> Downloads and USB copies are not encrypted. Set a passphrase to encrypt them (GnuPG, AES-256).`;
     els.bkEncRemove.hidden = !e.enabled;
     els.bkEncSet.textContent = e.enabled ? "Change passphrase" : "Set passphrase";
     renderBkUsb(d.usb, d);
   }
 
+  function bkKv(rows) {
+    return rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("");
+  }
+
   function renderBkUsb(u, d) {
     if (!u) return;
     const dev = u.device || {};
-    let html = u.present
-      ? `<b class="bk-on">Stick attached</b> — <span class="mono">${esc(dev.path || "")}</span> ` +
-        `(${esc([dev.model, dev.tran ? dev.tran.toUpperCase() : dev.type, dev.fstype].filter(Boolean).join(", "))}` +
-        `${dev.size ? ", " + formatBytes(dev.size) : ""}${dev.free != null ? ", " + formatBytes(dev.free) + " free" : ""})`
-      : `<b>No stick attached</b> — plug in the USB stick labelled <code>${esc(u.label || "TUXWALL-BACKUP")}</code>.`;
-    if (u.error) html += `<br><span class="bk-msg-err">${esc(u.error)}</span>`;
+    const rows = [];
+    rows.push(["Stick", u.present
+      ? `<span class="bk-pill bk-pill-ok">Attached</span> <span class="mono">${esc(dev.path || "")}</span> ` +
+        `<span class="muted">${esc([dev.model, dev.tran ? dev.tran.toUpperCase() : dev.type, dev.fstype].filter(Boolean).join(" · "))}` +
+        `${dev.size ? " · " + formatBytes(dev.size) : ""}${dev.free != null ? " · " + formatBytes(dev.free) + " free" : ""}</span>`
+      : `<span class="bk-pill">Not attached</span> <span class="muted">Plug in the stick labelled <code>${esc(u.label || "TUXWALL-BACKUP")}</code></span>`]);
+    if (u.error) rows.push(["Problem", `<span class="bk-msg-err">${esc(u.error)}</span>`]);
     const lc = u.last_copy;
-    if (lc) {
-      html += `<br>Last copy ${esc(bkWhen(lc.time))}${lc.trigger === "scheduled" ? " (scheduled)" : ""}: ` +
-        `<span class="mono">${esc(lc.file)}</span>${lc.encrypted ? " (encrypted)" : ""} ${bkIntegBadge("verified")} · ` +
-        `${lc.copies} cop${lc.copies === 1 ? "y" : "ies"} on the stick · ${formatBytes(lc.free || 0)} free` +
-        (lc.skipped ? " · it was already there" : "") + (lc.warning ? ` · <span class="bk-msg-err">${esc(lc.warning)}</span>` : "");
-    } else {
-      html += `<br><span class="muted">No copy made from this dashboard yet.</span>`;
+    rows.push(["Last copy", lc
+      ? `${esc(bkWhen(lc.time))} <span class="muted">(${esc(formatRelative(lc.time))}${lc.trigger === "scheduled" ? ", scheduled" : ""})</span><br>` +
+        `<span class="mono">${esc(lc.file)}</span>${lc.encrypted ? " · encrypted" : ""} ${bkIntegBadge("verified")}` +
+        (lc.skipped ? ` <span class="muted">· was already there</span>` : "") +
+        (lc.warning ? `<br><span class="bk-msg-err">${esc(lc.warning)}</span>` : "")
+      : `<span class="muted">No copy made from this dashboard yet</span>`]);
+    const lk = u.last_check;
+    if (lk || lc) {
+      const n = lk ? lk.copies : lc.copies;
+      const free = lk ? lk.free : lc.free;
+      rows.push(["On the stick", `${n} cop${n === 1 ? "y" : "ies"} · ${formatBytes(free || 0)} free` +
+        (lk ? ` <span class="muted">(checked ${esc(formatRelative(lk.time))})</span>` : "") +
+        (lk && lk.damaged ? ` · <span class="bk-msg-err">${lk.damaged} damaged</span>` : "")]);
     }
     const le = u.last_error;
     if (le && (!lc || le.time > lc.time)) {
-      html += `<br><span class="bk-msg-err">Last copy attempt failed (${esc(bkWhen(le.time))}): ${esc(le.error)}</span>`;
+      rows.push(["Last attempt", `<span class="bk-msg-err">Failed ${esc(bkWhen(le.time))}: ${esc(le.error)}</span>`]);
     }
-    els.bkUsbStatus.innerHTML = html;
+    els.bkUsbStatus.innerHTML = bkKv(rows);
     if (!els.bkUsbCopy.dataset.busy) els.bkUsbCopy.disabled = !u.present || !!(d && d.running);
     if (!els.bkUsbCheck.dataset.busy) els.bkUsbCheck.disabled = !u.present;
+  }
+
+  // ---- Status header (stat cards) ----
+  const BK_TONES = ["green", "amber", "red", "blue", "purple", "teal"];
+
+  function bkStat(key, value, sub, tone) {
+    const v = document.getElementById("bk-st-" + key);
+    const s = document.getElementById("bk-st-" + key + "-sub");
+    const card = document.getElementById("bk-st-" + key + "-card");
+    if (v) v.textContent = value;
+    if (s) s.textContent = sub || "";
+    if (card && tone) {
+      BK_TONES.forEach((t) => card.classList.toggle("stat-c-" + t, t === tone));
+      card.dataset.tone = tone;
+    }
+  }
+
+  function renderBkStats(d) {
+    const sys = (d.backups || []).slice().sort((a, b) => (b.time || 0) - (a.time || 0));
+    const newest = sys[0];
+    const staleDays = d.stale_days || 8;
+    if (d.running) {
+      bkStat("last", "Running", `${d.pct || 0}% · ${d.step || "working"}`, "blue");
+    } else if (!newest) {
+      bkStat("last", "Never", "No system backup yet", "red");
+    } else {
+      const ageDays = (Date.now() / 1000 - newest.time) / 86400;
+      const integ = (BK_INTEG[newest.integrity] || BK_INTEG.unchecked)[0];
+      const lr = d.last_run;
+      if (lr && lr.ok === false) bkStat("last", formatRelative(newest.time), "Last run failed", "red");
+      else if (newest.integrity === "damaged") bkStat("last", formatRelative(newest.time), "Damaged", "red");
+      else if (ageDays > staleDays) bkStat("last", formatRelative(newest.time), `Stale · over ${staleDays} days`, "amber");
+      else bkStat("last", formatRelative(newest.time), integ, newest.integrity === "verified" ? "green" : "blue");
+    }
+    const others = d.others || [];
+    const total = sys.concat(others).reduce((s, b) => s + (b.size || 0), 0);
+    bkStat("size", formatBytes(total),
+      `${sys.length} backup${sys.length === 1 ? "" : "s"}${others.length ? ` · ${others.length} other` : ""}`, "blue");
+
+    const sc = d.schedule || {};
+    if (sc.enabled && sc.next) {
+      const nx = new Date(sc.next * 1000);
+      const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
+      const day = nx.toDateString() === new Date().toDateString() ? "today"
+        : nx.toDateString() === tomorrow.toDateString() ? "tomorrow"
+          : nx.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+      const failed = sc.last_attempt && !sc.last_ok;
+      bkStat("next", nx.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        failed ? `${day} · last run failed` : `${day} · ${sc.freq === "weekly" ? "weekly" : "daily"}`, failed ? "red" : "purple");
+    } else {
+      bkStat("next", "Off", "Automatic backups disabled", "amber");
+    }
+
+    const ret = d.retention || {};
+    const pinned = (d.pinned || []).length;
+    bkStat("ret", `${ret.daily ?? 7} · ${ret.weekly ?? 4} · ${ret.monthly ?? 3}`,
+      "daily · weekly · monthly" + (pinned ? ` · ${pinned} pinned` : ""), "teal");
+    ["daily", "weekly", "monthly"].forEach((k) => {
+      const el = document.getElementById("bk-ret-" + k);
+      if (el && ret[k] != null) el.textContent = ret[k];
+    });
+    if (els.bkRetPinned) {
+      els.bkRetPinned.innerHTML = pinned
+        ? `<b>Pinned:</b> ${(d.pinned || []).map((n) => `<span class="mono">${esc(n)}</span>`).join(", ")}`
+        : `<span class="muted">Nothing pinned. Use the pin button in the list to keep a backup forever.</span>`;
+    }
+
+    const u = d.usb || {};
+    const lc = u.last_copy;
+    const le = u.last_error;
+    const usbFailed = le && (!lc || le.time > lc.time);
+    bkStat("usb", u.present ? "Attached" : "No stick",
+      usbFailed ? "last copy failed" : lc ? `copied ${formatRelative(lc.time)}` : "never copied",
+      usbFailed ? "red" : u.present ? "green" : lc ? "purple" : "amber");
+
+    const e = d.encryption || {};
+    bkStat("enc", e.enabled ? "On" : (!e.available ? "N/A" : "Off"),
+      e.enabled ? "downloads & USB copies" : (!e.available ? "gpg not installed" : "copies not encrypted"),
+      e.enabled ? "green" : "amber");
+  }
+
+  // ---- Unified list: system backups, sanitized exports, uploads, USB copies ----
+  const BK_TYPES = { system: "System", sanitized: "Sanitized", uploaded: "Uploaded", usb: "USB" };
+  let bkListFilter = "all";
+  let bkUsbCheckCache = null;
+
+  function bkKindOf(name) {
+    return /^sanitized-/.test(name) ? "sanitized" : /^uploaded-/.test(name) ? "uploaded" : "system";
+  }
+
+  function bkAllRows(d) {
+    const sys = (d.backups || []).map((b) => Object.assign({}, b, { kind: "system" }));
+    const others = (d.others || []).map((b) => Object.assign({}, b, { kind: bkKindOf(b.name) }));
+    let usb = [];
+    if (bkUsbCheckCache) {
+      usb = (bkUsbCheckCache.files || []).map((f) => ({ name: f.name, size: f.size, time: f.time, kind: "usb", integrity: f.status }));
+    } else if (d.usb && d.usb.last_copy && d.usb.last_copy.file) {
+      const lc = d.usb.last_copy;
+      const src = sys.find((b) => b.name === lc.archive);
+      usb = [{ name: lc.file, size: src ? src.size : null, time: lc.time, kind: "usb", integrity: "verified", checked: lc.time }];
+    }
+    return sys.concat(others, usb).sort((a, b) => (b.time || 0) - (a.time || 0));
+  }
+
+  const bkPh = () => `<span class="act-btn bk-ph" aria-hidden="true"></span>`;
+
+  function bkRowActions(b, enc) {
+    if (b.kind === "usb") return `<span class="muted bk-on-stick">On the USB stick</span>`;
+    const n = `data-name="${esc(b.name)}"`;
+    const sys = b.kind === "system";
+    return [
+      actBtn("download", enc && b.kind !== "sanitized" ? "Download (encrypted .gpg)" : "Download", n, "bk-sys-dl"),
+      b.kind === "sanitized" ? bkPh() : actBtn("browse", "Browse and restore files", n, "bk-sys-browse"),
+      actBtn("verify", "Verify checksums (SHA256SUMS)", n, "bk-sys-verify"),
+      sys ? actBtn("pin", b.pinned ? "Unpin (retention may prune it again)" : "Pin (never pruned by retention)",
+        `${n} aria-pressed="${b.pinned ? "true" : "false"}"`, "bk-sys-pin" + (b.pinned ? " is-on" : "")) : bkPh(),
+      sys ? actBtn("export", "Export sanitized copy (secrets removed)", n, "bk-sys-san") : bkPh(),
+      actBtn("delete", "Delete", n, "bk-sys-del"),
+    ].join("");
+  }
+
+  function renderBkFilterChips(rows) {
+    if (!els.bkListFilter) return;
+    const counts = { all: rows.length };
+    rows.forEach((r) => { counts[r.kind] = (counts[r.kind] || 0) + 1; });
+    if (bkListFilter !== "all" && !counts[bkListFilter]) bkListFilter = "all";
+    els.bkListFilter.innerHTML = ["all", "system", "sanitized", "uploaded", "usb"].map((k) => {
+      const n = counts[k] || 0;
+      const on = bkListFilter === k;
+      return `<button type="button" class="fw-chip${on ? " active" : ""}${!n ? " is-empty" : ""}" data-bk-filter="${k}" aria-pressed="${on}"` +
+        `${!n && k !== "all" ? " disabled" : ""}>${k === "all" ? "All" : BK_TYPES[k]} <span class="fw-chip-n">${n}</span></button>`;
+    }).join("");
   }
 
   function renderSystemBackups(d) {
     bkLastStatus = d;
     if (d.schedule) renderBkSettings(d);
+    renderBkStats(d);
+    renderBkPickers(d);
     const enc = !!(d.encryption && d.encryption.enabled);
-    const backups = (d.backups || []).slice().sort((a, b) => (b.time || 0) - (a.time || 0));
-    const latest = backups.reduce((m, b) => Math.max(m, b.time || 0), 0);
-    els.bkSysBody.innerHTML = backups.map((b) => {
-      const created = b.time ? new Date(b.time * 1000) : null;
+    const rows = bkAllRows(d);
+    renderBkFilterChips(rows);
+    const latest = (d.backups || []).reduce((m, b) => Math.max(m, b.time || 0), 0);
+    const shown = rows.filter((b) => bkListFilter === "all" || b.kind === bkListFilter);
+    els.bkSysBody.innerHTML = shown.map((b) => {
       const age = b.time ? formatRelative(b.time) : "";
+      const marks = (b.kind === "system" && b.time === latest ? ' <span class="bk-mark bk-latest">Latest</span>' : "") +
+        (b.pinned ? ' <span class="bk-mark bk-pinned">Pinned</span>' : "");
       return `
-      <tr>
-        <td class="mono bk-backup-name">${esc(b.name)}${b.time === latest ? ' <span class="bk-latest">Latest</span>' : ""} ${bkIntegBadge(b.integrity, b.checked)}</td>
-        <td>${formatBytes(b.size)}</td>
-        <td class="bk-created">
-          <span>${created ? created.toLocaleString() : "—"}</span>
-          ${age ? `<span class="bk-age">${esc(age)}</span>` : ""}
-        </td>
-        <td class="td-right">
-          ${actBtn("download", enc ? "Download this backup (encrypted .gpg)" : "Download this backup", `data-name="${esc(b.name)}"`, "bk-sys-dl")}
-          <button class="btn btn-sm btn-act bk-sys-browse" data-name="${esc(b.name)}" type="button">${ICONS.browse}<span>Browse</span></button>
-          ${actBtn("active", "Verify checksums (SHA256SUMS)", `data-name="${esc(b.name)}"`, "bk-sys-verify")}
-          ${actBtn("export", "Export sanitized copy (secrets removed)", `data-name="${esc(b.name)}"`, "bk-sys-san")}
-          ${actBtn("delete", "Delete this backup", `data-name="${esc(b.name)}"`, "bk-sys-del")}
-        </td>
+      <tr data-kind="${b.kind}">
+        <td class="bk-name-cell"><span class="bk-type bk-type-${b.kind}">${BK_TYPES[b.kind]}</span><span class="mono bk-backup-name">${esc(b.name)}</span>${marks}</td>
+        <td class="bk-size-cell">${b.size != null ? formatBytes(b.size) : "—"}</td>
+        <td class="bk-created"><span>${b.time ? esc(new Date(b.time * 1000).toLocaleString()) : "—"}</span>${age ? `<span class="bk-age">${esc(age)}</span>` : ""}</td>
+        <td class="bk-integ-cell">${bkIntegBadge(b.integrity, b.checked)}</td>
+        <td class="td-right"><div class="bk-acts">${bkRowActions(b, enc)}</div></td>
       </tr>`;
-    }).join("") || `<tr><td colspan="4" class="muted" style="text-align:center;padding:1.5rem">No backups yet — create one above.</td></tr>`;
+    }).join("") || `<tr><td colspan="5" class="muted bk-empty">No backups yet — create one above.</td></tr>`;
 
     if (els.bkSysCount) {
-      const total = backups.reduce((s, b) => s + (b.size || 0), 0);
-      els.bkSysCount.textContent = backups.length
-        ? `${backups.length} backup${backups.length === 1 ? "" : "s"} · ${formatBytes(total)}`
-        : "";
+      const sys = d.backups || [];
+      const total = sys.reduce((s, b) => s + (b.size || 0), 0);
+      els.bkSysCount.textContent = sys.length
+        ? `${sys.length} system backup${sys.length === 1 ? "" : "s"} · ${formatBytes(total)} on this router`
+        : "No system backups on this router yet";
     }
   }
 
+  function bkFillSelect(sel, names, empty) {
+    if (!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = names.length
+      ? names.map((b) => `<option value="${esc(b.name)}">${esc(b.name)} · ${esc(formatRelative(b.time))}</option>`).join("")
+      : `<option value="">${esc(empty)}</option>`;
+    if (cur && names.some((b) => b.name === cur)) sel.value = cur;
+    sel.disabled = !names.length;
+  }
+
+  function renderBkPickers(d) {
+    const sys = (d.backups || []).slice().sort((a, b) => (b.time || 0) - (a.time || 0));
+    const ups = (d.others || []).filter((b) => bkKindOf(b.name) === "uploaded");
+    bkFillSelect(els.bkBrowsePick, sys.concat(ups), "No backups yet");
+    bkFillSelect(els.bkSanPick, sys, "No system backups yet");
+    if (els.bkBrowseGo) els.bkBrowseGo.disabled = !els.bkBrowsePick.value;
+    if (els.bkSanGo && !els.bkSanGo.dataset.busy) els.bkSanGo.disabled = !els.bkSanPick.value;
+  }
+
+  // ---- Item selection: presets + collapsible groups ----
+  const BK_GROUPS = [
+    { id: "network", label: "Network", hint: "Interfaces, DHCP, DNS, WireGuard",
+      arcs: ["etc/netplan", "etc/systemd/network", "etc/networkd-dispatcher", "etc/kea", "var/lib/kea", "etc/unbound",
+        "etc/systemd/resolved.conf", "etc/radvd.conf", "etc/wireguard", "etc/hosts", "etc/hostname"] },
+    { id: "security", label: "Security", hint: "Firewall, CrowdSec, IDS, SSH, TLS",
+      arcs: ["etc/ufw", "etc/default/ufw", "etc/nftables.conf", "etc/crowdsec", "etc/suricata", "etc/opencanaryd",
+        "etc/ssh", "etc/letsencrypt", "etc/hosts.allow", "etc/hosts.deny", "etc/sudoers.d"] },
+    { id: "services", label: "Services", hint: "nginx, tunnels, units, cron, time",
+      arcs: ["etc/nginx", "etc/cloudflared", "etc/systemd/system", "etc/cron.d", "etc/chrony"] },
+    { id: "dashboard", label: "Dashboard", hint: "TuxWall config, files and state",
+      arcs: ["etc/tuxwall", "var/www/html", "var/lib/tuxwall"] },
+    { id: "system", label: "System", hint: "Kernel, packages, scripts, mounts",
+      arcs: ["etc/sysctl.d", "etc/modules-load.d", "etc/fstab", "etc/apt/sources.list", "etc/apt/sources.list.d",
+        "usr/local/bin", "usr/local/sbin"] },
+  ];
+  const bkOpenGroups = new Set();
   let bkSysItemsCache = [];
 
+  function bkGroupOf(arc) {
+    const g = BK_GROUPS.find((x) => x.arcs.includes(arc));
+    return g ? g.id : "system";
+  }
+
+  const BK_CHEVRON = `<svg class="bk-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>`;
+
   function renderSystemBackupItems(items) {
+    const prev = new Map(Array.from(els.bkSysItems.querySelectorAll(".bk-item-chk"))
+      .map((c) => [c.dataset.arc, c.checked]));
     bkSysItemsCache = items || [];
-    els.bkSysItems.innerHTML = (items || []).map((it) => `
-      <label class="bk-item">
-        <input type="checkbox" class="bk-item-chk" data-arc="${esc(it.arc)}" ${it.exists ? "checked" : " disabled"} />
-        <span class="bk-item-label">${esc(it.label)} <span class="muted mono">${esc(it.arc)}</span></span>
-        <span class="muted">${it.exists ? formatBytes(it.size) : "not present"}</span>
-      </label>`).join("") ||
-      `<p class="muted">No config items available.</p>`;
+    if (!bkSysItemsCache.length) {
+      els.bkSysItems.innerHTML = `<p class="muted bk-text">No config items available.</p>`;
+      renderBkPresets();
+      updateBackupSelection();
+      return;
+    }
+    els.bkSysItems.innerHTML = BK_GROUPS.map((g) => {
+      const its = bkSysItemsCache.filter((it) => bkGroupOf(it.arc) === g.id);
+      if (!its.length) return "";
+      const open = bkOpenGroups.has(g.id);
+      return `
+      <div class="bk-group${open ? " is-open" : ""}" data-group="${g.id}">
+        <div class="bk-group-head">
+          <label class="bk-group-check"><input type="checkbox" class="bk-group-chk" data-group="${g.id}"><span class="bk-group-name">${esc(g.label)}</span></label>
+          <button type="button" class="bk-group-toggle" aria-expanded="${open}" aria-controls="bk-grp-${g.id}" aria-label="${esc(g.label)}: show the ${its.length} items">
+            <span class="bk-group-hint">${esc(g.hint)}</span>
+            <span class="bk-group-meta" data-meta="${g.id}"></span>${BK_CHEVRON}
+          </button>
+        </div>
+        <div class="bk-group-body" id="bk-grp-${g.id}"${open ? "" : " hidden"}>
+          ${its.map((it) => {
+            const on = it.exists && (prev.has(it.arc) ? prev.get(it.arc) : true);
+            return `<label class="bk-item${it.exists ? "" : " is-missing"}">
+              <input type="checkbox" class="bk-item-chk" data-arc="${esc(it.arc)}"${on ? " checked" : ""}${it.exists ? "" : " disabled"}>
+              <span class="bk-item-label"><span>${esc(it.label)}</span><span class="muted mono">${esc(it.arc)}</span></span>
+              <span class="muted bk-item-size">${it.exists ? formatBytes(it.size) : "not present"}</span>
+            </label>`;
+          }).join("")}
+        </div>
+      </div>`;
+    }).join("");
+    renderBkPresets();
+    updateBackupSelection();
+  }
+
+  function renderBkPresets() {
+    if (!els.bkPresets) return;
+    const chips = [["all", "All"]].concat(BK_GROUPS.map((g) => [g.id, g.label]), [["none", "None"]]);
+    els.bkPresets.innerHTML = chips.map(([k, l]) =>
+      `<button type="button" class="fw-chip" data-bk-preset="${k}" aria-pressed="false">${esc(l)}</button>`).join("");
+  }
+
+  function bkApplyPreset(key) {
+    els.bkSysItems.querySelectorAll(".bk-item-chk:not(:disabled)").forEach((c) => {
+      c.checked = key === "all" || (key !== "none" && bkGroupOf(c.dataset.arc) === key);
+    });
     updateBackupSelection();
   }
 
@@ -7011,18 +7285,40 @@
   function updateBackupSelection() {
     const boxes = Array.from(els.bkSysItems.querySelectorAll(".bk-item-chk:not(:disabled)"));
     const checked = boxes.filter((c) => c.checked);
-    let size = 0;
-    checked.forEach((c) => {
+    const sizeOf = (list) => list.reduce((s, c) => {
       const item = bkSysItemsCache.find((it) => it.arc === c.dataset.arc);
-      size += (item && item.size) || 0;
-    });
+      return s + ((item && item.size) || 0);
+    }, 0);
     if (els.bkSysSel) {
       els.bkSysSel.textContent = !boxes.length
         ? ""
         : checked.length
-          ? `${checked.length} of ${boxes.length} selected · ${formatBytes(size)}`
+          ? `${checked.length} of ${boxes.length} selected · ${formatBytes(sizeOf(checked))}`
           : `None of ${boxes.length} selected`;
     }
+    BK_GROUPS.forEach((g) => {
+      const mine = boxes.filter((c) => bkGroupOf(c.dataset.arc) === g.id);
+      const on = mine.filter((c) => c.checked);
+      const gc = els.bkSysItems.querySelector(`.bk-group-chk[data-group="${g.id}"]`);
+      if (gc) {
+        gc.checked = mine.length > 0 && on.length === mine.length;
+        gc.indeterminate = on.length > 0 && on.length < mine.length;
+        gc.disabled = !mine.length;
+      }
+      const meta = els.bkSysItems.querySelector(`[data-meta="${g.id}"]`);
+      if (meta) meta.textContent = `${on.length}/${mine.length} · ${formatBytes(sizeOf(on))}`;
+    });
+    if (els.bkPresets) {
+      const sel = new Set(checked.map((c) => c.dataset.arc));
+      els.bkPresets.querySelectorAll("[data-bk-preset]").forEach((chip) => {
+        const k = chip.dataset.bkPreset;
+        const want = boxes.filter((c) => k === "all" || (k !== "none" && bkGroupOf(c.dataset.arc) === k));
+        const match = boxes.length > 0 && want.length === sel.size && want.every((c) => sel.has(c.dataset.arc));
+        chip.classList.toggle("active", match);
+        chip.setAttribute("aria-pressed", match ? "true" : "false");
+      });
+    }
+    if (els.bkSysCreate && !(bkLastStatus && bkLastStatus.running)) els.bkSysCreate.disabled = !checked.length;
   }
 
   async function refreshSystemBackupItems() {
@@ -7030,7 +7326,7 @@
       const data = await fetchJSON("/api/backups/system/items");
       renderSystemBackupItems(data.items);
     } catch (err) {
-      els.bkSysItems.innerHTML = `<p class="muted bk-msg-err">Could not load config items: ${esc(err.message)}</p>`;
+      els.bkSysItems.innerHTML = `<p class="bk-text bk-msg-err">Could not load config items: ${esc(err.message)}</p>`;
     }
   }
 
@@ -7057,7 +7353,7 @@
     const offset = header ? header.getBoundingClientRect().height : 64;
     const r = els.bkSysContents.getBoundingClientRect();
     if (r.top < offset + 12 || r.top > window.innerHeight - 160) {
-      els.bkSysContents.scrollIntoView({ behavior: "smooth", block: "start" });
+      els.bkSysContents.scrollIntoView({ behavior: bkSmooth(), block: "start" });
     }
   }
 
@@ -7067,29 +7363,32 @@
     const n = els.bkSysFiles.querySelectorAll(".bk-file-chk:checked").length;
     els.bkSysMulti.disabled = !n;
     els.bkSysMulti.textContent = n ? `Preview ${n} selected` : "Preview selected";
+    els.bkSysPickNone.disabled = !n;
   }
 
   function renderSystemBackupContents(data) {
     bkContents = data;
-    els.bkSysContentsTitle.textContent = "Contents of " + data.backup;
+    els.bkSysContentsTitle.textContent = data.backup;
     els.bkSysSvc.innerHTML = `<option value="">Select a service's files…</option>` +
       (data.services || []).map((g) => `<option value="${esc(g.service)}">${esc(g.service)} — ` +
         `${g.files} file${g.files === 1 ? "" : "s"}${g.firewall ? `, ${g.firewall} firewall` : ""}</option>`).join("");
     els.bkSysIntegrity.innerHTML = data.integrity
-      ? `Checksums: ${bkIntegBadge(data.integrity)}${data.integrity === "damaged" ? ` <span class="bk-msg-err">${esc(data.integrity_summary || "")}</span>` : ""}`
+      ? `Checksums ${bkIntegBadge(data.integrity)}${data.integrity === "damaged" ? ` <span class="bk-msg-err">${esc(data.integrity_summary || "")}</span>` : ""}`
       : "";
     els.bkSysFiles.innerHTML = (data.files || []).map((f) => `
       <tr>
-        <td class="mono">${f.kind === "info" ? `<span>${esc(f.name)}</span>`
+        <td class="mono bk-file-cell">${f.kind === "info" ? `<span class="bk-file-pick bk-file-info">${esc(f.name)}</span>`
           : `<label class="bk-file-pick"><input type="checkbox" class="bk-file-chk" data-file="${esc(f.name)}" data-svc="${esc(f.service || "")}" aria-label="Select ${esc(f.name)}"><span>${esc(f.name)}</span></label>`}</td>
         <td>${formatBytes(f.size)}</td>
         <td class="muted">${esc(f.service || "—")}</td>
-        <td class="td-right">
+        <td class="td-right"><div class="bk-acts">
           ${actBtn("download", "Download this file", `data-name="${esc(data.backup)}" data-file="${esc(f.name)}"`, "bk-file-dl")}
-          ${f.kind === "info" ? "" : actBtn("backup", f.kind === "firewall" ? "Import as firewall snapshot (preview first)" : "Preview and restore this file", `data-name="${esc(data.backup)}" data-file="${esc(f.name)}"`, "bk-file-restore")}
-        </td>
-      </tr>`).join("") || `<tr><td colspan="4" class="muted">No files.</td></tr>`;
+          ${f.kind === "info" ? bkPh() : actBtn("backup", f.kind === "firewall" ? "Import as firewall snapshot (preview first)" : "Preview and restore this file", `data-name="${esc(data.backup)}" data-file="${esc(f.name)}"`, "bk-file-restore")}
+        </div></td>
+      </tr>`).join("") || `<tr><td colspan="4" class="muted bk-empty">No files.</td></tr>`;
     els.bkSysContents.hidden = false;
+    if (els.bkBrowseEmpty) els.bkBrowseEmpty.hidden = true;
+    if (els.bkBrowsePick && Array.from(els.bkBrowsePick.options).some((o) => o.value === data.backup)) els.bkBrowsePick.value = data.backup;
     hideBkPreview();
     updateBkMulti();
     if (els.bkSysFilesSearch) els.bkSysFilesSearch.value = "";
@@ -7097,13 +7396,24 @@
     requestAnimationFrame(revealBackupContents);
   }
 
+  function bkGoTab(pane) {
+    const tab = document.querySelector(`#bk-subtabs .fw-subtab[data-bk-pane="${pane}"]`);
+    if (!tab || tab.classList.contains("active")) return;
+    setBkTab(pane);
+    syncSubtabState();
+    // twGo keeps the #backups/<pane> deep link and Back button in step
+    if (window.twGo) window.twGo("backups", pane, { push: true });
+  }
+
   async function browseSystemBackup(name) {
+    bkGoTab("restore");
+    bkMsgCard = els.bkBrowseCard;
     try {
       const data = await fetchJSON("/api/backups/system/contents?name=" + encodeURIComponent(name));
       renderSystemBackupContents(data);
       setBkSysMsg("");
     } catch (err) {
-      setBkSysMsg("Browse: " + err.message, true);
+      setBkSysMsg("Browse: " + err.message, true, els.bkBrowseCard);
     }
   }
 
@@ -7130,6 +7440,12 @@
       const data = await fetchJSON("/api/backups/system");
       renderSystemBackups(data);
       renderBkLastError(data);
+      if (data.running) {
+        bkShowProgress(data);
+        if (!bkSysPollTimer) bkSysPollTimer = setTimeout(pollSystemBackup, 600);
+      }
+      const pane = bkActivePane();
+      if (pane && pane.dataset.bkPane === "settings") loadBkAudit();
       return data;
     } catch (err) {
       setBkSysMsg("System backups: " + err.message, true);
@@ -7139,27 +7455,37 @@
 
   let bkSysPollTimer = null;
 
+  function bkShowProgress(data) {
+    const pct = data.pct || 0;
+    els.bkSysProgress.hidden = false;
+    els.bkSysBar.style.width = pct + "%";
+    if (els.bkSysPbar) els.bkSysPbar.setAttribute("aria-valuenow", String(pct));
+    els.bkSysStatus.textContent = `${pct}% — ${data.step || "Running…"}`;
+    els.bkSysCreate.disabled = true;
+  }
+
   async function pollSystemBackup() {
+    bkSysPollTimer = null;
     try {
       const data = await refreshSystemBackups();
       if (!data) return;
       if (data.running) {
-        els.bkSysProgress.hidden = false;
-        els.bkSysBar.style.width = (data.pct || 0) + "%";
-        els.bkSysStatus.textContent = `${data.pct || 0}% — ${data.step || "Running..."}`;
-        els.bkSysCreate.disabled = true;
-        bkSysPollTimer = setTimeout(pollSystemBackup, 600);
+        bkShowProgress(data);
+        if (!bkSysPollTimer) bkSysPollTimer = setTimeout(pollSystemBackup, 600);
       } else {
+        const was = !els.bkSysProgress.hidden;
         els.bkSysProgress.hidden = true;
-        els.bkSysCreate.disabled = false;
         if (bkSysPollTimer) { clearTimeout(bkSysPollTimer); bkSysPollTimer = null; }
-        if (data.error) setBkSysMsg("Backup failed: " + data.error, true);
-        else if (data.result) setBkSysMsg(`Backup created: ${data.result}. Download and store it off this machine.`, false);
+        updateBackupSelection();
+        if (was) {
+          if (data.error) setBkSysMsg("Backup failed: " + data.error, true, els.bkCreateCard);
+          else if (data.result) setBkSysMsg(`Backup created: ${data.result}. Download it or copy it to USB to keep one off this machine.`, false, els.bkCreateCard);
+        }
       }
     } catch (err) {
       els.bkSysProgress.hidden = true;
-      els.bkSysCreate.disabled = false;
-      setBkSysMsg("Backup status: " + err.message, true);
+      updateBackupSelection();
+      setBkSysMsg("Backup status: " + err.message, true, els.bkCreateCard);
     }
   }
 
@@ -7186,41 +7512,142 @@
 
   function bkUsbFilesHtml(r) {
     const rows = (r.files || []).map((f) => `<tr><td class="mono">${esc(f.name)}</td><td>${formatBytes(f.size)}</td>` +
-      `<td>${esc(bkWhen(f.time))}</td><td>${f.status === "unverified" ? '<span class="bk-integ bk-integ-muted">No .sha256</span>' : bkIntegBadge(f.status)}</td></tr>`).join("");
+      `<td>${esc(bkWhen(f.time))}</td><td>${bkIntegBadge(f.status)}</td></tr>`).join("");
     return `<table><thead><tr><th>On the stick (${esc(String(r.copies))})</th><th>Size</th><th>Copied</th><th>Check</th></tr></thead>` +
       `<tbody>${rows || '<tr><td colspan="4" class="muted">No TuxWall copies on this stick yet.</td></tr>'}</tbody></table>`;
   }
 
+  // ---- Audit view (Settings tab) ----
+  const BK_AUDIT_LABELS = {
+    "backup-start": "Backup started", "backup-finish": "Backup finished", "restore-file": "File restored",
+    "restore-files": "Files restored", "service-action": "Service action", "delete": "Deleted", "pin": "Pinned",
+    "unpin": "Unpinned", "upload": "Uploaded", "sanitize": "Sanitized export", "settings": "Settings saved",
+    "encryption-set": "Passphrase set", "encryption-remove": "Encryption removed", "usb-copy": "USB copy",
+    "usb-check": "USB check", "verify": "Verified", "import-firewall": "Firewall import", "prune": "Pruned",
+  };
+  const BK_AUDIT_SKIP = new Set(["action", "client", "time", "ts", "who", "ok", "batch", "run", "sha256"]);
+
+  function bkAuditDetail(e) {
+    return Object.keys(e).filter((k) => !BK_AUDIT_SKIP.has(k) && e[k] !== null && e[k] !== "" && e[k] !== false).map((k) => {
+      if (e[k] === true) return esc(k.replace(/_/g, " "));
+      const v = e[k];
+      if (k === "archive" || k === "member" || k === "file" || k === "unit") return `<span class="mono">${esc(String(v))}</span>`;
+      if (k === "error") return `<span class="bk-msg-err">${esc(String(v))}</span>`;
+      if (k === "bytes" || k === "size") return esc(formatBytes(v));
+      const val = typeof v === "object" ? (Array.isArray(v) ? v.join(", ") : JSON.stringify(v)) : String(v);
+      return `${esc(k.replace(/_/g, " "))} ${esc(val)}`;
+    }).join(" · ");
+  }
+
+  async function loadBkAudit() {
+    if (!els.bkAuditBody) return;
+    try {
+      const r = await fetchJSON("/api/backups/system/audit");
+      const list = (r.entries || []).slice().sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 60);
+      els.bkAuditBody.innerHTML = list.map((e) => `<tr${e.ok === false ? ' class="bk-audit-fail"' : ""}>` +
+        `<td class="bk-audit-when"><span>${esc(bkWhen(e.ts))}</span><span class="bk-age">${esc(formatRelative(e.ts))}</span></td>` +
+        `<td><span class="bk-audit-act">${esc(BK_AUDIT_LABELS[e.action] || e.action || "?")}</span>${e.ok === false ? ' <span class="bk-integ bk-integ-err">failed</span>' : ""}</td>` +
+        `<td class="bk-audit-detail">${bkAuditDetail(e) || '<span class="muted">—</span>'}</td>` +
+        `<td>${esc(e.who || (e.trigger === "scheduled" ? "scheduler" : "system"))}</td></tr>`).join("") ||
+        `<tr><td colspan="4" class="muted bk-empty">No backup activity recorded yet.</td></tr>`;
+    } catch (err) {
+      els.bkAuditBody.innerHTML = `<tr><td colspan="4" class="bk-msg-err bk-empty">Could not load the activity log: ${esc(err.message)}</td></tr>`;
+    }
+  }
+
+  function setBkTab(pane) {
+    document.querySelectorAll("#bk-subtabs .fw-subtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.bkPane === pane));
+    document.querySelectorAll("#view-backups .fw-pane[data-bk-pane]").forEach((p) => {
+      p.hidden = p.dataset.bkPane !== pane;
+    });
+    if (pane === "settings") loadBkAudit();
+  }
+
+  const bkBusy = (btn, on, label) => {
+    if (on) {
+      btn.dataset.busy = "1"; btn.dataset.label = btn.textContent; btn.textContent = label; btn.disabled = true;
+    } else {
+      delete btn.dataset.busy; btn.textContent = btn.dataset.label || btn.textContent; btn.disabled = false;
+    }
+  };
+
+  async function bkSanitize(name, btn) {
+    if (!(await (window.twConfirm || window.confirm)(`Create a sanitized export of "${name}"?\n\n` +
+      "Only config files go in (no dashboard code, DHCP leases or binaries). Private keys, tokens, " +
+      "passwords, API keys, webhook URLs and plugin secrets are removed or redacted, and the export is " +
+      "re-scanned before it is written. The export downloads automatically and a copy stays on this server."))) return;
+    try {
+      if (btn && btn.classList.contains("btn")) bkBusy(btn, true, "Exporting…");
+      else if (btn) btn.disabled = true;
+      const res = await postJSON("/api/backups/system/sanitize", { name });
+      if (!res.ok || !res.name) throw new Error(res.error || "sanitize failed");
+      await downloadSystemBackup(res.name);
+      setBkSysMsg(
+        `Sanitized export ${res.name} downloaded — ` +
+        `${(res.dropped || []).length} secret file(s) dropped, ${res.redacted || 0} key(s) redacted. ` +
+        "Check SANITIZED.txt inside before sharing.", false);
+      await refreshSystemBackups();
+    } catch (err) {
+      setBkSysMsg("Sanitize: " + err.message, true);
+    } finally {
+      if (btn && btn.classList.contains("btn")) bkBusy(btn, false);
+      else if (btn) btn.disabled = false;
+    }
+  }
+
   function bindBackupSettings() {
     const ask = window.twConfirm || window.confirm;
-    els.bkSched.addEventListener("input", () => { bkFormDirty = true; syncBkSchedForm(); });
-    els.bkSched.addEventListener("change", () => { bkFormDirty = true; syncBkSchedForm(); });
+    els.bkSched.addEventListener("input", () => { bkSchedDirty = true; syncBkSchedForm(); });
+    els.bkSched.addEventListener("change", () => { bkSchedDirty = true; syncBkSchedForm(); });
+    els.bkStaleDays.addEventListener("input", () => { bkStaleDirty = true; });
     els.bkSettingsSave.addEventListener("click", async () => {
+      if (!els.bkSchedTime.value) { setBkSysMsg("Enter a time for the automatic backup.", true); els.bkSchedTime.focus(); return; }
       const body = {
         schedule: {
           enabled: els.bkSchedOn.checked, freq: els.bkSchedFreq.value,
           weekday: Number(els.bkSchedWd.value), time: els.bkSchedTime.value,
         },
-        stale_days: Number(els.bkStaleDays.value),
         usb_after: els.bkUsbAfter.checked,
       };
       try {
         els.bkSettingsSave.disabled = true;
         const r = await bkApi("/api/backups/system/settings", body);
-        bkFormDirty = false;
-        setBkSysMsg(`Backup settings saved — ${(r.schedule && r.schedule.describe) === "off" ? "automatic backups off" : "automatic backups " + ((r.schedule && r.schedule.describe) || "")}, warning after ${r.stale_days} days.`, false);
+        bkSchedDirty = false;
+        const desc = (r.schedule && r.schedule.describe) || "";
+        setBkSysMsg(`Schedule saved — ${desc === "off" ? "automatic backups are off" : "automatic backups " + desc}` +
+          `${r.usb_after ? ", copied to USB afterwards" : ""}.`, false);
         await refreshSystemBackups();
       } catch (err) {
-        setBkSysMsg("Settings: " + err.message, true);
+        setBkSysMsg("Schedule: " + err.message, true);
       } finally {
         els.bkSettingsSave.disabled = false;
+      }
+    });
+    els.bkStaleSave.addEventListener("click", async () => {
+      const days = Number(els.bkStaleDays.value);
+      if (!Number.isInteger(days) || days < 1 || days > 90) {
+        setBkSysMsg("The age warning must be a whole number of days between 1 and 90.", true);
+        els.bkStaleDays.focus();
+        return;
+      }
+      try {
+        els.bkStaleSave.disabled = true;
+        const r = await bkApi("/api/backups/system/settings", { stale_days: days });
+        bkStaleDirty = false;
+        setBkSysMsg(`Saved — a backup older than ${r.stale_days} days is flagged in the sidebar, the Overview and incidents.`, false);
+        await refreshSystemBackups();
+      } catch (err) {
+        setBkSysMsg("Age warning: " + err.message, true);
+      } finally {
+        els.bkStaleSave.disabled = false;
       }
     });
 
     els.bkEncSet.addEventListener("click", async () => {
       const pw = els.bkEncPw.value;
-      if (pw.length < 10) { setBkSysMsg("Use a passphrase of at least 10 characters.", true); return; }
-      if (pw !== els.bkEncPw2.value) { setBkSysMsg("The two passphrases do not match.", true); return; }
+      if (pw.length < 10) { setBkSysMsg("Use a passphrase of at least 10 characters.", true); els.bkEncPw.focus(); return; }
+      if (pw !== els.bkEncPw2.value) { setBkSysMsg("The two passphrases do not match.", true); els.bkEncPw2.focus(); return; }
       const changing = !els.bkEncRemove.hidden;
       if (!(await ask((changing ? "Change the backup passphrase?" : "Encrypt downloads and USB copies with this passphrase?") +
         "\n\nStore it in your password manager now: it is never shown again, and encrypted copies cannot be restored without it." +
@@ -7249,29 +7676,26 @@
       }
     });
 
-    const busy = (btn, on, label) => {
-      if (on) { btn.dataset.busy = "1"; btn.dataset.label = btn.textContent; btn.textContent = label; btn.disabled = true; } else {
-        delete btn.dataset.busy; btn.textContent = btn.dataset.label || btn.textContent; btn.disabled = false;
-      }
-    };
     els.bkUsbCopy.addEventListener("click", async () => {
       try {
-        busy(els.bkUsbCopy, true, "Copying…");
+        bkBusy(els.bkUsbCopy, true, "Copying…");
         const r = await bkApi("/api/backups/system/usb-copy", {});
+        bkUsbCheckCache = null;
         setBkSysMsg(r.skipped
           ? `${r.file} was already on the stick (re-verified). The stick is unmounted — you can unplug it.`
           : `Copied ${r.file}${r.encrypted ? " (encrypted)" : ""} to the stick and verified it (sha256). The stick is unmounted — you can unplug it.`, false);
       } catch (err) {
         setBkSysMsg("USB copy: " + err.message, true);
       } finally {
-        busy(els.bkUsbCopy, false);
+        bkBusy(els.bkUsbCopy, false);
         await refreshSystemBackups();
       }
     });
     els.bkUsbCheck.addEventListener("click", async () => {
       try {
-        busy(els.bkUsbCheck, true, "Checking…");
+        bkBusy(els.bkUsbCheck, true, "Checking…");
         const r = await bkApi("/api/backups/system/usb-check", {});
+        bkUsbCheckCache = r;
         els.bkUsbFiles.innerHTML = bkUsbFilesHtml(r);
         els.bkUsbFiles.hidden = false;
         setBkSysMsg(`Stick checked: ${r.copies} cop${r.copies === 1 ? "y" : "ies"}` + (r.damaged ? `, ${r.damaged} DAMAGED` : ", all verified") +
@@ -7279,7 +7703,7 @@
       } catch (err) {
         setBkSysMsg("USB check: " + err.message, true);
       } finally {
-        busy(els.bkUsbCheck, false);
+        bkBusy(els.bkUsbCheck, false);
         await refreshSystemBackups();
       }
     });
@@ -7287,29 +7711,67 @@
 
   function bindSystemBackups() {
     bindBackupSettings();
-    els.bkSysAll.addEventListener("click", () => {
-      els.bkSysItems.querySelectorAll(".bk-item-chk:not(:disabled)").forEach((c) => { c.checked = true; });
+
+    const view = document.getElementById("view-backups");
+    const track = (e) => {
+      const card = e.target.closest && e.target.closest(".bk-card");
+      if (card) bkMsgCard = card;
+    };
+    view.addEventListener("pointerdown", track, true);
+    view.addEventListener("focusin", track, true);
+
+    document.querySelectorAll("#bk-subtabs .fw-subtab").forEach((btn) => {
+      btn.addEventListener("click", () => setBkTab(btn.dataset.bkPane));
+    });
+
+    els.bkPresets.addEventListener("click", (e) => {
+      const chip = e.target.closest("[data-bk-preset]");
+      if (chip) bkApplyPreset(chip.dataset.bkPreset);
+    });
+    els.bkSysItems.addEventListener("change", (e) => {
+      const gc = e.target.closest(".bk-group-chk");
+      if (gc) {
+        els.bkSysItems.querySelectorAll(".bk-item-chk:not(:disabled)").forEach((c) => {
+          if (bkGroupOf(c.dataset.arc) === gc.dataset.group) c.checked = gc.checked;
+        });
+      }
       updateBackupSelection();
     });
-    els.bkSysNone.addEventListener("click", () => {
-      els.bkSysItems.querySelectorAll(".bk-item-chk").forEach((c) => { c.checked = false; });
-      updateBackupSelection();
+    els.bkSysItems.addEventListener("click", (e) => {
+      const t = e.target.closest(".bk-group-toggle");
+      if (!t) return;
+      const group = t.closest(".bk-group");
+      const body = group.querySelector(".bk-group-body");
+      const open = body.hidden;
+      body.hidden = !open;
+      group.classList.toggle("is-open", open);
+      t.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open) bkOpenGroups.add(group.dataset.group); else bkOpenGroups.delete(group.dataset.group);
     });
-    els.bkSysItems.addEventListener("change", updateBackupSelection);
 
     els.bkSysCreate.addEventListener("click", async () => {
       const include = selectedSystemBackupItems();
       if (!include.length) {
-        setBkSysMsg("Select at least one config item to back up.", true);
+        setBkSysMsg("Select at least one item to back up.", true, els.bkCreateCard);
         return;
       }
       try {
+        els.bkSysCreate.disabled = true;
         await postJSON("/api/backups/system/create", { include });
-        setBkSysMsg("Starting system backup...", false);
+        setBkSysMsg("");
+        bkShowProgress({ pct: 0, step: "Starting…" });
         await pollSystemBackup();
       } catch (err) {
-        setBkSysMsg(err.message, true);
+        updateBackupSelection();
+        setBkSysMsg(err.message, true, els.bkCreateCard);
       }
+    });
+
+    els.bkListFilter.addEventListener("click", (e) => {
+      const chip = e.target.closest("[data-bk-filter]");
+      if (!chip || chip.disabled) return;
+      bkListFilter = chip.dataset.bkFilter;
+      if (bkLastStatus) renderSystemBackups(bkLastStatus);
     });
 
     els.bkSysUpload.addEventListener("click", async () => {
@@ -7319,27 +7781,42 @@
         return;
       }
       try {
-        setBkSysMsg("Uploading and examining " + file.name + "…", false);
+        bkBusy(els.bkSysUpload, true, "Uploading…");
+        setBkSysMsg("");
         const buf = await file.arrayBuffer();
         const data = await uploadSystemBackupExamine(buf, els.bkSysUploadPw.value);
         els.bkSysFile.value = "";
         els.bkSysUploadPw.value = "";
+        bkBusy(els.bkSysUpload, false);
         updateBackupFileHint();
+        await refreshSystemBackups();
         renderSystemBackupContents({ backup: data.name, files: data.files, services: data.services, integrity: data.integrity });
         setBkSysMsg(
           `Examined "${data.name}"${data.encrypted ? " (decrypted)" : ""} — ${(data.files || []).length} file(s) listed below, ` +
           `checksums ${data.integrity === "verified" ? "verified" : "not available (older backup)"}. ` +
-          "Each restore shows a preview first; the current file is copied to the pre-restore folder.", false);
-        await refreshSystemBackups();
+          "Each restore shows a preview first; the current file is copied to the pre-restore folder.", false, els.bkUploadCard);
       } catch (err) {
-        setBkSysMsg("Upload: " + err.message, true);
+        if (els.bkSysUpload.dataset.busy) bkBusy(els.bkSysUpload, false);
+        updateBackupFileHint();
+        setBkSysMsg("Upload: " + err.message, true, els.bkUploadCard);
         if (err.data && err.data.need_passphrase) els.bkSysUploadPw.focus();
       }
     });
 
     els.bkSysFile.addEventListener("change", updateBackupFileHint);
     els.bkSysFilesSearch.addEventListener("input", filterSystemBackupFiles);
-    els.bkSysMsg.addEventListener("click", () => setBkSysMsg(""));
+    els.bkSysMsg.addEventListener("click", (e) => {
+      if (e.target.closest(".bk-msg-x")) setBkSysMsg("");
+    });
+
+    els.bkBrowsePick.addEventListener("change", () => { els.bkBrowseGo.disabled = !els.bkBrowsePick.value; });
+    els.bkBrowseGo.addEventListener("click", () => {
+      if (els.bkBrowsePick.value) browseSystemBackup(els.bkBrowsePick.value);
+    });
+    els.bkSanPick.addEventListener("change", () => { els.bkSanGo.disabled = !els.bkSanPick.value; });
+    els.bkSanGo.addEventListener("click", () => {
+      if (els.bkSanPick.value) bkSanitize(els.bkSanPick.value, els.bkSanGo);
+    });
 
     if (els.bkSysDrop) {
       const drop = els.bkSysDrop;
@@ -7369,10 +7846,13 @@
       const dl = e.target.closest(".bk-sys-dl");
       if (dl) {
         try {
+          dl.disabled = true;
           const fname = await downloadSystemBackup(dl.dataset.name);
           if (/\.gpg$/.test(fname)) setBkSysMsg(`Downloaded ${fname} (encrypted). Decrypt with: gpg -d ${fname} > ${dl.dataset.name}`, false);
         } catch (err) {
-          setBkSysMsg(err.message, true);
+          setBkSysMsg("Download: " + err.message, true);
+        } finally {
+          dl.disabled = false;
         }
         return;
       }
@@ -7390,6 +7870,22 @@
         }
         return;
       }
+      const pin = e.target.closest(".bk-sys-pin");
+      if (pin) {
+        const on = pin.getAttribute("aria-pressed") !== "true";
+        try {
+          pin.disabled = true;
+          await bkApi("/api/backups/system/pin", { name: pin.dataset.name, pinned: on });
+          setBkSysMsg(on ? `${pin.dataset.name} is pinned: retention never deletes it.`
+            : `${pin.dataset.name} is unpinned: retention may prune it again.`, false);
+          await refreshSystemBackups();
+        } catch (err) {
+          setBkSysMsg("Pin: " + err.message, true);
+        } finally {
+          pin.disabled = false;
+        }
+        return;
+      }
       const browse = e.target.closest(".bk-sys-browse");
       if (browse) {
         await browseSystemBackup(browse.dataset.name);
@@ -7397,34 +7893,26 @@
       }
       const san = e.target.closest(".bk-sys-san");
       if (san) {
-        if (!(await (window.twConfirm || window.confirm)(`Create a sanitized export of "${san.dataset.name}"?\n\n` +
-          "Only config files go in (no dashboard code, DHCP leases or binaries). Private keys, tokens, " +
-          "passwords, API keys, webhook URLs and plugin secrets are removed or redacted, and the export is " +
-          "re-scanned before it is written. The export downloads automatically and a copy stays on this server."))) return;
-        try {
-          const res = await postJSON("/api/backups/system/sanitize", { name: san.dataset.name });
-          if (!res.ok || !res.name) throw new Error(res.error || "sanitize failed");
-          await downloadSystemBackup(res.name);
-          setBkSysMsg(
-            `Sanitized export ${res.name} downloaded — ` +
-            `${(res.dropped || []).length} secret file(s) dropped, ${res.redacted || 0} key(s) redacted. ` +
-            "Verify SANITIZED.txt inside before sharing.", false);
-        } catch (err) {
-          setBkSysMsg("Sanitize: " + err.message, true);
-        }
+        await bkSanitize(san.dataset.name, san);
         return;
       }
       const del = e.target.closest(".bk-sys-del");
       if (del) {
-        if (!(await (window.twConfirm || window.confirm)(`Delete system backup "${del.dataset.name}"?`))) return;
+        const kind = bkKindOf(del.dataset.name);
+        if (!(await (window.twConfirm || window.confirm)(`Delete ${kind === "system" ? "system backup" : kind === "sanitized" ? "sanitized export" : "uploaded backup"} "${del.dataset.name}"?` +
+          (kind === "system" ? "\n\nThe file is removed from this router; downloaded and USB copies are not affected." : "")))) return;
         try {
           await postJSON("/api/backups/system/delete", { name: del.dataset.name });
-          setBkSysMsg("System backup deleted.", false);
-          els.bkSysContents.hidden = true;
-          hideBkPreview();
+          setBkSysMsg(`Deleted ${del.dataset.name}.`, false);
+          if (bkContents && bkContents.backup === del.dataset.name) {
+            els.bkSysContents.hidden = true;
+            if (els.bkBrowseEmpty) els.bkBrowseEmpty.hidden = false;
+            bkContents = null;
+            hideBkPreview();
+          }
           await refreshSystemBackups();
         } catch (err) {
-          setBkSysMsg(err.message, true);
+          setBkSysMsg("Delete: " + err.message, true);
         }
       }
     });
@@ -7448,7 +7936,7 @@
       if (!svc) return;
       els.bkSysFiles.querySelectorAll(".bk-file-chk").forEach((c) => { c.checked = c.dataset.svc === svc; });
       updateBkMulti();
-      setBkSysMsg(`Selected every file of ${svc}. Click "${els.bkSysMulti.textContent}" to see what would change.`, false);
+      setBkSysMsg(`Selected every file of ${svc}. Choose "${els.bkSysMulti.textContent}" to see what would change.`, false);
     });
     els.bkSysPickNone.addEventListener("click", () => {
       els.bkSysFiles.querySelectorAll(".bk-file-chk").forEach((c) => { c.checked = false; });
@@ -7537,7 +8025,7 @@
       `<div class="bk-preview-head"><b>Restore preview</b> <span class="mono">${esc(p.member)}</span>` +
       `<span class="bk-kind">${esc(kinds[p.kind] || p.kind)}</span></div>` + body;
     box.hidden = false;
-    box.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    box.scrollIntoView({ block: "nearest", behavior: bkSmooth() });
   }
 
   async function previewBkRestore(name, file) {
@@ -7594,7 +8082,7 @@
     const first = box.querySelector(".bk-multi-item");
     if (first && (p.items || []).length <= 3) box.querySelectorAll(".bk-multi-item").forEach((d) => { d.open = true; });
     box.hidden = false;
-    box.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    box.scrollIntoView({ block: "nearest", behavior: bkSmooth() });
   }
 
   async function previewBkMulti() {
@@ -7632,7 +8120,7 @@
       (rows ? `<p class="bk-preview-meta">To apply the restored config, reload/restart only these services — when you are ready. Nothing was restarted.</p><ul class="bk-units">${rows}</ul>` : "") +
       `<div class="bk-preview-actions"><button type="button" class="btn btn-sm" data-bk-act="close">Done</button></div>`;
     box.hidden = false;
-    box.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    box.scrollIntoView({ block: "nearest", behavior: bkSmooth() });
   }
 
   async function onBkUnitClick(b) {
@@ -11435,7 +11923,10 @@
     users: '<circle cx="12" cy="8" r="3.5"/><path d="M5.2 20a6.8 6.8 0 0 1 13.6 0"/>',
     avatar: '<circle cx="11" cy="9" r="3.4"/><path d="M4.8 20a6.2 6.2 0 0 1 12.4 0"/><path d="M19 3.5v5M16.5 6h5"/>',
     security: '<rect x="4" y="10" width="16" height="11" rx="2.2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 15v2.5"/>',
-    alerts: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/>'
+    alerts: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/>',
+    archives: '<rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9"/><path d="M10 13h4"/>',
+    schedule: '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.6 1.6M9.5 2.5h5M12 2.5V5"/>',
+    restore: '<path d="M3 12a9 9 0 1 0 2.6-6.4L3 8"/><path d="M3 3v5h5"/><path d="M12 7.5V12l3 2"/>'
   };
 
   function subtabIconKey(tab) {
@@ -11534,7 +12025,8 @@
     rss: '<path d="M5 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4ZM5 11a8 8 0 0 1 8 8M5 5a14 14 0 0 1 14 14"/>',
     ban: '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
     pin: '<path d="M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.6"/>',
-    layers: '<path d="M12 3 3 7.5 12 12l9-4.5z"/><path d="m3 12 9 4.5 9-4.5M3 16.5 12 21l9-4.5"/>'
+    layers: '<path d="M12 3 3 7.5 12 12l9-4.5z"/><path d="m3 12 9 4.5 9-4.5M3 16.5 12 21l9-4.5"/>',
+    usb: '<path d="M8 3h8v6H8z"/><path d="M6 9h12v7a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4z"/><path d="M10.5 5.5h.01M13.5 5.5h.01"/>'
   };
   const CARD_ICON_TITLES = {
     "System Health": "activity", "WAN": "globe", "LAN & DHCP": "network",
@@ -11560,7 +12052,10 @@
     "Router location": "map", "Attack map appearance": "map", "User Manager": "users",
     "Two-Factor Authentication": "lock", "Alerts & Notifications": "bell",
     "Monitored checks": "check", "Dynamic Leases": "users", "Local DNS Records": "globe",
-    "Blocklist Sources": "list"
+    "Blocklist Sources": "list", "Create a backup": "archive", "All backups": "layers",
+    "Automatic backups": "clock", "Retention": "layers", "USB copy": "usb", "Encryption": "lock",
+    "Upload a backup": "upload", "Browse & restore": "search", "Backup age warning": "bell",
+    "Sanitized export": "shield", "Backup activity": "list"
   };
   const CARD_SUBTITLES = {
     "Response Codes": "DNS response distribution",
@@ -14165,6 +14660,8 @@
     download: `${SVG_OPEN}<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>`,
     export: `${SVG_OPEN}<path d="M13 4h6a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-5"/><path d="M10 14 20 4"/><path d="M14 4h6v6"/></svg>`,
     browse: `${SVG_OPEN}<rect x="1.5" y="1.5" width="21" height="21" rx="3"/><path d="M4.5 9V7a2 2 0 0 1 2-2h3l2 2h6a2 2 0 0 1 2 2v1"/><path d="M4.5 10.5h15v2.5M4.5 10.5v6a2 2 0 0 0 2 2h5"/><circle cx="15.2" cy="15.1" r="3.1"/><path d="m17.5 17.4 2.4 2.4"/></svg>`,
+    verify: `${SVG_OPEN}<path d="M12 3 5 6v6c0 4 3 7 7 9 4-2 7-5 7-9V6z"/><path d="m9 12 2.1 2.1L15.4 10"/></svg>`,
+    pin: `${SVG_OPEN}<path d="M9 4h6l-1 5 3 3v2H7v-2l3-3z"/><path d="M12 14v6"/></svg>`,
     up: `${SVG_OPEN}<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>`,
     down: `${SVG_OPEN}<path d="M12 5v14"/><path d="m5 12 7 7 7-7"/></svg>`,
   };

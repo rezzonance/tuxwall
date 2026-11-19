@@ -11338,6 +11338,7 @@ def system_backup_status():
         "result": job["result"],
         "error": job["error"],
         "backups": list_system_backups().get("backups", []),
+        "others": list_other_archives(),
         "last_run": _public_run(st.get("last_run")),
         "last_success": _public_run(st.get("last_success")),
         "last_failure": _public_run(st.get("last_failure")),
@@ -11354,6 +11355,17 @@ def list_system_backups():
     if _bk is None:
         return {"ok": False, "error": "Backup module unavailable", "backups": []}
     return {"ok": True, "backups": _bk.list_archives()}
+
+
+def list_other_archives():
+    """Sanitized exports and uploads, read-only, for the unified Backups list."""
+    if _bk is None:
+        return []
+    try:
+        return _bk.list_archives(regex=_bk.SANITIZED_RE) + _bk.list_archives(regex=_bk.UPLOADED_RE)
+    except Exception as exc:
+        print("[backup] listing exports/uploads failed: %r" % exc, flush=True)
+        return []
 
 
 def delete_system_backup(filename, who="", client=""):
