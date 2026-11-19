@@ -497,6 +497,7 @@
   /* ==========================================================================
      D2. Unified threat timeline (Security → Timeline)
      ======================================================================= */
+  var TW_HIST = "/api/security/tripwire/history?limit=200";
   var SEV_ORDER = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
   var SEV_LABEL = { critical: "Critical", high: "High", medium: "Medium", low: "Low", info: "Info" };
   var SOURCES = [
@@ -556,10 +557,35 @@
       var creds = /creds|login|password|auth/i.test((e.service || "") + " " + (e.detail || ""));
       ev.push({ ts: e.ts, src: "canary", sev: creds ? "high" : "medium", ip: e.src, title: "Canary " + (e.service || "event") + (e.dst_port ? " (:" + e.dst_port + ")" : ""), detail: e.detail || "" });
     });
+    // Tripwire: counted events from the history (blocks highlighted as
+    // critical, labelled with the block strength); excluded ones never show.
     var tw = data("/api/security/tripwire") || {};
-    if (tw.since && tw.src_ip) {
-      ev.push({ ts: tw.since, src: "tripwire", sev: tw.tripped ? "critical" : "high", ip: tw.src_ip, title: "Tripwire " + (tw.tripped ? "TRIPPED" : "trip") + " · " + (tw.signature || tw.reason || ""),
-        detail: (tw.class || "") + (tw.mode ? " · mode " + tw.mode : "") + (tw.trips ? " · " + tw.trips + " trip" + (tw.trips === 1 ? "" : "s") : "") });
+    var twLabel = {};
+    (tw.checks || []).forEach(function (c) { twLabel[c.id] = c.label; });
+    var twHist = (data(TW_HIST) || {}).items || [];
+    var twTripSeen = false;
+    twHist.forEach(function (r) {
+      if (!r || r.excluded || r.now_excluded || !/^(block|log|counted|absorb)$/.test(r.action || "")) return;
+      var ip = r.src && !/^local:/.test(r.src) ? r.src : "";
+      var where = (r.src || "?") + " → " + (r.dst || r.dst_ip || "?");
+      var label = twLabel[r.check] || (r.check === "manual" ? "Manual / test trip" : r.check);
+      if (r.action === "block") {
+        var mode = String(r.strength || tw.trip_mode || "").toUpperCase();
+        var live = tw.tripped && tw.since && Math.abs(tw.since - r.ts) < 120;
+        if (live) twTripSeen = true;
+        ev.push({ ts: r.ts, src: "tripwire", sev: "critical", ip: ip,
+          title: "Tripwire " + (live ? "TRIPPED" : "trip") + (mode ? " (" + mode + ")" : "") + " · " + label,
+          detail: [r.sig || r.class || "", where, live ? "network contained — resolve under Security › Tripwire" : ""].filter(Boolean).join(" · ") });
+      } else {
+        ev.push({ ts: r.ts, src: "tripwire", sev: r.action === "log" ? "high" : "medium", ip: ip,
+          title: "Tripwire " + (r.action === "log" ? "log-only" : r.action === "absorb" ? "absorbed (deception)" : "below threshold") + " · " + label,
+          detail: [r.sig || r.class || "", where].filter(Boolean).join(" · ") });
+      }
+    });
+    if (tw.tripped && tw.since && !twTripSeen) {
+      ev.push({ ts: tw.since, src: "tripwire", sev: "critical", ip: tw.src_ip || "",
+        title: "Tripwire TRIPPED (" + String(tw.trip_mode || "?").toUpperCase() + ") · " + (twLabel[tw.check] || tw.signature || tw.reason || ""),
+        detail: (tw.class || "") + " · network contained — resolve under Security › Tripwire" });
     }
     var inc = data("/api/incidents") || {};
     (inc.incidents || []).forEach(function (i) {
@@ -688,7 +714,7 @@
     if (!tl.events.length) renderTl();
     Promise.all([
       get("/api/security", 20000), get("/api/security/suricata", 20000), get("/api/security/honeypot", 20000),
-      get("/api/security/canary", 30000), get("/api/security/tripwire", 30000), get("/api/incidents", 30000),
+      get("/api/security/canary", 30000), get("/api/security/tripwire", 30000), get(TW_HIST, 30000), get("/api/incidents", 30000),
       get("/api/crowdsec", 300000)
     ]).then(function () {
       tl.loading = false;

@@ -196,6 +196,9 @@
     secTripHistPrev: document.getElementById("sec-trip-hist-prev"),
     secTripHistNext: document.getElementById("sec-trip-hist-next"),
     secTripHistRange: document.getElementById("sec-trip-hist-range"),
+    secTripHistRangeSel: document.getElementById("sec-trip-hist-range-sel"),
+    secTripHistCsv: document.getElementById("sec-trip-hist-csv"),
+    secTripHistJson: document.getElementById("sec-trip-hist-json"),
     secTripHistNote: document.getElementById("sec-trip-hist-note"),
     secTripMessage: document.getElementById("sec-trip-message"),
     secTripMsgTitle: document.getElementById("sec-trip-msg-title"),
@@ -4129,6 +4132,9 @@
     renderHoneyDetail(conf, st);
   }
 
+  // --- Security ▸ Tripwire (phase 3 layout): status cards, status + settings,
+  // checks, event history. Counts come from the event history; imported
+  // events that today's always-on rules exclude (now_excluded) never count.
   const TRIP_MODES = ["disabled", "logonly", "medium", "high"];
   const TRIP_MODE_LABEL = { disabled: "Off", logonly: "Log only", medium: "Medium", high: "High" };
   const TRIP_CLASS_DESC = {
@@ -4139,7 +4145,58 @@
     "shellcode-detect": "Executable exploit code was detected in network traffic",
     "canary-egress": "The honeypot process attempted an outbound connection — presumed deception-layer compromise",
   };
+  const TRIP_STRENGTH_DESC = {
+    medium: "Checks set to Block cut all forwarding (LAN↔WAN, VPN→LAN, between VLANs). The router itself stays reachable, including over WireGuard.",
+    high: "Checks set to Block also close new connections from the internet to the router — reachable from the LAN only. WAN DHCP and replies to the router's own connections keep working.",
+  };
+  const TRIP_STRENGTH_SHORT = { medium: "Cuts all forwarding", high: "Forwarding + internet → router" };
+  const TRIP_ACTION_LABEL = { off: "Off", log: "Log only", block: "Block" };
+  const TRIP_RESULT_LABEL = {
+    block: "Blocked", log: "Logged", counted: "Below threshold", excluded: "Excluded",
+    absorb: "Absorbed", off: "Off",
+  };
+  // Plain-English copy per check (falls back to the engine's description).
+  const TRIP_CHECK_INFO = {
+    "suricata.successful-admin": {
+      what: "Suricata reports that an attacker appears to have gained administrator access to a system (priority-1, successful-admin).",
+      fp: "rare — admin-looking strings in plain-HTTP traffic to your own devices.",
+    },
+    "suricata.attempted-admin": {
+      what: "Exploit attempts and botnet scanners trying to gain administrator privileges (priority-1, attempted-admin).",
+      fp: "internet scanners (Mirai-style) that fail anyway; LAN apps posting code-like data, e.g. Home Assistant.",
+    },
+    "suricata.trojan-activity": {
+      what: "Traffic matching known malware or trojan command-and-control (priority-1, trojan-activity).",
+      fp: "outdated threat-intel rules that hit a shared CDN or hosting address.",
+    },
+    "suricata.web-application-attack": {
+      what: "Injection or code-execution attempts against a web application — SQL injection, command injection, PHP code in a POST.",
+      fp: "dashboards and APIs on the LAN whose normal requests look like code (Home Assistant, admin panels).",
+    },
+    "suricata.shellcode-detect": {
+      what: "Executable exploit code (shellcode) inside network traffic (priority-1, shellcode-detect).",
+      fp: "binary downloads, updates or compressed streams that happen to resemble shellcode.",
+    },
+    "canary.egress": {
+      what: "The honeypot (OpenCanary) opened a connection out of the router. It never should, so the deception layer is presumed compromised.",
+      fp: "late replies to scanners on a canary port; loopback traffic is already ignored.",
+    },
+  };
+  const TRIP_COUNTED = new Set(["log", "block", "counted"]);
+  const TRIP_TONES = ["green", "amber", "red", "blue", "purple", "teal", "orange"];
+  const TRIP_CHEV = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
+  const TRIP_BLOCK_ICO = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/></svg>';
   let tripLast = null;
+  let tripSummary = null;
+  let tripSumAt = 0;
+  let tripSumBusy = false;
+  let tripOlder = { at: 0, row: null };
+  let tripStateKey = "";
+  let tripChecksSig = "";
+  const tripHist = { offset: 0, limit: 25, total: 0, items: [], open: new Set() };
+
+  function tripRowCounted(r) { return TRIP_COUNTED.has(r.action) && !r.excluded && !r.now_excluded; }
+  function tripRowExcluded(r) { return r.action === "excluded" || !!r.excluded || !!r.now_excluded; }
 
   function tripReasonText(d) {
     const raw = typeof d.reason === "string" ? d.reason.trim() : "";
@@ -4148,7 +4205,7 @@
   }
 
   function tripKv(label, value, wide) {
-    return `<span class="trip-kv${wide ? " trip-kv-wide" : ""}"><span>${esc(label)}</span><b>${esc(value)}</b></span>`;
+    return `<div class="trip-kv${wide ? " trip-kv-wide" : ""}"><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`;
   }
 
   function tripSrc(v) {
@@ -4161,108 +4218,247 @@
     return ts ? formatDateTime(ts) + " (" + formatRelative(ts) + ")" : "—";
   }
 
-  // Priority: a trip in force > recent log-only / absorbed events > the last
-  // (resolved) trip > armed / off.
-  function renderTripMessage(d, mode, tripMode) {
+  function tripDst(r) {
+    if (r.dst) return String(r.dst);
+    if (r.dst_ip) return r.dst_ip + (r.dst_port ? ":" + r.dst_port : "");
+    return "";
+  }
+
+  function tripCheck(id) {
+    return ((tripLast || {}).checks || []).find((x) => x.id === id) || null;
+  }
+
+  function tripShortLabel(label) {
+    return String(label || "").replace(/^(Suricata|Canary):\s*/i, "");
+  }
+
+  function tripHistLabel(id) {
+    const c = tripCheck(id);
+    if (c) return c.label;
+    if (id === "manual") return "Manual / test trip";
+    const later = ((tripLast || {}).coming_later || []).find((x) => x.id === id);
+    return later ? later.label : (id || "?");
+  }
+
+  function tripCheckShort(id) {
+    const c = tripCheck(id);
+    if (!c) return id === "manual" ? "Manual / test" : (id || "?");
+    return c.source === "canary" ? "Canary egress" : "Suricata " + tripShortLabel(c.label).replace(/^(successful|attempted) administrator privilege gain$/i, "$1-admin");
+  }
+
+  function tripStateOf(d) {
+    if (d.tripped) return "tripped";
+    const list = d.checks || [];
+    if (!d.config_available || !list.length) {
+      return d.mode === "medium" || d.mode === "high" ? "armed" : (d.mode === "logonly" ? "logonly" : "off");
+    }
+    if (!d.enabled) return "off";
+    if (list.some((c) => c.action === "block")) return "armed";
+    if (list.some((c) => c.action === "log")) return "logonly";
+    return "off";
+  }
+
+  function tripBlockingChecks(d) {
+    return (d.checks || []).filter((c) => c.action === "block");
+  }
+
+  function tripStrengthText() {
+    const d = tripLast || {};
+    return (d.strength === "high" ? "HIGH" : "MEDIUM") + ": " + TRIP_STRENGTH_DESC[d.strength === "high" ? "high" : "medium"];
+  }
+
+  // ---- Status cards -------------------------------------------------------
+  function tripStat(key, value, sub, tone, title) {
+    const v = document.getElementById("sec-trip-st-" + key);
+    const s = document.getElementById("sec-trip-st-" + key + "-sub");
+    const card = document.getElementById("sec-trip-st-" + key + "-card");
+    if (v) v.textContent = value;
+    if (s) s.textContent = sub || "";
+    if (card) {
+      if (tone) {
+        TRIP_TONES.forEach((t) => card.classList.toggle("stat-c-" + t, t === tone));
+        card.dataset.tone = tone;
+      }
+      card.title = title || (sub ? value + " — " + sub : "");
+    }
+  }
+
+  function renderTripStats(d) {
+    const state = tripStateOf(d);
+    const list = d.checks || [];
+    const nb = list.filter((c) => c.action === "block").length;
+    const nl = list.filter((c) => c.action === "log").length;
+    const strength = d.strength === "high" ? "high" : "medium";
+    const tripMode = d.trip_mode === "medium" ? "MEDIUM" : "HIGH";
+
+    if (state === "tripped") {
+      const age = Math.max(1, Date.now() / 1000 - (d.since || Date.now() / 1000));
+      tripStat("state", "Tripped", `${tripMode} · contained ${formatDuration(age)}`, "red");
+    } else if (state === "armed") {
+      tripStat("state", "Armed", `Blocks on ${nb} check${nb === 1 ? "" : "s"}`, "green");
+    } else if (state === "logonly") {
+      tripStat("state", "Log only", "Records, never blocks", "blue");
+    } else {
+      tripStat("state", "Off", d.enabled === false ? "Master switch is off" : "Every check is Off", "amber");
+    }
+
+    tripStat("strength", strength === "high" ? "High" : "Medium",
+      TRIP_STRENGTH_SHORT[strength] + (nb ? "" : " · unused"),
+      strength === "high" ? "orange" : "purple",
+      TRIP_STRENGTH_DESC[strength] + (nb ? "" : " No check is set to Block, so nothing is cut today."));
+
+    if (d.config_available && list.length) {
+      const on = list.filter((c) => c.action !== "off").length;
+      tripStat("checks", `${on} of ${list.length}`,
+        d.enabled ? `${nb} on Block · ${nl} log only` : "Master switch is off",
+        d.enabled ? "teal" : "amber");
+    } else {
+      tripStat("checks", "—", "Engine did not answer", "amber");
+    }
+
+    const sum = tripSummary;
+    if (sum) {
+      const extra = [];
+      extra.push(`${formatNumber(sum.excluded)} excluded`);
+      if (sum.absorbed) extra.push(`${formatNumber(sum.absorbed)} absorbed`);
+      tripStat("events", `${formatNumber(sum.day)} / ${formatNumber(sum.week)}`, extra.join(" · ") + " (7 d)",
+        sum.blockedDay ? "red" : (sum.day ? "amber" : "blue"),
+        `${sum.day} counted in 24 h, ${sum.week} in 7 days. Ignored in 7 days: ${sum.excluded} excluded (exclusions or always-ignored traffic), ${sum.absorbed} absorbed by the deception layer.`);
+      const last = sum.last || tripOlder.row;
+      if (last) {
+        tripStat("last", formatRelative(last.ts), `${tripCheckShort(last.check)} · ${TRIP_RESULT_LABEL[last.action] || last.action}`,
+          last.action === "block" ? "red" : "purple",
+          `${formatDateTime(last.ts)} — ${tripHistLabel(last.check)} (${TRIP_RESULT_LABEL[last.action] || last.action})`);
+      } else {
+        tripStat("last", "None", "Nothing counted in 90 days", "green");
+      }
+    } else {
+      tripStat("events", "—", "Reading history …", "blue");
+      tripStat("last", "—", "Reading history …", "purple");
+    }
+
+    const e = d.engine || {};
+    const w = e.watchers || {};
+    const wanted = e.wanted || {};
+    const live = ["suricata", "canary"].filter((n) => wanted[n] !== false && w[n]);
+    const beat = e.heartbeat_age != null ? `heartbeat ${Math.round(e.heartbeat_age)} s` : "";
+    if (!e.active) {
+      tripStat("engine", "Unknown", "Status unavailable", "amber");
+    } else if (e.healthy) {
+      if (d.mode === "disabled") tripStat("engine", "Idle", ["Detection off", beat].filter(Boolean).join(" · "), "teal");
+      else tripStat("engine", "Healthy", [`${live.length} watcher${live.length === 1 ? "" : "s"}`, beat].filter(Boolean).join(" · "), "green");
+    } else if (e.needed) {
+      tripStat("engine", "Not watching", (e.problems || [])[0] || "A watcher is down", "red", (e.problems || []).join("; "));
+    } else {
+      tripStat("engine", "Idle", (e.problems || [])[0] || "Nothing to watch", "amber", (e.problems || []).join("; "));
+    }
+
+    const ann = state + "|" + (e.healthy === false && e.needed ? "bad" : "ok");
+    const live2 = document.getElementById("sec-trip-live");
+    if (live2 && tripStateKey && ann !== tripStateKey) {
+      const words = { tripped: "Tripwire tripped — network contained", armed: "Tripwire armed", logonly: "Tripwire in log-only mode", off: "Tripwire off" };
+      live2.textContent = words[state] + (ann.endsWith("bad") ? ". Engine not watching." : ".");
+    }
+    tripStateKey = ann;
+  }
+
+  // ---- Status card ---------------------------------------------------------
+  function renderTripMessage(d) {
     if (!els.secTripMessage) return;
     const msg = els.secTripMessage;
-    if (els.secTripMsgSev) els.secTripMsgSev.hidden = true;
-    if (els.secTripMsgGrid) els.secTripMsgGrid.innerHTML = "";
+    const state = tripStateOf(d);
+    const mode = TRIP_MODES.includes(d.mode) ? d.mode : "disabled";
+    const tripMode = TRIP_MODES.includes(d.trip_mode) ? d.trip_mode : "high";
+    const lastTrip = !d.tripped && (d.trips || 0) > 0 && (d.reason || d.class) && d.since;
+    const lastTripKv = lastTrip
+      ? tripKv("Last trip", `${formatDateTime(d.since)} · ${String(tripMode).toUpperCase()} · resolved${d.resolved_at ? " " + formatRelative(d.resolved_at) : ""}${d.resolved_by ? " by " + d.resolved_by : ""}`, true)
+      : "";
+    els.secTripMsgSev.hidden = true;
+    msg.querySelector(".trip-message-ico").innerHTML = d.tripped || state !== "off"
+      ? '<svg viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>'
+      : '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5"/><path d="M12 16h.01"/></svg>';
 
     if (d.tripped) {
       const age = Math.max(1, Date.now() / 1000 - (d.since || Date.now() / 1000));
       msg.dataset.kind = "tripped";
-      els.secTripMsgTitle.textContent = "Tripwire tripped — WAN contained";
+      els.secTripMsgTitle.textContent = "Tripped — network contained";
       els.secTripMsgMeta.textContent =
-        `Contained for ${formatDuration(age)} · ${String(tripMode).toUpperCase()} mode · ${formatNumber(d.trips || 1)} trip event(s)`;
-      if (els.secTripMsgSev) {
-        els.secTripMsgSev.hidden = false;
-        els.secTripMsgSev.textContent = String(tripMode).toUpperCase();
-      }
+        `For ${formatDuration(age)} · ${String(tripMode).toUpperCase()} strength · ${d.check ? tripHistLabel(d.check) : "trip event"}`;
+      els.secTripMsgSev.hidden = false;
+      els.secTripMsgSev.textContent = String(tripMode).toUpperCase();
       let reason = tripReasonText(d);
-      if (mode === "disabled" || mode === "logonly") {
-        reason += ` — the checks no longer block (${TRIP_MODE_LABEL[mode]}), but that does not lift this trip: the ${String(tripMode).toUpperCase()} lockdown stays until you resolve it below.`;
+      if (state === "tripped" && (mode === "disabled" || mode === "logonly")) {
+        reason += ` — no check is on Block any more (${TRIP_MODE_LABEL[mode]}), but that does not lift this trip: the ${String(tripMode).toUpperCase()} lockdown stays until you resolve it below.`;
       }
       els.secTripMsgReason.textContent = reason;
       els.secTripMsgGrid.innerHTML = [
+        d.check ? tripKv("Check", tripHistLabel(d.check)) : "",
         tripKv("Class", d.class || "—"),
         tripKv("Source", tripSrc(d.src_ip)),
-        tripKv("Destination", d.dst || "—", true),
-        tripKv("Containment", d.rules_present ? "FORWARD drop active" : "rules not present"),
-        tripKv("Tripped", d.since ? formatDateTime(d.since) : "—"),
+        tripKv("Destination", d.dst || "—"),
+        tripKv("Containment", d.rules_present ? (tripMode === "high" ? "Forward + internet → router dropped" : "All forwarding dropped") : "Rules not present (re-applied by the watchdog)"),
+        tripKv("Tripped at", d.since ? formatDateTime(d.since) : "—"),
         tripKv("Signature", d.signature || "—", true),
       ].join("");
       return;
     }
 
-    const lo = d.last_logonly || null;
-    const ab = d.last_absorbed || null;
-    const nLo = d.logonly_events || 0;
-    const nAb = d.absorbed_events || 0;
-    const lastTrip = (d.trips || 0) > 0 && (d.reason || d.class) && d.since ? d : null;
-    const tripKvs = lastTrip
-      ? [tripKv("Last trip", `${formatDateTime(lastTrip.since)} · ${String(tripMode).toUpperCase()} · resolved${d.resolved_at ? " " + formatRelative(d.resolved_at) : ""}${d.resolved_by ? " by " + d.resolved_by : ""}`, true)]
-      : [];
-
-    if ((nLo > 0 && lo) || (nAb > 0 && ab)) {
-      const newest = (lo && (!ab || (lo.ts || 0) >= (ab.ts || 0))) ? "logonly" : "absorbed";
-      msg.dataset.kind = "armed";
-      const parts = [];
-      if (nLo) parts.push(formatNumber(nLo) + " log-only");
-      if (nAb) parts.push(formatNumber(nAb) + " absorbed");
-      els.secTripMsgTitle.textContent = "Trip-class events recorded — " + parts.join(" · ");
-      els.secTripMsgMeta.textContent = "Nothing was contained. Latest " +
-        (newest === "logonly" ? "log-only event " + formatRelative(lo.ts) : "absorbed event " + formatRelative(ab.ts)) + ".";
-      els.secTripMsgReason.textContent = newest === "logonly"
-        ? `${lo.reason || "Trip-class event"}${lo.class ? " [" + lo.class + "]" : ""} — recorded only${mode === "logonly" ? " (Log only mode)" : ""}.`
-        : `${ab.class || "Trip-class event"} hit a deception port and was absorbed by design (canary + ban pipeline own it).`;
-      const kv = [];
-      if (lo) {
-        kv.push(tripKv("Last log-only", tripWhen(lo.ts)));
-        kv.push(tripKv("Class", lo.class || "—"));
-        kv.push(tripKv("Source", tripSrc(lo.src)));
-        kv.push(tripKv("Destination", lo.dst || "—"));
-        if (lo.sig) kv.push(tripKv("Signature", lo.sig, true));
-      }
-      if (ab) {
-        kv.push(tripKv("Last absorbed", tripWhen(ab.ts)));
-        kv.push(tripKv("Source", tripSrc(ab.src)));
-        kv.push(tripKv("Landed on", ab.dst || "—", true));
-      }
-      els.secTripMsgGrid.innerHTML = kv.concat(tripKvs).join("");
+    const sum = tripSummary;
+    if (state === "off" && !(sum && sum.last)) {
+      msg.dataset.kind = "idle";
+      els.secTripMsgTitle.textContent = "Tripwire is off";
+      els.secTripMsgMeta.textContent = d.enabled === false ? "The master switch is off — no check runs." : "Every check is Off — nothing is watched.";
+      els.secTripMsgReason.textContent = "Set a check to Log only to record its events, or to Block to contain the network when one is detected.";
+      els.secTripMsgGrid.innerHTML = lastTripKv;
       return;
     }
 
-    if (lastTrip) {
-      msg.dataset.kind = "last";
-      els.secTripMsgTitle.textContent = "Last trip — resolved";
-      els.secTripMsgMeta.textContent =
-        `Tripped ${formatRelative(d.since)} · ${String(tripMode).toUpperCase()} mode · ${formatNumber(d.trips || 1)} trip event(s)`;
-      els.secTripMsgReason.textContent = tripReasonText(d);
+    if (sum && sum.last) {
+      const r = sum.last;
+      const blocked = r.action === "block";
+      msg.dataset.kind = blocked ? "last" : "armed";
+      els.secTripMsgTitle.textContent = "Last counted event — " + tripHistLabel(r.check);
+      els.secTripMsgMeta.textContent = `${tripWhen(r.ts)} · ${TRIP_RESULT_LABEL[r.action] || r.action}` +
+        (r.action === "log" ? " — recorded, nothing was blocked" : (r.action === "counted" ? " — below the threshold, nothing was blocked" : ""));
+      const desc = TRIP_CLASS_DESC[r.class] || r.class || "Trip-class event";
+      els.secTripMsgReason.textContent = desc.replace(/[.\s]+$/, "") + "." +
+        (sum.excluded ? ` ${formatNumber(sum.excluded)} other event${sum.excluded === 1 ? " was" : "s were"} excluded in the last 7 days.` : "");
+      const sig = r.sig && !/^\[TUXWALL-/.test(r.sig) ? r.sig : "";
       els.secTripMsgGrid.innerHTML = [
-        tripKv("Class", d.class || "—"),
-        tripKv("Source", tripSrc(d.src_ip)),
-        tripKv("Destination", d.dst || "—", true),
-        tripKv("Signature", d.signature || "—", true),
+        tripKv("Source", tripSrc(r.src) + (r.src_port ? ":" + r.src_port : "")),
+        tripKv("Destination", tripDst(r) || "—"),
+        r.iface ? tripKv("Interface", r.iface) : "",
+        sig ? tripKv("Signature", sig + (r.sid ? ` (SID ${r.sid})` : ""), true) : "",
+        r.decision ? tripKv("Decision", r.decision, true) : "",
+        lastTripKv,
       ].join("");
       return;
     }
 
-    msg.dataset.kind = mode === "disabled" ? "idle" : "armed";
-    els.secTripMsgTitle.textContent = mode === "disabled" ? "Tripwire is off" : "Armed — no events recorded";
-    els.secTripMsgMeta.textContent = mode === "disabled"
-      ? "No detection runs and the WAN stays open."
-      : "Watching for intrusion-class events.";
-    els.secTripMsgReason.textContent = mode === "disabled"
-      ? "Set checks below to Log only to record trip-class events, or to Block to contain the WAN when one is detected."
-      : (mode === "logonly"
-          ? "Matching events of the active checks are recorded and pushed — no check is set to Block, so nothing is cut."
-          : "Matching events of checks set to Block cut the network and require your admin password to restore.");
+    msg.dataset.kind = "armed";
+    if (!sum) {
+      els.secTripMsgTitle.textContent = state === "armed" ? "Armed" : (state === "logonly" ? "Log only" : "Tripwire");
+      els.secTripMsgMeta.textContent = "Reading the event history …";
+      els.secTripMsgReason.textContent = "";
+      els.secTripMsgGrid.innerHTML = lastTripKv;
+      return;
+    }
+    els.secTripMsgTitle.textContent = state === "off" ? "Tripwire is off" : "No counted events";
+    const ign = [];
+    if (sum.excluded) ign.push(`${formatNumber(sum.excluded)} excluded`);
+    if (sum.absorbed) ign.push(`${formatNumber(sum.absorbed)} absorbed by the deception layer`);
+    els.secTripMsgMeta.textContent = "Nothing has counted in the last 7 days" + (ign.length ? ` (${ign.join(", ")} — ignored by design)` : "") + ".";
+    els.secTripMsgReason.textContent = state === "armed"
+      ? "Matching events of the checks set to Block contain the network and need your admin password to restore."
+      : (state === "logonly"
+          ? "Matching events of the active checks are recorded and pushed — no check is on Block, so nothing is cut."
+          : "Set a check to Log only or Block to start watching.");
+    els.secTripMsgGrid.innerHTML = lastTripKv;
   }
 
   const TRIP_WATCHER_LABEL = { suricata: "Suricata watcher", canary: "Canary watcher" };
 
-  function renderTripHealth(d, mode) {
+  function renderTripHealth(d) {
     if (!els.secTripHealth) return;
     const e = d.engine || {};
     const w = e.watchers || {};
@@ -4271,7 +4467,7 @@
     if (!e.active) {
       ok = "unknown"; text = "Engine status unavailable";
     } else if (e.healthy) {
-      if (mode === "disabled") {
+      if (d.mode === "disabled") {
         ok = "idle";
         text = "Engine running · detection off" + (d.tripped ? " · re-enforcing the trip" : "");
       } else {
@@ -4296,6 +4492,10 @@
     els.secTripNotice.hidden = !text;
   }
 
+  function tripPaneVisible() {
+    return !!(els.secTripChecks && els.secTripChecks.offsetParent !== null);
+  }
+
   async function refreshTripwire() {
     let d;
     try { d = await fetchJSON("/api/security/tripwire"); }
@@ -4303,65 +4503,158 @@
     if (!d || !d.ok) return;
     tripLast = d;
 
-    const mode = TRIP_MODES.includes(d.mode) ? d.mode : "disabled";
+    const state = tripStateOf(d);
     const tripMode = TRIP_MODES.includes(d.trip_mode) ? d.trip_mode : "high";
-    const state = d.tripped ? "tripped" : (mode === "disabled" ? "disabled" : "armed");
     const eng = d.engine || {};
     const unhealthy = eng.needed && eng.healthy === false;
+    const nb = tripBlockingChecks(d).length;
 
-    if (els.secTripCard) {
-      els.secTripCard.dataset.state = state;
-      els.secTripCard.dataset.mode = mode;
-    }
+    if (els.secTripCard) els.secTripCard.dataset.state = state === "off" ? "disabled" : state;
     if (els.secTripBadge) {
       els.secTripBadge.dataset.state = state;
       els.secTripBadge.textContent = d.tripped
         ? String(tripMode).toUpperCase() + " · CONTAINED"
-        : (mode === "medium" || mode === "high" ? "BLOCK · " : "") + TRIP_MODE_LABEL[mode].toUpperCase();
+        : ({ armed: "ARMED · " + (d.strength === "high" ? "HIGH" : "MEDIUM"), logonly: "LOG ONLY", off: "OFF" })[state];
     }
     if (els.secTripHint) {
       els.secTripHint.textContent = d.tripped
-        ? "WAN contained since " + formatDateTime(d.since) + " — resolve below"
-        : (mode === "disabled"
-            ? (d.enabled === false ? "Off — master switch is off" : "Off — every check is Off")
-            : (mode === "logonly" ? "Log only — recording, never containing"
-                                  : "Block armed (" + TRIP_MODE_LABEL[mode] + " strength)"));
+        ? "Network contained since " + formatDateTime(d.since) + " — resolve below"
+        : ({
+            armed: `Blocking on ${nb} check${nb === 1 ? "" : "s"} at ${d.strength === "high" ? "High" : "Medium"} strength`,
+            logonly: "Recording and pushing — nothing is ever cut",
+            off: d.enabled === false ? "Master switch is off" : "Every check is Off",
+          })[state];
     }
     if (els.secTripDot) {
       els.secTripDot.dataset.status = d.tripped ? "crit"
-        : (unhealthy ? "inactive" : (mode === "disabled" ? "unknown" : "ok"));
+        : (unhealthy ? "inactive" : (state === "off" ? "unknown" : "ok"));
     }
     renderTripControls(d);
     renderTripChecks(d);
-    if (els.secTripHistBody && els.secTripHistBody.offsetParent !== null) refreshTripHistory();
-
-    renderTripHealth(d, mode);
-    renderTripMessage(d, mode, tripMode);
+    renderTripStats(d);
+    renderTripHealth(d);
+    renderTripMessage(d);
     if (!d.tripped) showTripNotice("");
     if (els.secTripResolve) els.secTripResolve.hidden = !d.tripped;
     if (els.tripBanner) {
       if (d.tripped) {
         els.tripBanner.hidden = false;
         els.tripBanner.textContent = "TRIPWIRE TRIPPED (" +
-          String(d.trip_mode || "?").toUpperCase() + "): WAN contained - " +
+          String(d.trip_mode || "?").toUpperCase() + "): network contained - " +
           (d.reason || "intrusion-class event") +
           ". This will NOT auto-restore. Resolve under Security > Tripwire.";
       } else els.tripBanner.hidden = true;
     }
+    if (tripPaneVisible()) {
+      refreshTripSummary(false);
+      refreshTripHistory();
+    }
   }
-  // --- Tripwire phase 2: master switch, block strength, notify policy,
-  // per-check actions / thresholds / exclusions, Test, event history -------
-  const TRIP_STRENGTH_DESC = {
-    medium: "Checks set to Block cut all forwarding (LAN↔WAN, VPN→LAN, between VLANs). The router itself stays reachable, including over WireGuard.",
-    high: "Checks set to Block also close new connections from the internet to the router — reachable from the LAN only. WAN DHCP and replies to the router's own connections keep working.",
-  };
-  const TRIP_ACTION_LABEL = { off: "Off", log: "Log only", block: "Block" };
-  const TRIP_RESULT_LABEL = {
-    block: "Blocked", log: "Logged", counted: "Below threshold", excluded: "Excluded",
-    absorb: "Absorbed", off: "Off",
-  };
-  let tripChecksSig = "";
-  const tripHist = { offset: 0, limit: 25, total: 0 };
+
+  // Counted / excluded / absorbed events of the last 7 days (newest first,
+  // paged); a counted event older than that is looked up once in a while.
+  async function refreshTripSummary(force) {
+    if (tripSumBusy || (!force && Date.now() - tripSumAt < 25000)) return;
+    tripSumBusy = true;
+    try {
+      const now = Date.now() / 1000;
+      const since = Math.floor(now - 7 * 86400);
+      const rows = [];
+      let offset = 0, total = 0, pages = 0;
+      do {
+        const r = await fetchJSON(`/api/security/tripwire/history?since=${since}&offset=${offset}&limit=200`);
+        if (!r || !r.ok) throw new Error("history unavailable");
+        rows.push(...(r.items || []));
+        total = r.total || 0;
+        offset += 200;
+        pages += 1;
+      } while (offset < total && pages < 25);
+      const sum = { day: 0, week: 0, blockedDay: 0, excluded: 0, absorbed: 0, perCheck: {}, last: null };
+      rows.forEach((r) => {
+        const pc = sum.perCheck[r.check] || (sum.perCheck[r.check] = { day: 0, week: 0, excluded: 0, absorbed: 0 });
+        const recent = now - (r.ts || 0) < 86400;
+        if (tripRowCounted(r)) {
+          sum.week += 1; pc.week += 1;
+          if (recent) { sum.day += 1; pc.day += 1; if (r.action === "block") sum.blockedDay += 1; }
+          if (!sum.last || r.ts > sum.last.ts) sum.last = r;
+        } else if (r.action === "absorb") {
+          sum.absorbed += 1; pc.absorbed += 1;
+        } else if (tripRowExcluded(r)) {
+          sum.excluded += 1; pc.excluded += 1;
+        }
+      });
+      if (!sum.last && Date.now() - tripOlder.at > 300000) {
+        let best = null;
+        for (const action of ["block", "log"]) {
+          const r = await fetchJSON(`/api/security/tripwire/history?action=${action}&limit=100`);
+          const hit = ((r && r.items) || []).find(tripRowCounted);
+          if (hit && (!best || hit.ts > best.ts)) best = hit;
+        }
+        tripOlder = { at: Date.now(), row: best };
+      }
+      if (sum.last) tripOlder = { at: 0, row: null };
+      tripSummary = sum;
+      tripSumAt = Date.now();
+    } catch (_) {
+      // keep the previous summary; the next refresh retries
+    } finally {
+      tripSumBusy = false;
+    }
+    if (tripLast && tripSummary) {
+      renderTripStats(tripLast);
+      renderTripMessage(tripLast);
+      renderTripCheckCounts(tripLast);
+    }
+  }
+
+  // ---- Settings card -------------------------------------------------------
+  function renderTripControls(d) {
+    const strength = d.strength === "high" ? "high" : "medium";
+    if (els.secTripMaster && document.activeElement !== els.secTripMaster) {
+      els.secTripMaster.checked = !!d.enabled;
+      els.secTripMaster.disabled = !d.config_available;
+    }
+    if (els.secTripMasterNote) {
+      const on = (d.checks || []).filter((c) => c.action !== "off").length;
+      els.secTripMasterNote.textContent = d.enabled
+        ? (on ? `On — ${on} of ${(d.checks || []).length} checks active. Off stops every check; settings are kept.` : "On — but every check is Off, so nothing is watched.")
+        : "Off — no check runs; the per-check settings are kept.";
+    }
+    if (els.secTripStrength) {
+      els.secTripStrength.querySelectorAll("[data-trip-strength]").forEach((btn) => {
+        const on = btn.dataset.tripStrength === strength;
+        btn.classList.toggle("active", on);
+        btn.setAttribute("aria-pressed", on ? "true" : "false");
+        btn.disabled = !!d.tripped || !d.config_available;
+        btn.title = d.tripped ? "Resolve the trip before changing the block strength" : "";
+      });
+    }
+    if (els.secTripStrengthNote) {
+      const nb = tripBlockingChecks(d).length;
+      els.secTripStrengthNote.textContent = (d.tripped ? "Locked while tripped. " : "") +
+        TRIP_STRENGTH_DESC[strength] + (nb ? "" : " No check is on Block, so nothing is cut today.");
+    }
+    const n = d.notify || {};
+    const busy = els.secTripNotifySave && els.secTripNotifySave.dataset.busy;
+    if (!busy && els.secTripNotifySave && els.secTripNotifySave.disabled) {
+      // only resync while the user has no unsaved change
+      if (els.secTripNotifyLog) els.secTripNotifyLog.checked = n.on_log !== false;
+      if (els.secTripNotifyWin && document.activeElement !== els.secTripNotifyWin) els.secTripNotifyWin.value = n.window_minutes || 10;
+    }
+    [els.secTripNotifyLog, els.secTripNotifyWin].forEach((x) => { if (x) x.disabled = !d.config_available; });
+  }
+
+  function tripNotifyDirty() {
+    const n = (tripLast || {}).notify || {};
+    if (!els.secTripNotifySave) return;
+    const dirty = !!els.secTripNotifyLog && (els.secTripNotifyLog.checked !== (n.on_log !== false) ||
+      String(els.secTripNotifyWin.value) !== String(n.window_minutes || 10));
+    els.secTripNotifySave.disabled = !dirty;
+    els.secTripNotifySave.classList.toggle("btn-primary", dirty);
+  }
+  [els.secTripNotifyLog, els.secTripNotifyWin].forEach((x) => {
+    if (x) { x.addEventListener("input", tripNotifyDirty); x.addEventListener("change", tripNotifyDirty); }
+  });
 
   // POST that understands the engine's "confirmation required" (409): asks,
   // then retries once with confirm:true.
@@ -4385,83 +4678,67 @@
     return r.data;
   }
 
-  function tripBlockingChecks(d) {
-    return (d.checks || []).filter((c) => c.action === "block");
-  }
-
-  function renderTripControls(d) {
-    const strength = d.strength === "high" ? "high" : "medium";
-    if (els.secTripMaster && document.activeElement !== els.secTripMaster) {
-      els.secTripMaster.checked = !!d.enabled;
-      els.secTripMaster.disabled = !d.config_available;
-    }
-    if (els.secTripMasterNote) {
-      const on = (d.checks || []).filter((c) => c.action !== "off").length;
-      els.secTripMasterNote.textContent = d.enabled
-        ? (on ? `On — ${on} of ${(d.checks || []).length} checks active.` : "On — but every check is Off, so nothing is watched.")
-        : "Off — no check runs; the per-check settings are kept.";
-    }
-    if (els.secTripStrength) {
-      els.secTripStrength.querySelectorAll("[data-trip-strength]").forEach((btn) => {
-        const on = btn.dataset.tripStrength === strength;
-        btn.classList.toggle("active", on);
-        btn.setAttribute("aria-pressed", on ? "true" : "false");
-        btn.disabled = !!d.tripped || !d.config_available;
-        btn.title = d.tripped ? "Resolve the trip before changing the block strength" : "";
-      });
-    }
-    if (els.secTripStrengthNote) {
-      const nb = tripBlockingChecks(d).length;
-      els.secTripStrengthNote.textContent = (d.tripped ? "Locked while tripped. " : "") +
-        TRIP_STRENGTH_DESC[strength] + (nb ? "" : " No check is set to Block, so nothing is cut today.");
-    }
-    const n = d.notify || {};
-    if (els.secTripNotifyLog && document.activeElement !== els.secTripNotifyLog) els.secTripNotifyLog.checked = n.on_log !== false;
-    if (els.secTripNotifyWin && document.activeElement !== els.secTripNotifyWin) els.secTripNotifyWin.value = n.window_minutes || 10;
-  }
-
-  function tripCountsText(c) {
-    const k = c.counts || {};
-    const parts = [`24 h: ${formatNumber(k.day || 0)}`, `7 d: ${formatNumber(k.week || 0)}`];
-    if (k.excluded_week) parts.push(`${formatNumber(k.excluded_week)} excluded (7 d)`);
-    if (k.last) parts.push(`last ${formatRelative(k.last)} (${TRIP_RESULT_LABEL[k.last_action] || k.last_action || "?"})`);
-    return parts.join(" · ");
-  }
+  // ---- Checks ---------------------------------------------------------------
+  function tripDomId(id) { return "trip-ck-" + String(id).replace(/[^a-z0-9]+/gi, "-"); }
 
   function tripCheckHtml(c) {
+    const info = TRIP_CHECK_INFO[c.id] || {};
+    const suri = c.source === "suricata";
+    const dom = tripDomId(c.id);
+    const btns = ["off", "log", "block"].map((a) =>
+      `<button type="button" class="seg-btn" data-trip-act="${a}" aria-pressed="false">${a === "block" ? TRIP_BLOCK_ICO : ""}<span>${TRIP_ACTION_LABEL[a]}</span></button>`).join("");
+    return `<div class="trip-check" data-check="${esc(c.id)}" data-action="${esc(c.action)}" role="group" aria-labelledby="${dom}-t">
+      <div class="trip-check-main">
+        <div class="trip-check-copy">
+          <div class="trip-check-title"><span class="trip-src" data-src="${esc(c.source)}">${suri ? "Suricata" : "Canary"}</span><strong id="${dom}-t">${esc(tripShortLabel(c.label))}</strong></div>
+          <p class="trip-check-what">${esc(info.what || c.description || "")}</p>
+          ${info.fp ? `<p class="trip-check-fp"><span>Typical false positives:</span> ${esc(info.fp)}</p>` : ""}
+        </div>
+        <div class="trip-check-side">
+          <div class="trip-counts" data-role="counts">
+            <span class="trip-count"><b data-n="day">0</b><small>24 h</small></span>
+            <span class="trip-count"><b data-n="week">0</b><small>7 d</small></span>
+          </div>
+          <div class="seg-btns trip-acts" role="group" aria-label="${esc(tripShortLabel(c.label))}: action">${btns}</div>
+        </div>
+      </div>
+      <div class="trip-check-bar">
+        <span class="trip-chip" data-role="thr"></span>
+        <span class="trip-chip" data-role="excl"></span>
+        ${suri
+          ? `<label class="trip-wan" title="Only events whose source is on the internet (WAN) count"><span class="fw-switch trip-switch-sm"><input type="checkbox" data-role="wan"><span class="fw-switch-slider"></span></span><span>Internet only</span></label>`
+          : `<span class="trip-chip trip-chip-quiet">Loopback ignored</span>`}
+        <span class="trip-check-btns">
+          <button type="button" class="btn btn-sm trip-edit-btn" data-do="edit" aria-expanded="false" aria-controls="${dom}-ed">${TRIP_CHEV}<span>Threshold &amp; exclusions</span></button>
+          <button type="button" class="btn btn-sm" data-do="test" aria-describedby="${dom}-tr">Test</button>
+        </span>
+      </div>
+      <div class="trip-test-result" id="${dom}-tr" data-role="test" role="status" aria-live="polite" hidden></div>
+      <div class="trip-check-editor" id="${dom}-ed" hidden>
+        <div class="trip-ed-grid">
+          <label class="fw-field"><span>Trigger after (events)</span><input type="number" min="1" max="100" inputmode="numeric" data-f="count"></label>
+          <label class="fw-field"><span>Within (minutes)</span><input type="number" min="1" max="1440" inputmode="numeric" data-f="minutes"></label>
+          <label class="fw-field trip-wide"><span>Excluded IPs / CIDRs (${suri ? "source or destination" : "destination"}), one per line</span><textarea rows="2" data-f="ips" spellcheck="false" placeholder="e.g. 192.168.1.181 or 203.0.113.0/24"></textarea></label>
+          ${suri ? `<label class="fw-field trip-wide"><span>Excluded Suricata signature IDs</span><textarea rows="1" data-f="sids" spellcheck="false" placeholder="e.g. 2031123"></textarea></label>` : ""}
+          <label class="fw-field trip-wide"><span>Test with ${suri ? "source" : "destination"} address (optional)</span><input type="text" data-f="test-src" spellcheck="false" autocomplete="off" placeholder="${suri ? "e.g. 203.0.113.9 — a simulated attacker" : "e.g. 203.0.113.9"}"></label>
+        </div>
+        <p class="muted trip-always">Always ignored: ${suri ? "traffic sent by the router itself, and loopback traffic" : "loopback traffic (OUT=lo) that never left the router"}.</p>
+        <div class="trip-ed-actions">
+          <button type="button" class="btn btn-sm btn-primary" data-do="save">Save</button>
+          <button type="button" class="btn btn-sm" data-do="cancel">Cancel</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  function tripFillEditor(row, c) {
     const ex = c.exclusions || {};
     const th = c.threshold || {};
-    const suri = c.source === "suricata";
-    const btns = ["off", "log", "block"].map((a) =>
-      `<button type="button" class="seg-btn" data-trip-act="${a}" aria-pressed="false">${TRIP_ACTION_LABEL[a]}</button>`).join("");
-    return `<div class="trip-check" data-check="${esc(c.id)}" data-action="${esc(c.action)}">
-      <div class="trip-check-head">
-        <div class="trip-check-copy">
-          <strong>${esc(c.label)}</strong>
-          <span class="muted">${esc(c.description || "")}</span>
-          <span class="trip-check-meta muted" data-role="meta">${esc(tripCountsText(c))}</span>
-        </div>
-        <div class="seg-btns trip-acts" role="group" aria-label="${esc(c.label)}: action">${btns}</div>
-      </div>
-      <details class="trip-check-more">
-        <summary>Threshold, exclusions &amp; test</summary>
-        <div class="trip-check-form">
-          <label class="fw-field"><span>Trigger after (events)</span><input type="number" min="1" max="100" data-f="count" value="${esc(th.count || 1)}"></label>
-          <label class="fw-field"><span>Within (minutes)</span><input type="number" min="1" max="1440" data-f="minutes" value="${esc(th.minutes || 5)}"></label>
-          <label class="fw-field trip-wide"><span>Excluded IPs / CIDRs (${suri ? "source or destination" : "destination"}), one per line</span><textarea rows="2" data-f="ips" spellcheck="false" placeholder="e.g. 192.168.1.181 or 203.0.113.0/24">${esc((ex.ips || []).join("\n"))}</textarea></label>
-          ${suri ? `<label class="fw-field trip-wide"><span>Excluded Suricata signature IDs</span><textarea rows="1" data-f="sids" spellcheck="false" placeholder="e.g. 2031123">${esc((ex.sids || []).join(" "))}</textarea></label>
-          <label class="trip-inline trip-wide"><input type="checkbox" data-f="wan_only"${ex.wan_only !== false ? " checked" : ""}> Only traffic from the internet (WAN-sourced) counts</label>` : ""}
-          <p class="muted trip-wide trip-always">Always ignored: ${suri ? "traffic sent by the router itself and loopback traffic" : "loopback traffic (OUT=lo) that never left the router"}.</p>
-          <div class="trip-check-actions trip-wide">
-            <button type="button" class="btn btn-sm btn-primary" data-do="save">Save</button>
-            <span class="toolbar-spacer"></span>
-            <input type="text" data-f="test-src" class="trip-test-src" placeholder="${suri ? "Test source IP (optional)" : "Test destination IP (optional)"}" aria-label="Test address" spellcheck="false">
-            <button type="button" class="btn btn-sm" data-do="test">Test</button>
-          </div>
-          <div class="trip-test-result trip-wide" data-role="test" hidden></div>
-        </div>
-      </details>
-    </div>`;
+    const set = (f, v) => { const el = row.querySelector(`[data-f="${f}"]`); if (el) el.value = v; };
+    set("count", th.count || 1);
+    set("minutes", th.minutes || 5);
+    set("ips", (ex.ips || []).join("\n"));
+    set("sids", (ex.sids || []).join(" "));
   }
 
   function tripSyncCheck(row, c, force) {
@@ -4471,19 +4748,46 @@
       b.classList.toggle("active", on);
       b.setAttribute("aria-pressed", on ? "true" : "false");
     });
-    const meta = row.querySelector('[data-role="meta"]');
-    if (meta) meta.textContent = tripCountsText(c);
-    const more = row.querySelector("details");
-    if (!force && more && more.open) return;      // never clobber an edit in progress
     const ex = c.exclusions || {};
     const th = c.threshold || {};
-    const set = (f, v) => { const el = row.querySelector(`[data-f="${f}"]`); if (el) el.value = v; };
-    set("count", th.count || 1);
-    set("minutes", th.minutes || 5);
-    set("ips", (ex.ips || []).join("\n"));
-    set("sids", (ex.sids || []).join(" "));
-    const wo = row.querySelector('[data-f="wan_only"]');
-    if (wo) wo.checked = ex.wan_only !== false;
+    const thr = row.querySelector('[data-role="thr"]');
+    if (thr) {
+      const n = th.count || 1;
+      thr.textContent = n === 1 ? "Fires on the first event" : `${n} events within ${th.minutes || 5} min`;
+    }
+    const excl = row.querySelector('[data-role="excl"]');
+    if (excl) {
+      const k = (ex.ips || []).length + (ex.sids || []).length;
+      excl.textContent = k ? `${k} exclusion${k === 1 ? "" : "s"}` : "No exclusions";
+      excl.classList.toggle("trip-chip-quiet", !k);
+      excl.title = [(ex.ips || []).join(", "), (ex.sids || []).map((s) => "SID " + s).join(", ")].filter(Boolean).join(" · ");
+    }
+    const wan = row.querySelector('[data-role="wan"]');
+    if (wan && !wan.dataset.busy) wan.checked = ex.wan_only !== false;
+    const ed = row.querySelector(".trip-check-editor");
+    if (!force && ed && !ed.hidden) return;      // never clobber an edit in progress
+    tripFillEditor(row, c);
+  }
+
+  function renderTripCheckCounts(d) {
+    if (!els.secTripChecks) return;
+    const per = tripSummary ? tripSummary.perCheck : null;
+    els.secTripChecks.querySelectorAll(".trip-check[data-check]").forEach((row) => {
+      const c = (d.checks || []).find((x) => x.id === row.dataset.check);
+      if (!c) return;
+      const k = per ? (per[c.id] || { day: 0, week: 0, excluded: 0, absorbed: 0 }) : { day: (c.counts || {}).day || 0, week: (c.counts || {}).week || 0, excluded: (c.counts || {}).excluded_week || 0 };
+      const box = row.querySelector('[data-role="counts"]');
+      if (!box) return;
+      box.querySelector('[data-n="day"]').textContent = formatNumber(k.day);
+      box.querySelector('[data-n="week"]').textContent = formatNumber(k.week);
+      box.dataset.hot = k.day ? "1" : "0";
+      const extra = [];
+      if (k.excluded) extra.push(`${k.excluded} excluded`);
+      if (k.absorbed) extra.push(`${k.absorbed} absorbed`);
+      const t = `Counted events: ${k.day} in 24 h, ${k.week} in 7 days` + (extra.length ? ` (ignored in 7 days: ${extra.join(", ")})` : "");
+      box.title = t;
+      box.setAttribute("aria-label", t);
+    });
   }
 
   function renderTripChecks(d) {
@@ -4501,21 +4805,22 @@
       fillTripHistChecks(list);
     }
     const byId = new Map(list.map((c) => [c.id, c]));
-    els.secTripChecks.querySelectorAll(".trip-check").forEach((row) => {
+    els.secTripChecks.querySelectorAll(".trip-check[data-check]").forEach((row) => {
       const c = byId.get(row.dataset.check);
       if (c) tripSyncCheck(row, c, false);
     });
+    renderTripCheckCounts(d);
     if (els.secTripChecksNote) {
       const n = { off: 0, log: 0, block: 0 };
       list.forEach((c) => { n[c.action] = (n[c.action] || 0) + 1; });
       els.secTripChecksNote.textContent = `${n.block} Block · ${n.log} Log only · ${n.off} Off` +
-        (d.enabled ? "" : " — master switch is off");
+        (d.enabled ? " — counts are counted events (24 h · 7 d)" : " — master switch is off");
     }
     if (els.secTripLater) {
       const later = d.coming_later || [];
       els.secTripLater.innerHTML = later.length
-        ? `<p class="trip-label trip-later-head">Coming later</p>` + later.map((c) =>
-            `<div class="trip-check trip-check-later" data-check="${esc(c.id)}"><div class="trip-check-head"><div class="trip-check-copy"><strong>${esc(c.label)}</strong><span class="muted">${esc(c.why || "")}</span></div><span class="badge">Coming later</span></div></div>`).join("")
+        ? `<p class="trip-later-head">Coming later</p>` + later.map((c) =>
+            `<div class="trip-check trip-check-later"><div class="trip-check-main"><div class="trip-check-copy"><div class="trip-check-title"><strong>${esc(c.label)}</strong></div><p class="trip-check-what">${esc(c.why || "")}</p></div><span class="trip-later-badge">Coming later</span></div></div>`).join("")
         : "";
     }
   }
@@ -4528,19 +4833,13 @@
     };
     if (row.querySelector('[data-f="sids"]')) {
       patch.exclusions.sids = v("sids").split(/[\s,]+/).filter(Boolean);
-      patch.exclusions.wan_only = !!row.querySelector('[data-f="wan_only"]').checked;
     }
     return patch;
   }
 
-  function tripStrengthText() {
-    const d = tripLast || {};
-    return (d.strength === "high" ? "HIGH" : "MEDIUM") + ": " + TRIP_STRENGTH_DESC[d.strength === "high" ? "high" : "medium"];
-  }
-
   async function tripSetAction(row, action) {
     const id = row.dataset.check;
-    const c = ((tripLast || {}).checks || []).find((x) => x.id === id) || {};
+    const c = tripCheck(id) || {};
     if (c.action === action) return;
     let confirm = false;
     if (action === "block") {
@@ -4562,6 +4861,45 @@
     }
   }
 
+  async function tripSetWan(row, input) {
+    const id = row.dataset.check;
+    const c = tripCheck(id) || {};
+    const on = input.checked;
+    if (!on && c.action === "block") {
+      const ok = await (window.twConfirm || window.confirm)(
+        `Let LAN and VPN traffic count for “${c.label || id}”?\n\nThis check is set to BLOCK: an event from inside your network will then cut the network too — ${tripStrengthText()}`);
+      if (!ok) { input.checked = true; return; }
+    }
+    input.dataset.busy = "1";
+    input.disabled = true;
+    try {
+      await tripPost("/api/security/tripwire/checks", { checks: { [id]: { exclusions: { wan_only: on } } } });
+      if (window.twToast) window.twToast(`${tripShortLabel(c.label || id)}: ${on ? "internet-sourced events only" : "LAN and internet events count"}`, "success");
+    } catch (err) {
+      input.checked = !on;
+      showBanner(true, "Tripwire check: " + err.message);
+    } finally {
+      delete input.dataset.busy;
+      input.disabled = false;
+      refreshTripwire();
+    }
+  }
+
+  function tripToggleEditor(row, open) {
+    const ed = row.querySelector(".trip-check-editor");
+    const btn = row.querySelector('[data-do="edit"]');
+    if (!ed || !btn) return;
+    const show = open == null ? ed.hidden : open;
+    if (show) {
+      const c = tripCheck(row.dataset.check);
+      if (c) tripFillEditor(row, c);
+    }
+    ed.hidden = !show;
+    row.classList.toggle("is-editing", show);
+    btn.setAttribute("aria-expanded", show ? "true" : "false");
+    if (show) { const f = ed.querySelector("input, textarea"); if (f) f.focus(); }
+  }
+
   async function tripSaveCheck(row) {
     const id = row.dataset.check;
     const btn = row.querySelector('[data-do="save"]');
@@ -4569,8 +4907,9 @@
     try {
       await tripPost("/api/security/tripwire/checks", { checks: { [id]: tripCheckFromRow(row) } });
       await refreshTripwire();
-      const c = ((tripLast || {}).checks || []).find((x) => x.id === id);
+      const c = tripCheck(id);
       if (c) tripSyncCheck(row, c, true);
+      tripToggleEditor(row, false);
       if (window.twToast) window.twToast("Saved: " + (c ? c.label : id), "success");
     } catch (err) {
       showBanner(true, "Tripwire check: " + err.message);
@@ -4582,34 +4921,52 @@
   async function tripTestCheck(row) {
     const id = row.dataset.check;
     const out = row.querySelector('[data-role="test"]');
+    const btn = row.querySelector('[data-do="test"]');
     const addr = (row.querySelector('[data-f="test-src"]') || {}).value || "";
     const suri = !!row.querySelector('[data-f="sids"]');
     const event = {};
     if (addr.trim()) event[suri ? "src" : "dst_ip"] = addr.trim();
     if (out) { out.hidden = false; out.dataset.kind = "busy"; out.textContent = "Testing …"; }
+    if (btn) btn.disabled = true;
     try {
       const r = await tripPost("/api/security/tripwire/test", { check: id, event });
       const dcs = r.decision || {};
       const ev = r.event || {};
       out.dataset.kind = dcs.action;
-      out.innerHTML = `<strong>${esc(TRIP_RESULT_LABEL[dcs.action] || dcs.action)}</strong> — ${esc(dcs.reason || "")}` +
-        `<span class="muted">Simulated ${esc(tripSrc(ev.src))} → ${esc(ev.dst || "?")} on ${esc(ev.iface || "?")}. A real event would: ${esc((dcs.would || []).join("; "))}. Nothing was recorded, pushed or blocked.</span>`;
+      out.innerHTML = `<div class="trip-test-head"><span class="trip-result" data-action="${esc(dcs.action)}">${esc(TRIP_RESULT_LABEL[dcs.action] || dcs.action)}</span><span>${esc(dcs.reason || "")}</span>` +
+        `<button type="button" class="trip-test-x" data-do="test-close" aria-label="Dismiss test result">&times;</button></div>` +
+        `<span class="muted">Simulated ${esc(tripSrc(ev.src))} → ${esc(ev.dst || "?")} on ${esc(ev.iface || "?")}. A real event would: ${esc((dcs.would || []).join("; ") || "nothing")}. Nothing was recorded, pushed or blocked.</span>`;
     } catch (err) {
       out.dataset.kind = "error";
       out.textContent = "Test failed: " + err.message;
+    } finally {
+      if (btn) btn.disabled = false;
     }
   }
 
   if (els.secTripChecks) {
     els.secTripChecks.addEventListener("click", (ev) => {
-      const row = ev.target.closest(".trip-check");
+      const row = ev.target.closest(".trip-check[data-check]");
       if (!row) return;
       const act = ev.target.closest("[data-trip-act]");
       if (act) { tripSetAction(row, act.dataset.tripAct); return; }
       const doBtn = ev.target.closest("[data-do]");
       if (!doBtn) return;
-      if (doBtn.dataset.do === "save") tripSaveCheck(row);
-      else if (doBtn.dataset.do === "test") tripTestCheck(row);
+      const what = doBtn.dataset.do;
+      if (what === "edit") tripToggleEditor(row);
+      else if (what === "cancel") { tripToggleEditor(row, false); row.querySelector('[data-do="edit"]').focus(); }
+      else if (what === "save") tripSaveCheck(row);
+      else if (what === "test") tripTestCheck(row);
+      else if (what === "test-close") { const o = row.querySelector('[data-role="test"]'); if (o) o.hidden = true; }
+    });
+    els.secTripChecks.addEventListener("change", (ev) => {
+      const wan = ev.target.closest('[data-role="wan"]');
+      if (wan) tripSetWan(wan.closest(".trip-check"), wan);
+    });
+    els.secTripChecks.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Escape") return;
+      const row = ev.target.closest(".trip-check.is-editing");
+      if (row) { tripToggleEditor(row, false); row.querySelector('[data-do="edit"]').focus(); }
     });
   }
 
@@ -4657,65 +5014,133 @@
   });
 
   if (els.secTripNotifySave) els.secTripNotifySave.addEventListener("click", async () => {
+    const btn = els.secTripNotifySave;
+    btn.dataset.busy = "1";
     try {
       await tripPost("/api/security/tripwire/config", { notify: {
         on_log: !!els.secTripNotifyLog.checked, window_minutes: Number(els.secTripNotifyWin.value) } });
+      btn.disabled = true;
+      btn.classList.remove("btn-primary");
       if (window.twToast) window.twToast("Notification policy saved", "success");
     } catch (err) {
       showBanner(true, "Tripwire notifications: " + err.message);
+    } finally {
+      delete btn.dataset.busy;
     }
     refreshTripwire();
   });
 
+  // ---- Event history ----------------------------------------------------------
   function fillTripHistChecks(list) {
     const sel = els.secTripHistCheck;
     if (!sel) return;
     const cur = sel.value;
+    const extra = [["manual", "Manual / test trip"]];
     sel.innerHTML = `<option value="">All checks</option>` +
-      list.map((c) => `<option value="${esc(c.id)}">${esc(c.label)}</option>`).join("");
+      list.map((c) => `<option value="${esc(c.id)}">${esc(c.label)}</option>`).join("") +
+      extra.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("");
     sel.value = cur;
   }
 
-  function tripHistLabel(id) {
-    const c = ((tripLast || {}).checks || []).find((x) => x.id === id);
-    return c ? c.label : (id === "manual" ? "Manual / test trip" : id);
-  }
-
-  async function refreshTripHistory() {
-    if (!els.secTripHistBody) return;
-    const q = new URLSearchParams({ offset: tripHist.offset, limit: tripHist.limit });
+  function tripHistQuery() {
+    const q = new URLSearchParams();
     if (els.secTripHistCheck && els.secTripHistCheck.value) q.set("check", els.secTripHistCheck.value);
     if (els.secTripHistAction && els.secTripHistAction.value) q.set("action", els.secTripHistAction.value);
+    const span = Number((els.secTripHistRangeSel || {}).value || 0);
+    if (span > 0) q.set("since", String(Math.floor(Date.now() / 1000 - span)));
+    return q;
+  }
+
+  function tripHistKey(r, seen) {
+    const base = [r.ts, r.check, r.action, r.src, r.dst, r.sid || ""].join("|");
+    const n = (seen.get(base) || 0) + 1;
+    seen.set(base, n);
+    return base + "#" + n;
+  }
+
+  function tripHistDetails(r) {
+    const kv = [];
+    const add = (k, v) => { if (v !== undefined && v !== null && v !== "") kv.push(`<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`); };
+    add("Check", tripHistLabel(r.check));
+    add("Signature", r.sig);
+    add("Signature ID", r.sid);
+    add("Class", r.class);
+    add("Source", tripSrc(r.src) + (r.src_port ? ":" + r.src_port : ""));
+    add("Destination", tripDst(r));
+    add("Protocol", r.proto);
+    add("Interface", r.iface);
+    add("Decision", r.decision);
+    if (r.threshold && typeof r.threshold === "object") add("Threshold", `${r.threshold.count || 1} in ${r.threshold.minutes || 5} min`);
+    if (r.strength) add("Block strength", String(r.strength).toUpperCase());
+    if (r.now_excluded) add("Today", "excluded — " + r.now_excluded);
+    if (r.imported) add("Origin", "imported from the pre-history tripwire.log");
+    add("Recorded", formatDateTime(r.ts));
+    return `<dl class="trip-dl">${kv.join("")}</dl>`;
+  }
+
+  function renderTripHistRows() {
+    const seen = new Map();
+    const rows = tripHist.items.map((r, i) => {
+      const key = tripHistKey(r, seen);
+      const open = tripHist.open.has(key);
+      const tags = [];
+      if (r.action === "block" && r.strength) tags.push(`<span class="trip-tag trip-tag-red">${esc(String(r.strength).toUpperCase())}</span>`);
+      if (r.now_excluded) tags.push(`<span class="trip-tag" title="${esc("Today: " + r.now_excluded)}">excluded today</span>`);
+      const where = `${tripSrc(r.src)}${r.src_port ? ":" + r.src_port : ""} → ${tripDst(r) || "?"}`;
+      const did = "trip-hd-" + i;
+      return `<tr class="trip-hist-row${open ? " is-open" : ""}" data-key="${esc(key)}" data-action="${esc(r.action)}"${r.now_excluded || r.excluded ? ' data-ignored="1"' : ""}>
+        <td class="trip-hist-time"><span class="mono">${esc(formatDateTime(r.ts))}</span><span class="trip-age">${esc(formatRelative(r.ts))}</span></td>
+        <td class="trip-hist-check">${esc(tripHistLabel(r.check))}</td>
+        <td class="trip-hist-res"><span class="trip-result" data-action="${esc(r.action)}">${esc(TRIP_RESULT_LABEL[r.action] || r.action)}</span>${tags.join("")}</td>
+        <td class="mono trip-hist-where">${esc(where)}${r.iface ? ` <span class="muted">(${esc(r.iface)})</span>` : ""}</td>
+        <td class="trip-hist-reason">${esc(r.decision || "—")}</td>
+        <td class="td-right trip-hist-tog"><button type="button" class="btn btn-sm btn-ghost trip-more-btn" aria-expanded="${open ? "true" : "false"}" aria-controls="${did}">${TRIP_CHEV}<span>Details</span></button></td>
+      </tr>` + (open ? `<tr class="trip-hist-details" id="${did}"><td colspan="6">${tripHistDetails(r)}</td></tr>` : "");
+    });
+    const filtered = tripHistQuery().toString() !== "";
+    els.secTripHistBody.innerHTML = rows.join("") ||
+      `<tr><td colspan="6" class="empty trip-hist-empty"><strong>${filtered ? "No events match these filters" : "No events recorded yet"}</strong><span class="muted">${filtered ? "Widen the time range or clear the check / result filter." : "Events appear here as soon as an active check sees something — including excluded ones."}</span></td></tr>`;
+  }
+
+  let tripHistBusy = false;
+  async function refreshTripHistory() {
+    if (!els.secTripHistBody || tripHistBusy) return;
+    tripHistBusy = true;
+    const q = tripHistQuery();
+    q.set("offset", tripHist.offset);
+    q.set("limit", tripHist.limit);
     let d;
     try { d = await fetchJSON("/api/security/tripwire/history?" + q.toString()); }
-    catch (_) { return; }
-    if (!d || !d.ok) return;
+    catch (_) { d = null; }
+    tripHistBusy = false;
+    if (!d || !d.ok) {
+      if (!tripHist.items.length) els.secTripHistBody.innerHTML = `<tr><td colspan="6" class="empty">The event history could not be read.</td></tr>`;
+      return;
+    }
     tripHist.total = d.total || 0;
-    const rows = (d.items || []).map((r) => {
-      const where = `${tripSrc(r.src)} → ${r.dst || "?"}`;
-      const detail = [r.decision, r.now_excluded ? "today: excluded — " + r.now_excluded : "", r.sig]
-        .filter(Boolean).join(" · ");
-      return `<tr data-action="${esc(r.action)}">
-        <td class="mono" data-label="Time">${esc(formatDateTime(r.ts))}</td>
-        <td data-label="Check">${esc(tripHistLabel(r.check))}</td>
-        <td data-label="Result"><span class="trip-result" data-action="${esc(r.action)}">${esc(TRIP_RESULT_LABEL[r.action] || r.action)}</span>${r.imported ? ' <span class="muted">(imported)</span>' : ""}</td>
-        <td class="mono trip-hist-where" data-label="Source → destination">${esc(where)}${r.iface ? ` <span class="muted">(${esc(r.iface)})</span>` : ""}</td>
-        <td class="trip-hist-detail" data-label="Detail">${esc(detail)}</td></tr>`;
-    });
-    els.secTripHistBody.innerHTML = rows.join("") ||
-      `<tr><td colspan="5" class="empty">No events${q.has("check") || q.has("action") ? " match the filter" : " recorded yet"}.</td></tr>`;
+    if (tripHist.offset && tripHist.offset >= tripHist.total) {
+      tripHist.offset = Math.max(0, Math.floor((tripHist.total - 1) / tripHist.limit) * tripHist.limit);
+      refreshTripHistory();
+      return;
+    }
+    tripHist.items = d.items || [];
+    renderTripHistRows();
     const from = tripHist.total ? tripHist.offset + 1 : 0;
     const to = Math.min(tripHist.offset + tripHist.limit, tripHist.total);
-    if (els.secTripHistRange) els.secTripHistRange.textContent = `${formatNumber(from)}–${formatNumber(to)} of ${formatNumber(tripHist.total)}`;
+    if (els.secTripHistRange) els.secTripHistRange.textContent = tripHist.total
+      ? `${formatNumber(from)}–${formatNumber(to)} of ${formatNumber(tripHist.total)} events`
+      : "0 events";
     if (els.secTripHistPrev) els.secTripHistPrev.disabled = tripHist.offset <= 0;
     if (els.secTripHistNext) els.secTripHistNext.disabled = to >= tripHist.total;
+    [els.secTripHistCsv, els.secTripHistJson].forEach((b) => { if (b && !b.dataset.busy) b.disabled = !tripHist.total; });
     const hi = (tripLast || {}).history_info || {};
     if (els.secTripHistNote && hi.max_bytes) {
-      els.secTripHistNote.textContent = `Every evaluated event, kept ${hi.days} days (max ${Math.round(hi.max_bytes / 1048576)} MB).`;
+      els.secTripHistNote.textContent = `Every evaluated event, kept ${hi.days} days (max ${Math.round(hi.max_bytes / 1048576)} MB) — open a row for its details.`;
     }
   }
-  [els.secTripHistCheck, els.secTripHistAction].forEach((sel) => {
-    if (sel) sel.addEventListener("change", () => { tripHist.offset = 0; refreshTripHistory(); });
+
+  [els.secTripHistCheck, els.secTripHistAction, els.secTripHistRangeSel].forEach((sel) => {
+    if (sel) sel.addEventListener("change", () => { tripHist.offset = 0; tripHist.open.clear(); refreshTripHistory(); });
   });
   if (els.secTripHistPrev) els.secTripHistPrev.addEventListener("click", () => {
     tripHist.offset = Math.max(0, tripHist.offset - tripHist.limit); refreshTripHistory();
@@ -4723,6 +5148,71 @@
   if (els.secTripHistNext) els.secTripHistNext.addEventListener("click", () => {
     if (tripHist.offset + tripHist.limit < tripHist.total) { tripHist.offset += tripHist.limit; refreshTripHistory(); }
   });
+  if (els.secTripHistBody) els.secTripHistBody.addEventListener("click", (ev) => {
+    const tr = ev.target.closest("tr.trip-hist-row");
+    if (!tr) return;
+    if (!ev.target.closest(".trip-more-btn") && (ev.target.closest("a, input, select, textarea") || String(window.getSelection() || ""))) return;
+    const key = tr.dataset.key;
+    if (tripHist.open.has(key)) tripHist.open.delete(key); else tripHist.open.add(key);
+    renderTripHistRows();
+    const again = Array.from(els.secTripHistBody.querySelectorAll("tr.trip-hist-row")).find((x) => x.dataset.key === key);
+    if (again && ev.target.closest(".trip-more-btn")) again.querySelector(".trip-more-btn").focus();
+  });
+
+  const TRIP_EXPORT_COLS = ["time", "ts", "check", "check_label", "action", "result", "excluded", "now_excluded",
+    "src", "src_port", "dst", "dst_ip", "dst_port", "proto", "iface", "class", "sig", "sid", "decision", "strength",
+    "threshold", "imported"];
+
+  async function tripExport(kind) {
+    const btn = kind === "csv" ? els.secTripHistCsv : els.secTripHistJson;
+    if (btn) { btn.dataset.busy = "1"; btn.disabled = true; }
+    try {
+      const q = tripHistQuery();
+      const rows = [];
+      let offset = 0, total = 0, pages = 0;
+      do {
+        q.set("offset", offset); q.set("limit", 200);
+        const d = await fetchJSON("/api/security/tripwire/history?" + q.toString());
+        if (!d || !d.ok) throw new Error("history unavailable");
+        rows.push(...(d.items || []));
+        total = d.total || 0;
+        offset += 200;
+        pages += 1;
+      } while (offset < total && pages < 150);
+      const nowD = new Date();
+      const pad = (n) => String(n).padStart(2, "0");
+      const stamp = `${nowD.getFullYear()}${pad(nowD.getMonth() + 1)}${pad(nowD.getDate())}-${pad(nowD.getHours())}${pad(nowD.getMinutes())}`;
+      let blob;
+      if (kind === "json") {
+        blob = new Blob([JSON.stringify({ exported: new Date().toISOString(), filter: Object.fromEntries(tripHistQuery()), total, items: rows }, null, 2)], { type: "application/json" });
+      } else {
+        const cell = (v) => {
+          let s = v == null ? "" : (typeof v === "object" ? JSON.stringify(v) : String(v));
+          if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;      // keep spreadsheets from evaluating it
+          return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+        };
+        const lines = [TRIP_EXPORT_COLS.join(",")].concat(rows.map((r) => TRIP_EXPORT_COLS.map((k) => cell(
+          k === "time" ? new Date((r.ts || 0) * 1000).toISOString()
+            : k === "check_label" ? tripHistLabel(r.check)
+            : k === "result" ? (TRIP_RESULT_LABEL[r.action] || r.action)
+            : r[k])).join(",")));
+        blob = new Blob([lines.join("\r\n") + "\r\n"], { type: "text/csv" });
+      }
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `tripwire-events-${stamp}.${kind}`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+      if (window.twToast) window.twToast(`Exported ${formatNumber(rows.length)} event${rows.length === 1 ? "" : "s"} (${kind.toUpperCase()})`, "success");
+    } catch (err) {
+      showBanner(true, "Tripwire export: " + err.message);
+    } finally {
+      if (btn) { delete btn.dataset.busy; btn.disabled = !tripHist.total; }
+    }
+  }
+  if (els.secTripHistCsv) els.secTripHistCsv.addEventListener("click", () => tripExport("csv"));
+  if (els.secTripHistJson) els.secTripHistJson.addEventListener("click", () => tripExport("json"));
 
   // Defense Layers card: real state, not hardcoded green (audit #12)
   function refreshDefenseLayers() {
@@ -4747,7 +5237,7 @@
 
   if (els.secTripResolveBtn) els.secTripResolveBtn.addEventListener("click", async () => {
     if (!els.secTripPass.value) { els.secTripPass.focus(); return; }
-    if (!(await (window.twConfirm || window.confirm)("Restore WAN access now?\nTriggered by: " +
+    if (!(await (window.twConfirm || window.confirm)("Resolve the trip and restore network access now?\nTriggered by: " +
         (els.secTripMsgReason && els.secTripMsgReason.textContent || "unknown") +
         "\n\nOnly resolve after investigating."))) return;
     try {
@@ -12485,7 +12975,8 @@
     "Blocklist Sources": "list", "Create a backup": "archive", "All backups": "layers",
     "Automatic backups": "clock", "Retention": "layers", "USB copy": "usb", "Encryption": "lock",
     "Upload a backup": "upload", "Browse & restore": "search", "Backup age warning": "bell",
-    "Sanitized export": "shield", "Backup activity": "list"
+    "Sanitized export": "shield", "Backup activity": "list",
+    "Tripwire status": "shield", "Tripwire settings": "settings", "Checks": "check", "Event history": "clock"
   };
   const CARD_SUBTITLES = {
     "Response Codes": "DNS response distribution",
