@@ -463,10 +463,11 @@ PY
     fi
     systemctl restart tuxwall.service || true
 
-    # Tripwire engine. Fresh installs start in mode "disabled" (no
+    # Tripwire engine. Fresh installs start with every check Off (no
     # /etc/tuxwall/tripwire.json): the service idles with no detection
-    # threads, but it must run so a mode chosen on Security > Tripwire takes
-    # effect and a trip in force is re-applied at boot. Enabled once, the
+    # threads, but it must run so a check enabled on Security > Tripwire takes
+    # effect and a trip in force is re-applied at boot. An older {"mode"}
+    # config is migrated to schema v2 at service start (Log only, never Block). Enabled once, the
     # first time it is seen (no config yet); an admin who disabled the unit
     # later keeps that choice. Upgrades restart a running engine.
     chmod 750 /usr/local/sbin/tuxwall-tripwire 2>/dev/null || true

@@ -209,8 +209,16 @@ class Ctx:
     def tripwire(self):
         conf = self.json("/etc/tuxwall/tripwire.json", {}) or {}
         st = self.json("/etc/tuxwall/tripwire-state.json", {}) or {}
-        return {"mode": str(conf.get("mode") or "disabled"), "tripped": bool(st.get("tripped")),
-                "trip_mode": st.get("mode") or "medium"}
+        mode = str(conf.get("mode") or "")
+        if not mode and isinstance(conf.get("checks"), dict):
+            # schema v2 without the derived legacy field: strongest check
+            acts = {str((c or {}).get("action")) for c in conf["checks"].values()
+                    if isinstance(c, dict)} if conf.get("enabled", True) else set()
+            mode = (str(conf.get("strength") or "medium") if "block" in acts
+                    else "logonly" if "log" in acts else "disabled")
+        return {"mode": mode or "disabled", "tripped": bool(st.get("tripped")),
+                "trip_mode": st.get("mode") or "medium",
+                "strength": conf.get("strength") or None}
 
     @property
     def crowdsec_chains(self):

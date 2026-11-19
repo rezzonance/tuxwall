@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
 """tuxwall-tripwire - WAN containment on confirmed intrusion-class events.
 
-Modes (/etc/tuxwall/tripwire.json, "mode"):
-  disabled  no detection threads run; nothing can cut the network
-            (a trip that is already in force still holds until resolved)
-  logonly   detection armed, blade sheathed: trip-class events are
-            recorded and pushed to the phone (rate-limited) but NOTHING
-            is contained - the mode for when nobody is home to resolve a
-            lockdown. Review the log, then arm medium/high when present
-  medium    trip -> all forwarding cut (FORWARD drop, v4 + v6); the
+Configuration (/etc/tuxwall/tripwire.json, schema version 2, root 0600):
+  enabled   master switch; off = no detection threads run and nothing can
+            cut the network (a trip already in force holds until resolved)
+  strength  block strength used by every check whose action is Block:
+    medium  trip -> all forwarding cut (FORWARD drop, v4 + v6); the
             router's own listeners (WireGuard 51820 included) stay up
-  high      trip -> forwarding cut + new WAN INPUT closed; the router is
+    high    trip -> forwarding cut + new WAN INPUT closed; the router is
             reachable from the LAN only. WAN DHCP (v4 67/68, v6 546/547),
             IPv6 neighbour discovery and replies to connections the
             router itself opened stay allowed, so the WAN lease survives
             and pushes/recovery keep working
+  notify    {"on_log": push log-only events, "window_minutes": at most one
+            push per check per window (later events are summarised)}
+  checks    per check: action off | log | block, threshold {count, minutes}
+            (N events within M minutes), exclusions {ips (CIDRs, matched
+            against source OR destination), sids (Suricata signature ids),
+            wan_only (Suricata: only internet-sourced traffic counts)}
+  mode      DERIVED, written for older readers: disabled | logonly |
+            medium | high (= what the strongest enabled check would do)
+A version-1 file ({"mode"}) is migrated in place at daemon start: logonly,
+medium and high become master on + the existing checks on Log only (never
+Block) with the old strength kept; disabled (or no file) = every check Off.
 
 Checks (CHECKS registry):
   suricata.<class>  Suricata priority-1 alerts in the exploit-success
@@ -29,6 +37,15 @@ Checks (CHECKS registry):
   canary.egress  the opencanary uid attempts ANY outbound connection
      beyond its webhook and DNS (kernel log prefix
      [TUXWALL-CANARY-EGRESS]) - presumed deception-layer compromise
+
+Always ignored (excluded, recorded in the history with the reason):
+Suricata alerts sourced from the router itself or loopback, and canary
+"egress" that never left the box (OUT=lo / loopback destination).
+
+Event history: every evaluated event except Off checks is appended to
+/var/lib/tuxwall/tripwire-events.jsonl (90 days, 5 MB cap) by the
+record_event hook. `test CHECK` runs a synthetic event through the same
+evaluation with no push, no enforcement and no history entry.
 
 No auto-restore, ever: a trip holds until an administrator resolves it
 deliberately (a timer would re-open the door before the compromise is
@@ -46,10 +63,15 @@ Testing: TUXWALL_TRIPWIRE_ROOT=<dir> remaps every path under <dir> and
 stubs enforcement (rules are recorded in <dir>/enforce.log) and the unbound
 restart; adding TUXWALL_TRIPWIRE_NETNS=<ns> applies the real rules inside
 that network namespace instead. TUXWALL_TRIPWIRE_PUSH_FILE=<file> records
-pushes instead of sending them. Never point a test at the live firewall.
+pushes instead of sending them. TUXWALL_TRIPWIRE_OWN_IPS / _LAN_NETS
+(comma lists) replace the router's addresses / internal networks that are
+otherwise read from `ip -o addr`. Never point a test at the live firewall.
 """
 
+import collections
+import copy
 import fcntl
+import ipaddress
 import json
 import os
 import re
@@ -80,6 +102,8 @@ EVE = ENV("TUXWALL_TRIPWIRE_EVE") or _p("/var/log/suricata/eve.json")
 RUN_DIR = _p("/run/tuxwall-tripwire")
 HEALTH = RUN_DIR + "/health.json"
 LOCK = RUN_DIR + "/state.lock"
+HISTORY = _p("/var/lib/tuxwall/tripwire-events.jsonl")
+HISTORY_LOCK = RUN_DIR + "/history.lock"
 ENFORCE_LOG = _p("/enforce.log")
 PUSH_FILE = ENV("TUXWALL_TRIPWIRE_PUSH_FILE") or ""
 KERNEL_CMD = shlex.split(ENV("TUXWALL_TRIPWIRE_KERNEL_CMD") or "") or [
@@ -88,6 +112,11 @@ KERNEL_CMD = shlex.split(ENV("TUXWALL_TRIPWIRE_KERNEL_CMD") or "") or [
 STUB_FIREWALL = bool(ROOT) and not NETNS
 
 MODES = ("disabled", "logonly", "medium", "high")
+ACTIONS = ("off", "log", "block")
+STRENGTHS = ("medium", "high")
+CONFIG_VERSION = 2
+MAX_LIST = 200                 # exclusion entries per list
+MAX_COUNT, MAX_MINUTES = 100, 1440
 MARK = "TUXWALL-TRIPWIRE"
 MARK_ALLOW = "TUXWALL-TRIPWIRE-ALLOW"
 CANARY_PREFIX = "[TUXWALL-CANARY-EGRESS]"
@@ -101,6 +130,9 @@ NOTIFY_TIMEOUT_S = 5
 EVE_CHUNK = 262144
 MAX_LINE = 4 * 1024 * 1024
 AUDIT_MAX = 256 * 1024
+HISTORY_MAX_BYTES = int(ENV("TUXWALL_TRIPWIRE_HISTORY_MAX") or 5 * 1024 * 1024)
+HISTORY_DAYS = 90
+NETS_TTL_S = 60
 
 # Destination ports owned by the deception layer: traffic landing here hit
 # a FAKE service by design - the canary/tarpit absorbed it and the ban
@@ -115,27 +147,57 @@ CHECKS = {
     "suricata.successful-admin": {
         "source": "suricata", "classtype": "successful-admin",
         "category": "Successful Administrator Privilege Gain",
-        "label": "Suricata: successful administrator privilege gain"},
+        "label": "Suricata: successful administrator privilege gain",
+        "description": "A priority-1 Suricata alert says an attacker appears to have "
+                       "gained administrator access to a system."},
     "suricata.attempted-admin": {
         "source": "suricata", "classtype": "attempted-admin",
         "category": "Attempted Administrator Privilege Gain",
-        "label": "Suricata: attempted administrator privilege gain"},
+        "label": "Suricata: attempted administrator privilege gain",
+        "description": "A priority-1 Suricata alert for an attempt to gain administrator "
+                       "privileges (exploit attempts, botnet scanners)."},
     "suricata.trojan-activity": {
         "source": "suricata", "classtype": "trojan-activity",
         "category": "A Network Trojan was detected",
-        "label": "Suricata: trojan activity"},
+        "label": "Suricata: trojan activity",
+        "description": "A priority-1 Suricata alert for trojan or malware network "
+                       "activity."},
     "suricata.web-application-attack": {
         "source": "suricata", "classtype": "web-application-attack",
         "category": "Web Application Attack",
-        "label": "Suricata: web application attack"},
+        "label": "Suricata: web application attack",
+        "description": "A priority-1 Suricata alert for an attack on a web application "
+                       "(injection or code-execution attempt)."},
     "suricata.shellcode-detect": {
         "source": "suricata", "classtype": "shellcode-detect",
         "category": "Executable code was detected",
-        "label": "Suricata: executable code (shellcode)"},
+        "label": "Suricata: executable code (shellcode)",
+        "description": "A priority-1 Suricata alert for executable exploit code in "
+                       "network traffic."},
     "canary.egress": {
         "source": "canary",
-        "label": "Canary egress attempt (presumed deception-layer compromise)"},
+        "label": "Canary egress attempt (presumed deception-layer compromise)",
+        "description": "The honeypot (OpenCanary) process tried to open a connection out "
+                       "of the router - it never should, so it is presumed compromised."},
 }
+# Planned checks with no robust data source on the box yet - listed, never
+# evaluated (and refused by `configure`), so the UI can't pretend they run.
+COMING_LATER = {
+    "aide.change": {
+        "label": "File integrity (AIDE) reports a change",
+        "why": "AIDE runs once a day and reports every legitimate package and "
+               "config update; it needs a baseline-aware filter first."},
+    "auth.bruteforce": {
+        "label": "Repeated failed dashboard logins",
+        "why": "Failed logins are only kept in the dashboard's memory today; the "
+               "engine needs a persisted login-event feed to follow."},
+    "crowdsec.critical": {
+        "label": "Critical CrowdSec decision",
+        "why": "CrowdSec decisions carry no severity; a reliable 'critical' "
+               "mapping (scenario list) still has to be defined."},
+}
+DEFAULT_THRESHOLD = {"suricata": {"count": 1, "minutes": 5},
+                     "canary": {"count": 1, "minutes": 5}}
 _BY_CLASSTYPE = {c["classtype"]: k for k, c in CHECKS.items() if c.get("classtype")}
 _BY_CATEGORY = {c["category"]: k for k, c in CHECKS.items() if c.get("category")}
 # legacy names kept for readers of the old module
@@ -193,13 +255,261 @@ def write_json(path, data, mode=0o644):
             os.unlink(tmp)
 
 
+# ── configuration (schema v2) ────────────────────────────────────────────────
+
+def default_check(cid, action="off"):
+    src = CHECKS[cid]["source"]
+    excl = {"ips": []}
+    if src == "suricata":
+        excl.update({"sids": [], "wan_only": True})
+    return {"action": action, "threshold": dict(DEFAULT_THRESHOLD[src]),
+            "exclusions": excl}
+
+
+def default_config():
+    return {"version": CONFIG_VERSION, "enabled": True, "strength": "medium",
+            "notify": {"on_log": True, "window_minutes": 10},
+            "checks": {cid: default_check(cid) for cid in CHECKS}}
+
+
+def legacy_mode(cfg):
+    """The single v1 'mode' older readers understand: what the strongest
+    enabled check would do."""
+    if not cfg.get("enabled"):
+        return "disabled"
+    actions = {c.get("action") for c in (cfg.get("checks") or {}).values()}
+    if "block" in actions:
+        return cfg.get("strength") if cfg.get("strength") in STRENGTHS else "medium"
+    return "logonly" if "log" in actions else "disabled"
+
+
+def _int(v, lo, hi, name):
+    n = v
+    if isinstance(n, float) and n.is_integer():
+        n = int(n)
+    elif isinstance(n, str) and n.strip().isdigit():
+        n = int(n.strip())
+    if isinstance(n, bool) or not isinstance(n, int):
+        raise ValueError("%s must be a whole number" % name)
+    if not lo <= n <= hi:
+        raise ValueError("%s must be between %d and %d" % (name, lo, hi))
+    return n
+
+
+def _ip_list(v, name):
+    if isinstance(v, str):
+        v = [x for x in re.split(r"[\s,]+", v) if x]
+    if not isinstance(v, list):
+        raise ValueError("%s must be a list of IP addresses / CIDRs" % name)
+    out = []
+    for x in v:
+        s = str(x).strip()
+        if not s:
+            continue
+        try:
+            net = ipaddress.ip_network(s, strict=False)
+        except ValueError:
+            raise ValueError("%s: %r is not an IP address or CIDR" % (name, s[:60]))
+        s = str(net) if "/" in s else str(net.network_address)
+        if s not in out:
+            out.append(s)
+    if len(out) > MAX_LIST:
+        raise ValueError("%s: at most %d entries" % (name, MAX_LIST))
+    return out
+
+
+def _sid_list(v, name):
+    if isinstance(v, (str, int)) and not isinstance(v, bool):
+        v = [x for x in re.split(r"[\s,]+", str(v)) if x]
+    if not isinstance(v, list):
+        raise ValueError("%s must be a list of signature ids" % name)
+    out = []
+    for x in v:
+        n = _int(x, 1, 4294967295, "%s entry" % name)
+        if n not in out:
+            out.append(n)
+    if len(out) > MAX_LIST:
+        raise ValueError("%s: at most %d entries" % (name, MAX_LIST))
+    return out
+
+
+def _apply_check(cur, patch, cid):
+    """Validate + merge one check patch into cur (a full check dict)."""
+    if not isinstance(patch, dict):
+        raise ValueError("%s: settings must be an object" % cid)
+    for k in patch:
+        if k not in ("action", "threshold", "exclusions"):
+            raise ValueError("%s: unknown setting %r" % (cid, k))
+    if "action" in patch:
+        a = str(patch["action"] or "").strip().lower()
+        if a not in ACTIONS:
+            raise ValueError("%s: action must be off, log or block" % cid)
+        cur["action"] = a
+    if "threshold" in patch:
+        t = patch["threshold"]
+        if not isinstance(t, dict) or set(t) - {"count", "minutes"}:
+            raise ValueError("%s: threshold must be {count, minutes}" % cid)
+        if "count" in t:
+            cur["threshold"]["count"] = _int(t["count"], 1, MAX_COUNT, "%s threshold count" % cid)
+        if "minutes" in t:
+            cur["threshold"]["minutes"] = _int(t["minutes"], 1, MAX_MINUTES,
+                                               "%s threshold minutes" % cid)
+    if "exclusions" in patch:
+        e = patch["exclusions"]
+        allowed = set(cur["exclusions"])
+        if not isinstance(e, dict) or set(e) - allowed:
+            raise ValueError("%s: exclusions may only contain %s"
+                             % (cid, ", ".join(sorted(allowed))))
+        if "ips" in e:
+            cur["exclusions"]["ips"] = _ip_list(e["ips"], "%s excluded IPs" % cid)
+        if "sids" in e:
+            cur["exclusions"]["sids"] = _sid_list(e["sids"], "%s excluded signatures" % cid)
+        if "wan_only" in e:
+            if not isinstance(e["wan_only"], bool):
+                raise ValueError("%s: wan_only must be true or false" % cid)
+            cur["exclusions"]["wan_only"] = e["wan_only"]
+    return cur
+
+
+def _apply_patch(cfg, patch):
+    """Validate a settings patch and merge it into a copy of cfg."""
+    if not isinstance(patch, dict):
+        raise ValueError("settings must be an object")
+    new = copy.deepcopy(cfg)
+    for k in patch:
+        if k not in ("enabled", "strength", "notify", "checks"):
+            raise ValueError("unknown setting %r" % k)
+    if "enabled" in patch:
+        if not isinstance(patch["enabled"], bool):
+            raise ValueError("enabled must be true or false")
+        new["enabled"] = patch["enabled"]
+    if "strength" in patch:
+        s = str(patch["strength"] or "").strip().lower()
+        if s not in STRENGTHS:
+            raise ValueError("block strength must be medium or high")
+        new["strength"] = s
+    if "notify" in patch:
+        n = patch["notify"]
+        if not isinstance(n, dict) or set(n) - {"on_log", "window_minutes"}:
+            raise ValueError("notify must be {on_log, window_minutes}")
+        if "on_log" in n:
+            if not isinstance(n["on_log"], bool):
+                raise ValueError("notify.on_log must be true or false")
+            new["notify"]["on_log"] = n["on_log"]
+        if "window_minutes" in n:
+            new["notify"]["window_minutes"] = _int(n["window_minutes"], 1, MAX_MINUTES,
+                                                   "notify window (minutes)")
+    if "checks" in patch:
+        if not isinstance(patch["checks"], dict):
+            raise ValueError("checks must be an object keyed by check id")
+        for cid, cp in patch["checks"].items():
+            if cid in COMING_LATER:
+                raise ValueError("%s is not available yet (coming later)" % cid)
+            if cid not in CHECKS:
+                raise ValueError("unknown check %r" % str(cid)[:60])
+            _apply_check(new["checks"][cid], cp, cid)
+    new["mode"] = legacy_mode(new)
+    return new
+
+
+def normalize_config(raw):
+    """(config v2, migrated_from_mode or None). Unknown / invalid stored
+    values fall back to defaults field by field - a hand-edited typo never
+    stops the engine."""
+    raw = raw if isinstance(raw, dict) else {}
+    cfg = default_config()
+    if raw.get("version") == CONFIG_VERSION or isinstance(raw.get("checks"), dict):
+        for key, val in (("enabled", raw.get("enabled")), ("strength", raw.get("strength"))):
+            try:
+                cfg = _apply_patch(cfg, {key: val})
+            except ValueError:
+                pass
+        for k, v in (raw.get("notify") or {}).items() if isinstance(raw.get("notify"), dict) else ():
+            try:
+                cfg = _apply_patch(cfg, {"notify": {k: v}})
+            except ValueError:
+                pass
+        for cid, c in (raw.get("checks") or {}).items():
+            if cid not in CHECKS or not isinstance(c, dict):
+                continue
+            for part in ("action", "threshold", "exclusions"):
+                if part not in c:
+                    continue
+                pieces = (c[part].items() if part != "action" and isinstance(c[part], dict)
+                          else [(None, c[part])])
+                for k, v in pieces:
+                    try:
+                        _apply_check(cfg["checks"][cid],
+                                     {part: v} if k is None else {part: {k: v}}, cid)
+                    except ValueError:
+                        pass
+        if isinstance(raw.get("migrated"), dict):
+            cfg["migrated"] = raw["migrated"]
+        cfg["mode"] = legacy_mode(cfg)
+        return cfg, None
+    # version 1 ({"mode"}) or no file at all
+    old = str(raw.get("mode") or "").strip().lower()
+    if old in ("logonly", "medium", "high"):
+        # keep today's behaviour visible but safe: Log only, never Block
+        for cid in CHECKS:
+            cfg["checks"][cid]["action"] = "log"
+        if old in STRENGTHS:
+            cfg["strength"] = old
+    cfg["mode"] = legacy_mode(cfg)
+    if old:
+        cfg["migrated"] = {"from": {"mode": old}, "ts": round(time.time(), 1)}
+        return cfg, old
+    return cfg, None
+
+
 def get_config():
-    return read_json(CONFIG, {})
+    return normalize_config(read_json(CONFIG, {}))[0]
 
 
 def get_mode():
-    mode = str(get_config().get("mode") or "disabled").lower()
-    return mode if mode in MODES else "disabled"
+    return get_config()["mode"]
+
+
+def config_for_mode(mode):
+    """Synthetic config for dry runs (`evaluate --mode`): every check set the
+    way a v1 mode behaved."""
+    cfg = default_config()
+    act = {"disabled": "off", "logonly": "log"}.get(mode, "block")
+    for c in cfg["checks"].values():
+        c["action"] = act
+    if mode in STRENGTHS:
+        cfg["strength"] = mode
+    cfg["mode"] = legacy_mode(cfg)
+    return cfg
+
+
+def save_config(cfg):
+    write_json(CONFIG, cfg, mode=0o600)
+
+
+def migrate_config_file(by="engine", via="upgrade"):
+    """Persist a v1 -> v2 migration (daemon start / `migrate`). Returns the
+    old mode when something was migrated."""
+    with state_lock():
+        if not os.path.exists(CONFIG):
+            return None
+        raw = read_json(CONFIG, {})
+        cfg, old = normalize_config(raw)
+        if old is None:
+            try:
+                if os.stat(CONFIG).st_mode & 0o077:
+                    os.chmod(CONFIG, 0o600)
+            except OSError:
+                pass
+            return None
+        save_config(cfg)
+    summary = ", ".join("%s=%s" % (cid, c["action"]) for cid, c in cfg["checks"].items())
+    log("CONFIG-MIGRATED v1 mode=%s -> v2 enabled=%s strength=%s %s"
+        % (old, cfg["enabled"], cfg["strength"], summary))
+    audit("migrate", by=by, via=via, previous_mode=old, enabled=cfg["enabled"],
+          strength=cfg["strength"],
+          checks={cid: c["action"] for cid, c in cfg["checks"].items()})
+    return old
 
 
 def _wrap(argv):
@@ -215,6 +525,56 @@ def wan_iface():
         return (out.split(" dev ")[1].split()[0] if " dev " in out else "")
     except Exception:
         return ""
+
+
+_NETS = {"ts": 0.0, "val": None}
+
+
+def _addr_list(s):
+    out = []
+    for x in re.split(r"[\s,]+", s or ""):
+        if not x:
+            continue
+        try:
+            out.append(ipaddress.ip_interface(x))
+        except ValueError:
+            pass
+    return out
+
+
+def local_networks(refresh=False):
+    """{"own": router addresses, "lan": internal networks (every interface
+    but the WAN and lo), "wan": WAN interface}; cached NETS_TTL_S."""
+    now = time.time()
+    if not refresh and _NETS["val"] and now - _NETS["ts"] < NETS_TTL_S:
+        return _NETS["val"]
+    wan = wan_iface()
+    if ENV("TUXWALL_TRIPWIRE_OWN_IPS") is not None or ENV("TUXWALL_TRIPWIRE_LAN_NETS") is not None:
+        own = [i.ip for i in _addr_list(ENV("TUXWALL_TRIPWIRE_OWN_IPS"))]
+        lan = [i.network for i in _addr_list(ENV("TUXWALL_TRIPWIRE_LAN_NETS"))]
+    else:
+        own, lan = [], []
+        try:
+            out = subprocess.run(_wrap(["ip", "-o", "addr", "show"]), capture_output=True,
+                                 text=True, timeout=5).stdout
+        except Exception:
+            out = ""
+        for ln in out.splitlines():
+            p = ln.split()
+            if len(p) < 4 or p[2] not in ("inet", "inet6"):
+                continue
+            ifname = p[1].split("@")[0]
+            try:
+                itf = ipaddress.ip_interface(p[3])
+            except ValueError:
+                continue
+            own.append(itf.ip)
+            if ifname not in (wan, "lo") and not itf.ip.is_link_local:
+                lan.append(itf.network)
+    val = {"own": own, "lan": lan, "wan": wan}
+    if own or lan:
+        _NETS.update(ts=now, val=val)
+    return val
 
 
 # ── state store (thread lock + cross-process flock) ──────────────────────────
@@ -491,20 +851,32 @@ def _send(title, message, priority="default"):
     return sent
 
 
-def notify(title, message, key=None, priority="default"):
-    """Push now, unless `key` already pushed within NOTIFY_WINDOW_S: then
-    the event is only counted and summarised later (flush_notify)."""
+def notify_window(cfg=None):
+    """Seconds between pushes per key: the environment override (tests),
+    else the configured notify.window_minutes."""
+    if ENV("TUXWALL_TRIPWIRE_NOTIFY_WINDOW"):
+        return NOTIFY_WINDOW_S
+    cfg = cfg or get_config()
+    return float((cfg.get("notify") or {}).get("window_minutes") or 10) * 60
+
+
+def notify(title, message, key=None, priority="default", window=None):
+    """Push now, unless `key` already pushed within the window (default
+    NOTIFY_WINDOW_S): then the event is only counted and summarised later
+    (flush_notify)."""
     if key:
         now = time.time()
+        win = float(window if window is not None else NOTIFY_WINDOW_S)
 
         def gate(st):
             slot = st.setdefault("notify", {}).setdefault(key, {})
-            if now - float(slot.get("last") or 0) < NOTIFY_WINDOW_S:
+            if now - float(slot.get("last") or 0) < win:
                 slot["suppressed"] = int(slot.get("suppressed") or 0) + 1
                 slot["title"] = title
+                slot["window"] = win
                 return None
             extra = int(slot.get("suppressed") or 0)
-            slot.update({"last": now, "suppressed": 0, "title": title})
+            slot.update({"last": now, "suppressed": 0, "title": title, "window": win})
             return extra
         extra = update_state(gate)
         if extra is None:
@@ -522,14 +894,15 @@ def flush_notify():
         due = []
         for key, slot in (st.get("notify") or {}).items():
             n = int(slot.get("suppressed") or 0)
-            if n and now - float(slot.get("last") or 0) >= NOTIFY_WINDOW_S:
-                due.append((key, n, slot.get("title") or key))
+            win = float(slot.get("window") or NOTIFY_WINDOW_S)
+            if n and now - float(slot.get("last") or 0) >= win:
+                due.append((key, n, slot.get("title") or key, win))
                 slot.update({"last": now, "suppressed": 0})
         return due
-    for key, n, title in update_state(take):
+    for key, n, title, win in update_state(take):
         _send("%s (+%d)" % (title, n),
               "%d more similar event(s) in the last %d minutes. See Security > "
-              "Tripwire and %s." % (n, int(NOTIFY_WINDOW_S // 60) or 1, LOG))
+              "Tripwire (event history)." % (n, int(win // 60) or 1))
 
 
 # ── events + evaluation ──────────────────────────────────────────────────────
@@ -572,7 +945,8 @@ def event_from_eve(ev):
             "class": alert.get("classtype") or alert.get("category") or "?",
             "sig": (alert.get("signature") or "")[:160],
             "sid": alert.get("signature_id"),
-            "src": ev.get("src_ip") or "?", "dst_ip": ev.get("dest_ip") or "",
+            "src": ev.get("src_ip") or "?", "src_port": ev.get("src_port"),
+            "dst_ip": ev.get("dest_ip") or "",
             "dst_port": port, "dst": dst_label(ev.get("dest_ip"), ev.get("dest_port")),
             "proto": ev.get("proto") or "", "iface": ev.get("in_iface") or "",
             "ts": time.time()}
@@ -605,22 +979,152 @@ def event_from_kernel(line):
             "ts": time.time()}
 
 
-def evaluate(event, mode=None):
-    """Pure decision for one event: {"action": absorb|ignore|log|trip}.
-    Delegation comes FIRST, before any mode logic: an attack that landed on
-    a deception port was absorbed by design and never contains, not even in
-    high mode, whatever Suricata called it."""
-    mode = mode if mode is not None else get_mode()
-    if event.get("source") == "suricata" and "deception layer" in (event.get("dst") or ""):
-        return {"action": "absorb", "mode": mode, "check": event.get("check")}
-    if mode not in ("logonly", "medium", "high"):
-        return {"action": "ignore", "mode": mode, "check": event.get("check")}
-    return {"action": "log" if mode == "logonly" else "trip", "mode": mode,
-            "check": event.get("check")}
+def _addr(s):
+    try:
+        return ipaddress.ip_address(str(s or "").split("%")[0].strip("[]"))
+    except ValueError:
+        return None
+
+
+def _is_loopback(ip):
+    return bool(ip) and (ip.is_loopback or ip.is_unspecified
+                         or (ip.version == 6 and ip.ipv4_mapped is not None
+                             and ip.ipv4_mapped.is_loopback))
+
+
+def wan_sourced(src, iface, nets):
+    """True when the source is on the internet side: not the router, not
+    loopback / link-local, not inside any internal network. A public
+    address always counts; a private one only when it arrived on the WAN
+    interface (an upstream modem or CGNAT neighbour)."""
+    ip = _addr(src)
+    if ip is None or _is_loopback(ip) or ip.is_link_local or ip.is_multicast:
+        return False
+    if ip in nets["own"] or any(ip in n for n in nets["lan"]):
+        return False
+    if ip.is_global:
+        return True
+    return bool(iface) and iface == nets.get("wan")
+
+
+def _ip_match(entries, *addrs):
+    ips = [a for a in (_addr(x) for x in addrs) if a]
+    for e in entries:
+        try:
+            net = ipaddress.ip_network(e, strict=False)
+        except ValueError:
+            continue
+        for ip in ips:
+            if ip.version == net.version and ip in net:
+                return e, ip
+    return None
+
+
+def evaluate(event, cfg=None, now=None, windows=None, nets=None):
+    """Decision for one event, no side effects:
+      off       the master switch or the check is off (nothing recorded)
+      absorb    landed on a deception port (delegated, never contains)
+      excluded  ignored by rule; "reason" says which
+      counted   below the check's threshold (N events within M minutes)
+      log       record + push, never contain
+      block     contain the WAN at the configured strength
+    `cfg` may be a v1 mode string (dry runs). `windows` (check -> deque of
+    earlier counted event times) is only read here; handle_event commits.
+    Delegation comes before any user setting: an attack that landed on a
+    deception port was absorbed by design and never contains."""
+    if isinstance(cfg, str):
+        cfg = config_for_mode(cfg)
+    cfg = cfg or get_config()
+    now = now or event.get("ts") or time.time()
+    cid = event.get("check")
+    c = (cfg.get("checks") or {}).get(cid)
+    out = {"check": cid, "action": "off", "excluded": False, "mode": cfg.get("mode")}
+    if not cfg.get("enabled"):
+        out["reason"] = "the tripwire master switch is off"
+        return out
+    if not c or c.get("action") not in ("log", "block"):
+        out["reason"] = "this check is Off"
+        return out
+    excl = c.get("exclusions") or {}
+
+    def excluded(why):
+        out.update(action="excluded", excluded=True, reason=why)
+        return out
+
+    src_ip, dst_ip = _addr(event.get("src")), _addr(event.get("dst_ip"))
+    if event.get("source") == "suricata":
+        if "deception layer" in (event.get("dst") or ""):
+            out.update(action="absorb",
+                       reason="landed on a deception-layer port: absorbed by the honeypot, "
+                              "the ban pipeline owns the response")
+            return out
+        nets = nets or local_networks()
+        if src_ip and (_is_loopback(src_ip) or src_ip in nets["own"]):
+            return excluded("router-originated or loopback traffic (%s) - always ignored"
+                            % src_ip)
+        if dst_ip and _is_loopback(dst_ip):
+            return excluded("loopback destination - always ignored")
+        sid = event.get("sid")
+        if sid is not None and sid in (excl.get("sids") or []):
+            return excluded("signature %s is excluded" % sid)
+        hit = _ip_match(excl.get("ips") or [], event.get("src"), event.get("dst_ip"))
+        if hit:
+            return excluded("%s matches the excluded address %s" % (hit[1], hit[0]))
+        if excl.get("wan_only", True) and not wan_sourced(event.get("src"), event.get("iface"),
+                                                          nets):
+            return excluded("not from the internet (source %s is internal); only "
+                            "WAN-sourced traffic counts for this check"
+                            % (event.get("src") or "?"))
+    elif event.get("source") == "canary":
+        if event.get("iface") == "lo" or (dst_ip and _is_loopback(dst_ip)):
+            return excluded("loopback traffic (OUT=lo) never left the router - always ignored")
+        hit = _ip_match(excl.get("ips") or [], event.get("dst_ip"))
+        if hit:
+            return excluded("%s matches the excluded address %s" % (hit[1], hit[0]))
+
+    th = c.get("threshold") or {}
+    count = int(th.get("count") or 1)
+    minutes = int(th.get("minutes") or 5)
+    earlier = [t for t in ((windows or {}).get(cid) or ()) if now - t < minutes * 60]
+    seen = len(earlier) + 1
+    out["threshold"] = {"count": count, "minutes": minutes, "seen": min(seen, count)}
+    if seen < count:
+        out.update(action="counted",
+                   reason="%d of %d within %d min - below the threshold, recorded only"
+                          % (seen, count, minutes))
+        return out
+    out["action"] = c["action"]
+    if c["action"] == "block":
+        out["strength"] = cfg.get("strength") if cfg.get("strength") in STRENGTHS else "medium"
+        out["reason"] = "Block: contain the WAN (%s)" % out["strength"].upper()
+    else:
+        out["reason"] = "Log only: record and notify, nothing is contained"
+    if count > 1:
+        out["reason"] += " - threshold reached (%d within %d min)" % (count, minutes)
+    return out
+
+
+_WINDOWS = {}                      # check -> deque(maxlen=count) of event times
+_EVAL_LOCK = threading.Lock()
+
+
+def _commit_window(windows, decision, now):
+    th = decision.get("threshold")
+    if not th or decision["action"] not in ("counted", "log", "block"):
+        return
+    cid = decision["check"]
+    dq = windows.get(cid)
+    if dq is None or dq.maxlen != th["count"]:
+        dq = windows[cid] = collections.deque(dq or (), maxlen=th["count"])
+    if decision["action"] == "counted":
+        dq.append(now)
+    else:
+        dq.clear()                 # fired: the next one needs N fresh events
 
 
 def record_event(event, decision):
-    """Counters + log line for absorbed / log-only events, then hooks."""
+    """Counters + log line for absorbed / log-only events, then hooks (the
+    event history is one) for every recorded decision."""
     action = decision["action"]
     rec = {"ts": event.get("ts") or time.time(), "check": event.get("check"),
            "reason": event.get("reason"), "class": event.get("class"),
@@ -640,8 +1144,14 @@ def record_event(event, decision):
             st["last_logonly"] = rec
             return st["logonly_events"]
         rec["n"] = update_state(bump)
-        log("WOULD-TRIP (log-only) class=%s src=%s -> %s reason=%s action=recorded"
-            % (rec["class"], rec["src"], rec["dst"], rec["reason"]))
+        log("WOULD-TRIP (log-only) check=%s class=%s src=%s -> %s reason=%s action=recorded"
+            % (rec["check"], rec["class"], rec["src"], rec["dst"], rec["reason"]))
+    elif action == "excluded":
+        log("EXCLUDED check=%s class=%s src=%s -> %s why=%s"
+            % (rec["check"], rec["class"], rec["src"], rec["dst"], decision.get("reason")))
+    elif action == "counted":
+        log("COUNTED check=%s class=%s src=%s -> %s (%s)"
+            % (rec["check"], rec["class"], rec["src"], rec["dst"], decision.get("reason")))
     for hook in EVENT_HOOKS:
         try:
             hook(event, decision)
@@ -653,32 +1163,317 @@ def record_event(event, decision):
 _ACTION_LOCK = threading.Lock()   # trip vs. watchdog re-enforce in the daemon
 
 
-def handle_event(event, mode=None):
-    decision = evaluate(event, mode)
+def would_do(decision, cfg):
+    a = decision["action"]
+    if a == "off":
+        return ["nothing - the event is not evaluated"]
+    out = ["record it in the event history"]
+    if a == "absorb":
+        out.append("count it as deception-absorbed; never contain")
+    elif a == "excluded":
+        out.append("no notification, no containment")
+    elif a == "counted":
+        out.append("no notification and no containment until the threshold is reached")
+    elif a == "log":
+        if (cfg.get("notify") or {}).get("on_log", True):
+            out.append("push a notification (at most one per check every %d min, the rest "
+                       "summarised)" % int((cfg.get("notify") or {}).get("window_minutes") or 10))
+        else:
+            out.append("no push (log-only pushes are turned off)")
+        out.append("never contain")
+    elif a == "block":
+        out.append("push an URGENT notification first")
+        out.append("contain the WAN: %s" % (
+            "HIGH - cut all forwarding and close new WAN connections to the router"
+            if decision.get("strength") == "high" else "MEDIUM - cut all forwarding"))
+        out.append("hold until an admin resolves it with a password")
+    return out
+
+
+def handle_event(event, cfg=None, dry=False, windows=None):
+    """Evaluate one event and act on it. dry=True is the Test path: the
+    same evaluation, but nothing is recorded, pushed or enforced."""
+    if isinstance(cfg, str):
+        cfg = config_for_mode(cfg)
+    cfg = cfg or get_config()
+    now = event.get("ts") or time.time()
+    windows = _WINDOWS if windows is None else windows
+    with _EVAL_LOCK:
+        decision = evaluate(event, cfg, now=now, windows=(None if dry else windows))
+        if not dry:
+            _commit_window(windows, decision, now)
+    if dry:
+        return dict(decision, dry_run=True, would=would_do(decision, cfg))
     action = decision["action"]
-    if action == "ignore":
+    if action == "off":
         return decision
-    if action in ("absorb", "log"):
-        rec = record_event(event, decision)
-        if action == "log":
-            notify("TRIPWIRE log-only: %s" % rec["class"],
-                   "Trip-class event (%s). From %s to %s - NOT contained, network "
-                   "untouched. Event #%d." % (rec["reason"], rec["src"], rec["dst"] or "?",
-                                              rec.get("n") or 0),
-                   key="logonly:%s" % event.get("check"))
-        return decision
-    trip(event.get("reason") or "trip", cls=event.get("class") or "?",
-         sig=event.get("sig") or "", src=event.get("src") or "",
-         dst=event.get("dst") or "", mode=decision["mode"], check=event.get("check"))
+    rec = record_event(event, decision)
+    if action == "log" and (cfg.get("notify") or {}).get("on_log", True):
+        notify("TRIPWIRE log-only: %s" % rec["class"],
+               "Trip-class event (%s). From %s to %s - NOT contained, network "
+               "untouched. Event #%d." % (rec["reason"], rec["src"], rec["dst"] or "?",
+                                          rec.get("n") or 0),
+               key="logonly:%s" % event.get("check"), window=notify_window(cfg))
+    elif action == "block":
+        trip(event.get("reason") or "trip", cls=event.get("class") or "?",
+             sig=event.get("sig") or "", src=event.get("src") or "",
+             dst=event.get("dst") or "", mode=decision["strength"], check=event.get("check"))
     return decision
+
+
+# ── event history (append-only JSONL, 90 days / 5 MB) ────────────────────────
+
+class _history_lock:
+    def __enter__(self):
+        os.makedirs(RUN_DIR, exist_ok=True)
+        self._fd = os.open(HISTORY_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(self._fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self._fd, fcntl.LOCK_UN)
+        os.close(self._fd)
+        return False
+
+
+_HIST = {"writes": 0}
+
+
+def history_entry(event, decision, imported=False):
+    rec = {"ts": round(float(event.get("ts") or time.time()), 3),
+           "check": event.get("check") or "?", "action": decision.get("action"),
+           "excluded": bool(decision.get("excluded")),
+           "decision": (decision.get("reason") or "")[:240],
+           "class": event.get("class") or "", "src": event.get("src") or "",
+           "dst": event.get("dst") or "", "dst_ip": event.get("dst_ip") or "",
+           "dst_port": event.get("dst_port") or None, "proto": event.get("proto") or "",
+           "iface": event.get("iface") or "", "sig": (event.get("sig") or "")[:160],
+           "sid": event.get("sid")}
+    if event.get("src_port") is not None:
+        rec["src_port"] = event.get("src_port")
+    if decision.get("strength"):
+        rec["strength"] = decision["strength"]
+    if decision.get("threshold"):
+        rec["threshold"] = decision["threshold"]
+    if imported:
+        rec["imported"] = True
+    return rec
+
+
+def history_append(recs):
+    if isinstance(recs, dict):
+        recs = [recs]
+    if not recs:
+        return
+    data = "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in recs)
+    with _history_lock():
+        os.makedirs(os.path.dirname(HISTORY), exist_ok=True)
+        fd = os.open(HISTORY, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o640)
+        with os.fdopen(fd, "a") as f:
+            f.write(data)
+        _HIST["writes"] += len(recs)
+        try:
+            big = os.path.getsize(HISTORY) > HISTORY_MAX_BYTES
+        except OSError:
+            big = False
+        if big or _HIST["writes"] >= 500:
+            _history_prune_locked()
+
+
+def _history_prune_locked(now=None):
+    """Keep 90 days and at most HISTORY_MAX_BYTES (trimmed to 80 % so the
+    rewrite doesn't run on every append). Caller holds the history lock."""
+    _HIST["writes"] = 0
+    now = now or time.time()
+    try:
+        with open(HISTORY, "rb") as f:
+            lines = f.read().splitlines(keepends=True)
+    except OSError:
+        return 0
+    cutoff = now - HISTORY_DAYS * 86400
+    keep = []
+    for ln in lines:
+        m = re.search(rb'"ts":\s*([0-9.]+)', ln)
+        if m and float(m.group(1)) >= cutoff:
+            keep.append(ln)
+    size = sum(len(x) for x in keep)
+    if size > HISTORY_MAX_BYTES:
+        budget, out = int(HISTORY_MAX_BYTES * 0.8), []
+        for ln in reversed(keep):
+            budget -= len(ln)
+            if budget < 0:
+                break
+            out.append(ln)
+        keep = out[::-1]
+    if len(keep) == len(lines):
+        return 0
+    tmp = "%s.%d.tmp" % (HISTORY, os.getpid())
+    try:
+        with open(tmp, "wb") as f:
+            f.writelines(keep)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o640)
+        os.replace(tmp, HISTORY)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return len(lines) - len(keep)
+
+
+def history_prune(now=None):
+    with _history_lock():
+        return _history_prune_locked(now)
+
+
+def history_hook(event, decision):
+    if decision.get("action") in (None, "off"):
+        return
+    history_append(history_entry(event, decision))
+
+
+EVENT_HOOKS.append(history_hook)
+
+
+def history_read():
+    out = []
+    try:
+        with open(HISTORY) as f:
+            for ln in f:
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                if isinstance(r, dict):
+                    out.append(r)
+    except OSError:
+        pass
+    return out
+
+
+def history_query(check="", action="", since=None, until=None, offset=0, limit=50):
+    """Newest first, filtered; {"items", "total", "offset", "limit"}."""
+    rows = []
+    for r in reversed(history_read()):
+        ts = float(r.get("ts") or 0)
+        if check and r.get("check") != check:
+            continue
+        if action and r.get("action") != action:
+            continue
+        if since and ts < float(since):
+            continue
+        if until and ts > float(until):
+            continue
+        rows.append(r)
+    offset, limit = max(0, int(offset)), max(1, min(500, int(limit)))
+    return {"items": rows[offset:offset + limit], "total": len(rows),
+            "offset": offset, "limit": limit}
+
+
+def history_counts(now=None):
+    """Per check: events in 24 h / 7 d (excluded ones separately), last ts."""
+    now = now or time.time()
+    out = {}
+    for r in history_read():
+        cid = r.get("check") or "?"
+        ts = float(r.get("ts") or 0)
+        c = out.setdefault(cid, {"day": 0, "week": 0, "excluded_week": 0, "total": 0,
+                                 "last": None, "last_action": None})
+        c["total"] += 1
+        if now - ts < 7 * 86400:
+            if r.get("excluded"):
+                c["excluded_week"] += 1
+            else:
+                c["week"] += 1
+                if now - ts < 86400:
+                    c["day"] += 1
+        if not c["last"] or ts >= c["last"]:
+            c["last"], c["last_action"] = ts, r.get("action")
+    return out
+
+
+_OLD_LINE = re.compile(
+    r"^(?P<ts>\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d) (?P<kind>WOULD-TRIP \(log-only\)|"
+    r"DECEPTION-ABSORBED|TRIP) (?:mode=(?P<mode>\S+) )?class=(?P<cls>.*?)"
+    r"(?: sig='(?P<sig>.*?)')? src=(?P<src>\S*)(?: -> (?P<dst>.*?))?"
+    r"(?: reason=(?P<reason>.*?))? action=")
+
+
+def import_old_log(path=None):
+    """Best effort, once: the pre-history tripwire.log lines (log-only,
+    absorbed, trips) become history entries marked imported."""
+    if (load_state().get("history_imported")):
+        return 0
+    recs = []
+    try:
+        with open(path or LOG, errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        lines = []
+    for ln in lines:
+        m = _OLD_LINE.match(ln.strip())
+        if not m:
+            continue
+        try:
+            ts = time.mktime(time.strptime(m.group("ts"), "%Y-%m-%dT%H:%M:%S"))
+        except ValueError:
+            continue
+        cls = m.group("cls") or "?"
+        if cls == "canary-egress":
+            cid = "canary.egress"
+        else:
+            cid = _BY_CATEGORY.get(cls) or _BY_CLASSTYPE.get(cls) or "manual"
+        sig = m.group("sig") or ""
+        dst = (m.group("dst") or "").strip()
+        ev = {"ts": ts, "check": cid, "class": cls, "sig": sig, "src": m.group("src") or "",
+              "dst": dst, "source": "canary" if cid == "canary.egress" else "suricata"}
+        if cid == "canary.egress" and sig:
+            kv = dict(_KV_RE.findall(sig))
+            ev.update(iface=kv.get("OUT", ""), dst_ip=kv.get("DST", ""),
+                      proto=kv.get("PROTO", ""))
+            if kv.get("DST") and not dst:
+                ev["dst"] = "%s:%s" % (kv["DST"], kv.get("DPT", "?"))
+        kind = m.group("kind")
+        action = ("log" if kind.startswith("WOULD") else
+                  "absorb" if kind == "DECEPTION-ABSORBED" else "block")
+        dec = {"action": action, "reason": "imported from tripwire.log (%s)" % kind.split()[0]}
+        if action == "block":
+            dec["strength"] = m.group("mode") or "medium"
+        rec = history_entry(ev, dec, imported=True)
+        if cid in CHECKS and action != "absorb":
+            # what today's always-on rules make of it (false-positive check)
+            now = evaluate(ev, config_for_mode("logonly"))
+            if now["action"] == "excluded":
+                rec["now_excluded"] = now["reason"]
+        recs.append(rec)
+    recs = [r for r in recs if r["ts"] >= time.time() - HISTORY_DAYS * 86400]
+    if recs:
+        with _history_lock():
+            existing = []
+            try:
+                with open(HISTORY) as f:
+                    existing = f.readlines()
+            except OSError:
+                pass
+            data = "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in recs)
+            os.makedirs(os.path.dirname(HISTORY), exist_ok=True)
+            tmp = "%s.%d.tmp" % (HISTORY, os.getpid())
+            with open(tmp, "w") as f:      # imported (older) lines go first
+                f.write(data + "".join(existing))
+            os.chmod(tmp, 0o640)
+            os.replace(tmp, HISTORY)
+    update_state(lambda st: st.__setitem__("history_imported",
+                                           {"ts": round(time.time(), 1), "events": len(recs)}))
+    log("HISTORY-IMPORT %d event(s) from %s" % (len(recs), path or LOG))
+    return len(recs)
 
 
 # ── trip / resolve / mode ────────────────────────────────────────────────────
 
 def trip(reason, cls="manual", sig="", src="", dst="", mode=None, check="manual",
          notify_user=True):
-    mode = (mode or get_mode())
-    if mode not in ("medium", "high"):
+    mode = mode or get_config().get("strength")
+    if mode not in STRENGTHS:
         mode = "medium"
     now = time.time()
 
@@ -747,29 +1542,100 @@ def resolve(by="admin", via="cli", client=""):
     return True
 
 
+class ConfirmRequired(ValueError):
+    """A change that arms (more) blocking without confirm=True."""
+
+
+def _tripped_warning(st):
+    return ("The tripwire is still TRIPPED (%s containment since %s). Changing "
+            "settings does not lift it - resolve the trip with your admin password "
+            "to restore the WAN."
+            % (str(st.get("mode") or "medium").upper(),
+               time.strftime("%Y-%m-%d %H:%M", time.localtime(
+                   float(st.get("since") or time.time())))))
+
+
+def _diff(old, new, prefix=""):
+    out = []
+    for k in sorted(set(old) | set(new)):
+        if k in ("mode", "migrated", "version"):
+            continue
+        a, b = old.get(k), new.get(k)
+        if isinstance(a, dict) and isinstance(b, dict):
+            out += _diff(a, b, prefix + k + ".")
+        elif a != b:
+            out.append({"field": prefix + k, "from": a, "to": b})
+    return out
+
+
+def _blocking(cfg):
+    if not cfg.get("enabled"):
+        return set()
+    return {cid for cid, c in cfg["checks"].items() if c.get("action") == "block"}
+
+
+def configure(patch, by="admin", via="cli", client="", confirm=False):
+    """Validate + apply a settings patch atomically (config root 0600),
+    audited with the acting user. Refused: unknown keys/checks, coming-later
+    checks, a block-strength change while tripped, and anything that arms
+    (more) blocking without confirm=True. A trip in force is never lifted
+    by a settings change."""
+    with state_lock():
+        cfg = get_config()
+        new = _apply_patch(cfg, patch)
+        st = load_state()
+        if new["strength"] != cfg["strength"] and st.get("tripped"):
+            raise ValueError("The block strength can't change while the tripwire is "
+                             "tripped - resolve the trip first.")
+        armed_old, armed_new = _blocking(cfg), _blocking(new)
+        arming = sorted(armed_new - armed_old)
+        stronger = bool(armed_new) and new["strength"] == "high" and (
+            cfg["strength"] != "high" or not armed_old)
+        if (arming or stronger) and not confirm:
+            raise ConfirmRequired(
+                "This arms blocking (%s at %s strength): a matching event will cut "
+                "the network until an admin resolves it. Confirm to continue."
+                % (", ".join(arming) or "strength change", new["strength"].upper()))
+        changes = _diff(cfg, new)
+        if changes or read_json(CONFIG, {}).get("version") != CONFIG_VERSION:
+            save_config(new)        # a v1 file is persisted as v2 on first save
+    out = {"ok": True, "config": new, "changes": changes,
+           "tripped": bool(st.get("tripped")), "trip_mode": st.get("mode")}
+    if st.get("tripped") and changes:
+        out["warning"] = _tripped_warning(st)
+    if changes:
+        log("CONFIG by=%s via=%s %s" % (by, via, "; ".join(
+            "%s %s->%s" % (c["field"], json.dumps(c["from"]), json.dumps(c["to"]))
+            for c in changes)[:900]))
+        audit("config", by=by, via=via, client=client, changes=changes[:40],
+              mode=new["mode"], previous_mode=cfg["mode"], confirmed=bool(confirm) or None,
+              tripped=bool(st.get("tripped")))
+    return out
+
+
 def set_mode(mode, by="admin", via="cli", client=""):
+    """Legacy (v1) mode switch, kept for scripts: only the two safe ones.
+    disabled = master switch off; logonly = master on and every check on
+    Log only (as v1 logonly behaved; Block checks step down). Arming blocking needs the per-check controls
+    (Security > Tripwire) so it is always a deliberate, confirmed choice."""
     mode = str(mode or "").strip().lower()
     if mode not in MODES:
         raise ValueError("mode must be one of: %s" % ", ".join(MODES))
-    with state_lock():
-        conf = get_config()
-        prev = str(conf.get("mode") or "disabled")
-        conf["mode"] = mode
-        write_json(CONFIG, conf)
-        st = load_state()
-    out = {"ok": True, "mode": mode, "previous": prev,
-           "tripped": bool(st.get("tripped")), "trip_mode": st.get("mode")}
-    if st.get("tripped") and mode in ("disabled", "logonly"):
-        out["warning"] = ("The tripwire is still TRIPPED (%s containment since %s). "
-                          "Changing the mode does not lift it - resolve the trip with "
-                          "your admin password to restore the WAN."
-                          % (str(st.get("mode") or "medium").upper(),
-                             time.strftime("%Y-%m-%d %H:%M", time.localtime(
-                                 float(st.get("since") or time.time())))))
-    if prev != mode:
-        log("MODE %s -> %s by=%s via=%s" % (prev, mode, by, via))
-        audit("mode", by=by, via=via, client=client, previous=prev, mode=mode,
-              tripped=bool(st.get("tripped")))
+    if mode in STRENGTHS:
+        raise ValueError("Set the block strength and choose Block on individual checks "
+                         "(Security > Tripwire, or `configure`) - %s is no longer a "
+                         "global mode." % mode)
+    cfg = get_config()
+    prev = cfg["mode"]
+    if mode == "disabled":
+        patch = {"enabled": False}
+    else:
+        patch = {"enabled": True, "checks": {cid: {"action": "log"} for cid in cfg["checks"]}}
+    res = configure(patch, by=by, via=via, client=client)
+    out = {"ok": True, "mode": res["config"]["mode"], "previous": prev,
+           "tripped": res["tripped"], "trip_mode": res["trip_mode"]}
+    if res["tripped"]:
+        out["warning"] = _tripped_warning(load_state())
     return out
 
 
@@ -940,10 +1806,24 @@ def follow_kernel(w):
                 pass
 
 
-def write_health(watchers, mode, started):
+def watchers_wanted(cfg):
+    """Which detection threads the configuration needs: none with the master
+    switch off, and a source only while one of its checks is not Off."""
+    if not cfg.get("enabled"):
+        return {"suricata": False, "canary": False}
+    on = {cid for cid, c in cfg["checks"].items() if c.get("action") != "off"}
+    return {"suricata": any(CHECKS[cid]["source"] == "suricata" for cid in on),
+            "canary": "canary.egress" in on}
+
+
+def write_health(watchers, mode, started, wanted=None, enabled=None):
     now = time.time()
     data = {"pid": os.getpid(), "ts": round(now, 1), "started": round(started, 1),
             "mode": mode, "watchers": {n: w.status(now) for n, w in watchers.items()}}
+    if wanted is not None:
+        data["wanted"] = wanted
+    if enabled is not None:
+        data["enabled"] = enabled
     try:
         write_json(HEALTH, data)
     except OSError:
@@ -958,8 +1838,17 @@ def run_daemon():
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
-    mode = get_mode()
-    log("DAEMON start mode=%s" % mode)
+    for step in (migrate_config_file, import_old_log, history_prune):
+        try:
+            step()
+        except Exception as exc:
+            log("START-STEP-ERROR %s: %s" % (step.__name__, exc))
+    cfg = get_config()
+    mode = cfg["mode"]
+    log("DAEMON start mode=%s enabled=%s strength=%s checks=%s" % (
+        mode, cfg["enabled"], cfg["strength"],
+        ",".join("%s:%s" % (cid.split(".", 1)[-1], c["action"])
+                 for cid, c in cfg["checks"].items())))
     st = load_state()
     if st.get("tripped"):
         with _ACTION_LOCK:
@@ -973,17 +1862,20 @@ def run_daemon():
                 "canary": Watcher("canary", follow_kernel, handle_event)}
     reported = {}
     last_enforce = 0.0
+    last_prune = time.time()
     while not stop.is_set():
         now = time.time()
-        new_mode = get_mode()
-        if new_mode != mode:
-            log("DAEMON mode %s -> %s" % (mode, new_mode))
-            mode = new_mode
+        cfg = get_config()
+        if cfg["mode"] != mode:
+            log("DAEMON mode %s -> %s" % (mode, cfg["mode"]))
+            mode = cfg["mode"]
+        wanted = watchers_wanted(cfg)
         for name, w in watchers.items():
-            if mode == "disabled":
+            if not wanted[name]:
                 if w.thread:
                     w.halt()
-                    log("WATCHER-OFF %s (mode disabled)" % name)
+                    log("WATCHER-OFF %s (%s)" % (name, "master switch off" if not cfg["enabled"]
+                                                 else "no check uses it"))
                 reported.pop(name, None)
                 continue
             if not w.thread:
@@ -1021,31 +1913,139 @@ def run_daemon():
                            "containment has been re-applied.", key="reenforce",
                            priority="high")
             flush_notify()
-        write_health(watchers, mode, started)
+        if now - last_prune >= 3600:
+            last_prune = now
+            try:
+                history_prune()
+            except Exception as exc:
+                log("HISTORY-PRUNE-ERROR %s" % exc)
+        write_health(watchers, mode, started, wanted, cfg["enabled"])
         stop.wait(TICK_S)
     for w in watchers.values():
         w.halt()
     log("DAEMON stop")
 
 
+# ── test events + UI view ────────────────────────────────────────────────────
+
+_IFACE_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,15}$")
+
+
+def synthetic_event(cid, over=None):
+    """A realistic event for `test`: by default an internet-sourced alert
+    (TEST-NET source, arriving on the WAN) or a canary connection out of
+    the WAN; `over` may set src, dst_ip, dst_port, sid, sig, iface."""
+    if cid in COMING_LATER:
+        raise ValueError("%s is not available yet (coming later)" % cid)
+    if cid not in CHECKS:
+        raise ValueError("unknown check %r" % str(cid)[:60])
+    over = over or {}
+    if not isinstance(over, dict) or set(over) - {"src", "dst_ip", "dst_port", "sid", "sig",
+                                                  "iface"}:
+        raise ValueError("test event may only set src, dst_ip, dst_port, sid, sig, iface")
+    for k in ("src", "dst_ip"):
+        if over.get(k) not in (None, "") and _addr(over[k]) is None:
+            raise ValueError("%s must be an IP address" % k)
+    if over.get("iface") not in (None, "") and not _IFACE_RE.match(str(over["iface"])):
+        raise ValueError("iface must be an interface name")
+    port = _int(over["dst_port"], 0, 65535, "dst_port") if over.get("dst_port") not in (
+        None, "") else 443
+    sid = _int(over["sid"], 1, 4294967295, "sid") if over.get("sid") not in (None, "") else None
+    sig = str(over.get("sig") or "")[:160]
+    if any(ord(ch) < 32 for ch in sig):
+        raise ValueError("sig must be plain text")
+    c = CHECKS[cid]
+    iface = str(over.get("iface") or "") or local_networks()["wan"] or "wan"
+    now = time.time()
+    if c["source"] == "suricata":
+        dst_ip = str(over.get("dst_ip") or "192.0.2.80")
+        return {"check": cid, "source": "suricata", "reason": SURICATA_REASON,
+                "class": c["classtype"], "sig": sig or "TUXWALL TEST: simulated %s alert"
+                % c["category"], "sid": sid, "src": str(over.get("src") or "203.0.113.10"),
+                "src_port": 40000, "dst_ip": dst_ip, "dst_port": port,
+                "dst": dst_label(dst_ip, port), "proto": "TCP", "iface": iface,
+                "ts": now, "test": True}
+    dst_ip = str(over.get("dst_ip") or "198.51.100.20")
+    return {"check": cid, "source": "canary", "reason": CANARY_REASON,
+            "class": "canary-egress",
+            "sig": sig or "%s (simulated) OUT=%s DST=%s PROTO=TCP DPT=%d" % (
+                CANARY_PREFIX, iface, dst_ip, port),
+            "sid": None, "src": "local:opencanary", "dst_ip": dst_ip, "dst_port": port,
+            "dst": "%s:%d" % (dst_ip, port), "proto": "TCP", "iface": iface,
+            "ts": now, "test": True}
+
+
+def test_check(cid, over=None):
+    """Simulate one event through the real evaluation (handle_event dry run):
+    no history entry, no push, no enforcement. Returns what would happen."""
+    ev = synthetic_event(cid, over)
+    decision = handle_event(ev, dry=True)
+    return {"ok": True, "check": cid, "event": ev, "decision": decision}
+
+
+def ui_config():
+    cfg = get_config()
+    counts = history_counts()
+    zero = {"day": 0, "week": 0, "excluded_week": 0, "total": 0, "last": None,
+            "last_action": None}
+    checks = []
+    for cid, meta in CHECKS.items():
+        c = cfg["checks"][cid]
+        checks.append({"id": cid, "label": meta["label"], "description": meta["description"],
+                       "source": meta["source"], "available": True,
+                       "action": c["action"], "threshold": c["threshold"],
+                       "exclusions": c["exclusions"], "counts": counts.get(cid, zero)})
+    try:
+        hsize = os.path.getsize(HISTORY)
+    except OSError:
+        hsize = 0
+    return {"ok": True, "config": cfg, "checks": checks,
+            "coming_later": [dict(id=cid, available=False, **m) for cid, m in COMING_LATER.items()],
+            "strengths": list(STRENGTHS), "actions": list(ACTIONS),
+            "limits": {"count": MAX_COUNT, "minutes": MAX_MINUTES, "list": MAX_LIST},
+            "history": {"bytes": hsize, "max_bytes": HISTORY_MAX_BYTES, "days": HISTORY_DAYS,
+                        "imported": load_state().get("history_imported")},
+            "wanted": watchers_wanted(cfg)}
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
+
+_VALUE_OPTS = ("--by", "--via", "--client", "--mode", "--check", "--action", "--limit",
+               "--offset", "--since", "--until")
+
 
 def _opts(args):
     out, rest, i = {}, [], 0
     while i < len(args):
-        if args[i] in ("--by", "--via", "--client", "--mode") and i + 1 < len(args):
+        if args[i] in _VALUE_OPTS and i + 1 < len(args):
             out[args[i][2:]] = args[i + 1]
             i += 2
+        elif args[i] == "--confirm":
+            out["confirm"] = True
+            i += 1
         else:
             rest.append(args[i])
             i += 1
     return out, rest
 
 
+def _stdin_json():
+    raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+    if not raw.strip():
+        return {}
+    try:
+        return json.loads(raw)
+    except ValueError:
+        raise ValueError("stdin is not valid JSON")
+
+
 def status():
     st = load_state()
+    cfg = get_config()
     return {
-        "mode": get_mode(),
+        "mode": cfg["mode"],
+        "enabled": cfg["enabled"], "strength": cfg["strength"],
+        "checks": {cid: c["action"] for cid, c in cfg["checks"].items()},
         "tripped": bool(st.get("tripped")),
         "logonly_events": st.get("logonly_events") or 0,
         "last_logonly": st.get("last_logonly"),
@@ -1060,33 +2060,58 @@ def status():
     }
 
 
+def _emit_json(fn):
+    try:
+        print(json.dumps(fn()))
+    except ConfirmRequired as exc:
+        print(json.dumps({"ok": False, "confirm_required": True, "error": str(exc)}))
+        return 3
+    except ValueError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}))
+        return 2
+    return 0
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else "status"
     opts, rest = _opts(argv[1:])
+    who = dict(by=opts.get("by") or "admin", via=opts.get("via") or "cli",
+               client=opts.get("client") or "")
     if cmd == "run":
         run_daemon()
     elif cmd == "trip":
         reason = " ".join(rest) or "manual test trip"
-        mode = opts.get("mode") or get_mode()
-        if mode not in ("medium", "high"):
-            print("mode is %r - manual trip defaults to medium" % mode)
+        mode = opts.get("mode") or get_config()["strength"]
+        if mode not in STRENGTHS:
+            print("strength %r unknown - manual trip defaults to medium" % mode)
             mode = "medium"
-        audit("manual-trip", by=opts.get("by") or "admin", via=opts.get("via") or "cli",
-              mode=mode, reason=reason)
+        audit("manual-trip", by=who["by"], via=who["via"], mode=mode, reason=reason)
         trip(reason, mode=mode)
         print("TRIPPED (%s). Resolve with: tuxwall-tripwire resolve" % mode)
     elif cmd == "resolve":
-        resolve(by=opts.get("by") or "admin", via=opts.get("via") or "cli",
-                client=opts.get("client") or "")
+        resolve(**who)
     elif cmd == "set-mode":
-        try:
-            print(json.dumps(set_mode(rest[0] if rest else "", by=opts.get("by") or "admin",
-                                      via=opts.get("via") or "cli",
-                                      client=opts.get("client") or "")))
-        except ValueError as exc:
-            print(json.dumps({"ok": False, "error": str(exc)}))
-            return 2
+        return _emit_json(lambda: set_mode(rest[0] if rest else "", **who))
+    elif cmd == "configure":
+        # JSON settings patch on stdin
+        return _emit_json(lambda: configure(_stdin_json(), confirm=bool(opts.get("confirm")),
+                                            **who))
+    elif cmd == "config":
+        print(json.dumps(ui_config()))
+    elif cmd == "test":
+        # optional JSON event overrides on stdin
+        return _emit_json(lambda: test_check(rest[0] if rest else "", _stdin_json()))
+    elif cmd == "history":
+        return _emit_json(lambda: history_query(
+            check=opts.get("check") or "", action=opts.get("action") or "",
+            since=opts.get("since"), until=opts.get("until"),
+            offset=int(opts.get("offset") or 0), limit=int(opts.get("limit") or 50)))
+    elif cmd == "migrate":
+        old = migrate_config_file(**{k: v for k, v in who.items() if k != "client"})
+        print("migrated from mode %s" % old if old else "nothing to migrate")
+    elif cmd == "import-history":
+        print("imported %d event(s)" % import_old_log())
     elif cmd == "status":
         print(json.dumps(status(), indent=2))
     elif cmd == "health":
@@ -1094,12 +2119,13 @@ def main(argv=None):
     elif cmd == "audit":
         print(json.dumps(audit_tail(int(rest[0]) if rest else 20), indent=2))
     elif cmd == "evaluate":
-        # dry run: eve.json or kernel lines on stdin -> decisions, no side effects
-        mode = opts.get("mode") or get_mode()
+        # dry run: eve.json or kernel lines on stdin -> decisions, no side
+        # effects (--mode m evaluates as if every check behaved like v1 mode m)
+        cfg = config_for_mode(opts["mode"]) if opts.get("mode") else get_config()
         for line in sys.stdin:
             ev = event_from_kernel(line) or event_from_eve_line(line)
             if ev:
-                print(json.dumps({"event": ev, "decision": evaluate(ev, mode)}))
+                print(json.dumps({"event": ev, "decision": evaluate(ev, cfg)}))
     elif cmd == "enforce":
         st = load_state()
         if st.get("tripped"):
@@ -1110,9 +2136,12 @@ def main(argv=None):
             print("not tripped - nothing to enforce")
     else:
         print(__doc__)
-        print("commands: run | status | health | audit [n] | enforce | "
-              "trip [reason] [--mode m] | resolve [--by u --via v] | "
-              "set-mode MODE [--by u --via v --client ip] | evaluate [--mode m] < lines")
+        print("commands: run | status | health | audit [n] | enforce | config | "
+              "configure [--confirm] [--by u --via v --client ip] < patch.json | "
+              "test CHECK [< overrides.json] | history [--check c --action a --limit n "
+              "--offset n] | migrate | import-history | trip [reason] [--mode m] | "
+              "resolve [--by u --via v] | set-mode disabled|logonly | "
+              "evaluate [--mode m] < lines")
         return 2
     return 0
 

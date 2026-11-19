@@ -19,9 +19,13 @@ Live state without shell: `tuxwall_crowdsec_decisions` (pass `ip` to check one a
   opencanary user reach only the dashboard webhook (127.0.0.1:8008) and local DNS; everything else is logged
   `[TUXWALL-CANARY-EGRESS]` and rejected. A similar block contains the forum user. Never delete or duplicate these blocks.
   Check: `sudo python3 /var/www/html/includes/canary_egress.py --check` (exit 0 = present in both files); `--plan` shows a repair diff.
-- Tripwire (`tuxwall-tripwire.service`, config `/etc/tuxwall/tripwire.json` mode disabled|logonly|medium|high, state
-  `/etc/tuxwall/tripwire-state.json`): trips on real exploit-class Suricata alerts or canary egress; medium/high cut WAN forwarding.
-  No auto-restore: a trip is resolved deliberately by the owner in the dashboard (Security). Never change the mode on your own.
+- Tripwire (`tuxwall-tripwire.service`, config `/etc/tuxwall/tripwire.json` schema v2: master `enabled`, block `strength`
+  medium|high, `notify`, per-check `checks` {action off|log|block, threshold, exclusions}; derived legacy `mode`; state
+  `/etc/tuxwall/tripwire-state.json`, history `/var/lib/tuxwall/tripwire-events.jsonl`): checks are Suricata priority-1
+  exploit classes and canary egress; Block checks cut WAN forwarding (high also closes WAN input). Router-originated/loopback
+  traffic is always ignored. Read-only: `sudo tuxwall-tripwire config`, `history --check C`, `test CHECK` (dry run, no side
+  effects). No auto-restore: a trip is resolved deliberately by the owner in the dashboard (Security). Never change settings
+  on your own.
 - CrowdSec (`crowdsec`, `crowdsec-firewall-bouncer`): decisions block attackers; permanent bans in `/etc/tuxwall/custom-blocklist.txt`.
 
 ## Common tasks

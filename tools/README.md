@@ -65,7 +65,12 @@ Loads `pkg/usr/local/sbin/tuxwall-tripwire` with `TUXWALL_TRIPWIRE_ROOT`
 pointing at a temp dir: every path is remapped, the firewall is stubbed
 (rules are only recorded) and pushes go to a file. Checks the eve.json
 pre-filter and event normalisation, `evaluate()` per mode and deception-port
-absorption, the lockdown rule plan (high mode keeps WAN DHCP, IPv6 ND and
+absorption, config schema v2 (v1 migration to Log only - never Block -,
+validation, confirm gate for arming Block, block strength frozen while
+tripped, audit), per-check actions, exclusions (router/loopback, the two
+real false positives, WAN-only, CIDRs, signature ids), thresholds, the Test
+path (no side effects), the event history (hook, filters, 90-day / size
+retention, one-time import of tripwire.log), the lockdown rule plan (high mode keeps WAN DHCP, IPv6 ND and
 replies to router-opened connections above the DROP), enforce/lift
 idempotence, push dedupe + summary, push-before-enforce, the state lock
 (threads + processes), set-mode/resolve audit and the "still tripped"

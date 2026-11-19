@@ -419,6 +419,16 @@ def t_invariants():
     with open(root + "/etc/tuxwall/tripwire-state.json", "w") as f:
         json.dump({"tripped": False, "mode": "high"}, f)
     check("tripwire-hook-missing" not in ids(G.invariants(rst, ctx, rst)), "not tripped: no hook needed")
+    # schema v2 (per-check actions) without the derived legacy "mode" field
+    for conf, want in (({"version": 2, "enabled": True, "strength": "high",
+                         "checks": {"canary.egress": {"action": "block"}}}, "high"),
+                       ({"version": 2, "enabled": True, "checks": {"a": {"action": "log"}}},
+                        "logonly"),
+                       ({"version": 2, "enabled": False, "checks": {"a": {"action": "block"}}},
+                        "disabled")):
+        with open(root + "/etc/tuxwall/tripwire.json", "w") as f:
+            json.dump(conf, f)
+        check(ctx.tripwire["mode"] == want, "tripwire v2 config -> mode %s" % want)
     with open(root + "/etc/tuxwall/tripwire.json", "w") as f:
         json.dump({"mode": "high"}, f)
     with open(root + "/etc/tuxwall/tripwire-state.json", "w") as f:

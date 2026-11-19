@@ -72,11 +72,34 @@ assert mod._bk.failure_incident("/nonexistent-root") is None
 # --- Tripwire status: every field the dashboard renders, no host needed ----
 mod.TRIPWIRE_CONF = mod.TRIPWIRE_STATE = mod.TRIPWIRE_HEALTH = "/nonexistent/tw.json"
 mod.TRIPWIRE_AUDIT = "/nonexistent/tw-audit.log"
+mod.TRIPWIRE_BIN = "/nonexistent/tuxwall-tripwire"
+mod.TRIPWIRE_HISTORY = "/nonexistent/tw-events.jsonl"
 tw = mod.tripwire_status()
 for key in ("mode", "tripped", "trip_mode", "dst", "logonly_events", "last_logonly",
-            "absorbed_events", "last_absorbed", "resolved_at", "engine", "audit"):
+            "absorbed_events", "last_absorbed", "resolved_at", "engine", "audit",
+            "enabled", "strength", "notify", "checks", "coming_later", "config_available"):
     assert key in tw, f"tripwire status lacks {key}"
 assert tw["mode"] == "disabled" and tw["engine"]["needed"] is False
+assert tw["config_available"] is False and tw["checks"] == []
 assert mod.tripwire_health("logonly")["healthy"] is False
+h = mod.tripwire_history({"check": ["canary.egress"], "limit": ["5"]})
+assert h["ok"] and h["items"] == [] and h["total"] == 0
+for bad in ({"action": ["nope"]}, {"limit": ["x"]}):
+    try:
+        mod.tripwire_history(bad)
+        raise AssertionError("tripwire_history accepted %r" % bad)
+    except ValueError:
+        pass
+for bad in ({"bogus": 1}, {}, {"confirm": True}):
+    try:
+        mod.tripwire_configure(bad, {"username": "t"})
+        raise AssertionError("tripwire_configure accepted %r" % bad)
+    except ValueError:
+        pass
+try:
+    mod.tripwire_test({"check": "../../x"})
+    raise AssertionError("tripwire_test accepted a bad check id")
+except ValueError:
+    pass
 
 print("api_server smoke test OK")

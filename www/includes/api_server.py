@@ -4384,6 +4384,12 @@ def tripwire_health(mode=None, tripped=False):
                           "events": int(w.get("events") or 0),
                           "error": str(w.get("error") or "")[:200],
                           "note": str(w.get("note") or "")[:200]}
+    # v2 engines report which watchers the per-check settings need (a
+    # source whose checks are all Off runs no thread); older ones: all of
+    # them unless the mode is disabled
+    wanted = h.get("wanted") if isinstance(h.get("wanted"), dict) else None
+    if wanted is None:
+        wanted = {n: mode != "disabled" for n in ("suricata", "canary")}
     problems = []
     if active != "active":
         problems.append("engine service is %s" % (active or "not running"))
@@ -4391,16 +4397,21 @@ def tripwire_health(mode=None, tripped=False):
         problems.append("engine has not reported a heartbeat")
     elif age > TRIPWIRE_HEALTH_STALE:
         problems.append("engine heartbeat is %d s old" % int(age))
-    elif mode != "disabled":
+    else:
         for name in ("suricata", "canary"):
+            if not wanted.get(name):
+                continue
             w = watchers.get(name)
             if not w or w["state"] != "running":
                 problems.append("%s watcher is %s%s" % (
                     name, (w or {}).get("state", "missing"),
                     (" (%s)" % w["error"]) if w and w.get("error") and w["state"] != "running" else ""))
+    for name, w in watchers.items():
+        w["wanted"] = bool(wanted.get(name))
     return {"active": active, "heartbeat_age": round(age, 1) if age is not None else None,
             "watchers": watchers, "problems": problems, "healthy": not problems,
-            "needed": mode != "disabled" or bool(tripped)}
+            "wanted": {n: bool(wanted.get(n)) for n in ("suricata", "canary")},
+            "needed": any(wanted.values()) or bool(tripped)}
 
 
 def _tripwire_audit_tail(n=10):
@@ -4421,9 +4432,24 @@ def _tripwire_audit_tail(n=10):
     return out
 
 
+def _tripwire_ui_config():
+    """Per-check view from the engine (it owns the schema, the v1 -> v2
+    migration and the history counts); None when the engine can't answer."""
+    try:
+        proc = subprocess.run([TRIPWIRE_BIN, "config"], capture_output=True, text=True,
+                              timeout=15)
+        data = json.loads(proc.stdout) if proc.returncode == 0 else None
+    except Exception:
+        data = None
+    return data if isinstance(data, dict) and data.get("ok") else None
+
+
 def tripwire_status():
     conf = _tripwire_read(TRIPWIRE_CONF, {})
     st = _tripwire_read(TRIPWIRE_STATE, {})
+    ui = _tripwire_ui_config()
+    if ui and isinstance(ui.get("config"), dict):
+        conf = ui["config"]
     mode = str(conf.get("mode") or "disabled")
     rules = False
     try:
@@ -4453,7 +4479,14 @@ def tripwire_status():
             "last_absorbed": rec(st.get("last_absorbed")),
             "rules_present": rules,
             "engine": tripwire_health(mode, bool(st.get("tripped"))),
-            "audit": _tripwire_audit_tail(10)}
+            "audit": _tripwire_audit_tail(10),
+            "enabled": bool(conf.get("enabled", mode != "disabled")),
+            "strength": conf.get("strength") or (mode if mode in ("medium", "high") else "medium"),
+            "notify": conf.get("notify") or {},
+            "checks": (ui or {}).get("checks") or [],
+            "coming_later": (ui or {}).get("coming_later") or [],
+            "history_info": (ui or {}).get("history") or {},
+            "config_available": ui is not None}
 
 
 def _tripwire_cli(args, timeout=30):
@@ -4464,23 +4497,118 @@ def _tripwire_cli(args, timeout=30):
     return (proc.stdout or "").strip()
 
 
+class TripwireConfirmRequired(ValueError):
+    pass
+
+
+def _tripwire_json_cli(args, payload=None, timeout=30):
+    """Engine commands that answer one JSON line: exit 0 ok, 2 refused
+    (ValueError), 3 confirmation required."""
+    proc = subprocess.run([TRIPWIRE_BIN] + args, capture_output=True, text=True,
+                          timeout=timeout,
+                          input=json.dumps(payload) if payload is not None else "")
+    try:
+        res = json.loads((proc.stdout or "").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        res = None
+    if not isinstance(res, dict):
+        raise RuntimeError((proc.stderr or proc.stdout or "tripwire command failed").strip()[-200:])
+    if proc.returncode == 3 or res.get("confirm_required"):
+        raise TripwireConfirmRequired(res.get("error") or "confirmation required")
+    if proc.returncode != 0 or not res.get("ok", True):
+        raise ValueError(res.get("error") or "refused by the tripwire engine")
+    return res
+
+
+TRIPWIRE_SETTING_KEYS = ("enabled", "strength", "notify")
+
+
+def tripwire_configure(body, identity=None, client_ip="", keys=TRIPWIRE_SETTING_KEYS):
+    """Settings patch (master switch, block strength, notify policy, or the
+    per-check map) applied by the engine: validation, atomic root-0600
+    write, refusal of a strength change while tripped, confirm gate for
+    anything that arms blocking, audit entry with the dashboard user."""
+    patch = {k: body[k] for k in keys if k in body}
+    unknown = [k for k in body if k not in keys and k != "confirm"]
+    if unknown:
+        raise ValueError("unknown setting %r" % unknown[0])
+    if not patch:
+        raise ValueError("nothing to change")
+    who = (identity or {}).get("username", "") or "unknown"
+    args = ["configure", "--by", who, "--via", "dashboard", "--client", client_ip or ""]
+    if body.get("confirm") is True:
+        args.append("--confirm")
+    res = _tripwire_json_cli(args, patch)
+    return {"ok": True, "changes": res.get("changes") or [], "mode": (res.get("config") or {}).get("mode"),
+            "tripped": bool(res.get("tripped")), "warning": res.get("warning") or ""}
+
+
+def tripwire_test(body):
+    """Simulate one event through the engine's real evaluation path - no
+    history entry, no push, no enforcement."""
+    check = str(body.get("check") or "").strip()
+    if not re.match(r"^[a-z]+\.[a-z-]+$", check):
+        raise ValueError("unknown check")
+    event = body.get("event") or {}
+    if not isinstance(event, dict):
+        raise ValueError("event must be an object")
+    return _tripwire_json_cli(["test", check], event)
+
+
+TRIPWIRE_HISTORY = "/var/lib/tuxwall/tripwire-events.jsonl"
+TRIPWIRE_HISTORY_ACTIONS = ("absorb", "excluded", "counted", "log", "block")
+
+
+def tripwire_history(qs):
+    """Event history, newest first; filters check / action / since / until,
+    paged by offset + limit (max 200)."""
+    def q(name):
+        return (qs.get(name) or [""])[0].strip()
+    check, action = q("check"), q("action")
+    if action and action not in TRIPWIRE_HISTORY_ACTIONS:
+        raise ValueError("unknown action filter")
+    try:
+        since = float(q("since") or 0)
+        until = float(q("until") or 0)
+        offset = max(0, int(q("offset") or 0))
+        limit = max(1, min(200, int(q("limit") or 50)))
+    except ValueError:
+        raise ValueError("since/until/offset/limit must be numbers")
+    rows = []
+    try:
+        with open(TRIPWIRE_HISTORY) as f:
+            lines = f.readlines()
+    except OSError:
+        lines = []
+    for ln in reversed(lines):
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(r, dict):
+            continue
+        ts = float(r.get("ts") or 0)
+        if (check and r.get("check") != check) or (action and r.get("action") != action):
+            continue
+        if (since and ts < since) or (until and ts > until):
+            continue
+        rows.append(r)
+    return {"ok": True, "items": rows[offset:offset + limit], "total": len(rows),
+            "offset": offset, "limit": limit}
+
+
 def tripwire_set_mode(body, identity=None, client_ip=""):
-    """Mode change through the engine: atomic config write + audit entry
-    with the dashboard user. A trip in force is never lifted by a mode
-    change; switching to disabled/logonly while tripped returns a warning."""
+    """Legacy (v1) mode change through the engine, kept for scripts: only
+    disabled (master switch off) and logonly (every check Log only) are
+    accepted; arming blocking goes through the per-check settings. Atomic
+    config write + audit entry with the dashboard user. A trip in force is
+    never lifted; changing settings while tripped returns a warning."""
     mode = str(body.get("mode") or "").strip().lower()
     if mode not in TRIPWIRE_MODES:
         raise ValueError("mode must be disabled, logonly, medium or high")
     who = (identity or {}).get("username", "") or "unknown"
-    out = _tripwire_cli(["set-mode", mode, "--by", who, "--via", "dashboard",
-                         "--client", client_ip or ""])
-    try:
-        res = json.loads(out.splitlines()[-1])
-    except (ValueError, IndexError):
-        raise RuntimeError("unexpected reply from the tripwire engine")
-    if not res.get("ok"):
-        raise ValueError(res.get("error") or "mode change refused")
-    return res
+    return _tripwire_json_cli(["set-mode", mode, "--by", who, "--via", "dashboard",
+                               "--client", client_ip or ""])
 
 
 def tripwire_resolve(body, identity, client_ip=""):
@@ -14477,6 +14605,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_canary())
         elif path == "/api/security/tripwire":
             self._send(200, tripwire_status())
+        elif path == "/api/security/tripwire/history":
+            try:
+                self._send(200, tripwire_history(
+                    urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
         elif path == "/api/agent/models":
             try:
                 if self._agent_is_v2():
@@ -15502,14 +15636,24 @@ class Handler(BaseHTTPRequestHandler):
             result = set_canary_enabled(bool(body.get("enabled")))
             self._send(200 if result.get("ok") else 400, result)
 
-        elif path in ("/api/security/tripwire/config", "/api/security/tripwire/resolve"):
+        elif path in ("/api/security/tripwire/config", "/api/security/tripwire/resolve",
+                      "/api/security/tripwire/checks", "/api/security/tripwire/test"):
             # errors used to escape the handler (dropped connection, so the
             # dashboard never showed "Password is incorrect")
             try:
-                if path.endswith("/config"):
+                if path.endswith("/config") and "mode" in body:
                     self._send(200, tripwire_set_mode(body, identity, _client_key(self)))
+                elif path.endswith("/config"):
+                    self._send(200, tripwire_configure(body, identity, _client_key(self)))
+                elif path.endswith("/checks"):
+                    self._send(200, tripwire_configure(body, identity, _client_key(self),
+                                                       keys=("checks",)))
+                elif path.endswith("/test"):
+                    self._send(200, tripwire_test(body))
                 else:
                     self._send(200, tripwire_resolve(body, identity, _client_key(self)))
+            except TripwireConfirmRequired as exc:
+                self._send(409, {"ok": False, "confirm_required": True, "error": str(exc)})
             except ValueError as exc:
                 self._send(400, {"ok": False, "error": str(exc)})
             except PermissionError as exc:

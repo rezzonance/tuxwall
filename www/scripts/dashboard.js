@@ -180,8 +180,23 @@
     secTripHint: document.getElementById("sec-trip-hint"),
     secTripDot: document.getElementById("sec-trip-dot"),
     secTripBadge: document.getElementById("sec-trip-badge"),
-    secTripModes: document.getElementById("sec-trip-modes"),
-    secTripModeNote: document.getElementById("sec-trip-mode-note"),
+    secTripMaster: document.getElementById("sec-trip-master"),
+    secTripMasterNote: document.getElementById("sec-trip-master-note"),
+    secTripStrength: document.getElementById("sec-trip-strength"),
+    secTripStrengthNote: document.getElementById("sec-trip-strength-note"),
+    secTripNotifyLog: document.getElementById("sec-trip-notify-log"),
+    secTripNotifyWin: document.getElementById("sec-trip-notify-win"),
+    secTripNotifySave: document.getElementById("sec-trip-notify-save"),
+    secTripChecks: document.getElementById("sec-trip-checks"),
+    secTripChecksNote: document.getElementById("sec-trip-checks-note"),
+    secTripLater: document.getElementById("sec-trip-later"),
+    secTripHistBody: document.getElementById("sec-trip-hist-body"),
+    secTripHistCheck: document.getElementById("sec-trip-hist-check"),
+    secTripHistAction: document.getElementById("sec-trip-hist-action"),
+    secTripHistPrev: document.getElementById("sec-trip-hist-prev"),
+    secTripHistNext: document.getElementById("sec-trip-hist-next"),
+    secTripHistRange: document.getElementById("sec-trip-hist-range"),
+    secTripHistNote: document.getElementById("sec-trip-hist-note"),
     secTripMessage: document.getElementById("sec-trip-message"),
     secTripMsgTitle: document.getElementById("sec-trip-msg-title"),
     secTripMsgMeta: document.getElementById("sec-trip-msg-meta"),
@@ -4115,13 +4130,7 @@
   }
 
   const TRIP_MODES = ["disabled", "logonly", "medium", "high"];
-  const TRIP_MODE_LABEL = { disabled: "Disabled", logonly: "Log only", medium: "Medium", high: "High" };
-  const TRIP_MODE_DESC = {
-    disabled: "Off — no detection runs and the WAN is never contained automatically.",
-    logonly: "Detection armed, blade sheathed — trip-class events are recorded and pushed (at most one push per check every 10 minutes), but nothing is ever contained. The away-from-home mode.",
-    medium: "Cuts all forwarding (LAN↔WAN, VPN→LAN, between VLANs). The router itself stays reachable, including over WireGuard.",
-    high: "Also closes new connections from the internet to the router — reachable from the LAN only. WAN DHCP and replies to the router's own connections (push alerts) keep working.",
-  };
+  const TRIP_MODE_LABEL = { disabled: "Off", logonly: "Log only", medium: "Medium", high: "High" };
   const TRIP_CLASS_DESC = {
     "successful-admin": "An attacker appears to have GAINED administrator access to a system",
     "attempted-admin": "An attacker attempted to gain administrator privileges",
@@ -4172,7 +4181,7 @@
       }
       let reason = tripReasonText(d);
       if (mode === "disabled" || mode === "logonly") {
-        reason += ` — the mode is now ${TRIP_MODE_LABEL[mode]}, but that does not lift this trip: the ${String(tripMode).toUpperCase()} lockdown stays until you resolve it below.`;
+        reason += ` — the checks no longer block (${TRIP_MODE_LABEL[mode]}), but that does not lift this trip: the ${String(tripMode).toUpperCase()} lockdown stays until you resolve it below.`;
       }
       els.secTripMsgReason.textContent = reason;
       els.secTripMsgGrid.innerHTML = [
@@ -4245,10 +4254,10 @@
       ? "No detection runs and the WAN stays open."
       : "Watching for intrusion-class events.";
     els.secTripMsgReason.textContent = mode === "disabled"
-      ? "Choose Log only to record trip-class events, or Medium / High to contain the WAN when one is detected."
+      ? "Set checks below to Log only to record trip-class events, or to Block to contain the WAN when one is detected."
       : (mode === "logonly"
-          ? "A Suricata priority-1 alert or a canary egress attempt will be recorded and pushed — nothing is cut."
-          : "A Suricata priority-1 alert or a canary egress attempt will cut forwarding and require your admin password to restore.");
+          ? "Matching events of the active checks are recorded and pushed — no check is set to Block, so nothing is cut."
+          : "Matching events of checks set to Block cut the network and require your admin password to restore.");
   }
 
   const TRIP_WATCHER_LABEL = { suricata: "Suricata watcher", canary: "Canary watcher" };
@@ -4266,7 +4275,9 @@
         ok = "idle";
         text = "Engine running · detection off" + (d.tripped ? " · re-enforcing the trip" : "");
       } else {
-        text = "Engine running · " + ["suricata", "canary"].map((n) => {
+        const wanted = e.wanted || {};
+        const live = ["suricata", "canary"].filter((n) => wanted[n] !== false);
+        text = "Engine running · " + (live.length ? "" : "no check needs a watcher") + live.map((n) => {
           const x = w[n] || {};
           return (TRIP_WATCHER_LABEL[n] || n) + " ok" + (x.age != null ? " (" + Math.round(x.age) + " s)" : "");
         }).join(" · ");
@@ -4306,28 +4317,23 @@
       els.secTripBadge.dataset.state = state;
       els.secTripBadge.textContent = d.tripped
         ? String(tripMode).toUpperCase() + " · CONTAINED"
-        : TRIP_MODE_LABEL[mode].toUpperCase();
+        : (mode === "medium" || mode === "high" ? "BLOCK · " : "") + TRIP_MODE_LABEL[mode].toUpperCase();
     }
     if (els.secTripHint) {
       els.secTripHint.textContent = d.tripped
         ? "WAN contained since " + formatDateTime(d.since) + " — resolve below"
         : (mode === "disabled"
-            ? "Disabled — no detection, no automatic containment"
+            ? (d.enabled === false ? "Off — master switch is off" : "Off — every check is Off")
             : (mode === "logonly" ? "Log only — recording, never containing"
-                                  : TRIP_MODE_LABEL[mode] + " containment armed"));
+                                  : "Block armed (" + TRIP_MODE_LABEL[mode] + " strength)"));
     }
     if (els.secTripDot) {
       els.secTripDot.dataset.status = d.tripped ? "crit"
         : (unhealthy ? "inactive" : (mode === "disabled" ? "unknown" : "ok"));
     }
-    if (els.secTripModes) {
-      els.secTripModes.querySelectorAll("[data-trip-mode]").forEach((btn) => {
-        const on = btn.dataset.tripMode === mode;
-        btn.classList.toggle("active", on);
-        btn.setAttribute("aria-pressed", on ? "true" : "false");
-      });
-    }
-    if (els.secTripModeNote) els.secTripModeNote.textContent = TRIP_MODE_DESC[mode];
+    renderTripControls(d);
+    renderTripChecks(d);
+    if (els.secTripHistBody && els.secTripHistBody.offsetParent !== null) refreshTripHistory();
 
     renderTripHealth(d, mode);
     renderTripMessage(d, mode, tripMode);
@@ -4343,6 +4349,381 @@
       } else els.tripBanner.hidden = true;
     }
   }
+  // --- Tripwire phase 2: master switch, block strength, notify policy,
+  // per-check actions / thresholds / exclusions, Test, event history -------
+  const TRIP_STRENGTH_DESC = {
+    medium: "Checks set to Block cut all forwarding (LAN↔WAN, VPN→LAN, between VLANs). The router itself stays reachable, including over WireGuard.",
+    high: "Checks set to Block also close new connections from the internet to the router — reachable from the LAN only. WAN DHCP and replies to the router's own connections keep working.",
+  };
+  const TRIP_ACTION_LABEL = { off: "Off", log: "Log only", block: "Block" };
+  const TRIP_RESULT_LABEL = {
+    block: "Blocked", log: "Logged", counted: "Below threshold", excluded: "Excluded",
+    absorb: "Absorbed", off: "Off",
+  };
+  let tripChecksSig = "";
+  const tripHist = { offset: 0, limit: 25, total: 0 };
+
+  // POST that understands the engine's "confirmation required" (409): asks,
+  // then retries once with confirm:true.
+  async function tripPost(url, body, confirmText) {
+    const send = async (b) => {
+      const res = await fetch(url, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(b), cache: "no-store",
+      });
+      if (res.status === 401) handleSessionExpired();
+      let data = {};
+      try { data = await res.json(); } catch (_) { data = {}; }
+      return { status: res.status, data };
+    };
+    let r = await send(body);
+    if (r.status === 409 && r.data.confirm_required && !body.confirm) {
+      if (!(await (window.twConfirm || window.confirm)(confirmText || r.data.error))) return null;
+      r = await send(Object.assign({}, body, { confirm: true }));
+    }
+    if (!r.data.ok) throw new Error(r.data.error || ("HTTP " + r.status));
+    return r.data;
+  }
+
+  function tripBlockingChecks(d) {
+    return (d.checks || []).filter((c) => c.action === "block");
+  }
+
+  function renderTripControls(d) {
+    const strength = d.strength === "high" ? "high" : "medium";
+    if (els.secTripMaster && document.activeElement !== els.secTripMaster) {
+      els.secTripMaster.checked = !!d.enabled;
+      els.secTripMaster.disabled = !d.config_available;
+    }
+    if (els.secTripMasterNote) {
+      const on = (d.checks || []).filter((c) => c.action !== "off").length;
+      els.secTripMasterNote.textContent = d.enabled
+        ? (on ? `On — ${on} of ${(d.checks || []).length} checks active.` : "On — but every check is Off, so nothing is watched.")
+        : "Off — no check runs; the per-check settings are kept.";
+    }
+    if (els.secTripStrength) {
+      els.secTripStrength.querySelectorAll("[data-trip-strength]").forEach((btn) => {
+        const on = btn.dataset.tripStrength === strength;
+        btn.classList.toggle("active", on);
+        btn.setAttribute("aria-pressed", on ? "true" : "false");
+        btn.disabled = !!d.tripped || !d.config_available;
+        btn.title = d.tripped ? "Resolve the trip before changing the block strength" : "";
+      });
+    }
+    if (els.secTripStrengthNote) {
+      const nb = tripBlockingChecks(d).length;
+      els.secTripStrengthNote.textContent = (d.tripped ? "Locked while tripped. " : "") +
+        TRIP_STRENGTH_DESC[strength] + (nb ? "" : " No check is set to Block, so nothing is cut today.");
+    }
+    const n = d.notify || {};
+    if (els.secTripNotifyLog && document.activeElement !== els.secTripNotifyLog) els.secTripNotifyLog.checked = n.on_log !== false;
+    if (els.secTripNotifyWin && document.activeElement !== els.secTripNotifyWin) els.secTripNotifyWin.value = n.window_minutes || 10;
+  }
+
+  function tripCountsText(c) {
+    const k = c.counts || {};
+    const parts = [`24 h: ${formatNumber(k.day || 0)}`, `7 d: ${formatNumber(k.week || 0)}`];
+    if (k.excluded_week) parts.push(`${formatNumber(k.excluded_week)} excluded (7 d)`);
+    if (k.last) parts.push(`last ${formatRelative(k.last)} (${TRIP_RESULT_LABEL[k.last_action] || k.last_action || "?"})`);
+    return parts.join(" · ");
+  }
+
+  function tripCheckHtml(c) {
+    const ex = c.exclusions || {};
+    const th = c.threshold || {};
+    const suri = c.source === "suricata";
+    const btns = ["off", "log", "block"].map((a) =>
+      `<button type="button" class="seg-btn" data-trip-act="${a}" aria-pressed="false">${TRIP_ACTION_LABEL[a]}</button>`).join("");
+    return `<div class="trip-check" data-check="${esc(c.id)}" data-action="${esc(c.action)}">
+      <div class="trip-check-head">
+        <div class="trip-check-copy">
+          <strong>${esc(c.label)}</strong>
+          <span class="muted">${esc(c.description || "")}</span>
+          <span class="trip-check-meta muted" data-role="meta">${esc(tripCountsText(c))}</span>
+        </div>
+        <div class="seg-btns trip-acts" role="group" aria-label="${esc(c.label)}: action">${btns}</div>
+      </div>
+      <details class="trip-check-more">
+        <summary>Threshold, exclusions &amp; test</summary>
+        <div class="trip-check-form">
+          <label class="fw-field"><span>Trigger after (events)</span><input type="number" min="1" max="100" data-f="count" value="${esc(th.count || 1)}"></label>
+          <label class="fw-field"><span>Within (minutes)</span><input type="number" min="1" max="1440" data-f="minutes" value="${esc(th.minutes || 5)}"></label>
+          <label class="fw-field trip-wide"><span>Excluded IPs / CIDRs (${suri ? "source or destination" : "destination"}), one per line</span><textarea rows="2" data-f="ips" spellcheck="false" placeholder="e.g. 192.168.1.181 or 203.0.113.0/24">${esc((ex.ips || []).join("\n"))}</textarea></label>
+          ${suri ? `<label class="fw-field trip-wide"><span>Excluded Suricata signature IDs</span><textarea rows="1" data-f="sids" spellcheck="false" placeholder="e.g. 2031123">${esc((ex.sids || []).join(" "))}</textarea></label>
+          <label class="trip-inline trip-wide"><input type="checkbox" data-f="wan_only"${ex.wan_only !== false ? " checked" : ""}> Only traffic from the internet (WAN-sourced) counts</label>` : ""}
+          <p class="muted trip-wide trip-always">Always ignored: ${suri ? "traffic sent by the router itself and loopback traffic" : "loopback traffic (OUT=lo) that never left the router"}.</p>
+          <div class="trip-check-actions trip-wide">
+            <button type="button" class="btn btn-sm btn-primary" data-do="save">Save</button>
+            <span class="toolbar-spacer"></span>
+            <input type="text" data-f="test-src" class="trip-test-src" placeholder="${suri ? "Test source IP (optional)" : "Test destination IP (optional)"}" aria-label="Test address" spellcheck="false">
+            <button type="button" class="btn btn-sm" data-do="test">Test</button>
+          </div>
+          <div class="trip-test-result trip-wide" data-role="test" hidden></div>
+        </div>
+      </details>
+    </div>`;
+  }
+
+  function tripSyncCheck(row, c, force) {
+    row.dataset.action = c.action;
+    row.querySelectorAll("[data-trip-act]").forEach((b) => {
+      const on = b.dataset.tripAct === c.action;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+    const meta = row.querySelector('[data-role="meta"]');
+    if (meta) meta.textContent = tripCountsText(c);
+    const more = row.querySelector("details");
+    if (!force && more && more.open) return;      // never clobber an edit in progress
+    const ex = c.exclusions || {};
+    const th = c.threshold || {};
+    const set = (f, v) => { const el = row.querySelector(`[data-f="${f}"]`); if (el) el.value = v; };
+    set("count", th.count || 1);
+    set("minutes", th.minutes || 5);
+    set("ips", (ex.ips || []).join("\n"));
+    set("sids", (ex.sids || []).join(" "));
+    const wo = row.querySelector('[data-f="wan_only"]');
+    if (wo) wo.checked = ex.wan_only !== false;
+  }
+
+  function renderTripChecks(d) {
+    if (!els.secTripChecks) return;
+    const list = d.checks || [];
+    if (!d.config_available || !list.length) {
+      els.secTripChecks.innerHTML = `<p class="muted trip-empty">The tripwire engine did not answer — check settings are unavailable.</p>`;
+      tripChecksSig = "";
+      return;
+    }
+    const sig = list.map((c) => c.id).join("|");
+    if (sig !== tripChecksSig) {
+      els.secTripChecks.innerHTML = list.map(tripCheckHtml).join("");
+      tripChecksSig = sig;
+      fillTripHistChecks(list);
+    }
+    const byId = new Map(list.map((c) => [c.id, c]));
+    els.secTripChecks.querySelectorAll(".trip-check").forEach((row) => {
+      const c = byId.get(row.dataset.check);
+      if (c) tripSyncCheck(row, c, false);
+    });
+    if (els.secTripChecksNote) {
+      const n = { off: 0, log: 0, block: 0 };
+      list.forEach((c) => { n[c.action] = (n[c.action] || 0) + 1; });
+      els.secTripChecksNote.textContent = `${n.block} Block · ${n.log} Log only · ${n.off} Off` +
+        (d.enabled ? "" : " — master switch is off");
+    }
+    if (els.secTripLater) {
+      const later = d.coming_later || [];
+      els.secTripLater.innerHTML = later.length
+        ? `<p class="trip-label trip-later-head">Coming later</p>` + later.map((c) =>
+            `<div class="trip-check trip-check-later" data-check="${esc(c.id)}"><div class="trip-check-head"><div class="trip-check-copy"><strong>${esc(c.label)}</strong><span class="muted">${esc(c.why || "")}</span></div><span class="badge">Coming later</span></div></div>`).join("")
+        : "";
+    }
+  }
+
+  function tripCheckFromRow(row) {
+    const v = (f) => { const el = row.querySelector(`[data-f="${f}"]`); return el ? el.value : ""; };
+    const patch = {
+      threshold: { count: Number(v("count")), minutes: Number(v("minutes")) },
+      exclusions: { ips: v("ips").split(/[\s,]+/).filter(Boolean) },
+    };
+    if (row.querySelector('[data-f="sids"]')) {
+      patch.exclusions.sids = v("sids").split(/[\s,]+/).filter(Boolean);
+      patch.exclusions.wan_only = !!row.querySelector('[data-f="wan_only"]').checked;
+    }
+    return patch;
+  }
+
+  function tripStrengthText() {
+    const d = tripLast || {};
+    return (d.strength === "high" ? "HIGH" : "MEDIUM") + ": " + TRIP_STRENGTH_DESC[d.strength === "high" ? "high" : "medium"];
+  }
+
+  async function tripSetAction(row, action) {
+    const id = row.dataset.check;
+    const c = ((tripLast || {}).checks || []).find((x) => x.id === id) || {};
+    if (c.action === action) return;
+    let confirm = false;
+    if (action === "block") {
+      let text = `Set “${c.label || id}” to BLOCK?\n\nA matching event will cut the network at the current block strength — ${tripStrengthText()}\n\nIt never restores itself: an admin must resolve it with a password.`;
+      if (!(tripLast || {}).enabled) text += "\n\nThe master switch is off, so this takes effect when it is turned on.";
+      if (!(await (window.twConfirm || window.confirm)(text))) return;
+      confirm = true;
+    }
+    const btns = Array.from(row.querySelectorAll("[data-trip-act]"));
+    btns.forEach((b) => { b.disabled = true; });
+    try {
+      const res = await tripPost("/api/security/tripwire/checks", { checks: { [id]: { action } }, confirm });
+      if (res && res.warning) showTripNotice(res.warning);
+      await refreshTripwire();
+    } catch (err) {
+      showBanner(true, "Tripwire check: " + err.message);
+    } finally {
+      btns.forEach((b) => { b.disabled = false; });
+    }
+  }
+
+  async function tripSaveCheck(row) {
+    const id = row.dataset.check;
+    const btn = row.querySelector('[data-do="save"]');
+    if (btn) btn.disabled = true;
+    try {
+      await tripPost("/api/security/tripwire/checks", { checks: { [id]: tripCheckFromRow(row) } });
+      await refreshTripwire();
+      const c = ((tripLast || {}).checks || []).find((x) => x.id === id);
+      if (c) tripSyncCheck(row, c, true);
+      if (window.twToast) window.twToast("Saved: " + (c ? c.label : id), "success");
+    } catch (err) {
+      showBanner(true, "Tripwire check: " + err.message);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function tripTestCheck(row) {
+    const id = row.dataset.check;
+    const out = row.querySelector('[data-role="test"]');
+    const addr = (row.querySelector('[data-f="test-src"]') || {}).value || "";
+    const suri = !!row.querySelector('[data-f="sids"]');
+    const event = {};
+    if (addr.trim()) event[suri ? "src" : "dst_ip"] = addr.trim();
+    if (out) { out.hidden = false; out.dataset.kind = "busy"; out.textContent = "Testing …"; }
+    try {
+      const r = await tripPost("/api/security/tripwire/test", { check: id, event });
+      const dcs = r.decision || {};
+      const ev = r.event || {};
+      out.dataset.kind = dcs.action;
+      out.innerHTML = `<strong>${esc(TRIP_RESULT_LABEL[dcs.action] || dcs.action)}</strong> — ${esc(dcs.reason || "")}` +
+        `<span class="muted">Simulated ${esc(tripSrc(ev.src))} → ${esc(ev.dst || "?")} on ${esc(ev.iface || "?")}. A real event would: ${esc((dcs.would || []).join("; "))}. Nothing was recorded, pushed or blocked.</span>`;
+    } catch (err) {
+      out.dataset.kind = "error";
+      out.textContent = "Test failed: " + err.message;
+    }
+  }
+
+  if (els.secTripChecks) {
+    els.secTripChecks.addEventListener("click", (ev) => {
+      const row = ev.target.closest(".trip-check");
+      if (!row) return;
+      const act = ev.target.closest("[data-trip-act]");
+      if (act) { tripSetAction(row, act.dataset.tripAct); return; }
+      const doBtn = ev.target.closest("[data-do]");
+      if (!doBtn) return;
+      if (doBtn.dataset.do === "save") tripSaveCheck(row);
+      else if (doBtn.dataset.do === "test") tripTestCheck(row);
+    });
+  }
+
+  if (els.secTripMaster) els.secTripMaster.addEventListener("change", async () => {
+    const on = els.secTripMaster.checked;
+    const d = tripLast || {};
+    const blocking = tripBlockingChecks(d);
+    let text = on
+      ? "Turn the tripwire ON?" + (blocking.length
+          ? `\n\n${blocking.length} check(s) are set to BLOCK (${blocking.map((c) => c.label).join(", ")}): a matching event will cut the network — ${tripStrengthText()}`
+          : "\n\nChecks set to Log only will record and push; none is set to Block.")
+      : "Turn the tripwire OFF?\n\nNo check runs while it is off (the per-check settings are kept).";
+    if (!on && d.tripped) text += "\n\nThe tripwire is TRIPPED right now. Turning it off does NOT lift the lockdown — resolve it with your admin password.";
+    if (!(await (window.twConfirm || window.confirm)(text))) { els.secTripMaster.checked = !on; return; }
+    els.secTripMaster.disabled = true;
+    try {
+      const res = await tripPost("/api/security/tripwire/config", { enabled: on, confirm: on && blocking.length > 0 });
+      if (res && res.warning) showTripNotice(res.warning);
+    } catch (err) {
+      showBanner(true, "Tripwire: " + err.message);
+    } finally {
+      els.secTripMaster.disabled = false;
+      refreshTripwire();
+    }
+  });
+
+  if (els.secTripStrength) els.secTripStrength.addEventListener("click", async (ev) => {
+    const btn = ev.target.closest("[data-trip-strength]");
+    if (!btn || btn.classList.contains("active") || btn.disabled) return;
+    const strength = btn.dataset.tripStrength;
+    const d = tripLast || {};
+    if (d.tripped) { showTripNotice("Resolve the trip before changing the block strength."); return; }
+    const blocking = tripBlockingChecks(d);
+    let text = `Change the block strength to ${strength.toUpperCase()}?\n\n${TRIP_STRENGTH_DESC[strength]}`;
+    text += blocking.length
+      ? `\n\nApplies to the ${blocking.length} check(s) set to Block: ${blocking.map((c) => c.label).join(", ")}.`
+      : "\n\nNo check is set to Block right now; this applies once one is.";
+    if (!(await (window.twConfirm || window.confirm)(text))) return;
+    try {
+      await tripPost("/api/security/tripwire/config", { strength, confirm: true });
+    } catch (err) {
+      showBanner(true, "Tripwire block strength: " + err.message);
+    }
+    refreshTripwire();
+  });
+
+  if (els.secTripNotifySave) els.secTripNotifySave.addEventListener("click", async () => {
+    try {
+      await tripPost("/api/security/tripwire/config", { notify: {
+        on_log: !!els.secTripNotifyLog.checked, window_minutes: Number(els.secTripNotifyWin.value) } });
+      if (window.twToast) window.twToast("Notification policy saved", "success");
+    } catch (err) {
+      showBanner(true, "Tripwire notifications: " + err.message);
+    }
+    refreshTripwire();
+  });
+
+  function fillTripHistChecks(list) {
+    const sel = els.secTripHistCheck;
+    if (!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">All checks</option>` +
+      list.map((c) => `<option value="${esc(c.id)}">${esc(c.label)}</option>`).join("");
+    sel.value = cur;
+  }
+
+  function tripHistLabel(id) {
+    const c = ((tripLast || {}).checks || []).find((x) => x.id === id);
+    return c ? c.label : (id === "manual" ? "Manual / test trip" : id);
+  }
+
+  async function refreshTripHistory() {
+    if (!els.secTripHistBody) return;
+    const q = new URLSearchParams({ offset: tripHist.offset, limit: tripHist.limit });
+    if (els.secTripHistCheck && els.secTripHistCheck.value) q.set("check", els.secTripHistCheck.value);
+    if (els.secTripHistAction && els.secTripHistAction.value) q.set("action", els.secTripHistAction.value);
+    let d;
+    try { d = await fetchJSON("/api/security/tripwire/history?" + q.toString()); }
+    catch (_) { return; }
+    if (!d || !d.ok) return;
+    tripHist.total = d.total || 0;
+    const rows = (d.items || []).map((r) => {
+      const where = `${tripSrc(r.src)} → ${r.dst || "?"}`;
+      const detail = [r.decision, r.now_excluded ? "today: excluded — " + r.now_excluded : "", r.sig]
+        .filter(Boolean).join(" · ");
+      return `<tr data-action="${esc(r.action)}">
+        <td class="mono" data-label="Time">${esc(formatDateTime(r.ts))}</td>
+        <td data-label="Check">${esc(tripHistLabel(r.check))}</td>
+        <td data-label="Result"><span class="trip-result" data-action="${esc(r.action)}">${esc(TRIP_RESULT_LABEL[r.action] || r.action)}</span>${r.imported ? ' <span class="muted">(imported)</span>' : ""}</td>
+        <td class="mono trip-hist-where" data-label="Source → destination">${esc(where)}${r.iface ? ` <span class="muted">(${esc(r.iface)})</span>` : ""}</td>
+        <td class="trip-hist-detail" data-label="Detail">${esc(detail)}</td></tr>`;
+    });
+    els.secTripHistBody.innerHTML = rows.join("") ||
+      `<tr><td colspan="5" class="empty">No events${q.has("check") || q.has("action") ? " match the filter" : " recorded yet"}.</td></tr>`;
+    const from = tripHist.total ? tripHist.offset + 1 : 0;
+    const to = Math.min(tripHist.offset + tripHist.limit, tripHist.total);
+    if (els.secTripHistRange) els.secTripHistRange.textContent = `${formatNumber(from)}–${formatNumber(to)} of ${formatNumber(tripHist.total)}`;
+    if (els.secTripHistPrev) els.secTripHistPrev.disabled = tripHist.offset <= 0;
+    if (els.secTripHistNext) els.secTripHistNext.disabled = to >= tripHist.total;
+    const hi = (tripLast || {}).history_info || {};
+    if (els.secTripHistNote && hi.max_bytes) {
+      els.secTripHistNote.textContent = `Every evaluated event, kept ${hi.days} days (max ${Math.round(hi.max_bytes / 1048576)} MB).`;
+    }
+  }
+  [els.secTripHistCheck, els.secTripHistAction].forEach((sel) => {
+    if (sel) sel.addEventListener("change", () => { tripHist.offset = 0; refreshTripHistory(); });
+  });
+  if (els.secTripHistPrev) els.secTripHistPrev.addEventListener("click", () => {
+    tripHist.offset = Math.max(0, tripHist.offset - tripHist.limit); refreshTripHistory();
+  });
+  if (els.secTripHistNext) els.secTripHistNext.addEventListener("click", () => {
+    if (tripHist.offset + tripHist.limit < tripHist.total) { tripHist.offset += tripHist.limit; refreshTripHistory(); }
+  });
+
   // Defense Layers card: real state, not hardcoded green (audit #12)
   function refreshDefenseLayers() {
     fetchJSON("/api/system/services").then(d => {
@@ -4364,39 +4745,6 @@
   setInterval(refreshTripwire, 30000);
   refreshTripwire();
 
-  if (els.secTripModes) {
-    els.secTripModes.addEventListener("click", async (ev) => {
-      const btn = ev.target.closest("[data-trip-mode]");
-      if (!btn || btn.classList.contains("active")) return;
-      const mode = btn.dataset.tripMode;
-      if (!TRIP_MODES.includes(mode)) return;
-      const cur = tripLast || (await fetchJSON("/api/security/tripwire").catch(() => null)) || {};
-      let text = `Switch the tripwire to ${TRIP_MODE_LABEL[mode]}?\n\n${TRIP_MODE_DESC[mode]}`;
-      if (mode === "medium" || mode === "high") {
-        text += "\n\nA trip cuts the network until an admin resolves it with a password — it never restores itself.";
-      }
-      if (cur.tripped && (mode === "disabled" || mode === "logonly")) {
-        text += "\n\nThe tripwire is TRIPPED right now. Changing the mode does NOT lift the lockdown — resolve it with your admin password afterwards.";
-      }
-      if (!(await (window.twConfirm || window.confirm)(text))) return;
-      const buttons = Array.from(els.secTripModes.querySelectorAll("button"));
-      buttons.forEach((b) => { b.disabled = true; });
-      els.secTripModes.setAttribute("aria-busy", "true");
-      try {
-        const res = await postJSON("/api/security/tripwire/config", { mode });
-        await refreshTripwire();
-        if (res && res.warning) {
-          showTripNotice(res.warning);
-          if (els.secTripPass) els.secTripPass.focus();
-        } else showTripNotice("");
-      } catch (err) {
-        showBanner(true, "Tripwire mode: " + err.message);
-      } finally {
-        buttons.forEach((b) => { b.disabled = false; });
-        els.secTripModes.removeAttribute("aria-busy");
-      }
-    });
-  }
   if (els.secTripResolveBtn) els.secTripResolveBtn.addEventListener("click", async () => {
     if (!els.secTripPass.value) { els.secTripPass.focus(); return; }
     if (!(await (window.twConfirm || window.confirm)("Restore WAN access now?\nTriggered by: " +

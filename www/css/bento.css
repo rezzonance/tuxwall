@@ -4523,6 +4523,123 @@ body.light-theme .is-allowed .fw-legend-pct { color: #18762b; }
   color: var(--muted);
 }
 
+/* --- Phase 2 controls: master switch, block strength, notify policy ------ */
+#sec-trip-card .trip-ctl-row > .fw-switch { margin-left: auto; }
+#sec-trip-card .trip-modes .seg-btn[data-trip-strength="medium"] { --trip-mode-c: var(--amber); }
+#sec-trip-card .trip-modes .seg-btn[data-trip-strength="high"]   { --trip-mode-c: var(--red); }
+#sec-trip-card .trip-modes .seg-btn[data-trip-strength]:disabled { cursor: not-allowed; }
+#sec-trip-card .trip-notify {
+  margin-left: auto;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+}
+.trip-inline {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text);
+}
+.trip-inline input[type="checkbox"] { accent-color: var(--accent); }
+:is(#sec-trip-card, .trip-checks-card, .trip-hist-card) :is(input[type="number"], input[type="text"], textarea, select) {
+  background: var(--bg-elev); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+  font: inherit; font-size: 12.5px; padding: 6px 9px; min-width: 0;
+  color-scheme: inherit;
+}
+:is(#sec-trip-card, .trip-checks-card, .trip-hist-card) :is(input, textarea, select):focus {
+  border-color: var(--accent); outline: none;
+}
+#sec-trip-card .trip-notify input[type="number"] { width: 70px; }
+
+/* --- Checks list ---------------------------------------------------------- */
+.trip-checks-card .trip-empty { padding: 14px 18px; margin: 0; }
+.trip-check {
+  padding: 12px 18px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+.trip-check-head {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
+}
+.trip-check-copy {
+  flex: 1 1 280px; min-width: 0;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.trip-check-copy strong { font-size: 13px; }
+.trip-check-copy .muted { font-size: 11.5px; line-height: 1.45; }
+.trip-check-meta { font-family: var(--mono); font-size: 10.5px !important; }
+.trip-acts { margin-left: auto; }
+.trip-acts .seg-btn { min-width: 74px; }
+.trip-acts .seg-btn[data-trip-act="off"]   { --trip-act-c: var(--muted); }
+.trip-acts .seg-btn[data-trip-act="log"]   { --trip-act-c: var(--accent); }
+.trip-acts .seg-btn[data-trip-act="block"] { --trip-act-c: var(--red); }
+.trip-acts .seg-btn.active {
+  color: color-mix(in srgb, var(--trip-act-c) 45%, var(--text));
+  background: color-mix(in srgb, var(--trip-act-c) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--trip-act-c) 40%, transparent);
+}
+.trip-check-more { margin-top: 8px; }
+.trip-check-more > summary {
+  cursor: pointer; font-size: 11.5px; color: var(--muted); width: max-content;
+}
+.trip-check-more > summary:hover { color: var(--text); }
+.trip-check-form {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px 14px; margin-top: 10px;
+}
+.trip-check-form .fw-field { display: flex; flex-direction: column; gap: 5px; font-size: 11.5px; color: var(--muted); }
+.trip-check-form .trip-wide { grid-column: 1 / -1; }
+.trip-check-form textarea { resize: vertical; font-family: var(--mono); width: 100%; }
+.trip-check-form .trip-always { margin: 0; font-size: 11px; }
+.trip-check-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.trip-test-src { width: 220px; max-width: 100%; }
+.trip-test-result {
+  --tt-c: var(--muted);
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 9px 12px; font-size: 12px; line-height: 1.45;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--tt-c) 35%, var(--border));
+  background: color-mix(in srgb, var(--tt-c) 8%, transparent);
+}
+.trip-test-result[data-kind="block"] { --tt-c: var(--red); }
+.trip-test-result[data-kind="log"] { --tt-c: var(--accent); }
+.trip-test-result[data-kind="error"] { --tt-c: var(--red); }
+.trip-test-result .muted { font-size: 11px; }
+.trip-later { padding-bottom: 6px; }
+.trip-later-head { display: block; margin: 0; padding: 12px 18px 2px; }
+.trip-check-later { opacity: .7; }
+.trip-check-later .badge { margin-left: auto; }
+
+/* --- Event history -------------------------------------------------------- */
+.trip-hist-card .trip-hist-filters { align-items: flex-end; flex-wrap: wrap; gap: 8px 12px; }
+.trip-hist-card .trip-hist-filters .fw-field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--muted); }
+.trip-hist-card .trip-hist-range { font-size: 11px; font-family: var(--mono); }
+.trip-hist-card #sec-trip-hist td { vertical-align: top; }
+.trip-hist-card #sec-trip-hist td:nth-child(2) { white-space: normal; min-width: 160px; }
+.trip-hist-card #sec-trip-hist td.trip-hist-where { white-space: normal; overflow-wrap: anywhere; min-width: 180px; }
+.trip-hist-card #sec-trip-hist td.trip-hist-detail {
+  white-space: normal; font-size: 11.5px; overflow-wrap: anywhere; min-width: 240px;
+}
+.trip-result {
+  --tr-c: var(--muted);
+  display: inline-block; padding: 2px 8px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 600; white-space: nowrap;
+  color: color-mix(in srgb, var(--tr-c) 70%, var(--text));
+  background: color-mix(in srgb, var(--tr-c) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--tr-c) 30%, transparent);
+}
+.trip-result[data-action="block"] { --tr-c: var(--red); }
+.trip-result[data-action="log"] { --tr-c: var(--accent); }
+.trip-result[data-action="counted"] { --tr-c: var(--amber); }
+.trip-result[data-action="absorb"] { --tr-c: var(--green); }
+
+@media (max-width: 760px) {
+  #sec-trip-card .trip-notify { margin-left: 0; }
+  .trip-check { padding: 12px 14px; }
+  .trip-acts { margin-left: 0; width: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .trip-acts .seg-btn { min-width: 0; }
+  .trip-later-head { padding-left: 14px; }
+  .trip-hist-card #sec-trip-hist td.trip-hist-where,
+  .trip-hist-card #sec-trip-hist td.trip-hist-detail { grid-column: 1 / -1; min-width: 0; }
+  .trip-hist-card #sec-trip-hist td:nth-child(2) { min-width: 0; }
+}
+
 /* Tripwire dot: JS uses "crit" (red) / "ok" (green, default) / "inactive". */
 #sec-trip-dot[data-status="crit"] {
   background: var(--red);
