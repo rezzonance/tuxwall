@@ -463,6 +463,21 @@ PY
     fi
     systemctl restart tuxwall.service || true
 
+    # Tripwire engine. Fresh installs start in mode "disabled" (no
+    # /etc/tuxwall/tripwire.json): the service idles with no detection
+    # threads, but it must run so a mode chosen on Security > Tripwire takes
+    # effect and a trip in force is re-applied at boot. Enabled once, the
+    # first time it is seen (no config yet); an admin who disabled the unit
+    # later keeps that choice. Upgrades restart a running engine.
+    chmod 750 /usr/local/sbin/tuxwall-tripwire 2>/dev/null || true
+    chmod 750 /usr/local/sbin/tuxwall-tripwire-restore 2>/dev/null || true
+    if ! systemctl is-enabled --quiet tuxwall-tripwire.service 2>/dev/null \
+       && [[ ! -e /etc/tuxwall/tripwire.json ]]; then
+        systemctl enable --now tuxwall-tripwire.service >/dev/null 2>&1 || true
+    else
+        systemctl try-restart tuxwall-tripwire.service >/dev/null 2>&1 || true
+    fi
+
     step 8 "Triggering initial blocklist download (background)..."
     sleep 2
     curl -s -X POST http://127.0.0.1:8008/api/blocklists/update >/dev/null 2>&1 || true

@@ -191,6 +191,9 @@
     secTripResolve: document.getElementById("sec-trip-resolve"),
     secTripPass: document.getElementById("sec-trip-pass"),
     secTripResolveBtn: document.getElementById("sec-trip-resolve-btn"),
+    secTripHealth: document.getElementById("sec-trip-health"),
+    secTripHealthText: document.getElementById("sec-trip-health-text"),
+    secTripNotice: document.getElementById("sec-trip-notice"),
     tripBanner: document.getElementById("trip-banner"),
     secCanaryHint: document.getElementById("sec-canary-hint"),
     secCanaryToggle: document.getElementById("sec-canary-toggle"),
@@ -3900,6 +3903,7 @@
     document.querySelectorAll("#view-security .fw-pane[data-sec-pane]").forEach((p) => {
       p.hidden = p.dataset.secPane !== pane;
     });
+    if (pane === "tripwire") refreshTripwire();
   }
   document.querySelectorAll("#sec-subtabs .fw-subtab").forEach((btn) => {
     btn.addEventListener("click", () => setSecTab(btn.dataset.secPane));
@@ -4113,10 +4117,10 @@
   const TRIP_MODES = ["disabled", "logonly", "medium", "high"];
   const TRIP_MODE_LABEL = { disabled: "Disabled", logonly: "Log only", medium: "Medium", high: "High" };
   const TRIP_MODE_DESC = {
-    disabled: "Off — the WAN is never contained automatically.",
-    logonly: "Detection armed, blade sheathed — trip-class events are recorded and pushed, but nothing is ever contained. The away-from-home mode.",
-    medium: "Cuts LAN↔WAN forwarding but keeps WireGuard 51820 open as the emergency admin door.",
-    high: "Cuts all WAN access — the router is reachable from the LAN only.",
+    disabled: "Off — no detection runs and the WAN is never contained automatically.",
+    logonly: "Detection armed, blade sheathed — trip-class events are recorded and pushed (at most one push per check every 10 minutes), but nothing is ever contained. The away-from-home mode.",
+    medium: "Cuts all forwarding (LAN↔WAN, VPN→LAN, between VLANs). The router itself stays reachable, including over WireGuard.",
+    high: "Also closes new connections from the internet to the router — reachable from the LAN only. WAN DHCP and replies to the router's own connections (push alerts) keep working.",
   };
   const TRIP_CLASS_DESC = {
     "successful-admin": "An attacker appears to have GAINED administrator access to a system",
@@ -4126,6 +4130,7 @@
     "shellcode-detect": "Executable exploit code was detected in network traffic",
     "canary-egress": "The honeypot process attempted an outbound connection — presumed deception-layer compromise",
   };
+  let tripLast = null;
 
   function tripReasonText(d) {
     const raw = typeof d.reason === "string" ? d.reason.trim() : "";
@@ -4137,17 +4142,23 @@
     return `<span class="trip-kv${wide ? " trip-kv-wide" : ""}"><span>${esc(label)}</span><b>${esc(value)}</b></span>`;
   }
 
+  function tripSrc(v) {
+    if (!v) return "—";
+    const s = String(v);
+    return s.startsWith("local:") ? "local (" + s.replace(/^local:/, "") + ")" : s;
+  }
+
+  function tripWhen(ts) {
+    return ts ? formatDateTime(ts) + " (" + formatRelative(ts) + ")" : "—";
+  }
+
+  // Priority: a trip in force > recent log-only / absorbed events > the last
+  // (resolved) trip > armed / off.
   function renderTripMessage(d, mode, tripMode) {
     if (!els.secTripMessage) return;
     const msg = els.secTripMessage;
     if (els.secTripMsgSev) els.secTripMsgSev.hidden = true;
     if (els.secTripMsgGrid) els.secTripMsgGrid.innerHTML = "";
-
-    const src = d.src_ip
-      ? (String(d.src_ip).startsWith("local:")
-          ? "local (" + String(d.src_ip).replace(/^local:/, "") + ")"
-          : String(d.src_ip))
-      : "";
 
     if (d.tripped) {
       const age = Math.max(1, Date.now() / 1000 - (d.since || Date.now() / 1000));
@@ -4159,10 +4170,14 @@
         els.secTripMsgSev.hidden = false;
         els.secTripMsgSev.textContent = String(tripMode).toUpperCase();
       }
-      els.secTripMsgReason.textContent = tripReasonText(d);
+      let reason = tripReasonText(d);
+      if (mode === "disabled" || mode === "logonly") {
+        reason += ` — the mode is now ${TRIP_MODE_LABEL[mode]}, but that does not lift this trip: the ${String(tripMode).toUpperCase()} lockdown stays until you resolve it below.`;
+      }
+      els.secTripMsgReason.textContent = reason;
       els.secTripMsgGrid.innerHTML = [
         tripKv("Class", d.class || "—"),
-        tripKv("Source", src || "—"),
+        tripKv("Source", tripSrc(d.src_ip)),
         tripKv("Destination", d.dst || "—", true),
         tripKv("Containment", d.rules_present ? "FORWARD drop active" : "rules not present"),
         tripKv("Tripped", d.since ? formatDateTime(d.since) : "—"),
@@ -4171,7 +4186,45 @@
       return;
     }
 
-    if ((d.trips || 0) > 0 && (d.reason || d.class)) {
+    const lo = d.last_logonly || null;
+    const ab = d.last_absorbed || null;
+    const nLo = d.logonly_events || 0;
+    const nAb = d.absorbed_events || 0;
+    const lastTrip = (d.trips || 0) > 0 && (d.reason || d.class) && d.since ? d : null;
+    const tripKvs = lastTrip
+      ? [tripKv("Last trip", `${formatDateTime(lastTrip.since)} · ${String(tripMode).toUpperCase()} · resolved${d.resolved_at ? " " + formatRelative(d.resolved_at) : ""}${d.resolved_by ? " by " + d.resolved_by : ""}`, true)]
+      : [];
+
+    if ((nLo > 0 && lo) || (nAb > 0 && ab)) {
+      const newest = (lo && (!ab || (lo.ts || 0) >= (ab.ts || 0))) ? "logonly" : "absorbed";
+      msg.dataset.kind = "armed";
+      const parts = [];
+      if (nLo) parts.push(formatNumber(nLo) + " log-only");
+      if (nAb) parts.push(formatNumber(nAb) + " absorbed");
+      els.secTripMsgTitle.textContent = "Trip-class events recorded — " + parts.join(" · ");
+      els.secTripMsgMeta.textContent = "Nothing was contained. Latest " +
+        (newest === "logonly" ? "log-only event " + formatRelative(lo.ts) : "absorbed event " + formatRelative(ab.ts)) + ".";
+      els.secTripMsgReason.textContent = newest === "logonly"
+        ? `${lo.reason || "Trip-class event"}${lo.class ? " [" + lo.class + "]" : ""} — recorded only${mode === "logonly" ? " (Log only mode)" : ""}.`
+        : `${ab.class || "Trip-class event"} hit a deception port and was absorbed by design (canary + ban pipeline own it).`;
+      const kv = [];
+      if (lo) {
+        kv.push(tripKv("Last log-only", tripWhen(lo.ts)));
+        kv.push(tripKv("Class", lo.class || "—"));
+        kv.push(tripKv("Source", tripSrc(lo.src)));
+        kv.push(tripKv("Destination", lo.dst || "—"));
+        if (lo.sig) kv.push(tripKv("Signature", lo.sig, true));
+      }
+      if (ab) {
+        kv.push(tripKv("Last absorbed", tripWhen(ab.ts)));
+        kv.push(tripKv("Source", tripSrc(ab.src)));
+        kv.push(tripKv("Landed on", ab.dst || "—", true));
+      }
+      els.secTripMsgGrid.innerHTML = kv.concat(tripKvs).join("");
+      return;
+    }
+
+    if (lastTrip) {
       msg.dataset.kind = "last";
       els.secTripMsgTitle.textContent = "Last trip — resolved";
       els.secTripMsgMeta.textContent =
@@ -4179,51 +4232,57 @@
       els.secTripMsgReason.textContent = tripReasonText(d);
       els.secTripMsgGrid.innerHTML = [
         tripKv("Class", d.class || "—"),
-        tripKv("Source", src || "—"),
+        tripKv("Source", tripSrc(d.src_ip)),
         tripKv("Destination", d.dst || "—", true),
         tripKv("Signature", d.signature || "—", true),
       ].join("");
       return;
     }
 
-    if ((d.absorbed_events || 0) > 0) {
-      const la = d.last_absorbed || {};
-      msg.dataset.kind = "armed";
-      els.secTripMsgTitle.textContent = "Deception layer absorbed " + formatNumber(d.absorbed_events) + " trip-class event(s)";
-      els.secTripMsgMeta.textContent = "Delegated to the canary + ban pipeline - never contained, in any mode.";
-      els.secTripMsgReason.textContent = (la.class || "") + " hit a honeypot port and was absorbed by design.";
-      els.secTripMsgGrid.innerHTML = [
-        tripKv("Last class", la.class || "—"),
-        tripKv("Source", la.src && !String(la.src).startsWith("local:") ? String(la.src) : (la.src || "—")),
-        tripKv("Landed on", la.dst || "—", true),
-        tripKv("Absorbed", la.ts ? formatDateTime(la.ts) : "—"),
-      ].join("");
-      return;
-    }
-
-    if (mode === "logonly" && (d.logonly_events || 0) > 0) {
-      const last = d.last_logonly || {};
-      msg.dataset.kind = "armed";
-      els.secTripMsgTitle.textContent = "Armed (log only) — " + formatNumber(d.logonly_events) + " event(s) recorded";
-      els.secTripMsgMeta.textContent = "Nothing contained — trip-class events are recorded for review.";
-      els.secTripMsgReason.textContent = (last.reason || "") + (last.class ? " [" + last.class + "]" : "");
-      els.secTripMsgGrid.innerHTML = [
-        tripKv("Last class", last.class || "—"),
-        tripKv("Source", last.src && !String(last.src).startsWith("local:") ? String(last.src) : (last.src || "—")),
-        tripKv("Destination", last.dst || "—", true),
-        tripKv("Recorded", last.ts ? formatDateTime(last.ts) : "—"),
-      ].join("");
-      return;
-    }
-
     msg.dataset.kind = mode === "disabled" ? "idle" : "armed";
-    els.secTripMsgTitle.textContent = mode === "disabled" ? "Tripwire is off" : "Armed — no trip recorded";
+    els.secTripMsgTitle.textContent = mode === "disabled" ? "Tripwire is off" : "Armed — no events recorded";
     els.secTripMsgMeta.textContent = mode === "disabled"
-      ? "No automatic containment — the WAN stays open."
+      ? "No detection runs and the WAN stays open."
       : "Watching for intrusion-class events.";
     els.secTripMsgReason.textContent = mode === "disabled"
-      ? "Choose Medium or High above to contain the WAN when a confirmed intrusion is detected."
-      : "A Suricata priority-1 alert or a canary egress attempt will cut WAN forwarding and require your admin password to restore.";
+      ? "Choose Log only to record trip-class events, or Medium / High to contain the WAN when one is detected."
+      : (mode === "logonly"
+          ? "A Suricata priority-1 alert or a canary egress attempt will be recorded and pushed — nothing is cut."
+          : "A Suricata priority-1 alert or a canary egress attempt will cut forwarding and require your admin password to restore.");
+  }
+
+  const TRIP_WATCHER_LABEL = { suricata: "Suricata watcher", canary: "Canary watcher" };
+
+  function renderTripHealth(d, mode) {
+    if (!els.secTripHealth) return;
+    const e = d.engine || {};
+    const w = e.watchers || {};
+    let ok = "ok";
+    let text;
+    if (!e.active) {
+      ok = "unknown"; text = "Engine status unavailable";
+    } else if (e.healthy) {
+      if (mode === "disabled") {
+        ok = "idle";
+        text = "Engine running · detection off" + (d.tripped ? " · re-enforcing the trip" : "");
+      } else {
+        text = "Engine running · " + ["suricata", "canary"].map((n) => {
+          const x = w[n] || {};
+          return (TRIP_WATCHER_LABEL[n] || n) + " ok" + (x.age != null ? " (" + Math.round(x.age) + " s)" : "");
+        }).join(" · ");
+      }
+    } else {
+      ok = e.needed ? "bad" : "idle";
+      text = (e.needed ? "Not watching: " : "Engine: ") + (e.problems || []).join("; ");
+    }
+    els.secTripHealth.dataset.ok = ok;
+    els.secTripHealthText.textContent = text;
+  }
+
+  function showTripNotice(text) {
+    if (!els.secTripNotice) return;
+    els.secTripNotice.textContent = text || "";
+    els.secTripNotice.hidden = !text;
   }
 
   async function refreshTripwire() {
@@ -4231,12 +4290,18 @@
     try { d = await fetchJSON("/api/security/tripwire"); }
     catch (_) { return; }
     if (!d || !d.ok) return;
+    tripLast = d;
 
     const mode = TRIP_MODES.includes(d.mode) ? d.mode : "disabled";
     const tripMode = TRIP_MODES.includes(d.trip_mode) ? d.trip_mode : "high";
     const state = d.tripped ? "tripped" : (mode === "disabled" ? "disabled" : "armed");
+    const eng = d.engine || {};
+    const unhealthy = eng.needed && eng.healthy === false;
 
-    if (els.secTripCard) els.secTripCard.dataset.state = state;
+    if (els.secTripCard) {
+      els.secTripCard.dataset.state = state;
+      els.secTripCard.dataset.mode = mode;
+    }
     if (els.secTripBadge) {
       els.secTripBadge.dataset.state = state;
       els.secTripBadge.textContent = d.tripped
@@ -4247,11 +4312,13 @@
       els.secTripHint.textContent = d.tripped
         ? "WAN contained since " + formatDateTime(d.since) + " — resolve below"
         : (mode === "disabled"
-            ? "Disabled — no automatic WAN containment"
-            : TRIP_MODE_LABEL[mode] + " containment armed");
+            ? "Disabled — no detection, no automatic containment"
+            : (mode === "logonly" ? "Log only — recording, never containing"
+                                  : TRIP_MODE_LABEL[mode] + " containment armed"));
     }
     if (els.secTripDot) {
-      els.secTripDot.dataset.status = d.tripped ? "crit" : (mode === "disabled" ? "unknown" : "ok");
+      els.secTripDot.dataset.status = d.tripped ? "crit"
+        : (unhealthy ? "inactive" : (mode === "disabled" ? "unknown" : "ok"));
     }
     if (els.secTripModes) {
       els.secTripModes.querySelectorAll("[data-trip-mode]").forEach((btn) => {
@@ -4262,7 +4329,9 @@
     }
     if (els.secTripModeNote) els.secTripModeNote.textContent = TRIP_MODE_DESC[mode];
 
+    renderTripHealth(d, mode);
     renderTripMessage(d, mode, tripMode);
+    if (!d.tripped) showTripNotice("");
     if (els.secTripResolve) els.secTripResolve.hidden = !d.tripped;
     if (els.tripBanner) {
       if (d.tripped) {
@@ -4301,12 +4370,25 @@
       if (!btn || btn.classList.contains("active")) return;
       const mode = btn.dataset.tripMode;
       if (!TRIP_MODES.includes(mode)) return;
+      const cur = tripLast || (await fetchJSON("/api/security/tripwire").catch(() => null)) || {};
+      let text = `Switch the tripwire to ${TRIP_MODE_LABEL[mode]}?\n\n${TRIP_MODE_DESC[mode]}`;
+      if (mode === "medium" || mode === "high") {
+        text += "\n\nA trip cuts the network until an admin resolves it with a password — it never restores itself.";
+      }
+      if (cur.tripped && (mode === "disabled" || mode === "logonly")) {
+        text += "\n\nThe tripwire is TRIPPED right now. Changing the mode does NOT lift the lockdown — resolve it with your admin password afterwards.";
+      }
+      if (!(await (window.twConfirm || window.confirm)(text))) return;
       const buttons = Array.from(els.secTripModes.querySelectorAll("button"));
       buttons.forEach((b) => { b.disabled = true; });
       els.secTripModes.setAttribute("aria-busy", "true");
       try {
-        await postJSON("/api/security/tripwire/config", { mode });
+        const res = await postJSON("/api/security/tripwire/config", { mode });
         await refreshTripwire();
+        if (res && res.warning) {
+          showTripNotice(res.warning);
+          if (els.secTripPass) els.secTripPass.focus();
+        } else showTripNotice("");
       } catch (err) {
         showBanner(true, "Tripwire mode: " + err.message);
       } finally {

@@ -7,6 +7,12 @@ case "$1" in
     systemctl stop tuxwall.service 2>/dev/null || true
     systemctl disable tuxwall.service 2>/dev/null || true
     systemctl disable tuxwall-blocklist-update.timer 2>/dev/null || true
+    # tripwire: keep running across upgrades (a trip in force stays
+    # enforced); stopped only when the package is removed
+    if [ "$1" = remove ]; then
+      systemctl stop tuxwall-tripwire.service 2>/dev/null || true
+      systemctl disable tuxwall-tripwire.service 2>/dev/null || true
+    fi
     ;;
 esac
 

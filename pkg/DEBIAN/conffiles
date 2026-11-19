@@ -11,3 +11,5 @@
 /etc/aide/aide.conf.d/61_tuxwall_appliance
 /etc/systemd/system/tuxwall-kea-mirror.service
 /etc/systemd/system/tuxwall-kea-mirror.timer
+/etc/systemd/system/tuxwall-tripwire.service
+/etc/logrotate.d/tuxwall-tripwire

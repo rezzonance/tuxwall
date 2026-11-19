@@ -54,3 +54,24 @@ against a synthetic archive containing every known leak type (and, with
 `--live`, every secret value of the real archive), upload limits, and the
 single-file restore (preview, atomic write, permissions, pre-restore copy,
 symlink refusal, strict second confirm, firewall routing, audit log).
+
+## tripwire_check.py — tripwire engine (CI)
+
+```bash
+python3 tools/tripwire_check.py
+```
+
+Loads `pkg/usr/local/sbin/tuxwall-tripwire` with `TUXWALL_TRIPWIRE_ROOT`
+pointing at a temp dir: every path is remapped, the firewall is stubbed
+(rules are only recorded) and pushes go to a file. Checks the eve.json
+pre-filter and event normalisation, `evaluate()` per mode and deception-port
+absorption, the lockdown rule plan (high mode keeps WAN DHCP, IPv6 ND and
+replies to router-opened connections above the DROP), enforce/lift
+idempotence, push dedupe + summary, push-before-enforce, the state lock
+(threads + processes), set-mode/resolve audit and the "still tripped"
+warning, eve rotation (rename, copytruncate, oversized lines), the kernel
+follower, watcher death, and a short daemon run (heartbeats, disabled mode
+stops the watchers, re-enforcement, CLI resolve). Real iptables rules are
+validated separately inside a throwaway `ip netns` (never on a live
+firewall): run the engine with `TUXWALL_TRIPWIRE_ROOT=<tmp>` plus
+`TUXWALL_TRIPWIRE_NETNS=<ns>`.

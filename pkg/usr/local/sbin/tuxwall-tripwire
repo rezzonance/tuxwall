@@ -1,0 +1,1121 @@
+#!/usr/bin/env python3
+"""tuxwall-tripwire - WAN containment on confirmed intrusion-class events.
+
+Modes (/etc/tuxwall/tripwire.json, "mode"):
+  disabled  no detection threads run; nothing can cut the network
+            (a trip that is already in force still holds until resolved)
+  logonly   detection armed, blade sheathed: trip-class events are
+            recorded and pushed to the phone (rate-limited) but NOTHING
+            is contained - the mode for when nobody is home to resolve a
+            lockdown. Review the log, then arm medium/high when present
+  medium    trip -> all forwarding cut (FORWARD drop, v4 + v6); the
+            router's own listeners (WireGuard 51820 included) stay up
+  high      trip -> forwarding cut + new WAN INPUT closed; the router is
+            reachable from the LAN only. WAN DHCP (v4 67/68, v6 546/547),
+            IPv6 neighbour discovery and replies to connections the
+            router itself opened stay allowed, so the WAN lease survives
+            and pushes/recovery keep working
+
+Checks (CHECKS registry):
+  suricata.<class>  Suricata priority-1 alerts in the exploit-success
+     classes successful-admin, attempted-admin, trojan-activity,
+     web-application-attack, shellcode-detect
+     - BUT ONLY when the attack landed on something REAL. Events whose
+       destination is a deception-layer port (canary/tarpit) are delegated:
+       the honeypot absorbed the attack and the ban pipeline owns the
+       response - the tripwire never contains for them (a Mirai scan
+       hitting the fake ADB port is weather, not an incident). They are
+       counted as deception-absorbed and remain visible in the log.
+  canary.egress  the opencanary uid attempts ANY outbound connection
+     beyond its webhook and DNS (kernel log prefix
+     [TUXWALL-CANARY-EGRESS]) - presumed deception-layer compromise
+
+No auto-restore, ever: a trip holds until an administrator resolves it
+deliberately (a timer would re-open the door before the compromise is
+actually fixed; a CrowdSec ban does not un-find the way in).
+
+State survives reboot: tripwire-state.json + the daemon re-enforces the
+lockdown at service start (ExecStartPre) and every 15 s while tripped, so
+neither a reboot nor a ufw reload can drop the containment.
+
+Health: every watcher thread beats; the daemon writes
+/run/tuxwall-tripwire/health.json every few seconds (the dashboard shows it
+and raises an incident when a watcher is dead or stale).
+
+Testing: TUXWALL_TRIPWIRE_ROOT=<dir> remaps every path under <dir> and
+stubs enforcement (rules are recorded in <dir>/enforce.log) and the unbound
+restart; adding TUXWALL_TRIPWIRE_NETNS=<ns> applies the real rules inside
+that network namespace instead. TUXWALL_TRIPWIRE_PUSH_FILE=<file> records
+pushes instead of sending them. Never point a test at the live firewall.
+"""
+
+import fcntl
+import json
+import os
+import re
+import select
+import shlex
+import signal
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+
+ENV = os.environ.get
+ROOT = (ENV("TUXWALL_TRIPWIRE_ROOT") or "").rstrip("/")
+NETNS = ENV("TUXWALL_TRIPWIRE_NETNS") or ""
+
+
+def _p(path):
+    return ROOT + path if ROOT else path
+
+
+CONFIG = _p("/etc/tuxwall/tripwire.json")
+STATE = _p("/etc/tuxwall/tripwire-state.json")
+LOG = _p("/var/log/tuxwall/tripwire.log")
+AUDIT = _p("/var/log/tuxwall/tripwire-audit.log")
+ALERTS_CONF = _p("/etc/tuxwall/alerts.json")
+EVE = ENV("TUXWALL_TRIPWIRE_EVE") or _p("/var/log/suricata/eve.json")
+RUN_DIR = _p("/run/tuxwall-tripwire")
+HEALTH = RUN_DIR + "/health.json"
+LOCK = RUN_DIR + "/state.lock"
+ENFORCE_LOG = _p("/enforce.log")
+PUSH_FILE = ENV("TUXWALL_TRIPWIRE_PUSH_FILE") or ""
+KERNEL_CMD = shlex.split(ENV("TUXWALL_TRIPWIRE_KERNEL_CMD") or "") or [
+    "journalctl", "-kf", "-n", "0", "-o", "cat", "--no-pager"]
+# enforcement is stubbed in a sandbox unless a test namespace is given
+STUB_FIREWALL = bool(ROOT) and not NETNS
+
+MODES = ("disabled", "logonly", "medium", "high")
+MARK = "TUXWALL-TRIPWIRE"
+MARK_ALLOW = "TUXWALL-TRIPWIRE-ALLOW"
+CANARY_PREFIX = "[TUXWALL-CANARY-EGRESS]"
+
+TICK_S = float(ENV("TUXWALL_TRIPWIRE_TICK") or 5)          # health/supervision
+ENFORCE_EVERY_S = float(ENV("TUXWALL_TRIPWIRE_ENFORCE_S") or 15)
+BEAT_S = float(ENV("TUXWALL_TRIPWIRE_BEAT") or 5)           # watcher heartbeat
+STALE_S = float(ENV("TUXWALL_TRIPWIRE_STALE") or 90)
+NOTIFY_WINDOW_S = float(ENV("TUXWALL_TRIPWIRE_NOTIFY_WINDOW") or 600)
+NOTIFY_TIMEOUT_S = 5
+EVE_CHUNK = 262144
+MAX_LINE = 4 * 1024 * 1024
+AUDIT_MAX = 256 * 1024
+
+# Destination ports owned by the deception layer: traffic landing here hit
+# a FAKE service by design - the canary/tarpit absorbed it and the ban
+# pipeline owns the response. Annotated so the reader can instantly tell
+# "absorbed" from "landed on something real".
+DECEPTION_PORTS = {22, 23, 161, 5555, 2323, 3389, 445, 5900, 1433, 6379}
+
+# ── check registry ───────────────────────────────────────────────────────────
+# eve.json alerts carry the classification DESCRIPTION in "category"
+# (verified against live Suricata output), not the short classtype name.
+CHECKS = {
+    "suricata.successful-admin": {
+        "source": "suricata", "classtype": "successful-admin",
+        "category": "Successful Administrator Privilege Gain",
+        "label": "Suricata: successful administrator privilege gain"},
+    "suricata.attempted-admin": {
+        "source": "suricata", "classtype": "attempted-admin",
+        "category": "Attempted Administrator Privilege Gain",
+        "label": "Suricata: attempted administrator privilege gain"},
+    "suricata.trojan-activity": {
+        "source": "suricata", "classtype": "trojan-activity",
+        "category": "A Network Trojan was detected",
+        "label": "Suricata: trojan activity"},
+    "suricata.web-application-attack": {
+        "source": "suricata", "classtype": "web-application-attack",
+        "category": "Web Application Attack",
+        "label": "Suricata: web application attack"},
+    "suricata.shellcode-detect": {
+        "source": "suricata", "classtype": "shellcode-detect",
+        "category": "Executable code was detected",
+        "label": "Suricata: executable code (shellcode)"},
+    "canary.egress": {
+        "source": "canary",
+        "label": "Canary egress attempt (presumed deception-layer compromise)"},
+}
+_BY_CLASSTYPE = {c["classtype"]: k for k, c in CHECKS.items() if c.get("classtype")}
+_BY_CATEGORY = {c["category"]: k for k, c in CHECKS.items() if c.get("category")}
+# legacy names kept for readers of the old module
+CLASSTYPES = set(_BY_CLASSTYPE)
+CATEGORIES = set(_BY_CATEGORY)
+
+SURICATA_REASON = "Suricata priority-1 alert"
+CANARY_REASON = "Canary egress attempt (presumed deception-layer compromise)"
+
+# Cheap byte-level pre-filter: only alert lines of severity 1 are ever
+# JSON-parsed (eve.json is mostly flow/dns/tls records).
+_ALERT_TAG = b'"event_type":"alert"'
+_SEV1_RE = re.compile(rb'"severity":\s*1\s*[,}]')
+_KV_RE = re.compile(r"\b(OUT|IN|SRC|DST|DPT|SPT|PROTO)=(\S*)")
+
+EVENT_HOOKS = []   # callables(event, decision) run after an event is recorded
+
+
+# ── small helpers ────────────────────────────────────────────────────────────
+
+def log(line):
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        with open(LOG, "a") as f:
+            f.write("%s %s\n" % (ts, line))
+    except OSError:
+        pass
+
+
+def read_json(path, fallback):
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, type(fallback)) else fallback
+    except Exception:
+        return fallback
+
+
+def write_json(path, data, mode=0o644):
+    """Atomic: unique temp file in the same directory, fsync, rename."""
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    tmp = "%s/.%s.%d.%d.tmp" % (d, os.path.basename(path), os.getpid(),
+                                threading.get_ident())
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def get_config():
+    return read_json(CONFIG, {})
+
+
+def get_mode():
+    mode = str(get_config().get("mode") or "disabled").lower()
+    return mode if mode in MODES else "disabled"
+
+
+def _wrap(argv):
+    return (["ip", "netns", "exec", NETNS] + argv) if NETNS else argv
+
+
+def wan_iface():
+    if ENV("TUXWALL_TRIPWIRE_WAN"):
+        return ENV("TUXWALL_TRIPWIRE_WAN")
+    try:
+        out = subprocess.run(_wrap(["ip", "route", "show", "default"]),
+                             capture_output=True, text=True, timeout=5).stdout
+        return (out.split(" dev ")[1].split()[0] if " dev " in out else "")
+    except Exception:
+        return ""
+
+
+# ── state store (thread lock + cross-process flock) ──────────────────────────
+
+_THREAD_LOCK = threading.RLock()
+_LOCK_DEPTH = threading.local()
+
+
+class state_lock:
+    """Serialises every read-modify-write of the state file between the
+    daemon's threads and the CLI (resolve/set-mode run as other processes)."""
+
+    def __enter__(self):
+        _THREAD_LOCK.acquire()
+        depth = getattr(_LOCK_DEPTH, "n", 0)
+        if depth == 0:
+            os.makedirs(RUN_DIR, exist_ok=True)
+            self._fd = os.open(LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(self._fd, fcntl.LOCK_EX)
+            _LOCK_DEPTH.fd = self._fd
+        _LOCK_DEPTH.n = depth + 1
+        return self
+
+    def __exit__(self, *exc):
+        _LOCK_DEPTH.n -= 1
+        if _LOCK_DEPTH.n == 0:
+            fd = _LOCK_DEPTH.fd
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        _THREAD_LOCK.release()
+        return False
+
+
+def load_state():
+    return read_json(STATE, {})
+
+
+def update_state(fn):
+    """fn(state) mutates in place and may return a value; written atomically."""
+    with state_lock():
+        st = load_state()
+        result = fn(st)
+        write_json(STATE, st)
+        return result
+
+
+# ── audit ────────────────────────────────────────────────────────────────────
+
+def audit(action, by="", via="", client="", **detail):
+    entry = {"ts": round(time.time(), 3),
+             "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+             "action": action, "by": by or "unknown", "via": via or "cli"}
+    if client:
+        entry["client"] = client
+    entry.update({k: v for k, v in detail.items() if v is not None})
+    try:
+        os.makedirs(os.path.dirname(AUDIT), exist_ok=True)
+        if os.path.exists(AUDIT) and os.path.getsize(AUDIT) > AUDIT_MAX:
+            os.replace(AUDIT, AUDIT + ".1")
+        fd = os.open(AUDIT, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o640)
+        with os.fdopen(fd, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass
+    return entry
+
+
+def audit_tail(n=20):
+    try:
+        with open(AUDIT) as f:
+            lines = f.readlines()[-n:]
+    except OSError:
+        return []
+    out = []
+    for ln in lines:
+        try:
+            out.append(json.loads(ln))
+        except ValueError:
+            continue
+    return out
+
+
+# ── lockdown engine ──────────────────────────────────────────────────────────
+
+def _c(mark):
+    return ["-m", "comment", "--comment", mark]
+
+
+def lockdown_rules(mode, wan):
+    """[(ipt, chain, [spec, ...])] - specs top to bottom; the last spec of
+    each chain is the DROP and every ALLOW must sit above it."""
+    plan = []
+    for ipt in ("iptables", "ip6tables"):
+        plan.append((ipt, "FORWARD", [_c(MARK) + ["-j", "DROP"]]))
+    if mode == "high" and wan:
+        for ipt in ("iptables", "ip6tables"):
+            allow = []
+            if ipt == "iptables":
+                allow.append(["-i", wan, "-p", "udp", "--sport", "67", "--dport", "68"]
+                             + _c(MARK_ALLOW) + ["-j", "ACCEPT"])
+            else:
+                allow.append(["-i", wan, "-p", "udp", "--sport", "547", "--dport", "546"]
+                             + _c(MARK_ALLOW) + ["-j", "ACCEPT"])
+                for t in ("134", "135", "136"):   # RA, NS, NA: v6 WAN needs ND
+                    allow.append(["-i", wan, "-p", "ipv6-icmp", "--icmpv6-type", t]
+                                 + _c(MARK_ALLOW) + ["-j", "ACCEPT"])
+            # replies to connections the ROUTER opened (push, DNS upstream,
+            # NTP, later recovery); --ctdir REPLY never matches a session an
+            # outside host opened towards the router
+            allow.append(["-i", wan, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
+                          "--ctdir", "REPLY"] + _c(MARK_ALLOW) + ["-j", "ACCEPT"])
+            plan.append((ipt, "INPUT", allow + [["-i", wan] + _c(MARK) + ["-j", "DROP"]]))
+    return plan
+
+
+def _ipt(argv):
+    if STUB_FIREWALL:
+        with open(ENFORCE_LOG, "a") as f:
+            f.write(" ".join(argv) + "\n")
+        # stub: -C never matches before an -I was recorded for the same spec
+        if argv[1] == "-C":
+            return _stub_present(argv)
+        return 0
+    try:
+        return subprocess.run(_wrap(argv), capture_output=True, timeout=20).returncode
+    except Exception:
+        return 1
+
+
+def _stub_present(argv):
+    key = " ".join([argv[0], argv[2]] + argv[3:])
+    try:
+        with open(ENFORCE_LOG) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return 1
+    n = 0
+    for ln in lines:
+        p = ln.split(" ")
+        if len(p) < 3:
+            continue
+        spec = " ".join([p[0], p[2]] + p[3 + (1 if p[1] == "-I" else 0):])
+        if spec == key:
+            n += {"-I": 1, "-D": -1}.get(p[1], 0)
+    return 0 if n > 0 else 1
+
+
+def _chain_lines(ipt, chain):
+    if STUB_FIREWALL:
+        return []
+    try:
+        out = subprocess.run(_wrap([ipt, "-S", chain]), capture_output=True,
+                             text=True, timeout=20).stdout
+    except Exception:
+        return []
+    return [ln for ln in out.splitlines() if ln.startswith("-A ")]
+
+
+def _delete_marked(ipt, chain, which):
+    """Delete our rules (which: 'allow' | 'drop' | 'all') by their -S line."""
+    removed = 0
+    for _ in range(64):
+        hit = None
+        for ln in _chain_lines(ipt, chain):
+            allow = MARK_ALLOW in ln
+            drop = (not allow) and re.search(r"--comment \"?%s\"? " % MARK, ln)
+            if (which in ("allow", "all") and allow) or (which in ("drop", "all") and drop):
+                hit = ln
+                break
+        if not hit:
+            break
+        argv = shlex.split(hit)
+        argv[0] = "-D"
+        if _ipt([ipt] + argv) != 0:
+            break
+        removed += 1
+    return removed
+
+
+def _chain_ok(ipt, chain, specs):
+    if any(_ipt([ipt, "-C", chain] + s) != 0 for s in specs):
+        return False
+    if len(specs) == 1 or STUB_FIREWALL:
+        return True
+    lines = _chain_lines(ipt, chain)
+    drop_idx = [i for i, ln in enumerate(lines)
+                if MARK_ALLOW not in ln and MARK in ln and "-j DROP" in ln]
+    allow_idx = [i for i, ln in enumerate(lines) if MARK_ALLOW in ln]
+    return bool(drop_idx) and all(i < drop_idx[0] for i in allow_idx)
+
+
+def enforce(mode=None, wan=None):
+    """Idempotently apply the lockdown rules (DROP first, so the chain is
+    never open while ALLOWs are re-ordered). True if anything changed."""
+    mode = mode or (load_state().get("mode") or "medium")
+    wan = wan or wan_iface()
+    changed = False
+    for ipt, chain, specs in lockdown_rules(mode, wan):
+        if _chain_ok(ipt, chain, specs):
+            continue
+        changed = True
+        drop = specs[-1]
+        if _ipt([ipt, "-C", chain] + drop) != 0:
+            if _ipt([ipt, "-I", chain, "1"] + drop) != 0:
+                log("ENFORCE-FAIL %s -I %s 1 %s" % (ipt, chain, " ".join(drop)))
+        if len(specs) > 1:
+            _delete_marked(ipt, chain, "allow")
+            for spec in reversed(specs[:-1]):
+                if _ipt([ipt, "-I", chain, "1"] + spec) != 0:
+                    log("ENFORCE-FAIL %s -I %s 1 %s" % (ipt, chain, " ".join(spec)))
+    return changed
+
+
+def lift():
+    """Remove every tripwire rule from INPUT and FORWARD, whatever the
+    mode or WAN interface was at trip time."""
+    if STUB_FIREWALL:
+        st = load_state()
+        for ipt, chain, specs in lockdown_rules(st.get("mode") or "high", wan_iface()):
+            for s in specs:
+                while _ipt([ipt, "-C", chain] + s) == 0:
+                    _ipt([ipt, "-D", chain] + s)
+        return
+    for ipt in ("iptables", "ip6tables"):
+        for chain in ("FORWARD", "INPUT"):
+            _delete_marked(ipt, chain, "all")
+
+
+def lockdown_active(mode=None):
+    mode = mode or (load_state().get("mode") or "medium")
+    return all(_chain_ok(ipt, chain, specs)
+               for ipt, chain, specs in lockdown_rules(mode, wan_iface()))
+
+
+def any_rules_present():
+    if STUB_FIREWALL:
+        return lockdown_active()
+    return any(MARK in ln for ipt in ("iptables", "ip6tables")
+               for chain in ("FORWARD", "INPUT") for ln in _chain_lines(ipt, chain))
+
+
+# ── notification (dedupe + rate limit) ───────────────────────────────────────
+
+def _send(title, message, priority="default"):
+    if PUSH_FILE:
+        with open(PUSH_FILE, "a") as f:
+            f.write(json.dumps({"ts": time.time(), "title": title,
+                                "message": message, "priority": priority}) + "\n")
+        return True
+    cfg = read_json(ALERTS_CONF, {})
+    if not cfg.get("enabled"):
+        return False
+    sent = False
+    for url_key in ("ntfy_url", "webhook_url"):
+        url = str(cfg.get(url_key) or "")
+        if not url:
+            continue
+        if url_key == "ntfy_url":
+            headers = {"Title": title.encode("ascii", "replace").decode()}
+            if priority != "default":
+                headers["Priority"] = priority
+            data = message.encode()
+        else:
+            headers = {"Content-Type": "application/json"}
+            data = json.dumps({"title": title, "message": message,
+                               "priority": priority,
+                               "tags": ["rotating_light"]}).encode()
+        try:
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            urllib.request.urlopen(req, timeout=NOTIFY_TIMEOUT_S).close()
+            sent = True
+        except Exception:
+            pass
+    return sent
+
+
+def notify(title, message, key=None, priority="default"):
+    """Push now, unless `key` already pushed within NOTIFY_WINDOW_S: then
+    the event is only counted and summarised later (flush_notify)."""
+    if key:
+        now = time.time()
+
+        def gate(st):
+            slot = st.setdefault("notify", {}).setdefault(key, {})
+            if now - float(slot.get("last") or 0) < NOTIFY_WINDOW_S:
+                slot["suppressed"] = int(slot.get("suppressed") or 0) + 1
+                slot["title"] = title
+                return None
+            extra = int(slot.get("suppressed") or 0)
+            slot.update({"last": now, "suppressed": 0, "title": title})
+            return extra
+        extra = update_state(gate)
+        if extra is None:
+            return False
+        if extra:
+            message += " (+%d similar event(s) were held back earlier.)" % extra
+    return _send(title, message, priority)
+
+
+def flush_notify():
+    """One summary push per key whose window ran out with events held back."""
+    now = time.time()
+
+    def take(st):
+        due = []
+        for key, slot in (st.get("notify") or {}).items():
+            n = int(slot.get("suppressed") or 0)
+            if n and now - float(slot.get("last") or 0) >= NOTIFY_WINDOW_S:
+                due.append((key, n, slot.get("title") or key))
+                slot.update({"last": now, "suppressed": 0})
+        return due
+    for key, n, title in update_state(take):
+        _send("%s (+%d)" % (title, n),
+              "%d more similar event(s) in the last %d minutes. See Security > "
+              "Tripwire and %s." % (n, int(NOTIFY_WINDOW_S // 60) or 1, LOG))
+
+
+# ── events + evaluation ──────────────────────────────────────────────────────
+
+def dst_label(dest_ip, dest_port):
+    try:
+        port = int(dest_port or 0)
+    except (TypeError, ValueError):
+        port = 0
+    where = "%s:%s" % (dest_ip or "?", dest_port or "?")
+    if port in DECEPTION_PORTS:
+        return "%s [deception layer - absorbed]" % where
+    return where
+
+
+def eve_prefilter(line):
+    return _ALERT_TAG in line and _SEV1_RE.search(line) is not None
+
+
+def event_from_eve(ev):
+    """Normalised event for a trip-class priority-1 alert, else None."""
+    if not isinstance(ev, dict) or ev.get("event_type") != "alert":
+        return None
+    alert = ev.get("alert") or {}
+    try:
+        sev = int(alert.get("severity") or alert.get("priority") or 9)
+    except (TypeError, ValueError):
+        sev = 9
+    if sev != 1:
+        return None
+    check = (_BY_CLASSTYPE.get(alert.get("classtype"))
+             or _BY_CATEGORY.get(alert.get("category")))
+    if not check:
+        return None
+    try:
+        port = int(ev.get("dest_port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    return {"check": check, "source": "suricata", "reason": SURICATA_REASON,
+            "class": alert.get("classtype") or alert.get("category") or "?",
+            "sig": (alert.get("signature") or "")[:160],
+            "sid": alert.get("signature_id"),
+            "src": ev.get("src_ip") or "?", "dst_ip": ev.get("dest_ip") or "",
+            "dst_port": port, "dst": dst_label(ev.get("dest_ip"), ev.get("dest_port")),
+            "proto": ev.get("proto") or "", "iface": ev.get("in_iface") or "",
+            "ts": time.time()}
+
+
+def event_from_eve_line(raw):
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8", "replace")
+    if not eve_prefilter(raw):
+        return None
+    try:
+        return event_from_eve(json.loads(raw.decode("utf-8", "replace")))
+    except ValueError:
+        return None
+
+
+def event_from_kernel(line):
+    if CANARY_PREFIX not in line:
+        return None
+    kv = dict(_KV_RE.findall(line))
+    dst = ("%s:%s" % (kv.get("DST", "?"), kv.get("DPT", "?"))) if kv.get("DST") else ""
+    try:
+        port = int(kv.get("DPT") or 0)
+    except ValueError:
+        port = 0
+    return {"check": "canary.egress", "source": "canary", "reason": CANARY_REASON,
+            "class": "canary-egress", "sig": line.strip()[:160], "sid": None,
+            "src": "local:opencanary", "dst_ip": kv.get("DST", ""), "dst_port": port,
+            "dst": dst, "proto": kv.get("PROTO", ""), "iface": kv.get("OUT", ""),
+            "ts": time.time()}
+
+
+def evaluate(event, mode=None):
+    """Pure decision for one event: {"action": absorb|ignore|log|trip}.
+    Delegation comes FIRST, before any mode logic: an attack that landed on
+    a deception port was absorbed by design and never contains, not even in
+    high mode, whatever Suricata called it."""
+    mode = mode if mode is not None else get_mode()
+    if event.get("source") == "suricata" and "deception layer" in (event.get("dst") or ""):
+        return {"action": "absorb", "mode": mode, "check": event.get("check")}
+    if mode not in ("logonly", "medium", "high"):
+        return {"action": "ignore", "mode": mode, "check": event.get("check")}
+    return {"action": "log" if mode == "logonly" else "trip", "mode": mode,
+            "check": event.get("check")}
+
+
+def record_event(event, decision):
+    """Counters + log line for absorbed / log-only events, then hooks."""
+    action = decision["action"]
+    rec = {"ts": event.get("ts") or time.time(), "check": event.get("check"),
+           "reason": event.get("reason"), "class": event.get("class"),
+           "src": event.get("src"), "dst": event.get("dst"),
+           "sig": (event.get("sig") or "")[:160]}
+    if action == "absorb":
+        def bump(st):
+            st["absorbed_events"] = int(st.get("absorbed_events") or 0) + 1
+            st["last_absorbed"] = rec
+            return st["absorbed_events"]
+        update_state(bump)
+        log("DECEPTION-ABSORBED class=%s src=%s -> %s action=delegated "
+            "(canary + ban pipeline own this)" % (rec["class"], rec["src"], rec["dst"]))
+    elif action == "log":
+        def bump(st):
+            st["logonly_events"] = int(st.get("logonly_events") or 0) + 1
+            st["last_logonly"] = rec
+            return st["logonly_events"]
+        rec["n"] = update_state(bump)
+        log("WOULD-TRIP (log-only) class=%s src=%s -> %s reason=%s action=recorded"
+            % (rec["class"], rec["src"], rec["dst"], rec["reason"]))
+    for hook in EVENT_HOOKS:
+        try:
+            hook(event, decision)
+        except Exception as exc:
+            log("HOOK-ERROR %s: %s" % (getattr(hook, "__name__", hook), exc))
+    return rec
+
+
+_ACTION_LOCK = threading.Lock()   # trip vs. watchdog re-enforce in the daemon
+
+
+def handle_event(event, mode=None):
+    decision = evaluate(event, mode)
+    action = decision["action"]
+    if action == "ignore":
+        return decision
+    if action in ("absorb", "log"):
+        rec = record_event(event, decision)
+        if action == "log":
+            notify("TRIPWIRE log-only: %s" % rec["class"],
+                   "Trip-class event (%s). From %s to %s - NOT contained, network "
+                   "untouched. Event #%d." % (rec["reason"], rec["src"], rec["dst"] or "?",
+                                              rec.get("n") or 0),
+                   key="logonly:%s" % event.get("check"))
+        return decision
+    trip(event.get("reason") or "trip", cls=event.get("class") or "?",
+         sig=event.get("sig") or "", src=event.get("src") or "",
+         dst=event.get("dst") or "", mode=decision["mode"], check=event.get("check"))
+    return decision
+
+
+# ── trip / resolve / mode ────────────────────────────────────────────────────
+
+def trip(reason, cls="manual", sig="", src="", dst="", mode=None, check="manual",
+         notify_user=True):
+    mode = (mode or get_mode())
+    if mode not in ("medium", "high"):
+        mode = "medium"
+    now = time.time()
+
+    def mark(st):
+        if st.get("tripped"):
+            st["trips"] = int(st.get("trips") or 0) + 1
+            st["last_reason"] = reason
+            return False
+        st.update({"tripped": True, "mode": mode, "since": now, "reason": reason,
+                   "class": cls, "check": check, "signature": sig, "src_ip": src,
+                   "dst": dst, "trips": 1})
+        st.pop("resolved_at", None)
+        st.pop("resolved_by", None)
+        return True
+    with _ACTION_LOCK:
+        if not update_state(mark):
+            log("REPEAT class=%s sig=%r src=%s (already contained)" % (cls, sig, src))
+            return False
+        # push BEFORE the rules go on: high mode closes the WAN, and a
+        # lockdown nobody hears about is a mystery outage
+        if notify_user:
+            notify("TRIPWIRE TRIPPED (%s)" % mode.upper(),
+                   "Intrusion-class event: %s (%s). From %s to %s. WAN being "
+                   "contained now - will NOT auto-restore. Resolve after "
+                   "investigation." % (reason, cls, src, dst or "?"), priority="urgent")
+        # NO conntrack flush: the DROPs at position 1 sever forwarding
+        # anyway, and flushing UNTRACKS the canary's live sessions - their
+        # next retransmission then classifies as NEW and false-trips the
+        # canary-egress trigger again (observed 2026-11-08). Never flush.
+        enforce(mode=mode)
+    log("TRIP mode=%s class=%s src=%s -> %s reason=%s action=lockdown"
+        % (mode, cls, src, dst, reason))
+    return True
+
+
+def resolve(by="admin", via="cli", client=""):
+    with state_lock():
+        st = load_state()
+        if not st.get("tripped"):
+            print("tripwire is not tripped")
+            return False
+        lift()
+        now = time.time()
+        st.update({"tripped": False, "resolved_at": now, "resolved_by": by})
+        write_json(STATE, st)
+    minutes = (now - float(st.get("since") or now)) / 60
+    # A long WAN blackout predictably wedged unbound's upstream state (a
+    # 234-minute high-mode containment needed a restart before DNS worked
+    # again): bounce it so resolving restores DNS too.
+    if ROOT:
+        log("(sandbox) would restart unbound")
+    else:
+        try:
+            subprocess.run(["systemctl", "restart", "unbound"],
+                           capture_output=True, timeout=30)
+        except Exception:
+            pass
+    log("RESOLVE by=%s via=%s (contained %.0f minutes, %d trip events)"
+        % (by, via, minutes, st.get("trips") or 1))
+    audit("resolve", by=by, via=via, client=client, trip_mode=st.get("mode"),
+          minutes=round(minutes, 1), trips=st.get("trips") or 1)
+    notify("Tripwire resolved",
+           "WAN containment lifted by %s via %s. Total containment: %.0f minutes."
+           % (by, via, minutes))
+    print("resolved: containment lifted after %.0f minutes" % minutes)
+    return True
+
+
+def set_mode(mode, by="admin", via="cli", client=""):
+    mode = str(mode or "").strip().lower()
+    if mode not in MODES:
+        raise ValueError("mode must be one of: %s" % ", ".join(MODES))
+    with state_lock():
+        conf = get_config()
+        prev = str(conf.get("mode") or "disabled")
+        conf["mode"] = mode
+        write_json(CONFIG, conf)
+        st = load_state()
+    out = {"ok": True, "mode": mode, "previous": prev,
+           "tripped": bool(st.get("tripped")), "trip_mode": st.get("mode")}
+    if st.get("tripped") and mode in ("disabled", "logonly"):
+        out["warning"] = ("The tripwire is still TRIPPED (%s containment since %s). "
+                          "Changing the mode does not lift it - resolve the trip with "
+                          "your admin password to restore the WAN."
+                          % (str(st.get("mode") or "medium").upper(),
+                             time.strftime("%Y-%m-%d %H:%M", time.localtime(
+                                 float(st.get("since") or time.time())))))
+    if prev != mode:
+        log("MODE %s -> %s by=%s via=%s" % (prev, mode, by, via))
+        audit("mode", by=by, via=via, client=client, previous=prev, mode=mode,
+              tripped=bool(st.get("tripped")))
+    return out
+
+
+# ── watchers ─────────────────────────────────────────────────────────────────
+
+class Watcher:
+    """A detection thread with a heartbeat. The target loops until
+    self.stop is set and calls self.beat() at least every BEAT_S."""
+
+    def __init__(self, name, target, on_event):
+        self.name, self.target, self.on_event = name, target, on_event
+        self.thread = None
+        self.stop = threading.Event()
+        self.last_beat = 0.0
+        self.started = 0.0
+        self.restarts = -1
+        self.events = 0
+        self.error = ""
+        self.note = ""
+
+    def beat(self, note=None):
+        self.last_beat = time.time()
+        if note is not None:
+            self.note = note
+
+    def emit(self, event):
+        self.events += 1
+        try:
+            self.on_event(event)
+        except Exception as exc:
+            log("HANDLER-ERROR %s: %s" % (self.name, exc))
+
+    def _run(self):
+        try:
+            self.target(self)
+        except Exception as exc:
+            self.error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+            log("WATCHER-ERROR %s %s" % (self.name, self.error))
+
+    def start(self):
+        self.stop = threading.Event()
+        self.restarts += 1
+        self.started = self.last_beat = time.time()
+        self.thread = threading.Thread(target=self._run, name="tw-" + self.name,
+                                       daemon=True)
+        self.thread.start()
+
+    def halt(self, wait=3.0):
+        self.stop.set()
+        if self.thread:
+            self.thread.join(wait)
+        self.thread = None
+
+    def alive(self):
+        return bool(self.thread and self.thread.is_alive())
+
+    def status(self, now=None):
+        now = now or time.time()
+        if not self.thread:
+            state = "off"
+        elif not self.thread.is_alive():
+            state = "dead"
+        elif now - self.last_beat > STALE_S:
+            state = "stale"
+        else:
+            state = "running"
+        return {"state": state, "beat": round(self.last_beat, 1),
+                "age": round(now - self.last_beat, 1) if self.last_beat else None,
+                "started": round(self.started, 1), "restarts": max(0, self.restarts),
+                "events": self.events, "error": self.error, "note": self.note}
+
+
+def tail_eve(w):
+    """Follow eve.json from EOF. Handles rename rotation (drain the old
+    file, read the new one from the start) and copytruncate (size below
+    our offset -> rewind). Only pre-filtered lines are JSON-parsed."""
+    f, ino, first = None, None, True
+    buf, skipping = b"", False
+
+    def feed(chunk):
+        nonlocal buf, skipping
+        parts = (buf + chunk).split(b"\n")
+        buf = parts.pop()
+        for line in parts:
+            if skipping:
+                skipping = False
+                continue
+            ev = event_from_eve_line(line)
+            if ev:
+                w.emit(ev)
+        if len(buf) > MAX_LINE:
+            buf, skipping = b"", True
+
+    try:
+        while not w.stop.is_set():
+            w.beat()
+            if f is None:
+                try:
+                    f = open(EVE, "rb")
+                except OSError:
+                    # a file that appears later is read from its start
+                    first = False
+                    w.beat("eve.json not found - waiting for Suricata")
+                    w.stop.wait(2)
+                    continue
+                ino = os.fstat(f.fileno()).st_ino
+                if first:
+                    f.seek(0, os.SEEK_END)
+                first = False
+                buf, skipping = b"", False
+                w.note = ""
+            chunk = f.read(EVE_CHUNK)
+            if chunk:
+                feed(chunk)
+                continue
+            w.stop.wait(1.0)
+            try:
+                st = os.stat(EVE)
+            except OSError:
+                continue
+            if st.st_ino != ino:
+                rest = f.read()
+                if rest:
+                    feed(rest + b"\n")
+                f.close()
+                f = None
+                log("EVE-ROTATED (new file) - following the new eve.json from its start")
+            elif st.st_size < f.tell():
+                f.seek(0)
+                buf, skipping = b"", False
+                log("EVE-TRUNCATED (copytruncate) - rewound to the start")
+    finally:
+        if f:
+            f.close()
+
+
+def follow_kernel(w):
+    """Follow kernel messages for the canary-egress prefix; beats while
+    idle (select timeout) and fails loudly when journalctl exits."""
+    proc = subprocess.Popen(KERNEL_CMD, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, bufsize=0)
+    fd = proc.stdout.fileno()
+    buf = b""
+    try:
+        while not w.stop.is_set():
+            w.beat()
+            ready, _, _ = select.select([fd], [], [], BEAT_S)
+            if ready:
+                data = os.read(fd, 65536)
+                if not data:
+                    raise RuntimeError("kernel log reader exited (rc=%s)" % proc.poll())
+                lines = (buf + data).split(b"\n")
+                buf = lines.pop()[-MAX_LINE:]
+                for raw in lines:
+                    ev = event_from_kernel(raw.decode("utf-8", "replace"))
+                    if ev:
+                        w.emit(ev)
+            elif proc.poll() is not None:
+                raise RuntimeError("kernel log reader exited (rc=%s)" % proc.returncode)
+    finally:
+        try:
+            proc.terminate()
+            proc.wait(5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+def write_health(watchers, mode, started):
+    now = time.time()
+    data = {"pid": os.getpid(), "ts": round(now, 1), "started": round(started, 1),
+            "mode": mode, "watchers": {n: w.status(now) for n, w in watchers.items()}}
+    try:
+        write_json(HEALTH, data)
+    except OSError:
+        pass
+    return data
+
+
+# ── daemon ───────────────────────────────────────────────────────────────────
+
+def run_daemon():
+    started = time.time()
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    mode = get_mode()
+    log("DAEMON start mode=%s" % mode)
+    st = load_state()
+    if st.get("tripped"):
+        with _ACTION_LOCK:
+            enforce(mode=st.get("mode"))
+        log("RE-ENFORCE at start (state was tripped)")
+        notify("Tripwire still active after restart",
+               "The tripwire service restarted while tripped; WAN containment "
+               "(%s) has been re-applied." % st.get("mode"), priority="high")
+
+    watchers = {"suricata": Watcher("suricata", tail_eve, handle_event),
+                "canary": Watcher("canary", follow_kernel, handle_event)}
+    reported = {}
+    last_enforce = 0.0
+    while not stop.is_set():
+        now = time.time()
+        new_mode = get_mode()
+        if new_mode != mode:
+            log("DAEMON mode %s -> %s" % (mode, new_mode))
+            mode = new_mode
+        for name, w in watchers.items():
+            if mode == "disabled":
+                if w.thread:
+                    w.halt()
+                    log("WATCHER-OFF %s (mode disabled)" % name)
+                reported.pop(name, None)
+                continue
+            if not w.thread:
+                w.start()
+                continue
+            s = w.status(now)
+            if s["state"] in ("dead", "stale"):
+                if reported.get(name) != s["state"]:
+                    reported[name] = s["state"]
+                    log("WATCHER-%s %s (%s)" % (s["state"].upper(), name,
+                                               s["error"] or "no heartbeat"))
+                    notify("Tripwire watcher %s: %s" % (s["state"], name),
+                           "The %s watcher is %s (%s). The tripwire is restarting it; "
+                           "check Security > Tripwire." % (name, s["state"],
+                                                          s["error"] or "no heartbeat"),
+                           key="health:%s" % name, priority="high")
+                if s["state"] == "dead":
+                    w.start()
+            elif reported.pop(name, None):
+                log("WATCHER-OK %s" % name)
+        if now - last_enforce >= ENFORCE_EVERY_S:
+            last_enforce = now
+            changed = False
+            if load_state().get("tripped") and _ACTION_LOCK.acquire(blocking=False):
+                try:
+                    with state_lock():
+                        st = load_state()
+                        changed = st.get("tripped") and enforce(mode=st.get("mode"))
+                finally:
+                    _ACTION_LOCK.release()
+                if changed:
+                    log("RE-ENFORCE (rules had been removed - ufw reload or flush)")
+                    notify("Tripwire re-enforced",
+                           "Lockdown rules were removed while tripped (ufw reload?); "
+                           "containment has been re-applied.", key="reenforce",
+                           priority="high")
+            flush_notify()
+        write_health(watchers, mode, started)
+        stop.wait(TICK_S)
+    for w in watchers.values():
+        w.halt()
+    log("DAEMON stop")
+
+
+# ── CLI ──────────────────────────────────────────────────────────────────────
+
+def _opts(args):
+    out, rest, i = {}, [], 0
+    while i < len(args):
+        if args[i] in ("--by", "--via", "--client", "--mode") and i + 1 < len(args):
+            out[args[i][2:]] = args[i + 1]
+            i += 2
+        else:
+            rest.append(args[i])
+            i += 1
+    return out, rest
+
+
+def status():
+    st = load_state()
+    return {
+        "mode": get_mode(),
+        "tripped": bool(st.get("tripped")),
+        "logonly_events": st.get("logonly_events") or 0,
+        "last_logonly": st.get("last_logonly"),
+        "absorbed_events": st.get("absorbed_events") or 0,
+        "last_absorbed": st.get("last_absorbed"),
+        "trip_mode": st.get("mode"), "since": st.get("since"),
+        "reason": st.get("reason"), "class": st.get("class"),
+        "dst": st.get("dst") or "", "src_ip": st.get("src_ip"),
+        "trips": st.get("trips"), "resolved_at": st.get("resolved_at"),
+        "rules_present": any_rules_present(),
+        "health": read_json(HEALTH, {}),
+    }
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    cmd = argv[0] if argv else "status"
+    opts, rest = _opts(argv[1:])
+    if cmd == "run":
+        run_daemon()
+    elif cmd == "trip":
+        reason = " ".join(rest) or "manual test trip"
+        mode = opts.get("mode") or get_mode()
+        if mode not in ("medium", "high"):
+            print("mode is %r - manual trip defaults to medium" % mode)
+            mode = "medium"
+        audit("manual-trip", by=opts.get("by") or "admin", via=opts.get("via") or "cli",
+              mode=mode, reason=reason)
+        trip(reason, mode=mode)
+        print("TRIPPED (%s). Resolve with: tuxwall-tripwire resolve" % mode)
+    elif cmd == "resolve":
+        resolve(by=opts.get("by") or "admin", via=opts.get("via") or "cli",
+                client=opts.get("client") or "")
+    elif cmd == "set-mode":
+        try:
+            print(json.dumps(set_mode(rest[0] if rest else "", by=opts.get("by") or "admin",
+                                      via=opts.get("via") or "cli",
+                                      client=opts.get("client") or "")))
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}))
+            return 2
+    elif cmd == "status":
+        print(json.dumps(status(), indent=2))
+    elif cmd == "health":
+        print(json.dumps(read_json(HEALTH, {}), indent=2))
+    elif cmd == "audit":
+        print(json.dumps(audit_tail(int(rest[0]) if rest else 20), indent=2))
+    elif cmd == "evaluate":
+        # dry run: eve.json or kernel lines on stdin -> decisions, no side effects
+        mode = opts.get("mode") or get_mode()
+        for line in sys.stdin:
+            ev = event_from_kernel(line) or event_from_eve_line(line)
+            if ev:
+                print(json.dumps({"event": ev, "decision": evaluate(ev, mode)}))
+    elif cmd == "enforce":
+        st = load_state()
+        if st.get("tripped"):
+            with state_lock():
+                enforce(mode=st.get("mode"))
+            print("re-enforced")
+        else:
+            print("not tripped - nothing to enforce")
+    else:
+        print(__doc__)
+        print("commands: run | status | health | audit [n] | enforce | "
+              "trip [reason] [--mode m] | resolve [--by u --via v] | "
+              "set-mode MODE [--by u --via v --client ip] | evaluate [--mode m] < lines")
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)

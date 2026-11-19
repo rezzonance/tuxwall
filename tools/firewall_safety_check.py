@@ -402,6 +402,27 @@ def t_invariants():
         json.dump({"tripped": True}, f)
     rst = G.load_ruleset(ctx, raw={"v4": IPT_SAVE.replace("TUXWALL-TRIPWIRE", "X"), "v6": ""})
     check("tripwire-hook-missing" in ids(G.invariants(rst, ctx, rst)), "tripwire hook")
+    # mode switched to logonly/disabled while tripped: the trip still counts
+    for m in ("logonly", "disabled"):
+        with open(root + "/etc/tuxwall/tripwire.json", "w") as f:
+            json.dump({"mode": m}, f)
+        with open(root + "/etc/tuxwall/tripwire-state.json", "w") as f:
+            json.dump({"tripped": True, "mode": "high"}, f)
+        check("tripwire-hook-missing" in ids(G.invariants(rst, ctx, rst)), "tripwire hook (mode %s)" % m)
+    # an ALLOW rule alone is not the lockdown
+    rsa = G.load_ruleset(ctx, raw={"v4": IPT_SAVE.replace(
+        "-A FORWARD -m comment --comment TUXWALL-TRIPWIRE -j DROP",
+        "-A INPUT -i eth0 -p udp --sport 67 --dport 68 -m comment --comment TUXWALL-TRIPWIRE-ALLOW -j ACCEPT"), "v6": ""})
+    check("tripwire-hook-missing" in ids(G.invariants(rsa, ctx, rsa)), "tripwire allow-only is not a lockdown")
+    rok = G.load_ruleset(ctx, raw={"v4": IPT_SAVE, "v6": ""})
+    check("tripwire-hook-missing" not in ids(G.invariants(rok, ctx, rok)), "tripwire hook present")
+    with open(root + "/etc/tuxwall/tripwire-state.json", "w") as f:
+        json.dump({"tripped": False, "mode": "high"}, f)
+    check("tripwire-hook-missing" not in ids(G.invariants(rst, ctx, rst)), "not tripped: no hook needed")
+    with open(root + "/etc/tuxwall/tripwire.json", "w") as f:
+        json.dump({"mode": "high"}, f)
+    with open(root + "/etc/tuxwall/tripwire-state.json", "w") as f:
+        json.dump({"tripped": True}, f)
     # guard: harmless add passes; pre-existing issues don't block
     pa, _ = G.proposed_add(cur, ["allow", "in", "on", LAN, "to", "any", "port", "8080", "proto", "tcp"])
     check(G.check(cur, pa, ctx)["ok"], "harmless add passes")

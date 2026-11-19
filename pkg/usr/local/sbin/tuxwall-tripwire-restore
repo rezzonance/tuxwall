@@ -1,0 +1,90 @@
+#!/bin/bash
+# tuxwall-tripwire-restore - maintainer helper: re-apply the dashboard from
+# a local checkout of the tuxwall repository (branch main by default) after
+# a package upgrade replaced /var/www/html with an older released version.
+#
+# The tripwire ENGINE (/usr/local/sbin/tuxwall-tripwire), its systemd unit
+# and logrotate config ship in the package (pkg/ in the repo); its config,
+# state, trip log + audit log and the canary-egress firewall rules live
+# outside the dashboard tree and survive an upgrade. This script restores
+# the dashboard files listed in FILES from the repo branch (each one
+# sanity-checked first), syncs TUXWALL_VERSION to the installed package,
+# cache-busts index.html, restarts the API (rolling back on failure) and
+# makes sure the tripwire service is enabled and running.
+#
+# Run after:  sudo apt upgrade tuxwall   (only on a box that runs main)
+# Usage:      sudo tuxwall-tripwire-restore
+#             sudo TUXWALL_REPO=/path/to/checkout BRANCH=main tuxwall-tripwire-restore
+set -euo pipefail
+
+REPO=${TUXWALL_REPO:-/home/jeff/github-tuxwall}
+BRANCH=${BRANCH:-main}
+WWW=/var/www/html
+BACKUP=/root/config-backup-archive/etc-tuxwall
+FILES=(includes/api_server.py index.html scripts/dashboard.js css/bento.css
+       css/buttons.css css/enhance.css css/insights.css css/netmap.css css/themes.css
+       css/worldmap.css scripts/buttons.js scripts/enhance.js scripts/insights.js
+       scripts/netmap.js scripts/worldmap.js)
+
+[[ $EUID -eq 0 ]] || { echo "Run as root: sudo $0"; exit 1; }
+[[ -d $REPO/.git ]] || { echo "repo missing: $REPO"; exit 1; }
+git -C "$REPO" rev-parse --verify "$BRANCH" >/dev/null 2>&1 \
+  || { echo "branch $BRANCH not found in $REPO"; exit 1; }
+
+TS=$(date +%Y%m%d-%H%M%S)
+INSTALLED=$(dpkg-query -W -f '${Version}' tuxwall 2>/dev/null || echo unknown)
+echo "restoring the dashboard from $REPO ($BRANCH; installed deb: $INSTALLED)"
+
+mkdir -p "$BACKUP"
+for f in "${FILES[@]}"; do
+  tmp="/tmp/$(basename "$f").tripwire-restore"
+  git -C "$REPO" show "$BRANCH:www/$f" > "$tmp"
+
+  # never install a file that fails sanity: the dashboard must not go
+  # down because the branch was mid-edit
+  case "$f" in
+    *.py) python3 -m py_compile "$tmp" || { echo "SANITY FAIL: $f - aborting (dashboard untouched)"; exit 1; } ;;
+    *.js) node --check "$tmp" 2>/dev/null || true ;;  # node optional
+  esac
+
+  cp -a "$WWW/$f" "$BACKUP/$(basename "$f").pre-tripwire-restore-$TS" 2>/dev/null || true
+  install -m 644 "$tmp" "$WWW/$f"
+  rm -f "$tmp"
+  echo "  restored $f"
+done
+
+# keep reporting honest: the branch may be ahead of the release, so sync its
+# version constant to the actually-installed package version
+if [[ $INSTALLED != unknown ]]; then
+  sed -i "s/^TUXWALL_VERSION = \"[^\"]*\"/TUXWALL_VERSION = \"$INSTALLED\"/" \
+    "$WWW/includes/api_server.py"
+  echo "  TUXWALL_VERSION synced to $INSTALLED"
+fi
+
+# fresh asset stamp so browsers pick up the restored JS
+ASSET_V=$(date +%Y%m%d%H%M)
+sed -i -E "s/\.(js|css)\?v=[A-Za-z0-9]+/.\1?v=${ASSET_V}/g" "$WWW/index.html"
+
+systemctl restart tuxwall
+sleep 5
+systemctl is-active --quiet tuxwall || { echo "tuxwall FAILED to start - restoring backups"; 
+  for f in "${FILES[@]}"; do
+    b="$BACKUP/$(basename "$f").pre-tripwire-restore-$TS"
+    [[ -f $b ]] && cp -a "$b" "$WWW/$f"
+  done
+  systemctl restart tuxwall || true
+  echo "rolled back - investigate: journalctl -u tuxwall"; exit 1; }
+
+# the tripwire engine itself ships in the package; make sure it is alive
+systemctl is-enabled --quiet tuxwall-tripwire.service || systemctl enable tuxwall-tripwire.service
+systemctl restart tuxwall-tripwire.service
+
+# verify: the endpoint must exist again (401 = auth-gated and present)
+code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 http://127.0.0.1:8008/api/security/tripwire)
+if [[ $code == 401 || $code == 200 ]]; then
+  echo "OK: /api/security/tripwire answers ($code), dashboard + engine restored."
+  /usr/local/sbin/tuxwall-tripwire status
+else
+  echo "WARN: endpoint returned $code (expected 401) - check journalctl -u tuxwall"
+  exit 1
+fi

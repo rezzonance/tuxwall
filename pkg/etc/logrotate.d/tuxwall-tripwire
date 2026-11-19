@@ -1,0 +1,16 @@
+# tuxwall tripwire: trip/event log and the audit log (mode changes,
+# resolves). The engine opens both files per write, so a plain rename
+# rotation is safe (no copytruncate, no service reload).
+/var/log/tuxwall/tripwire.log
+/var/log/tuxwall/tripwire-audit.log
+{
+	weekly
+	rotate 12
+	maxsize 5M
+	missingok
+	notifempty
+	compress
+	delaycompress
+	create 0640 root root
+	su root root
+}

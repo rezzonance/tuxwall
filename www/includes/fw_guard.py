@@ -792,11 +792,14 @@ def invariants(rs, ctx, cur=None):
     # 4. tripwire
     tw = ctx.tripwire
     raw = rs.get("raw") or {}
-    if tw["tripped"] and tw["mode"] in ("medium", "high") and raw.get("v4"):
-        if "TUXWALL-TRIPWIRE" not in raw.get("v4", ""):
+    # keyed on the TRIP (its own mode), not the configured mode: switching
+    # to logonly/disabled while tripped leaves the lockdown in force
+    if tw["tripped"] and raw.get("v4"):
+        if not re.search(r'--comment "?TUXWALL-TRIPWIRE"? -j DROP', raw.get("v4", "")):
             v.append(_v("tripwire-hook-missing", "critical",
                         "Tripwire is tripped but its lockdown rule is missing",
-                        "Run `tuxwall-tripwire enforce` (the service re-applies it every 15 s).",
+                        "Tripped in %s mode; run `tuxwall-tripwire enforce` (the service "
+                        "re-applies it every 15 s)." % str(tw.get("trip_mode") or "medium").upper(),
                         {"kind": "run", "cmd": ["/usr/local/sbin/tuxwall-tripwire", "enforce"]},
                         "tripwire"))
     # 5. CrowdSec hook first

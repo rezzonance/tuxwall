@@ -69,4 +69,14 @@ assert "/api/backups/restore" in mod.LEGACY_BACKUP_PATHS
 assert callable(getattr(mod, "restore_system_backup_member", None))
 assert mod._bk.failure_incident("/nonexistent-root") is None
 
+# --- Tripwire status: every field the dashboard renders, no host needed ----
+mod.TRIPWIRE_CONF = mod.TRIPWIRE_STATE = mod.TRIPWIRE_HEALTH = "/nonexistent/tw.json"
+mod.TRIPWIRE_AUDIT = "/nonexistent/tw-audit.log"
+tw = mod.tripwire_status()
+for key in ("mode", "tripped", "trip_mode", "dst", "logonly_events", "last_logonly",
+            "absorbed_events", "last_absorbed", "resolved_at", "engine", "audit"):
+    assert key in tw, f"tripwire status lacks {key}"
+assert tw["mode"] == "disabled" and tw["engine"]["needed"] is False
+assert mod.tripwire_health("logonly")["healthy"] is False
+
 print("api_server smoke test OK")

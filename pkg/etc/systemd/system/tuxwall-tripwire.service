@@ -1,0 +1,15 @@
+[Unit]
+Description=Tuxwall tripwire - WAN containment on confirmed intrusion
+After=network.target suricata.service systemd-journald.service
+
+[Service]
+Type=simple
+# close the boot window: if the state file says tripped, rules go on
+# BEFORE the daemon (and traffic) start
+ExecStartPre=/usr/local/sbin/tuxwall-tripwire enforce
+ExecStart=/usr/local/sbin/tuxwall-tripwire run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

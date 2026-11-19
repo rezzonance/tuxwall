@@ -4293,39 +4293,12 @@ body.light-theme .is-allowed .fw-legend-pct { color: #18762b; }
 #sec-trip-card[data-state="tripped"] { --trip-c: var(--red); }
 #sec-trip-card[data-state="disabled"]{ --trip-c: var(--muted); }
 
-#sec-trip-card .trip-head {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 16px 18px 14px;
-  border-bottom: 1px solid color-mix(in srgb, var(--trip-c) 14%, var(--border));
-  background: linear-gradient(135deg,
-    color-mix(in srgb, var(--trip-c) 7%, transparent) 0%, transparent 70%);
-}
-#sec-trip-card .trip-ico {
-  flex: none;
-  width: 36px; height: 36px;
-  display: grid; place-items: center;
-  border-radius: 10px;
-  color: var(--trip-c);
-  background: color-mix(in srgb, var(--trip-c) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--trip-c) 30%, var(--border));
-  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 8%, transparent);
-}
-#sec-trip-card .trip-ico svg {
-  width: 19px; height: 19px;
-  fill: none; stroke: currentColor; stroke-width: 1.8;
-  stroke-linecap: round; stroke-linejoin: round;
-}
-#sec-trip-card .trip-head-copy {
-  flex: 1 1 auto; min-width: 0;
-  display: flex; flex-direction: column; gap: 3px;
-}
-#sec-trip-card .trip-head-copy h2 {
-  margin: 0;
-  display: flex; align-items: center; gap: 8px;
-  font-size: 16px;
-  color: var(--text);
+/* Standard card head; the badge + hint sit on the right like other cards. */
+#sec-trip-card > .card-head .trip-head-meta {
+  display: flex; align-items: center; flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px 10px;
+  min-width: 0;
 }
 #sec-trip-card .trip-sub {
   font-size: 11px; line-height: 1.4;
@@ -4333,7 +4306,7 @@ body.light-theme .is-allowed .fw-legend-pct { color: #18762b; }
   overflow-wrap: anywhere;
 }
 #sec-trip-card .trip-badge {
-  flex: none; margin-left: auto;
+  flex: none;
   padding: 4px 10px;
   border-radius: 999px;
   font-family: var(--mono);
@@ -4379,6 +4352,7 @@ body.light-theme .is-allowed .fw-legend-pct { color: #18762b; }
   color: color-mix(in srgb, var(--muted) 85%, transparent);
 }
 #sec-trip-card .trip-modes .seg-btn[data-trip-mode="disabled"] { --trip-mode-c: var(--muted); }
+#sec-trip-card .trip-modes .seg-btn[data-trip-mode="logonly"]  { --trip-mode-c: var(--accent); }
 #sec-trip-card .trip-modes .seg-btn[data-trip-mode="medium"]   { --trip-mode-c: var(--amber); }
 #sec-trip-card .trip-modes .seg-btn[data-trip-mode="high"]     { --trip-mode-c: var(--red); }
 #sec-trip-card .trip-modes .seg-btn.active {
@@ -4397,6 +4371,33 @@ body.light-theme .is-allowed .fw-legend-pct { color: #18762b; }
 #sec-trip-card .trip-modes .seg-btn:focus-visible {
   outline: 2px solid var(--trip-c);
   outline-offset: 2px;
+}
+
+/* --- Engine health strip + mode-change notice ----------------------------- */
+#sec-trip-card .trip-health {
+  --th-c: var(--muted);
+  display: flex; align-items: center; gap: 8px;
+  margin: 12px 18px 0;
+  font-size: 11px; line-height: 1.4;
+  color: color-mix(in srgb, var(--text) 70%, var(--muted));
+}
+#sec-trip-card .trip-health[data-ok="ok"]   { --th-c: var(--green); }
+#sec-trip-card .trip-health[data-ok="bad"]  { --th-c: var(--red); color: var(--text); }
+#sec-trip-card .trip-health-dot {
+  flex: none;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--th-c);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--th-c) 60%, transparent);
+}
+#sec-trip-card .trip-health-text { min-width: 0; overflow-wrap: anywhere; }
+#sec-trip-card .trip-notice {
+  margin: 12px 18px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 12px; line-height: 1.5;
+  color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--amber) 40%, var(--border));
+  background: color-mix(in srgb, var(--amber) 9%, transparent);
 }
 
 /* --- Trip message / reason ------------------------------------------------ */
@@ -4530,14 +4531,15 @@ body.light-theme .is-allowed .fw-legend-pct { color: #18762b; }
 }
 
 @media (max-width: 760px) {
-  #sec-trip-card .trip-head { padding: 14px; gap: 10px; }
   #sec-trip-card .trip-badge { font-size: 8.5px; padding: 3px 8px; }
+  #sec-trip-card .trip-health,
+  #sec-trip-card .trip-notice { margin-left: 14px; margin-right: 14px; }
   #sec-trip-card .trip-mode-block { padding: 12px 14px; }
   #sec-trip-card .trip-modes {
     margin-left: 0;
     width: 100%;
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   #sec-trip-card .trip-modes .seg-btn {
     min-width: 0;

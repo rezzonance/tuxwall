@@ -4341,18 +4341,90 @@ def _canary_event_detail(logtype, logdata):
 # --- Tripwire (WAN containment on confirmed intrusion) ---------------------
 TRIPWIRE_CONF = "/etc/tuxwall/tripwire.json"
 TRIPWIRE_STATE = "/etc/tuxwall/tripwire-state.json"
+TRIPWIRE_HEALTH = "/run/tuxwall-tripwire/health.json"
+TRIPWIRE_AUDIT = "/var/log/tuxwall/tripwire-audit.log"
+TRIPWIRE_BIN = "/usr/local/sbin/tuxwall-tripwire"
 TRIPWIRE_MODES = ("disabled", "logonly", "medium", "high")
+TRIPWIRE_HEALTH_STALE = 60      # engine writes health every 5 s
+TRIPWIRE_WATCHER_STALE = 90
+
+
+def _tripwire_read(path, fb):
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, type(fb)) else fb
+    except Exception:
+        return fb
+
+
+def tripwire_health(mode=None, tripped=False):
+    """Engine service + per-watcher heartbeat summary (shared by the status
+    endpoint and the incident monitor)."""
+    now = time.time()
+    if mode is None:
+        mode = str(_tripwire_read(TRIPWIRE_CONF, {}).get("mode") or "disabled")
+    try:
+        active = subprocess.run(["systemctl", "is-active", "tuxwall-tripwire"],
+                                capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        active = "unknown"
+    h = _tripwire_read(TRIPWIRE_HEALTH, {})
+    age = (now - float(h.get("ts") or 0)) if h.get("ts") else None
+    watchers = {}
+    for name, w in (h.get("watchers") or {}).items():
+        if not isinstance(w, dict):
+            continue
+        beat = float(w.get("beat") or 0)
+        state = str(w.get("state") or "unknown")
+        if state == "running" and beat and now - beat > TRIPWIRE_WATCHER_STALE:
+            state = "stale"
+        watchers[name] = {"state": state, "age": round(now - beat, 1) if beat else None,
+                          "restarts": int(w.get("restarts") or 0),
+                          "events": int(w.get("events") or 0),
+                          "error": str(w.get("error") or "")[:200],
+                          "note": str(w.get("note") or "")[:200]}
+    problems = []
+    if active != "active":
+        problems.append("engine service is %s" % (active or "not running"))
+    elif age is None:
+        problems.append("engine has not reported a heartbeat")
+    elif age > TRIPWIRE_HEALTH_STALE:
+        problems.append("engine heartbeat is %d s old" % int(age))
+    elif mode != "disabled":
+        for name in ("suricata", "canary"):
+            w = watchers.get(name)
+            if not w or w["state"] != "running":
+                problems.append("%s watcher is %s%s" % (
+                    name, (w or {}).get("state", "missing"),
+                    (" (%s)" % w["error"]) if w and w.get("error") and w["state"] != "running" else ""))
+    return {"active": active, "heartbeat_age": round(age, 1) if age is not None else None,
+            "watchers": watchers, "problems": problems, "healthy": not problems,
+            "needed": mode != "disabled" or bool(tripped)}
+
+
+def _tripwire_audit_tail(n=10):
+    try:
+        with open(TRIPWIRE_AUDIT) as f:
+            lines = f.readlines()[-n:]
+    except OSError:
+        return []
+    out = []
+    for ln in lines:
+        try:
+            e = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(e, dict):
+            e.pop("client", None)
+            out.append(e)
+    return out
 
 
 def tripwire_status():
-    def rd(path, fb):
-        try:
-            with open(path) as f:
-                return json.load(f)
-        except Exception:
-            return fb
-    conf = rd(TRIPWIRE_CONF, {})
-    st = rd(TRIPWIRE_STATE, {})
+    conf = _tripwire_read(TRIPWIRE_CONF, {})
+    st = _tripwire_read(TRIPWIRE_STATE, {})
+    mode = str(conf.get("mode") or "disabled")
     rules = False
     try:
         for ipt in ("iptables", "ip6tables"):
@@ -4362,28 +4434,56 @@ def tripwire_status():
                 rules = True
     except Exception:
         pass
+
+    def rec(v):
+        return v if isinstance(v, dict) else None
     return {"ok": True,
-            "mode": str(conf.get("mode") or "disabled"),
+            "mode": mode,
             "tripped": bool(st.get("tripped")),
             "trip_mode": st.get("mode"), "since": st.get("since"),
             "reason": st.get("reason"), "class": st.get("class"),
+            "check": st.get("check") or "",
             "signature": st.get("signature") or "",
-            "src_ip": st.get("src_ip"), "trips": st.get("trips") or 0,
-            "rules_present": rules}
+            "src_ip": st.get("src_ip"), "dst": st.get("dst") or "",
+            "trips": st.get("trips") or 0,
+            "resolved_at": st.get("resolved_at"), "resolved_by": st.get("resolved_by") or "",
+            "logonly_events": int(st.get("logonly_events") or 0),
+            "last_logonly": rec(st.get("last_logonly")),
+            "absorbed_events": int(st.get("absorbed_events") or 0),
+            "last_absorbed": rec(st.get("last_absorbed")),
+            "rules_present": rules,
+            "engine": tripwire_health(mode, bool(st.get("tripped"))),
+            "audit": _tripwire_audit_tail(10)}
 
 
-def tripwire_set_mode(body):
+def _tripwire_cli(args, timeout=30):
+    proc = subprocess.run([TRIPWIRE_BIN] + args, capture_output=True, text=True,
+                          timeout=timeout)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "tripwire command failed").strip()[-200:])
+    return (proc.stdout or "").strip()
+
+
+def tripwire_set_mode(body, identity=None, client_ip=""):
+    """Mode change through the engine: atomic config write + audit entry
+    with the dashboard user. A trip in force is never lifted by a mode
+    change; switching to disabled/logonly while tripped returns a warning."""
     mode = str(body.get("mode") or "").strip().lower()
     if mode not in TRIPWIRE_MODES:
         raise ValueError("mode must be disabled, logonly, medium or high")
-    tmp = TRIPWIRE_CONF + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump({"mode": mode}, f, indent=2)
-    os.replace(tmp, TRIPWIRE_CONF)
-    return {"ok": True, "mode": mode}
+    who = (identity or {}).get("username", "") or "unknown"
+    out = _tripwire_cli(["set-mode", mode, "--by", who, "--via", "dashboard",
+                         "--client", client_ip or ""])
+    try:
+        res = json.loads(out.splitlines()[-1])
+    except (ValueError, IndexError):
+        raise RuntimeError("unexpected reply from the tripwire engine")
+    if not res.get("ok"):
+        raise ValueError(res.get("error") or "mode change refused")
+    return res
 
 
-def tripwire_resolve(body, identity):
+def tripwire_resolve(body, identity, client_ip=""):
     """Lift the lockdown. Deliberate two-step: admin session PLUS the
     acting admin's password - a stolen dashboard session must never be
     enough to re-open the WAN during a trip."""
@@ -4396,11 +4496,9 @@ def tripwire_resolve(body, identity):
     current = str(body.get("password") or "")
     if not hmac.compare_digest(_hash_password(current, user["salt"]), user["hash"]):
         raise PermissionError("Password is incorrect")
-    proc = subprocess.run(["/usr/local/sbin/tuxwall-tripwire", "resolve"],
-                          capture_output=True, text=True, timeout=30)
-    if proc.returncode != 0:
-        raise RuntimeError((proc.stderr or "resolve failed").strip()[:200])
-    return {"ok": True, "detail": (proc.stdout or "").strip()[:200]}
+    out = _tripwire_cli(["resolve", "--by", identity["username"], "--via", "dashboard",
+                         "--client", client_ip or ""], timeout=60)
+    return {"ok": True, "detail": out[:200]}
 
 
 def build_canary():
@@ -15404,11 +15502,20 @@ class Handler(BaseHTTPRequestHandler):
             result = set_canary_enabled(bool(body.get("enabled")))
             self._send(200 if result.get("ok") else 400, result)
 
-        elif path == "/api/security/tripwire/config":
-            self._send(200, tripwire_set_mode(body))
-
-        elif path == "/api/security/tripwire/resolve":
-            self._send(200, tripwire_resolve(body, identity))
+        elif path in ("/api/security/tripwire/config", "/api/security/tripwire/resolve"):
+            # errors used to escape the handler (dropped connection, so the
+            # dashboard never showed "Password is incorrect")
+            try:
+                if path.endswith("/config"):
+                    self._send(200, tripwire_set_mode(body, identity, _client_key(self)))
+                else:
+                    self._send(200, tripwire_resolve(body, identity, _client_key(self)))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except PermissionError as exc:
+                self._send(403, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)[:200]})
 
         elif path == "/api/security/honeypot/config":
             self._send(200, set_honeypot_conf(body))
@@ -18230,6 +18337,26 @@ def _incident_conditions():
                     "the dashboard and the tripwire see nothing. Restart "
                     "suricata, and never edit eve.json in place."
                     % int(eve_age / 60))
+    except Exception:
+        pass
+
+    # Tripwire engine + watcher heartbeats (only when it is armed or a trip
+    # is in force: a disabled tripwire runs no watchers by design).
+    try:
+        tw_conf = _tripwire_read(TRIPWIRE_CONF, {})
+        tw_st = _tripwire_read(TRIPWIRE_STATE, {})
+        tw_mode = str(tw_conf.get("mode") or "disabled")
+        tw_tripped = bool(tw_st.get("tripped"))
+        if tw_mode != "disabled" or tw_tripped:
+            twh = tripwire_health(tw_mode, tw_tripped)
+            if not twh["healthy"]:
+                add("tripwire:engine", "critical" if tw_tripped else "warning",
+                    "Tripwire is not watching",
+                    "Mode %s: %s. Trip-class events may be missed%s. Check "
+                    "Security > Tripwire and `systemctl status tuxwall-tripwire`."
+                    % (tw_mode, "; ".join(twh["problems"]),
+                       " and the lockdown is not being re-enforced" if tw_tripped
+                       and twh["active"] != "active" else ""))
     except Exception:
         pass
 
