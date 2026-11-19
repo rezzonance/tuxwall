@@ -281,11 +281,12 @@
       else if (updates) setBadge("system", String(updates), "warn", updates + " update" + (updates > 1 ? "s" : "") + " available");
       else setBadge("system", "");
 
-      // --- Backups older than 7 days
+      // --- Backups older than the owner-set threshold (System > Backups, default 8 days)
       if (bk && bk.backups) {
         var newest = bk.backups.reduce(function (m, b) { return Math.max(m, b.time || 0); }, 0);
         var age = newest ? (Date.now() / 1000 - newest) / 86400 : Infinity;
-        if (age > 7) setBadge("backups", "!", "warn", newest ? "Last backup " + Math.floor(age) + " days ago" : "No system backup yet");
+        var staleDays = bk.stale_days || 8;
+        if (age > staleDays) setBadge("backups", "!", "warn", newest ? "Last backup " + Math.floor(age) + " days ago (limit " + staleDays + ")" : "No system backup yet");
         else setBadge("backups", "");
       }
 

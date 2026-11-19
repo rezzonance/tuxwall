@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
   <link rel="stylesheet" href="/css/style.css?v=20261118202024">
-  <link rel="stylesheet" href="/css/polish.css?v=202611120056">
+  <link rel="stylesheet" href="/css/polish.css?v=20261118210051">
   <link rel="stylesheet" href="/css/firewall.css?v=202611120056">
   <link rel="stylesheet" href="/css/bento.css?v=202611120056">
   <link rel="stylesheet" href="/css/heroes.css?v=202611120056">
@@ -3160,6 +3160,48 @@
           <div class="bar upd-bar"><div class="bar-fill" id="bk-sys-bar" style="width:0%"></div></div>
           <p class="muted upd-status" id="bk-sys-status"></p>
         </div>
+        <h3>Schedule &amp; settings</h3>
+        <div class="bk-settings" id="bk-sched">
+          <div class="bk-form-row">
+            <label class="bk-check"><input type="checkbox" id="bk-sched-on"> <span>Automatic backups</span></label>
+            <label class="bk-field"><span>Every</span>
+              <select id="bk-sched-freq"><option value="daily">day</option><option value="weekly">week</option></select></label>
+            <label class="bk-field" id="bk-sched-wd-wrap" hidden><span>on</span>
+              <select id="bk-sched-wd"><option value="0">Monday</option><option value="1">Tuesday</option><option value="2">Wednesday</option><option value="3">Thursday</option><option value="4">Friday</option><option value="5">Saturday</option><option value="6">Sunday</option></select></label>
+            <label class="bk-field"><span>at</span> <input type="time" id="bk-sched-time" value="03:30" step="60" required></label>
+          </div>
+          <div class="bk-form-row">
+            <label class="bk-field"><span>Warn when the newest backup is older than</span>
+              <input type="number" id="bk-stale-days" min="1" max="90" step="1" value="8"> <span>days</span></label>
+            <label class="bk-check"><input type="checkbox" id="bk-usb-after"> <span>Copy to the USB stick after each scheduled backup (when it is attached)</span></label>
+          </div>
+          <div class="card-toolbar">
+            <button class="btn btn-sm btn-primary" id="bk-settings-save" type="button">Save settings</button>
+            <span class="muted bk-sched-status" id="bk-sched-status"></span>
+          </div>
+          <p class="muted bk-note">Scheduled backups capture every item, run the retention policy afterwards and never overlap a manual run. If the router is off at the scheduled time, the backup runs once shortly after it starts again. A failed run opens an incident (and an alert, if alerts are set up). The age warning above is used by the incident check, the Overview tile and the sidebar badge.</p>
+        </div>
+        <h3>Encryption</h3>
+        <div class="bk-settings" id="bk-enc">
+          <p class="bk-enc-status" id="bk-enc-status">Loading…</p>
+          <div class="bk-form-row">
+            <input type="password" id="bk-enc-pw" autocomplete="new-password" placeholder="New passphrase (10+ characters)" maxlength="512">
+            <input type="password" id="bk-enc-pw2" autocomplete="new-password" placeholder="Repeat passphrase" maxlength="512">
+            <button class="btn btn-sm btn-primary" id="bk-enc-set" type="button">Set passphrase</button>
+            <button class="btn btn-sm" id="bk-enc-remove" type="button" hidden>Remove encryption</button>
+          </div>
+          <p class="muted bk-note">With a passphrase, downloads and USB copies are encrypted (GnuPG, OpenPGP AES-256, tamper-evident) and named <code>….tar.gz.gpg</code>; uploads of such files are decrypted with it. Archives on this router stay unencrypted (root-only, next to the live config they mirror) so browsing and restoring keep working. The passphrase is stored root-only in <code>/etc/tuxwall/backup-passphrase</code>, never shown again and never put in a backup: keep it in your password manager, encrypted copies cannot be restored without it. Decrypt elsewhere with <code>gpg -d file.tar.gz.gpg &gt; file.tar.gz</code>.</p>
+        </div>
+        <h3>USB copy</h3>
+        <div class="bk-settings" id="bk-usb">
+          <p class="bk-usb-status" id="bk-usb-status">Checking for the stick…</p>
+          <div class="card-toolbar">
+            <button class="btn btn-sm btn-primary" id="bk-usb-copy" type="button">Copy latest backup to USB</button>
+            <button class="btn btn-sm" id="bk-usb-check" type="button">Check stick</button>
+          </div>
+          <div class="table-wrap" id="bk-usb-files" hidden></div>
+          <p class="muted bk-note">Only a stick whose filesystem label is <code>TUXWALL-BACKUP</code> is used, and it is never formatted. The latest backup (encrypted when a passphrase is set) is copied into <code>tuxwall-backups/</code> on it with a <code>.sha256</code> file, read back to verify, then the stick is unmounted; the newest 10 copies are kept there. Other files on the stick are never touched.</p>
+        </div>
         <h3>Include in backup</h3>
         <div class="card-toolbar">
           <button class="btn btn-sm" id="bk-sys-all" type="button">Select all</button>
@@ -3177,11 +3219,17 @@
         </div>
         <div id="bk-sys-contents" hidden>
           <h3 id="bk-sys-contents-title"></h3>
-          <p class="muted">Download any file, or restore a single file to its live location: you see a preview (diff against the live file) first, the current file is copied to <code>/var/lib/tuxwall/backups/pre-restore/</code>, and the write is atomic. Firewall files are imported as a firewall snapshot instead (guard check, 60 s confirm-or-revert). Restores never auto-restart services — apply the suggested restart yourself when ready.</p>
+          <p class="muted">Download any file, or restore a single file to its live location: you see a preview (diff against the live file) first, the current file is copied to <code>/var/lib/tuxwall/backups/pre-restore/</code>, and the write is atomic. Firewall files are imported as a firewall snapshot instead (guard check, 60 s confirm-or-revert). To restore several files at once, tick them or pick a service: one preview lists every change, one restore applies them (rolled back if any file fails). Restores never auto-restart services — afterwards you are offered the reload/restart of just the affected services.</p>
           <div class="card-toolbar bk-files-toolbar">
             <input type="search" id="bk-sys-files-search" placeholder="Filter files or services…" autocomplete="off" spellcheck="false">
             <span class="toolbar-spacer"></span>
             <span class="muted" id="bk-sys-files-count"></span>
+          </div>
+          <div class="card-toolbar bk-files-toolbar bk-multi-toolbar">
+            <select id="bk-sys-svc" aria-label="Restore a service"><option value="">Select a service's files…</option></select>
+            <button class="btn btn-sm" id="bk-sys-pick-none" type="button">Clear selection</button>
+            <button class="btn btn-sm btn-primary" id="bk-sys-multi" type="button" disabled>Preview selected</button>
+            <span class="muted" id="bk-sys-integrity"></span>
           </div>
           <div class="table-wrap" style="max-height:340px;overflow:auto">
             <table>
@@ -3194,9 +3242,10 @@
         </div>
         <h3>Restore from uploaded backup</h3>
         <div class="bk-upload" id="bk-sys-drop">
-          <p class="muted">Upload a system backup <b>.tar.gz</b> to examine it and choose which files to restore (e.g. KEA config, Unbound config, firewall rules). Uploads are checked (size and member limits, no unsafe paths); the last two are kept on this server.</p>
+          <p class="muted">Upload a system backup <b>.tar.gz</b> (or an encrypted <b>.tar.gz.gpg</b>) to examine it and choose which files to restore (e.g. KEA config, Unbound config, firewall rules). Uploads are checked (size and member limits, no unsafe paths, SHA256SUMS); the last two are kept on this server.</p>
           <div class="bk-upload-row">
-            <input type="file" id="bk-sys-file" accept=".tar.gz,application/gzip">
+            <input type="file" id="bk-sys-file" accept=".tar.gz,.gz,.gpg,.pgp,application/gzip">
+            <input type="password" id="bk-sys-upload-pw" autocomplete="off" placeholder="Passphrase (encrypted uploads, if not the stored one)" maxlength="512">
             <button class="btn btn-sm" id="bk-sys-upload" type="button" disabled>Upload &amp; examine</button>
           </div>
           <p class="muted bk-file-hint" id="bk-sys-file-hint">Choose a .tar.gz — or drop one here.</p>
@@ -3742,8 +3791,8 @@
   </div>
 </div>
 <script src="/scripts/worldmap.js?v=202611120056"></script>
-<script src="/scripts/dashboard.js?v=20261118202024"></script>
-<script src="/scripts/enhance.js?v=20261114075640"></script>
+<script src="/scripts/dashboard.js?v=20261118204958"></script>
+<script src="/scripts/enhance.js?v=20261118204958"></script>
 <script src="/scripts/netmap.js?v=202611120056"></script>
 <script src="/scripts/insights.js?v=20261112182249"></script>
 <script src="/scripts/interfaces.js?v=20261117000145"></script>

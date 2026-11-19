@@ -144,6 +144,9 @@ for entry in "${CONFIG_PATHS[@]}"; do
 done
 # Bytecode caches are regenerated; never back them up (GLOBAL_EXCLUDE).
 find "$STAGE" -depth -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+# The backup encryption passphrase never goes into an archive (it would sit
+# in plaintext in the local copy); re-enter it on a rebuilt box.
+rm -f "$STAGE/etc/tuxwall/backup-passphrase"
 progress 30 "Configuration files collected"
 
 # package state (requires root)
@@ -167,6 +170,11 @@ cat > "$STAGE/restore.sh" <<'RESTORE_EOF'
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
+
+if [ -f SHA256SUMS ]; then
+  echo "==> Verifying checksums (SHA256SUMS)"
+  sha256sum --quiet --strict -c SHA256SUMS || { echo "ERROR: checksum mismatch - this backup is damaged, nothing was restored" >&2; exit 1; }
+fi
 
 echo "==> Restoring system configuration (etc/, usr/local/, var/)"
 [ -d etc ] && cp -a etc/. /etc/
@@ -225,9 +233,16 @@ progress 70 "Writing manifest"
   done
   echo ""
   echo "Also included: dpkg-selections.txt, apt-manual.txt, package-versions.txt, iptables-save.txt, ip6tables-save.txt"
+  echo "Integrity:    SHA256SUMS lists every file (check: sha256sum -c SHA256SUMS)"
   echo "Not included: databases (CrowdSec/reports/MariaDB: see the USB backup), GeoIP databases,"
   echo "              caches, logs, histories, home directories (incl. the opencode credential store)"
 } > "$STAGE/manifest.txt"
+
+# integrity manifest of every regular file (written last, lists itself out)
+progress 78 "Writing checksums"
+( cd "$STAGE" && find . -type f ! -path ./SHA256SUMS -printf '%P\0' | LC_ALL=C sort -z \
+    | xargs -0 -r sha256sum -- ) > "$STAGE/SHA256SUMS"
+[ -s "$STAGE/SHA256SUMS" ] || { echo "ERROR: could not write SHA256SUMS" >&2; exit 4; }
 
 progress 85 "Compressing archive"
 mkdir -p "$OUTDIR"

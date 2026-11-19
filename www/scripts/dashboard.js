@@ -341,6 +341,30 @@
     bkSysFileHint: document.getElementById("bk-sys-file-hint"),
     bkSysLastErr: document.getElementById("bk-sys-lasterr"),
     bkSysPreview: document.getElementById("bk-sys-preview"),
+    bkSchedOn: document.getElementById("bk-sched-on"),
+    bkSchedFreq: document.getElementById("bk-sched-freq"),
+    bkSchedWd: document.getElementById("bk-sched-wd"),
+    bkSchedWdWrap: document.getElementById("bk-sched-wd-wrap"),
+    bkSchedTime: document.getElementById("bk-sched-time"),
+    bkSched: document.getElementById("bk-sched"),
+    bkStaleDays: document.getElementById("bk-stale-days"),
+    bkUsbAfter: document.getElementById("bk-usb-after"),
+    bkSettingsSave: document.getElementById("bk-settings-save"),
+    bkSchedStatus: document.getElementById("bk-sched-status"),
+    bkEncStatus: document.getElementById("bk-enc-status"),
+    bkEncPw: document.getElementById("bk-enc-pw"),
+    bkEncPw2: document.getElementById("bk-enc-pw2"),
+    bkEncSet: document.getElementById("bk-enc-set"),
+    bkEncRemove: document.getElementById("bk-enc-remove"),
+    bkUsbStatus: document.getElementById("bk-usb-status"),
+    bkUsbCopy: document.getElementById("bk-usb-copy"),
+    bkUsbCheck: document.getElementById("bk-usb-check"),
+    bkUsbFiles: document.getElementById("bk-usb-files"),
+    bkSysSvc: document.getElementById("bk-sys-svc"),
+    bkSysPickNone: document.getElementById("bk-sys-pick-none"),
+    bkSysMulti: document.getElementById("bk-sys-multi"),
+    bkSysIntegrity: document.getElementById("bk-sys-integrity"),
+    bkSysUploadPw: document.getElementById("bk-sys-upload-pw"),
     sysCpu: document.getElementById("sys-cpu"),
     sysMem: document.getElementById("sys-mem"),
     sysUptime: document.getElementById("sys-uptime"),
@@ -6802,15 +6826,24 @@
     });
   }
 
-  async function uploadSystemBackupExamine(buf) {
+  async function uploadSystemBackupExamine(buf, passphrase) {
+    const headers = { "Content-Type": "application/octet-stream" };
+    // percent-encoded so any passphrase survives an HTTP header; never in the URL (access logs)
+    if (passphrase) headers["X-Backup-Passphrase"] = encodeURIComponent(passphrase);
     const res = await fetch("/api/backups/system/upload", {
       method: "POST",
-      headers: { "Content-Type": "application/gzip" },
+      headers,
       body: buf,
       cache: "no-store",
     });
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    if (res.status === 401) handleSessionExpired();
+    let data = null;
+    try { data = await res.json(); } catch (_) { data = null; }
+    if (!data || !data.ok) {
+      const err = new Error((data && data.error) || `HTTP ${res.status}`);
+      err.data = data;
+      throw err;
+    }
     return data;
   }
 
@@ -6839,7 +6872,92 @@
     }
   }
 
+  const BK_INTEG = {
+    verified: ["Verified", "ok", "Every file matches the SHA256SUMS inside the archive"],
+    damaged: ["Damaged", "err", "Does not match its checksums: do not restore from it"],
+    "no-manifest": ["No checksums", "muted", "Older backup without SHA256SUMS: readable, but its files cannot be checked"],
+    unchecked: ["Unchecked", "muted", "Not verified yet: use Verify"],
+  };
+
+  function bkIntegBadge(status, checked) {
+    const [label, cls, title] = BK_INTEG[status] || BK_INTEG.unchecked;
+    const when = checked ? ` (checked ${new Date(checked * 1000).toLocaleString()})` : "";
+    return `<span class="bk-integ bk-integ-${cls}" title="${esc(title + when)}">${label}</span>`;
+  }
+
+  function bkWhen(ts) {
+    return ts ? new Date(ts * 1000).toLocaleString() : "—";
+  }
+
+  let bkFormDirty = false;
+  let bkLastStatus = null;
+
+  function syncBkSchedForm() {
+    els.bkSchedWdWrap.hidden = els.bkSchedFreq.value !== "weekly";
+    const off = !els.bkSchedOn.checked;
+    [els.bkSchedFreq, els.bkSchedWd, els.bkSchedTime].forEach((x) => { x.disabled = off; });
+  }
+
+  function renderBkSettings(d) {
+    const sc = d.schedule || {};
+    if (!bkFormDirty && sc.time) {
+      els.bkSchedOn.checked = !!sc.enabled;
+      els.bkSchedFreq.value = sc.freq || "daily";
+      els.bkSchedWd.value = String(sc.weekday != null ? sc.weekday : 6);
+      els.bkSchedTime.value = sc.time;
+      els.bkStaleDays.value = d.stale_days || 8;
+      els.bkUsbAfter.checked = !!d.usb_after;
+      syncBkSchedForm();
+    }
+    let st = sc.enabled && sc.next ? `Next backup: ${bkWhen(sc.next)}` : "Automatic backups are off";
+    if (sc.last_attempt) {
+      st += ` · last scheduled run ${bkWhen(sc.last_attempt)}: ` +
+        (sc.last_ok ? "succeeded" : `failed (${sc.last_error || "see above"})`);
+    }
+    els.bkSchedStatus.textContent = st;
+
+    const e = d.encryption || {};
+    els.bkEncStatus.innerHTML = !e.available && !e.enabled
+      ? `<b class="bk-msg-err">gpg is not installed</b> — install the <code>gnupg</code> package to enable encryption.`
+      : e.enabled
+        ? `<b class="bk-on">Encryption on</b> — passphrase set ${esc(bkWhen(e.set_at))}. Downloads and USB copies are encrypted.`
+        : `<b>Encryption off</b> — downloads and USB copies are not encrypted. Set a passphrase to encrypt them.`;
+    els.bkEncRemove.hidden = !e.enabled;
+    els.bkEncSet.textContent = e.enabled ? "Change passphrase" : "Set passphrase";
+    renderBkUsb(d.usb, d);
+  }
+
+  function renderBkUsb(u, d) {
+    if (!u) return;
+    const dev = u.device || {};
+    let html = u.present
+      ? `<b class="bk-on">Stick attached</b> — <span class="mono">${esc(dev.path || "")}</span> ` +
+        `(${esc([dev.model, dev.tran ? dev.tran.toUpperCase() : dev.type, dev.fstype].filter(Boolean).join(", "))}` +
+        `${dev.size ? ", " + formatBytes(dev.size) : ""}${dev.free != null ? ", " + formatBytes(dev.free) + " free" : ""})`
+      : `<b>No stick attached</b> — plug in the USB stick labelled <code>${esc(u.label || "TUXWALL-BACKUP")}</code>.`;
+    if (u.error) html += `<br><span class="bk-msg-err">${esc(u.error)}</span>`;
+    const lc = u.last_copy;
+    if (lc) {
+      html += `<br>Last copy ${esc(bkWhen(lc.time))}${lc.trigger === "scheduled" ? " (scheduled)" : ""}: ` +
+        `<span class="mono">${esc(lc.file)}</span>${lc.encrypted ? " (encrypted)" : ""} ${bkIntegBadge("verified")} · ` +
+        `${lc.copies} cop${lc.copies === 1 ? "y" : "ies"} on the stick · ${formatBytes(lc.free || 0)} free` +
+        (lc.skipped ? " · it was already there" : "") + (lc.warning ? ` · <span class="bk-msg-err">${esc(lc.warning)}</span>` : "");
+    } else {
+      html += `<br><span class="muted">No copy made from this dashboard yet.</span>`;
+    }
+    const le = u.last_error;
+    if (le && (!lc || le.time > lc.time)) {
+      html += `<br><span class="bk-msg-err">Last copy attempt failed (${esc(bkWhen(le.time))}): ${esc(le.error)}</span>`;
+    }
+    els.bkUsbStatus.innerHTML = html;
+    if (!els.bkUsbCopy.dataset.busy) els.bkUsbCopy.disabled = !u.present || !!(d && d.running);
+    if (!els.bkUsbCheck.dataset.busy) els.bkUsbCheck.disabled = !u.present;
+  }
+
   function renderSystemBackups(d) {
+    bkLastStatus = d;
+    if (d.schedule) renderBkSettings(d);
+    const enc = !!(d.encryption && d.encryption.enabled);
     const backups = (d.backups || []).slice().sort((a, b) => (b.time || 0) - (a.time || 0));
     const latest = backups.reduce((m, b) => Math.max(m, b.time || 0), 0);
     els.bkSysBody.innerHTML = backups.map((b) => {
@@ -6847,15 +6965,16 @@
       const age = b.time ? formatRelative(b.time) : "";
       return `
       <tr>
-        <td class="mono bk-backup-name">${esc(b.name)}${b.time === latest ? ' <span class="bk-latest">Latest</span>' : ""}</td>
+        <td class="mono bk-backup-name">${esc(b.name)}${b.time === latest ? ' <span class="bk-latest">Latest</span>' : ""} ${bkIntegBadge(b.integrity, b.checked)}</td>
         <td>${formatBytes(b.size)}</td>
         <td class="bk-created">
           <span>${created ? created.toLocaleString() : "—"}</span>
           ${age ? `<span class="bk-age">${esc(age)}</span>` : ""}
         </td>
         <td class="td-right">
-          ${actBtn("download", "Download this backup", `data-name="${esc(b.name)}"`, "bk-sys-dl")}
+          ${actBtn("download", enc ? "Download this backup (encrypted .gpg)" : "Download this backup", `data-name="${esc(b.name)}"`, "bk-sys-dl")}
           <button class="btn btn-sm btn-act bk-sys-browse" data-name="${esc(b.name)}" type="button">${ICONS.browse}<span>Browse</span></button>
+          ${actBtn("active", "Verify checksums (SHA256SUMS)", `data-name="${esc(b.name)}"`, "bk-sys-verify")}
           ${actBtn("export", "Export sanitized copy (secrets removed)", `data-name="${esc(b.name)}"`, "bk-sys-san")}
           ${actBtn("delete", "Delete this backup", `data-name="${esc(b.name)}"`, "bk-sys-del")}
         </td>
@@ -6942,11 +7061,27 @@
     }
   }
 
+  let bkContents = null;
+
+  function updateBkMulti() {
+    const n = els.bkSysFiles.querySelectorAll(".bk-file-chk:checked").length;
+    els.bkSysMulti.disabled = !n;
+    els.bkSysMulti.textContent = n ? `Preview ${n} selected` : "Preview selected";
+  }
+
   function renderSystemBackupContents(data) {
+    bkContents = data;
     els.bkSysContentsTitle.textContent = "Contents of " + data.backup;
+    els.bkSysSvc.innerHTML = `<option value="">Select a service's files…</option>` +
+      (data.services || []).map((g) => `<option value="${esc(g.service)}">${esc(g.service)} — ` +
+        `${g.files} file${g.files === 1 ? "" : "s"}${g.firewall ? `, ${g.firewall} firewall` : ""}</option>`).join("");
+    els.bkSysIntegrity.innerHTML = data.integrity
+      ? `Checksums: ${bkIntegBadge(data.integrity)}${data.integrity === "damaged" ? ` <span class="bk-msg-err">${esc(data.integrity_summary || "")}</span>` : ""}`
+      : "";
     els.bkSysFiles.innerHTML = (data.files || []).map((f) => `
       <tr>
-        <td class="mono">${esc(f.name)}</td>
+        <td class="mono">${f.kind === "info" ? `<span>${esc(f.name)}</span>`
+          : `<label class="bk-file-pick"><input type="checkbox" class="bk-file-chk" data-file="${esc(f.name)}" data-svc="${esc(f.service || "")}" aria-label="Select ${esc(f.name)}"><span>${esc(f.name)}</span></label>`}</td>
         <td>${formatBytes(f.size)}</td>
         <td class="muted">${esc(f.service || "—")}</td>
         <td class="td-right">
@@ -6956,6 +7091,7 @@
       </tr>`).join("") || `<tr><td colspan="4" class="muted">No files.</td></tr>`;
     els.bkSysContents.hidden = false;
     hideBkPreview();
+    updateBkMulti();
     if (els.bkSysFilesSearch) els.bkSysFilesSearch.value = "";
     filterSystemBackupFiles();
     requestAnimationFrame(revealBackupContents);
@@ -7029,19 +7165,128 @@
 
   async function downloadSystemBackup(name) {
     const res = await fetch("/api/backups/system/download?name=" + encodeURIComponent(name), { cache: "no-store" });
-    if (!res.ok) throw new Error("Download failed");
+    if (!res.ok) {
+      let msg = "Download failed";
+      try { msg = (await res.json()).error || msg; } catch (_) { /* not JSON */ }
+      throw new Error(msg);
+    }
+    const m = (res.headers.get("Content-Disposition") || "").match(/filename="([^"]+)"/);
+    const fname = m ? m[1] : name;
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = name;
+    a.download = fname;
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 5000);
+    return fname;
+  }
+
+  function bkUsbFilesHtml(r) {
+    const rows = (r.files || []).map((f) => `<tr><td class="mono">${esc(f.name)}</td><td>${formatBytes(f.size)}</td>` +
+      `<td>${esc(bkWhen(f.time))}</td><td>${f.status === "unverified" ? '<span class="bk-integ bk-integ-muted">No .sha256</span>' : bkIntegBadge(f.status)}</td></tr>`).join("");
+    return `<table><thead><tr><th>On the stick (${esc(String(r.copies))})</th><th>Size</th><th>Copied</th><th>Check</th></tr></thead>` +
+      `<tbody>${rows || '<tr><td colspan="4" class="muted">No TuxWall copies on this stick yet.</td></tr>'}</tbody></table>`;
+  }
+
+  function bindBackupSettings() {
+    const ask = window.twConfirm || window.confirm;
+    els.bkSched.addEventListener("input", () => { bkFormDirty = true; syncBkSchedForm(); });
+    els.bkSched.addEventListener("change", () => { bkFormDirty = true; syncBkSchedForm(); });
+    els.bkSettingsSave.addEventListener("click", async () => {
+      const body = {
+        schedule: {
+          enabled: els.bkSchedOn.checked, freq: els.bkSchedFreq.value,
+          weekday: Number(els.bkSchedWd.value), time: els.bkSchedTime.value,
+        },
+        stale_days: Number(els.bkStaleDays.value),
+        usb_after: els.bkUsbAfter.checked,
+      };
+      try {
+        els.bkSettingsSave.disabled = true;
+        const r = await bkApi("/api/backups/system/settings", body);
+        bkFormDirty = false;
+        setBkSysMsg(`Backup settings saved — ${(r.schedule && r.schedule.describe) === "off" ? "automatic backups off" : "automatic backups " + ((r.schedule && r.schedule.describe) || "")}, warning after ${r.stale_days} days.`, false);
+        await refreshSystemBackups();
+      } catch (err) {
+        setBkSysMsg("Settings: " + err.message, true);
+      } finally {
+        els.bkSettingsSave.disabled = false;
+      }
+    });
+
+    els.bkEncSet.addEventListener("click", async () => {
+      const pw = els.bkEncPw.value;
+      if (pw.length < 10) { setBkSysMsg("Use a passphrase of at least 10 characters.", true); return; }
+      if (pw !== els.bkEncPw2.value) { setBkSysMsg("The two passphrases do not match.", true); return; }
+      const changing = !els.bkEncRemove.hidden;
+      if (!(await ask((changing ? "Change the backup passphrase?" : "Encrypt downloads and USB copies with this passphrase?") +
+        "\n\nStore it in your password manager now: it is never shown again, and encrypted copies cannot be restored without it." +
+        (changing ? " Copies made before keep the OLD passphrase." : "")))) return;
+      try {
+        els.bkEncSet.disabled = true;
+        await bkApi("/api/backups/system/encryption", { action: "set", passphrase: pw });
+        els.bkEncPw.value = "";
+        els.bkEncPw2.value = "";
+        setBkSysMsg(changing ? "Passphrase changed." : "Encryption on: downloads and USB copies are now encrypted.", false);
+        await refreshSystemBackups();
+      } catch (err) {
+        setBkSysMsg("Encryption: " + err.message, true);
+      } finally {
+        els.bkEncSet.disabled = false;
+      }
+    });
+    els.bkEncRemove.addEventListener("click", async () => {
+      if (!(await ask("Remove encryption?\n\nFuture downloads and USB copies will NOT be encrypted. Copies already encrypted still need the old passphrase."))) return;
+      try {
+        await bkApi("/api/backups/system/encryption", { action: "remove" });
+        setBkSysMsg("Encryption removed.", false);
+        await refreshSystemBackups();
+      } catch (err) {
+        setBkSysMsg("Encryption: " + err.message, true);
+      }
+    });
+
+    const busy = (btn, on, label) => {
+      if (on) { btn.dataset.busy = "1"; btn.dataset.label = btn.textContent; btn.textContent = label; btn.disabled = true; } else {
+        delete btn.dataset.busy; btn.textContent = btn.dataset.label || btn.textContent; btn.disabled = false;
+      }
+    };
+    els.bkUsbCopy.addEventListener("click", async () => {
+      try {
+        busy(els.bkUsbCopy, true, "Copying…");
+        const r = await bkApi("/api/backups/system/usb-copy", {});
+        setBkSysMsg(r.skipped
+          ? `${r.file} was already on the stick (re-verified). The stick is unmounted — you can unplug it.`
+          : `Copied ${r.file}${r.encrypted ? " (encrypted)" : ""} to the stick and verified it (sha256). The stick is unmounted — you can unplug it.`, false);
+      } catch (err) {
+        setBkSysMsg("USB copy: " + err.message, true);
+      } finally {
+        busy(els.bkUsbCopy, false);
+        await refreshSystemBackups();
+      }
+    });
+    els.bkUsbCheck.addEventListener("click", async () => {
+      try {
+        busy(els.bkUsbCheck, true, "Checking…");
+        const r = await bkApi("/api/backups/system/usb-check", {});
+        els.bkUsbFiles.innerHTML = bkUsbFilesHtml(r);
+        els.bkUsbFiles.hidden = false;
+        setBkSysMsg(`Stick checked: ${r.copies} cop${r.copies === 1 ? "y" : "ies"}` + (r.damaged ? `, ${r.damaged} DAMAGED` : ", all verified") +
+          `, ${formatBytes(r.free)} free.`, !!r.damaged);
+      } catch (err) {
+        setBkSysMsg("USB check: " + err.message, true);
+      } finally {
+        busy(els.bkUsbCheck, false);
+        await refreshSystemBackups();
+      }
+    });
   }
 
   function bindSystemBackups() {
+    bindBackupSettings();
     els.bkSysAll.addEventListener("click", () => {
       els.bkSysItems.querySelectorAll(".bk-item-chk:not(:disabled)").forEach((c) => { c.checked = true; });
       updateBackupSelection();
@@ -7076,15 +7321,19 @@
       try {
         setBkSysMsg("Uploading and examining " + file.name + "…", false);
         const buf = await file.arrayBuffer();
-        const data = await uploadSystemBackupExamine(buf);
+        const data = await uploadSystemBackupExamine(buf, els.bkSysUploadPw.value);
         els.bkSysFile.value = "";
+        els.bkSysUploadPw.value = "";
         updateBackupFileHint();
-        renderSystemBackupContents({ backup: data.name, files: data.files });
+        renderSystemBackupContents({ backup: data.name, files: data.files, services: data.services, integrity: data.integrity });
         setBkSysMsg(
-          `Examined "${data.name}" — ${(data.files || []).length} file(s) listed below. ` +
+          `Examined "${data.name}"${data.encrypted ? " (decrypted)" : ""} — ${(data.files || []).length} file(s) listed below, ` +
+          `checksums ${data.integrity === "verified" ? "verified" : "not available (older backup)"}. ` +
           "Each restore shows a preview first; the current file is copied to the pre-restore folder.", false);
+        await refreshSystemBackups();
       } catch (err) {
         setBkSysMsg("Upload: " + err.message, true);
+        if (err.data && err.data.need_passphrase) els.bkSysUploadPw.focus();
       }
     });
 
@@ -7120,9 +7369,24 @@
       const dl = e.target.closest(".bk-sys-dl");
       if (dl) {
         try {
-          await downloadSystemBackup(dl.dataset.name);
+          const fname = await downloadSystemBackup(dl.dataset.name);
+          if (/\.gpg$/.test(fname)) setBkSysMsg(`Downloaded ${fname} (encrypted). Decrypt with: gpg -d ${fname} > ${dl.dataset.name}`, false);
         } catch (err) {
           setBkSysMsg(err.message, true);
+        }
+        return;
+      }
+      const ver = e.target.closest(".bk-sys-verify");
+      if (ver) {
+        try {
+          ver.disabled = true;
+          const r = await bkApi("/api/backups/system/verify", { name: ver.dataset.name });
+          setBkSysMsg(`${r.name}: ${(BK_INTEG[r.integrity] || BK_INTEG.unchecked)[0]} — ${r.summary}.`, r.integrity === "damaged");
+          await refreshSystemBackups();
+        } catch (err) {
+          setBkSysMsg("Verify: " + err.message, true);
+        } finally {
+          ver.disabled = false;
         }
         return;
       }
@@ -7176,6 +7440,22 @@
       const rst = e.target.closest(".bk-file-restore");
       if (rst) await previewBkRestore(rst.dataset.name, rst.dataset.file);
     });
+    els.bkSysFiles.addEventListener("change", (e) => {
+      if (e.target.closest(".bk-file-chk")) updateBkMulti();
+    });
+    els.bkSysSvc.addEventListener("change", () => {
+      const svc = els.bkSysSvc.value;
+      if (!svc) return;
+      els.bkSysFiles.querySelectorAll(".bk-file-chk").forEach((c) => { c.checked = c.dataset.svc === svc; });
+      updateBkMulti();
+      setBkSysMsg(`Selected every file of ${svc}. Click "${els.bkSysMulti.textContent}" to see what would change.`, false);
+    });
+    els.bkSysPickNone.addEventListener("click", () => {
+      els.bkSysFiles.querySelectorAll(".bk-file-chk").forEach((c) => { c.checked = false; });
+      els.bkSysSvc.value = "";
+      updateBkMulti();
+    });
+    els.bkSysMulti.addEventListener("click", previewBkMulti);
 
     if (els.bkSysPreview) els.bkSysPreview.addEventListener("click", onBkPreviewClick);
   }
@@ -7200,8 +7480,13 @@
     return data;
   }
 
+  let bkMulti = null;
+  let bkUnits = [];
+
   function hideBkPreview() {
     bkPreview = null;
+    bkMulti = null;
+    bkUnits = [];
     if (!els.bkSysPreview) return;
     els.bkSysPreview.hidden = true;
     els.bkSysPreview.innerHTML = "";
@@ -7268,13 +7553,154 @@
     }
   }
 
+  const BK_KINDS = { new: "New file", modified: "Changes the live file", identical: "Identical to the live file",
+    refused: "Cannot be restored" };
+
+  function bkItemHtml(i) {
+    const perms = i.perms || {};
+    const diff = i.error ? `<p class="bk-msg-err">${esc(i.error)}</p>`
+      : i.binary ? `<p class="muted">Binary file — no text diff (${formatBytes(i.old_size || 0)} → ${formatBytes(i.new_size || 0)}).</p>`
+        : i.diff_note ? `<p class="muted">${esc(i.diff_note)}.</p>`
+          : i.diff ? `<pre>${bkDiffHtml(i.diff)}</pre>` + (i.diff_truncated ? `<p class="muted">Diff truncated (${i.diff_lines} lines in total).</p>` : "")
+            : "";
+    const meta = i.error ? "" : `<p class="bk-preview-meta">Permissions <span class="mono">${esc(perms.mode || "?")} ${esc(perms.owner || "")}</span> ` +
+      `<span class="muted">(${esc(perms.source || "")})</span>${i.creates_dirs ? ` · creates <span class="mono">${esc(i.creates_dirs)}</span>` : ""}` +
+      `${i.strict ? ` · <b>second confirmation:</b> ${esc(i.strict_reason || "")}` : ""}</p>`;
+    return `<details class="bk-multi-item"><summary><span class="mono">${esc(i.target)}</span> ` +
+      `<span class="bk-kind">${esc(BK_KINDS[i.kind] || i.kind)}</span>${i.strict ? ' <span class="bk-kind bk-kind-strict">sensitive</span>' : ""}</summary>` +
+      meta + diff + `</details>`;
+  }
+
+  function renderBkMulti(p) {
+    const box = els.bkSysPreview;
+    const counts = {};
+    (p.items || []).forEach((i) => { counts[i.kind] = (counts[i.kind] || 0) + 1; });
+    const summary = ["new", "modified", "identical", "refused"].filter((k) => counts[k])
+      .map((k) => `${counts[k]} ${k === "new" ? "new" : k === "modified" ? "changed" : k === "identical" ? "identical" : "refused"}`).join(" · ");
+    const units = (p.units || []).map((u) => esc(u.label)).join(", ");
+    box.innerHTML =
+      `<div class="bk-preview-head"><b>Restore preview</b> <span class="mono">${esc(p.service ? "service " + p.service : (p.items || []).length + " file(s)")}</span>` +
+      `<span class="bk-kind">${esc(summary || "nothing selected")}</span></div>` +
+      (p.firewall && p.firewall.length
+        ? `<div class="bk-preview-strict">${p.firewall.length} firewall file(s) (${esc(p.firewall.join(", "))}) are never restored raw: ` +
+          `<button type="button" class="btn btn-sm" data-bk-act="fwimport">Import as firewall snapshot</button></div>` : "") +
+      (p.strict && p.strict.length ? `<div class="bk-preview-strict"><b>Needs a second confirmation:</b> the selection ${esc(p.strict.join("; "))}.</div>` : "") +
+      `<div class="bk-multi-list">${(p.items || []).map(bkItemHtml).join("")}</div>` +
+      (units ? `<p class="bk-preview-meta">Affected services: ${units}. Nothing is restarted automatically — you are offered the reload/restart after the restore.</p>` : "") +
+      `<div class="bk-preview-actions">` +
+      (p.changes ? `<button type="button" class="btn btn-sm btn-primary" data-bk-act="applymany">Restore ${p.changes} file${p.changes === 1 ? "" : "s"}</button>`
+        : `<button type="button" class="btn btn-sm" disabled>Nothing to restore</button>`) +
+      `<button type="button" class="btn btn-sm" data-bk-act="close">Cancel</button></div>`;
+    const first = box.querySelector(".bk-multi-item");
+    if (first && (p.items || []).length <= 3) box.querySelectorAll(".bk-multi-item").forEach((d) => { d.open = true; });
+    box.hidden = false;
+    box.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  async function previewBkMulti() {
+    if (!bkContents) return;
+    const files = Array.from(els.bkSysFiles.querySelectorAll(".bk-file-chk:checked")).map((c) => c.dataset.file);
+    if (!files.length) return;
+    try {
+      els.bkSysMulti.disabled = true;
+      const p = await bkApi("/api/backups/system/preview-many", { name: bkContents.backup, files });
+      hideBkPreview();
+      bkMulti = { name: bkContents.backup, p };
+      renderBkMulti(p);
+      setBkSysMsg("");
+    } catch (err) {
+      setBkSysMsg("Preview: " + err.message, true);
+    } finally {
+      updateBkMulti();
+    }
+  }
+
+  function bkUnitLabel(u) {
+    return u.action === "restart" ? `Restart ${u.label}` : u.action === "reload" ? `Reload ${u.label}`
+      : u.action === "daemon-reload" ? "Reload systemd units" : `Apply ${u.label}`;
+  }
+
+  function renderBkUnits(headHtml, units) {
+    bkUnits = units || [];
+    const box = els.bkSysPreview;
+    const rows = bkUnits.map((u) => u.manual
+      ? `<li class="bk-unit"><b>${esc(u.label)}</b>: <span class="muted">${esc(u.manual)}</span></li>`
+      : `<li class="bk-unit${u.critical ? " bk-unit-critical" : ""}"><button type="button" class="btn btn-sm" data-bk-act="unit" data-unit="${esc(u.unit)}">${esc(bkUnitLabel(u))}</button>` +
+        `${u.critical ? ' <span class="bk-kind bk-kind-strict">network-critical</span>' : ""} <span>${esc(u.warning || "")}</span>` +
+        `${u.check ? ` <span class="muted">(runs <code>${esc(u.check)}</code> first)</span>` : ""}<span class="bk-unit-res"></span></li>`).join("");
+    box.innerHTML = headHtml +
+      (rows ? `<p class="bk-preview-meta">To apply the restored config, reload/restart only these services — when you are ready. Nothing was restarted.</p><ul class="bk-units">${rows}</ul>` : "") +
+      `<div class="bk-preview-actions"><button type="button" class="btn btn-sm" data-bk-act="close">Done</button></div>`;
+    box.hidden = false;
+    box.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  async function onBkUnitClick(b) {
+    const ask = window.twConfirm || window.confirm;
+    const u = bkUnits.find((x) => x.unit === b.dataset.unit);
+    if (!u) return;
+    if (!(await ask(`${bkUnitLabel(u)}?\n\n${u.warning || ""}${u.check ? `\n\n"${u.check}" runs first; nothing happens if it fails.` : ""}`))) return;
+    if (u.critical && !(await ask(`SECOND CONFIRMATION — ${u.label} is network-critical.\n\n${u.warning}\n\n` +
+      "Only continue if you can reach the router another way (console or a wired LAN port) should it go wrong."))) return;
+    const res = b.parentElement.querySelector(".bk-unit-res");
+    try {
+      b.disabled = true;
+      const r = await bkApi("/api/backups/system/service-action", { unit: u.unit, confirm_critical: !!u.critical });
+      b.textContent = "Done";
+      if (res) res.textContent = " — " + (r.pending ? r.message : `${r.action} OK${r.active ? ` (now ${r.active})` : ""}${r.check ? `, check ${r.check}` : ""}`);
+    } catch (err) {
+      b.disabled = false;
+      if (res) {
+        res.innerHTML = ` — <span class="bk-msg-err">${esc(err.message)}</span>` +
+          (err.data && err.data.output ? `<pre>${esc(err.data.output)}</pre>` : "");
+      }
+    }
+  }
+
+  async function onBkMultiApply(b) {
+    const ask = window.twConfirm || window.confirm;
+    const { name, p } = bkMulti;
+    const changing = (p.items || []).filter((i) => i.restorable && (i.kind === "new" || i.kind === "modified"));
+    if (!changing.length) return;
+    const list = changing.slice(0, 12).map((i) => "  " + i.target + (i.kind === "new" ? " (new)" : "")).join("\n") +
+      (changing.length > 12 ? `\n  … and ${changing.length - 12} more` : "");
+    if (!(await ask(`Restore ${changing.length} file(s) from ${name}?\n\n${list}\n\n` +
+      "Every current file is copied to /var/lib/tuxwall/backups/pre-restore/ first; each write is atomic and if one " +
+      "fails the files already written are put back. Services are not restarted."))) return;
+    const strict = (p.strict || []).length > 0;
+    if (strict && !(await ask(`SECOND CONFIRMATION — the selection ${p.strict.join("; ")}.\n\n` +
+      "Only proceed if you trust this backup and know how to undo the change."))) return;
+    try {
+      b.disabled = true;
+      const res = await bkApi("/api/backups/system/restore-files", {
+        name, confirm_strict: strict,
+        files: changing.map((i) => ({ file: i.member, expect_sha256: i.new_sha256, expect_live_sha256: i.old_sha256 })),
+      });
+      bkMulti = null;
+      renderBkUnits(
+        `<div class="bk-preview-head"><b>Restored ${res.restored.length} file${res.restored.length === 1 ? "" : "s"}</b>` +
+        `<span class="bk-kind">from ${esc(name)}</span></div>` +
+        `<p class="bk-preview-meta">${res.restored.map((r) => `<span class="mono">${esc(r.target)}</span>${r.created ? " (new)" : ""}`).join(", ")}` +
+        (res.pre_restore ? ` · previous versions saved in <span class="mono">${esc(res.pre_restore)}</span>` : "") + `</p>`,
+        res.units);
+      setBkSysMsg(`Restored ${res.restored.length} file(s).` + (res.pre_restore ? ` Previous versions: ${res.pre_restore}.` : ""), false);
+    } catch (err) {
+      b.disabled = false;
+      setBkSysMsg("Restore: " + err.message, true);
+    }
+  }
+
   async function onBkPreviewClick(e) {
     const b = e.target.closest("[data-bk-act]");
-    if (!b || !bkPreview) return;
+    if (!b) return;
     const act = b.dataset.bkAct;
+    if (act === "close") { hideBkPreview(); return; }
+    if (act === "unit") { await onBkUnitClick(b); return; }
+    if (act === "applymany" && bkMulti) { await onBkMultiApply(b); return; }
+    if (act === "fwimport" && bkMulti && !bkPreview) bkPreview = { name: bkMulti.name, file: "", p: {} };
+    if (!bkPreview) return;
     const { name, file, p } = bkPreview;
     const ask = window.twConfirm || window.confirm;
-    if (act === "close") { hideBkPreview(); return; }
     if (act === "fwimport") {
       try {
         b.disabled = true;
@@ -7311,12 +7737,14 @@
         expect_sha256: p.new_sha256, expect_live_sha256: p.old_sha256,
       });
       hideBkPreview();
-      const hint = res.restart_required
-        ? (res.restart_required === "daemon-reload" ? " Then run: sudo systemctl daemon-reload"
-          : res.restart_required.indexOf(" ") > 0 ? ` Then run: sudo ${res.restart_required}`
-            : ` To apply, run: sudo systemctl restart ${res.restart_required}`) : "";
+      if (res.units && res.units.length) {
+        renderBkUnits(`<div class="bk-preview-head"><b>Restored</b> <span class="mono">${esc(res.target)}</span>` +
+          `<span class="bk-kind">mode ${esc(res.mode)}</span></div>` +
+          (res.pre_restore ? `<p class="bk-preview-meta">Previous version saved to <span class="mono">${esc(res.pre_restore)}</span></p>` : ""),
+          res.units);
+      }
       setBkSysMsg(`Restored ${res.target} (mode ${res.mode}).` +
-        (res.pre_restore ? ` Previous version saved to ${res.pre_restore}.` : "") + hint, false);
+        (res.pre_restore ? ` Previous version saved to ${res.pre_restore}.` : ""), false);
     } catch (err) {
       b.disabled = false;
       setBkSysMsg("Restore: " + err.message, true);
@@ -9624,12 +10052,11 @@
       lost += ovPenalty(issues, n > 30 ? 5 : 3, "info",
         `${n} package update${n === 1 ? "" : "s"} available`, "system");
     }
-    if (ovPosture.backupAgeDays != null && ovPosture.backupAgeDays > 30) {
-      lost += ovPenalty(issues, 4, "info",
-        `Last backup ${Math.round(ovPosture.backupAgeDays)} days ago`, "backups");
-    } else if (ovPosture.backupAgeDays != null && ovPosture.backupAgeDays > 14) {
-      lost += ovPenalty(issues, 2, "info",
-        `Backup is ${Math.round(ovPosture.backupAgeDays)} days old`, "backups");
+    // one owner-set threshold (System > Backups) for this, the sidebar badge and the incident
+    const bkStale = ovPosture.backupStaleDays || 8;
+    if (ovPosture.backupAgeDays != null && ovPosture.backupAgeDays > bkStale) {
+      lost += ovPenalty(issues, ovPosture.backupAgeDays > 2 * bkStale ? 4 : 2, "info",
+        `Last backup ${Math.round(ovPosture.backupAgeDays)} days ago (limit ${bkStale})`, "backups");
     }
     if (ovPosture.failedUnits > 0) {
       lost += ovPenalty(issues, Math.min(6, ovPosture.failedUnits * 2), "warn",
@@ -9961,12 +10388,13 @@
 
     if (ovPosture.backupAgeDays !== undefined) {
       const a = ovPosture.backupAgeDays;
-      const fresh = a == null ? 0 : Math.max(0, Math.round(100 * (1 - Math.min(a, 30) / 30)));
+      const stale = ovPosture.backupStaleDays || 8;
+      const fresh = a == null ? 0 : Math.max(0, Math.round(100 * (1 - Math.min(a, stale) / stale)));
       setPost("ov-backup-val", "ov-backup-sub",
         a == null ? "None" : a < 1 ? "Today" : `${Math.round(a)}d ago`,
         a == null ? "no system snapshot" : "system snapshot",
-        "ov-post-backup", a == null ? "warn" : a > 30 ? "warn" : "ok");
-      ovChip("ov-backup-chip", a == null ? "None" : a > 30 ? "Stale" : a > 14 ? "Aging" : "Fresh");
+        "ov-post-backup", a == null ? "warn" : a > stale ? "warn" : "ok");
+      ovChip("ov-backup-chip", a == null ? "None" : a > stale ? "Stale" : a > stale / 2 ? "Aging" : "Fresh");
       const newest = ovPosture.backupNewest;
       const when = newest
         ? new Date(newest * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" })
@@ -10008,6 +10436,7 @@
       ovPosture.backupCount = list.length;
       ovPosture.backupSize = list.reduce((sum, b) => sum + (b.size || 0), 0);
       ovPosture.backupAgeDays = newest ? (Date.now() / 1000 - newest) / 86400 : null;
+      ovPosture.backupStaleDays = bks.stale_days || 8;
     }
     if (svcs) {
       state.svcData = svcs;

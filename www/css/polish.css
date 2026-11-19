@@ -1589,3 +1589,48 @@ body.light-theme .topbar {
   .bk-files-toolbar input[type="search"] { flex: 1 1 100%; }
   #bk-sys-contents { scroll-margin-top: 118px; }
 }
+
+/* ── Backups phase 2: schedule/encryption/USB panels, integrity badges,
+   multi-file restore. Functional baseline; the page redesign restyles it. */
+#view-backups .bk-settings { padding: 4px 14px 10px; }
+#view-backups .bk-form-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin: 6px 0; }
+#view-backups .bk-field, #view-backups .bk-check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+#view-backups .bk-field input[type="number"] { width: 70px; }
+#view-backups .bk-form-row input[type="password"] { flex: 1 1 200px; min-width: 0; max-width: 300px; }
+#view-backups .bk-note { font-size: 12px; margin: 6px 0 0; }
+#view-backups .bk-sched-status { font-size: 12px; }
+#view-backups .bk-enc-status, #view-backups .bk-usb-status { margin: 4px 0 8px; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+#view-backups .bk-on { color: var(--green); }
+#view-backups #bk-usb-files { margin: 8px 0; }
+#view-backups .bk-upload-row input[type="password"] { flex: 1 1 220px; min-width: 0; }
+#view-backups .bk-settings :is(input[type="password"], input[type="number"], input[type="time"], select),
+#view-backups .bk-upload-row input[type="password"], #view-backups .bk-multi-toolbar select {
+  background: var(--bg-elev); color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+  font: inherit; font-size: 13px; padding: 6px 9px;
+}
+#view-backups .bk-settings :is(input, select):focus, #view-backups .bk-upload-row input[type="password"]:focus,
+#view-backups .bk-multi-toolbar select:focus { border-color: var(--accent); outline: none; }
+.bk-integ {
+  display: inline-block; margin-left: 4px; padding: 1px 6px 2px; border-radius: 999px; vertical-align: middle;
+  font-family: inherit; font-size: 8.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+  border: 1px solid var(--border); color: var(--muted);
+}
+.bk-integ-ok { color: var(--green); border-color: color-mix(in srgb, var(--green) 35%, transparent);
+  background: color-mix(in srgb, var(--green) 13%, transparent); }
+.bk-integ-err { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, transparent);
+  background: color-mix(in srgb, var(--red) 13%, transparent); }
+.bk-file-pick { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; overflow-wrap: anywhere; }
+.bk-file-pick input { flex: none; }
+.bk-multi-toolbar select { max-width: 320px; min-width: 0; }
+.bk-multi-list { margin: 8px 0; max-height: 520px; overflow: auto; }
+.bk-multi-item { border-top: 1px solid var(--border); padding: 6px 0; }
+.bk-multi-item > summary { cursor: pointer; font-size: 12.5px; overflow-wrap: anywhere; }
+.bk-kind-strict { color: var(--amber, #d29922); border-color: color-mix(in srgb, var(--amber, #d29922) 45%, transparent); }
+.bk-units { margin: 6px 0; padding-left: 0; list-style: none; display: grid; gap: 8px; font-size: 12.5px; }
+.bk-unit-critical > .btn { border-color: color-mix(in srgb, var(--amber, #d29922) 55%, var(--border)); }
+.bk-unit pre { max-height: 200px; }
+@media (max-width: 560px) {
+  #view-backups .bk-sys-verify::after { content: "Verify"; }
+  #view-backups .bk-form-row input[type="password"] { max-width: none; flex: 1 1 100%; }
+  .bk-multi-toolbar select { flex: 1 1 100%; max-width: none; }
+}

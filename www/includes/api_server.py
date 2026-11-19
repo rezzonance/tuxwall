@@ -11172,14 +11172,16 @@ def _backup_incident_refresh():
     threading.Thread(target=run, daemon=True).start()
 
 
-def _system_backup_worker(include, who):
+def _system_backup_worker(include, who, trigger="manual"):
+    """Run one backup (in this thread) with progress in _system_backup_job.
+    Returns the finished run record, or None when another job held the lock."""
     def progress(pct, step):
         with _system_backup_lock:
             _system_backup_job["pct"] = pct
             _system_backup_job["step"] = step
-    result = error = None
+    result = error = run = None
     try:
-        run = _bk.run_job(include=include, who=who, trigger="manual", on_progress=progress)
+        run = _bk.run_job(include=include, who=who, trigger=trigger, on_progress=progress)
         if run.get("ok"):
             result = run.get("result")
         else:
@@ -11187,12 +11189,17 @@ def _system_backup_worker(include, who):
     except _bk.Refused as exc:
         error = exc.payload.get("error") or str(exc)
     except Exception as exc:
-        error = str(exc)
+        error = str(exc) or exc.__class__.__name__
+        try:
+            run = _bk.record_failure("", trigger, error, who=who)   # still raises backup:failed
+        except Exception as rexc:
+            print("[backup] could not record the failure: %r" % rexc, flush=True)
     with _system_backup_lock:
         _system_backup_job.update({"running": False, "result": result, "error": error,
                                    "pct": 100 if error else _system_backup_job["pct"]})
-    print("[backup] system backup by %s: %s" % (who or "?", result or ("FAILED: %s" % error)), flush=True)
+    print("[backup] %s system backup by %s: %s" % (trigger, who or "?", result or ("FAILED: %s" % error)), flush=True)
     _backup_incident_refresh()
+    return run
 
 
 def create_system_backup(include=None, who=""):
@@ -11211,11 +11218,93 @@ def create_system_backup(include=None, who=""):
     return {"ok": True, "running": True}
 
 
+# --- Scheduled backups --------------------------------------------------------
+# A thread in this API (not a systemd timer): the schedule is owner-edited
+# here and takes effect at once, the run shares the job lock and the live
+# progress with the "Create" button, and failures go through the same
+# state file -> backup:failed incident -> ntfy path. Missed slots (router
+# off at the scheduled time) run once soon after start; see backups.due_slot.
+BACKUP_SCHED_START_DELAY = 90
+BACKUP_SCHED_TICK = 30
+
+
+def _backup_scheduled_run(slot):
+    with _system_backup_lock:
+        if _system_backup_job["running"] or _bk.job_is_locked():
+            return False                       # a manual run or USB copy: retry next tick
+        _system_backup_job.update({"pct": 0, "step": "Scheduled backup", "result": None, "error": None,
+                                   "running": True})
+    run = _system_backup_worker(None, "scheduler", trigger="scheduled")
+    if run is None:
+        with _system_backup_lock:
+            _system_backup_job["error"] = None
+        return False
+    _bk.mark_slot("", slot, run)
+    if run.get("ok") and _bk.load_settings()["usb_after"]:
+        try:
+            dev, err = _bk.usb_detect()
+            if dev or err:
+                res = _bk.usb_copy(who="scheduler", trigger="scheduled")
+                print("[backup] scheduled USB copy: %s%s" % (res.get("file"), " (already there)" if res.get("skipped") else ""),
+                      flush=True)
+            else:
+                print("[backup] scheduled USB copy skipped: no %s stick attached" % _bk.USB_LABEL, flush=True)
+        except _bk.Refused as exc:
+            print("[backup] scheduled USB copy FAILED: %s" % exc.payload.get("error"), flush=True)
+        except Exception as exc:
+            print("[backup] scheduled USB copy FAILED: %r" % exc, flush=True)
+        _usb_status_cache["t"] = 0
+        _backup_incident_refresh()
+    return True
+
+
+def _backup_scheduler_loop():
+    time.sleep(BACKUP_SCHED_START_DELAY)
+    try:
+        err = _bk.usb_cleanup()
+        if err:
+            print("[backup] %s" % err, flush=True)
+    except Exception as exc:
+        print("[backup] USB cleanup failed: %r" % exc, flush=True)
+    while True:
+        try:
+            slot = _bk.schedule_due("")
+            if slot is not None:
+                print("[backup] scheduled backup due (slot %s)" % time.strftime("%Y-%m-%d %H:%M", time.localtime(slot)),
+                      flush=True)
+                _backup_scheduled_run(slot)
+        except Exception as exc:
+            print("[backup] scheduler error: %r" % exc, flush=True)
+        time.sleep(BACKUP_SCHED_TICK)
+
+
+def start_backup_scheduler():
+    if _bk is None:
+        return
+    threading.Thread(target=_backup_scheduler_loop, name="backup-scheduler", daemon=True).start()
+
+
+_usb_status_cache = {"t": 0, "data": None}
+_usb_status_lock = threading.Lock()
+
+
+def _usb_status(force=False):
+    with _usb_status_lock:
+        if force or not _usb_status_cache["data"] or time.time() - _usb_status_cache["t"] > 10:
+            try:
+                _usb_status_cache["data"] = _bk.usb_status()
+            except Exception as exc:
+                _usb_status_cache["data"] = {"present": False, "error": "USB detection failed: %s" % exc,
+                                             "label": _bk.USB_LABEL}
+            _usb_status_cache["t"] = time.time()
+        return dict(_usb_status_cache["data"])
+
+
 def _public_run(run):
     if not run:
         return None
     keep = ("id", "started", "finished", "running", "ok", "trigger", "who", "result", "error",
-            "stderr_tail", "size", "pruned")
+            "stderr_tail", "size", "pruned", "integrity")
     out = {k: run.get(k) for k in keep if k in run}
     items = run.get("items")
     out["items"] = items if items == "all" else len(items or [])
@@ -11227,13 +11316,21 @@ def system_backup_status():
         job = dict(_system_backup_job)
     st = {}
     failed = None
+    extra = {}
     if _bk is not None:
         try:
             st = _bk.load_state() if job["running"] else _bk.reconcile_interrupted()
             failed = _bk.failure_incident()
         except Exception as exc:
             print("[backup] state read failed: %r" % exc, flush=True)
-    return {
+        try:
+            settings = _bk.load_settings()
+            extra = {"stale_days": settings["stale_days"], "usb_after": settings["usb_after"],
+                     "schedule": _bk.schedule_info(), "encryption": _bk.encryption_info(),
+                     "usb": _usb_status()}
+        except Exception as exc:
+            print("[backup] settings read failed: %r" % exc, flush=True)
+    out = {
         "ok": True,
         "running": job["running"],
         "pct": job["pct"],
@@ -11247,7 +11344,10 @@ def system_backup_status():
         "failed": bool(failed),
         "pinned": st.get("pinned") or [],
         "retention": dict(_bk.RETENTION) if _bk else {},
+        "stale_days": 8,
     }
+    out.update(extra)
+    return out
 
 
 def list_system_backups():
@@ -11266,6 +11366,7 @@ def delete_system_backup(filename, who="", client=""):
     os.remove(path)
     if _bk is not None:
         try:
+            _bk.forget_archive("", base)
             if base in (_bk.load_state().get("pinned") or []):
                 _bk.set_pinned("", base, False, who=who)
             _bk.audit("", "delete", who=who, client=client, archive=base)
@@ -11530,18 +11631,27 @@ def _system_backup_path(filename, sanitized=False):
     return base, path
 
 
-def upload_system_backup(raw, who=""):
+def upload_system_backup(raw, who="", passphrase=None):
     """Validate (gzip, member-count and decompressed-size limits, no unsafe
-    members) and store an uploaded system backup (root-only), then list it."""
+    members, SHA256SUMS) and store an uploaded system backup (root-only).
+    Encrypted (.gpg) uploads are decrypted with the given or stored passphrase."""
     _bk_required()
-    return _bk.store_upload("", raw, who=who)
+    res = _bk.store_upload("", raw, who=who, passphrase=passphrase or None)
+    try:
+        res["services"] = _bk.services_in(res.get("files") or [])
+    except Exception:
+        pass
+    return res
 
 
 def system_backup_contents(filename):
     _bk_required()
     base, path = _system_backup_path(filename)
     _bk.check_archive(path, strict=bool(UPLOADED_RE.match(base)))
-    return {"ok": True, "backup": base, "files": _bk.contents(path)}
+    integ = _bk.check_integrity("", base, path)
+    files = _bk.contents(path)
+    return {"ok": True, "backup": base, "files": files, "services": _bk.services_in(files),
+            "integrity": integ["status"], "integrity_summary": _bk.integrity_summary(integ)}
 
 
 def download_system_backup_member(filename, member):
@@ -11556,6 +11666,7 @@ def preview_system_restore(filename, member):
     _bk_required()
     base, path = _system_backup_path(filename)
     _bk.check_archive(path, strict=bool(UPLOADED_RE.match(base)))
+    _bk.require_intact("", base, path)
     return _bk.restore_preview("", path, base, member)
 
 
@@ -11568,11 +11679,62 @@ def restore_system_backup_member(filename, member, who="", client="", confirm_st
     never restarted automatically."""
     _bk_required()
     base, path = _system_backup_path(filename)
+    _bk.require_intact("", base, path)
     res = _bk.restore_apply("", path, base, member, who=who, client=client,
                             confirm_strict=confirm_strict, expect_new=expect_new, expect_old=expect_old)
+    res["units"] = _bk.unit_plan([res.get("restart_required")])
     print("[backup] RESTORE-FILE /%s from %s by %s (pre-restore copy: %s)"
           % (res["restored"], base, who or "?", res.get("pre_restore") or "none, new file"), flush=True)
     return res
+
+
+def preview_system_restore_many(filename, files=None, service=None):
+    _bk_required()
+    base, path = _system_backup_path(filename)
+    _bk.check_archive(path, strict=bool(UPLOADED_RE.match(base)))
+    _bk.require_intact("", base, path)
+    if service is not None and not isinstance(service, str):
+        raise ValueError("Invalid service")
+    return _bk.restore_preview_many("", path, base, members=files, service=service or None)
+
+
+def restore_system_backup_many(filename, files, who="", client="", confirm_strict=False):
+    """Several files in one apply (see backups.restore_apply_many): all
+    hashes checked first, one pre-restore folder, atomic per file, rollback
+    of the written files if one fails. Never restarts anything."""
+    _bk_required()
+    base, path = _system_backup_path(filename)
+    _bk.require_intact("", base, path)
+    res = _bk.restore_apply_many("", path, base, files, who=who, client=client, confirm_strict=confirm_strict)
+    print("[backup] RESTORE-FILES %d file(s) from %s by %s (pre-restore copies: %s)"
+          % (len(res["restored"]), base, who or "?", res.get("pre_restore") or "none, new files"), flush=True)
+    return res
+
+
+def _defer_self_reload(cmd):
+    def run():
+        time.sleep(1.5)
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=60)
+        except Exception as exc:
+            print("[backup] deferred %s failed: %r" % (" ".join(cmd), exc), flush=True)
+    threading.Thread(target=run, daemon=True).start()
+
+
+def backup_service_action(unit, confirm_critical=False, who="", client=""):
+    _bk_required()
+    res = _bk.run_unit_action("", unit, confirm_critical=confirm_critical, who=who, client=client,
+                              defer=_defer_self_reload)
+    print("[backup] SERVICE-ACTION %s %s by %s" % (res.get("action"), unit, who or "?"), flush=True)
+    return res
+
+
+def verify_system_backup(filename):
+    _bk_required()
+    base, path = _system_backup_path(filename, sanitized=True)
+    res = _bk.check_integrity("", base, path, force=True)
+    return {"ok": True, "name": base, "integrity": res["status"], "summary": _bk.integrity_summary(res),
+            "sha256": res.get("sha256"), "files": res.get("files")}
 
 
 def import_system_backup_firewall(filename, identity=None, client_ip=""):
@@ -11585,6 +11747,7 @@ def import_system_backup_firewall(filename, identity=None, client_ip=""):
         raise RuntimeError("Firewall snapshot module unavailable")
     who = (identity or {}).get("username", "")
     base, path = _system_backup_path(filename)
+    _bk.require_intact("", base, path)
     files, raw, notes = _bk.firewall_snapshot_files("", path)
     ufw = {k: files.get(k, "") for k in _fw_snap.UFW_FILES}
     errs = _fw_snap.validate_files({k: v for k, v in ufw.items() if v})
@@ -11607,6 +11770,57 @@ def sanitize_system_backup(filename, who=""):
     base, path = _system_backup_path(filename)
     _bk.check_archive(path, strict=bool(UPLOADED_RE.match(base)))
     return dict(_bk.sanitize_to_dir("", path, base, who=who), ok=True)
+
+
+def backup_settings_save(body, who=""):
+    _bk_required()
+    patch = {k: body[k] for k in ("schedule", "usb_after", "stale_days") if k in body}
+    if not patch:
+        raise ValueError("Nothing to save")
+    _bk.save_settings("", patch, who=who)
+    _backup_incident_refresh()
+    st = system_backup_status()
+    return {"ok": True, "schedule": st.get("schedule"), "usb_after": st.get("usb_after"),
+            "stale_days": st.get("stale_days")}
+
+
+def backup_encryption_save(body, who=""):
+    _bk_required()
+    action = body.get("action")
+    if action == "set":
+        info = _bk.set_passphrase("", body.get("passphrase"), who=who)
+    elif action == "remove":
+        info = _bk.clear_passphrase("", who=who)
+    else:
+        raise ValueError("Unknown action")
+    print("[backup] encryption passphrase %s by %s" % ("set" if action == "set" else "removed", who or "?"),
+          flush=True)
+    return {"ok": True, "encryption": info}
+
+
+def backup_usb_copy(body, who=""):
+    _bk_required()
+    name = body.get("name") or None
+    if name is not None and not SYSTEM_BACKUP_RE.match(os.path.basename(name)):
+        raise ValueError("Only system backups are copied to the stick")
+    with _system_backup_lock:
+        if _system_backup_job["running"]:
+            raise _bk.Refused(409, {"ok": False, "error": "A system backup is running; copy when it has finished"})
+    try:
+        res = _bk.usb_copy(name=os.path.basename(name) if name else None, who=who, trigger="manual")
+    finally:
+        _usb_status_cache["t"] = 0
+    print("[backup] USB-COPY %s by %s (%s)" % (res.get("file"), who or "?",
+                                              "already there" if res.get("skipped") else "copied, verified"), flush=True)
+    return res
+
+
+def backup_usb_check():
+    _bk_required()
+    try:
+        return _bk.usb_check()
+    finally:
+        _usb_status_cache["t"] = 0
 
 
 UNBOUND_ROUTER_CONF = "/etc/unbound/unbound.conf.d/router-dns.conf"
@@ -13950,15 +14164,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_file(self, path, download_name):
+    def _send_file(self, path, download_name, content_type="application/gzip", extra_headers=None):
         # Streamed in 1 MB chunks: archives are not read into memory.
         with open(path, "rb") as f:
             size = os.fstat(f.fileno()).st_size
             self.send_response(200)
-            self.send_header("Content-Type", "application/gzip")
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Disposition", 'attachment; filename="{}"'.format(download_name))
             self.send_header("Content-Length", str(size))
             self.send_header("Cache-Control", "no-store")
+            for k, v in (extra_headers or {}).items():
+                if v:
+                    self.send_header(k, v)
             self.end_headers()
             shutil.copyfileobj(f, self.wfile, 1048576)
 
@@ -13988,8 +14205,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _backup_post(self, path, body, raw, identity):
-        """POST /api/backups/system/{create,restore-file,import-firewall,
-        sanitize,upload,delete,pin} (admin-only via the default-deny gate)."""
+        """POST /api/backups/system/{create,restore-file,restore-files,
+        preview-many,service-action,import-firewall,sanitize,upload,delete,
+        pin,verify,settings,encryption,usb-copy,usb-check} (admin-only via
+        the default-deny gate). Passphrases are never logged or echoed."""
         who = (identity or {}).get("username", "")
         client = _client_key(self)
         try:
@@ -14005,7 +14224,27 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/backups/system/sanitize":
                 res = sanitize_system_backup(body.get("name"), who=who)
             elif path == "/api/backups/system/upload":
-                res = upload_system_backup(raw, who=who)
+                pw = self.headers.get("X-Backup-Passphrase") or ""
+                res = upload_system_backup(raw, who=who,
+                                           passphrase=urllib.parse.unquote(pw, errors="strict") if pw else None)
+            elif path == "/api/backups/system/preview-many":
+                res = preview_system_restore_many(body.get("name"), body.get("files"), body.get("service"))
+            elif path == "/api/backups/system/restore-files":
+                res = restore_system_backup_many(body.get("name"), body.get("files"), who=who, client=client,
+                                                 confirm_strict=bool(body.get("confirm_strict")))
+            elif path == "/api/backups/system/service-action":
+                res = backup_service_action(body.get("unit"), confirm_critical=bool(body.get("confirm_critical")),
+                                            who=who, client=client)
+            elif path == "/api/backups/system/verify":
+                res = verify_system_backup(body.get("name"))
+            elif path == "/api/backups/system/settings":
+                res = backup_settings_save(body, who=who)
+            elif path == "/api/backups/system/encryption":
+                res = backup_encryption_save(body, who=who)
+            elif path == "/api/backups/system/usb-copy":
+                res = backup_usb_copy(body, who=who)
+            elif path == "/api/backups/system/usb-check":
+                res = backup_usb_check()
             elif path == "/api/backups/system/delete":
                 res = delete_system_backup((body.get("name") or "").strip(), who=who, client=client)
             elif path == "/api/backups/system/pin":
@@ -14380,6 +14619,12 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/backups/system/audit":
             self._send(200, {"ok": True, "entries": _bk.audit_tail("", 100) if _bk else []})
 
+        elif path == "/api/backups/system/usb":
+            if _bk is None:
+                self._send(500, {"ok": False, "error": "Backup module unavailable"})
+            else:
+                self._send(200, dict(_usb_status(force=True), ok=True))
+
         elif path == "/api/backups/system/contents":
             qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             name = (qs.get("name") or [None])[0] or ""
@@ -14415,7 +14660,33 @@ class Handler(BaseHTTPRequestHandler):
             if not os.path.isfile(fpath):
                 self._send(404, {"ok": False, "error": "System backup not found"})
                 return
-            self._send_file(fpath, base)
+            # Everything that leaves the box is encrypted once a passphrase is
+            # set (sanitized exports are meant for sharing and stay plain).
+            pw = _bk.read_passphrase() if (_bk is not None and not SANITIZED_RE.match(base)) else None
+            if not pw:
+                self._send_file(fpath, base)
+                return
+            tmp = None
+            try:
+                integ = _bk.check_integrity("", base, fpath)
+                if integ["status"] == "damaged":
+                    self._send(409, {"ok": False, "error": "This backup is damaged (%s); not downloaded"
+                                                           % _bk.integrity_summary(integ)})
+                    return
+                tmp = _bk.encrypted_copy("", fpath, pw)
+                _bk.audit("", "download", who=(identity or {}).get("username", ""), client=_client_key(self),
+                          archive=base, encrypted=True)
+                self._send_file(tmp, base + ".gpg", content_type="application/pgp-encrypted",
+                                extra_headers={"X-Backup-SHA256": integ.get("sha256") or ""})
+            except Exception as exc:
+                print("[backup] encrypted download failed: %r" % exc, flush=True)
+                self._send(500, {"ok": False, "error": "Encrypting the download failed: %s" % exc})
+            finally:
+                if tmp:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
 
         elif path == "/api/reservations":
             self._send(200, build_reservations())
@@ -18292,9 +18563,12 @@ def _incident_conditions():
             add("backup:never", "warning", "No system backup has been created",
                 "A gateway without a config backup turns every mistake into "
                 "a rebuild. Create one under System > Backups.")
-        elif now - latest > 8 * 86400:
-            add("backup:stale", "warning", "System backup is stale",
-                "Last system backup is %.0f days old." % ((now - latest) / 86400))
+        else:
+            stale_days = _bk.load_settings()["stale_days"] if _bk is not None else 8
+            if now - latest > stale_days * 86400:
+                add("backup:stale", "warning", "System backup is stale",
+                    "Last system backup is %.0f days old (threshold: %d days, set under System > "
+                    "Backups)." % ((now - latest) / 86400, stale_days))
     except Exception:
         pass
     # A failed run (persisted in backups/state.json) stays an incident until
@@ -18305,6 +18579,9 @@ def _incident_conditions():
             failed = _bk.failure_incident()
             if failed:
                 add("backup:failed", "warning", failed[0], failed[1])
+            usb_failed = _bk.usb_failure_incident()
+            if usb_failed:
+                add("backup:usb-failed", "warning", usb_failed[0], usb_failed[1])
     except Exception:
         pass
 
@@ -18827,6 +19104,7 @@ def main():
     get_latency_monitor()
     get_insights_history()
     start_incident_monitor()
+    start_backup_scheduler()      # scheduled system backups (+ optional USB copy)
     get_community_auto_worker()   # community auto-ban sync (no-op until enabled)
     start_fw_hits_sampler()       # read-only per-rule hit counters (5 min)
     start_agent_facts_writer()    # /var/lib/tuxwall/agent/facts.md for the AI agent (5 min)

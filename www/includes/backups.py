@@ -1,19 +1,28 @@
 """TuxWall system backups: item catalog, retention, persisted job state,
-sanitized export, archive limits and the hardened single-file restore
-(preview diff, atomic write, safe permissions, pre-restore copies, audit log).
+sanitized export, archive limits, the hardened restore (preview diff,
+atomic write, safe permissions, pre-restore copies, audit log; single file,
+several files or a whole service), the schedule, integrity (SHA256SUMS
+inside every archive + the archive's own sha256), optional gpg encryption
+of everything that leaves the box, and the USB copy.
 
 Every path goes through a ``root`` prefix ("" on the router) so
 tools/backup_safety_check.py exercises all of it in a temp tree.
 
 Layout under <root>/var/lib/tuxwall/backups/ (dir 0700 where created here):
   system/          archives: system-backup-*, sanitized-*, uploaded-* (0600)
-  state.json       last run / last success / last failure / pinned (0600)
+  state.json       last run / success / failure, pinned, per-archive
+                   integrity, schedule bookkeeping, USB copy results (0600)
   audit.jsonl      who/what/when of every backup action, never contents (0600)
   pre-restore/<ts>/<path>   live file copies taken before a restore (0700/0600)
-  .work/           private scratch (mkstemp) for include lists (0700)
+  .work/           private scratch (mkstemp, gpg homedirs) (0700)
+Owner settings: /etc/tuxwall/backups.json (0600); the encryption passphrase
+(if set): /etc/tuxwall/backup-passphrase (0600, never in an archive, never
+logged or returned).
 """
+import datetime
 import difflib
 import fnmatch
+import gzip
 import hashlib
 import io
 import json
@@ -21,6 +30,7 @@ import os
 import re
 import secrets
 import shutil
+import stat as _stat
 import subprocess
 import tarfile
 import threading
@@ -65,8 +75,9 @@ STDERR_TAIL_LINES = 30
 AUDIT_MAX_BYTES = 2 * 1024 * 1024
 JOB_TIMEOUT_S = 1800
 
+MANIFEST_NAME = "SHA256SUMS"
 TOP_FILES = ("iptables-save.txt", "ip6tables-save.txt", "manifest.txt", "dpkg-selections.txt",
-             "apt-manual.txt", "package-versions.txt", "restore.sh")
+             "apt-manual.txt", "package-versions.txt", "restore.sh", MANIFEST_NAME)
 MEMBER_PREFIXES = ("etc/", "usr/local/", "var/www/html/", "var/lib/tuxwall/", "var/lib/kea/")
 
 # ── catalog ─────────────────────────────────────────────────────────────────
@@ -300,7 +311,8 @@ _state_lock = threading.RLock()
 
 
 def _default_state():
-    return {"version": 1, "pinned": [], "last_run": None, "last_success": None, "last_failure": None}
+    return {"version": 1, "pinned": [], "last_run": None, "last_success": None, "last_failure": None,
+            "archives": {}, "schedule": {}, "usb": {}}
 
 
 def load_state(root=""):
@@ -315,6 +327,9 @@ def load_state(root=""):
     base.update(st)
     if not isinstance(base.get("pinned"), list):
         base["pinned"] = []
+    for k in ("archives", "schedule", "usb"):
+        if not isinstance(base.get(k), dict):
+            base[k] = {}
     return base
 
 
@@ -413,6 +428,22 @@ def failure_incident(root=""):
             % (fail.get("trigger") or "manual", when, err))
 
 
+def record_failure(root, trigger, error, who=""):
+    """Persist a failure that happened outside run_job (e.g. the run could
+    not even start), so it raises the backup:failed incident too."""
+    now = int(time.time())
+    run = {"id": time.strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(2), "started": now, "finished": now,
+           "running": False, "ok": False, "trigger": trigger, "who": who or "", "items": "all",
+           "error": str(error)[:300], "stderr_tail": ""}
+
+    def fn(s):
+        s["last_run"] = dict(run)
+        s["last_failure"] = dict(run)
+    update_state(root, fn)
+    audit(root, "backup-finish", who=who, trigger=trigger, run=run["id"], ok=False, error=run["error"])
+    return run
+
+
 # ── retention ───────────────────────────────────────────────────────────────
 
 def backup_ts(name):
@@ -503,7 +534,9 @@ def list_archives(root="", regex=SYSTEM_RE):
         names = sorted(os.listdir(d), reverse=True)
     except OSError:
         return out
-    pinned = set(load_state(root).get("pinned") or ())
+    state = load_state(root)
+    pinned = set(state.get("pinned") or ())
+    recs = state.get("archives") or {}
     for n in names:
         if not regex.match(n):
             continue
@@ -511,7 +544,10 @@ def list_archives(root="", regex=SYSTEM_RE):
             st = os.stat(os.path.join(d, n))
         except OSError:
             continue
-        out.append({"name": n, "size": st.st_size, "time": int(st.st_mtime), "pinned": n in pinned})
+        rec = recs.get(n) or {}
+        out.append({"name": n, "size": st.st_size, "time": int(st.st_mtime), "pinned": n in pinned,
+                    "integrity": rec.get("status") or "unchecked", "checked": rec.get("checked"),
+                    "sha256": rec.get("sha256")})
     return out
 
 
@@ -620,11 +656,21 @@ def run_job(root="", include=None, who="", trigger="manual", on_progress=None, s
                 os.chmod(path, 0o600)
                 check_archive(path)
                 res["size"] = os.path.getsize(path)
+                if on_progress:
+                    try:
+                        on_progress(97, "Verifying checksums")
+                    except Exception:
+                        pass
+                integ = check_integrity(root, res["result"], path, force=True)
+                res["integrity"] = integ["status"]
+                res["sha256"] = integ.get("sha256")
+                if integ["status"] == "damaged":
+                    raise ValueError(integrity_summary(integ))
             except Exception as exc:
                 res.update(ok=False, error="Archive check failed: %s" % exc)
         run.update(running=False, finished=int(time.time()), ok=res["ok"], result=res.get("result"),
                    error=res.get("error"), stderr_tail=res.get("stderr_tail", "")[-2000:],
-                   size=res.get("size"))
+                   size=res.get("size"), integrity=res.get("integrity"), sha256=res.get("sha256"))
         if res["ok"]:
             pruned = prune_system(root)
             run["pruned"] = pruned
@@ -636,6 +682,8 @@ def run_job(root="", include=None, who="", trigger="manual", on_progress=None, s
             else:
                 s["last_failure"] = dict(run)
             s["pinned"] = [n for n in s.get("pinned") or [] if n not in pruned]
+            for n in pruned:
+                (s.get("archives") or {}).pop(n, None)
         update_state(root, fin)
         audit(root, "backup-finish", who=who, trigger=trigger, run=run["id"], ok=run["ok"],
               archive=run.get("result"), error=run.get("error"), pruned=pruned or None)
@@ -761,7 +809,7 @@ def contents(path):
 EXPORT_PREFIXES = ("etc/", "usr/local/bin/", "usr/local/sbin/", "var/lib/tuxwall/")
 SECRET_FILE_RES = [re.compile(p) for p in (
     r"(^|/)auth\.json$", r"(^|/)llm\.json$", r"(^|/)opencode\.json\.bak",
-    r"^etc/tuxwall/(internal-token|agent-token)$", r"(^|/)canary-token$", r"(^|/)api\.token$",
+    r"^etc/tuxwall/(internal-token|agent-token|backup-passphrase)$", r"(^|/)canary-token$", r"(^|/)api\.token$",
     r"^etc/tuxwall/agent(/|$)", r"(^|/)keys?/", r"^etc/cloudflared/(?!config\.ya?ml$)",
     r"credentials", r"(^|/)private[-_]?key", r"(^|/)privatekey$", r"(^|/)publickey$",
     r"\.key$", r"(^|/)ssh_host_[a-z0-9]+_key$", r"^etc/letsencrypt/(accounts|keys|csr)(/|$)",
@@ -1079,11 +1127,12 @@ def sanitize_archive(src_path, out_fileobj, source_name=""):
     with tarfile.open(src_path, "r:gz") as src:
         pfields = _plugin_fields_from_tar(src)
     buf_names = set()
+    sums = []
     with tarfile.open(src_path, "r:gz") as src, tarfile.open(fileobj=out_fileobj, mode="w:gz") as dst:
         for m in src:
             name = member_safe(m.name)
-            if not name or name in buf_names:
-                continue
+            if not name or name in buf_names or name == MANIFEST_NAME:
+                continue  # the source SHA256SUMS hashes secret files: a fresh one is written below
             if m.isdir():
                 if name.startswith(EXPORT_PREFIXES) and not secret_file(name + "/"):
                     info = tarfile.TarInfo(name)
@@ -1126,6 +1175,7 @@ def sanitize_archive(src_path, out_fileobj, source_name=""):
             info.mtime = m.mtime
             dst.addfile(info, io.BytesIO(body))
             buf_names.add(name)
+            sums.append((name, sha256_bytes(body)))
             kept += 1
         note = ("TuxWall sanitized export\nCreated: %s\nSource: %s\n"
                 "Kept %d config file(s); dropped %d secret file(s); redacted %d value(s).\n"
@@ -1140,6 +1190,13 @@ def sanitize_archive(src_path, out_fileobj, source_name=""):
         info.mtime = int(time.time())
         info.mode = 0o644
         dst.addfile(info, io.BytesIO(note.encode()))
+        sums.append(("SANITIZED.txt", sha256_bytes(note.encode())))
+        body = format_sums(sums).encode("utf-8")
+        info = tarfile.TarInfo(MANIFEST_NAME)
+        info.size = len(body)
+        info.mtime = int(time.time())
+        info.mode = 0o644
+        dst.addfile(info, io.BytesIO(body))
     return {"dropped": dropped, "redacted": redacted, "kept": kept}
 
 
@@ -1157,7 +1214,7 @@ def verify_export(fileobj_or_path):
             if m.isreg() and re.match(r"^etc/tuxwall/plugins/[^/]+/plugin\.json$", n):
                 pf[n.rsplit("/", 1)[0]] = plugin_secret_fields(tar.extractfile(m).read())
         for m in members:
-            if not m.isreg() or m.name == "SANITIZED.txt":
+            if not m.isreg() or m.name in ("SANITIZED.txt", MANIFEST_NAME):
                 continue
             pm = re.match(r"^(etc/tuxwall/plugins/[^/]+)/", m.name)
             r = find_secrets(m.name, tar.extractfile(m).read(), pf.get(pm.group(1), ()) if pm else ())
@@ -1194,36 +1251,80 @@ def sanitize_to_dir(root, src_path, source_name="", who=""):
 
 # ── uploads ─────────────────────────────────────────────────────────────────
 
-def store_upload(root, raw, who=""):
+def store_upload(root, raw, who="", passphrase=None, gpg=None):
+    """Store an uploaded backup: a .tar.gz, or an OpenPGP-encrypted one
+    (decrypted with ``passphrase`` or else the stored one). The archive is
+    limit-checked and its SHA256SUMS verified; a damaged upload is refused."""
     if not raw or len(raw) < 64:
         raise ValueError("Upload is empty")
     if len(raw) > UPLOAD_MAX_BYTES:
         raise ValueError("Upload is larger than %d MB" % (UPLOAD_MAX_BYTES // 1048576))
-    if raw[:2] != b"\x1f\x8b":
-        raise ValueError("Not a .tar.gz archive")
+    encrypted = looks_encrypted(raw)
+    if raw[:2] != b"\x1f\x8b" and not encrypted:
+        raise ValueError("Not a .tar.gz archive or an encrypted TuxWall backup (.gpg)")
     d = P(root, SYSTEM_DIR)
     os.makedirs(d, exist_ok=True)
     name = "uploaded-" + time.strftime("%Y%m%d-%H%M%S") + ".tar.gz"
     tmp = os.path.join(d, ".%s.%s.partial" % (name, secrets.token_hex(4)))
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    enc_tmp = None
     try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(raw)
+        if encrypted:
+            pw = passphrase or read_passphrase(root)
+            if not pw:
+                raise Refused(400, {"ok": False, "need_passphrase": True,
+                                    "error": "This backup is encrypted. Enter the passphrase it was encrypted with."})
+            fd, enc_tmp = mkstemp_private(root, prefix="upload-", suffix=".gpg")
+            with os.fdopen(fd, "wb") as f:
+                f.write(raw)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "wb") as out:
+                try:
+                    gpg_decrypt_stream(root, enc_tmp, pw, out.write, cap=UPLOAD_MAX_BYTES * 2, gpg=gpg)
+                except DecryptError as exc:
+                    if exc.kind == "passphrase":
+                        raise Refused(400, {"ok": False, "need_passphrase": True,
+                                            "error": "Wrong passphrase: this backup could not be decrypted"
+                                                     + ("" if passphrase else " with the stored one")
+                                                     + ". Enter the passphrase it was encrypted with."})
+                    raise ValueError(str(exc))
+            with open(tmp, "rb") as f:
+                if f.read(2) != b"\x1f\x8b":
+                    raise ValueError("The decrypted upload is not a .tar.gz archive")
+        else:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(raw)
         info = check_archive(tmp, strict=True)
+        integ = verify_members(tmp)
+        if integ["status"] == "damaged":
+            raise ValueError("The uploaded backup is damaged: %s" % integrity_summary(integ))
         files = contents(tmp)
         if not files:
             raise ValueError("No restorable TuxWall files in this archive")
+        sha = sha256_file(tmp)
         os.replace(tmp, os.path.join(d, name))
     except BaseException as exc:
         try:
             os.unlink(tmp)
         except OSError:
             pass
-        audit(root, "upload", who=who, ok=False, error=str(exc)[:200], bytes=len(raw))
+        err = exc.payload.get("error") if isinstance(exc, Refused) else str(exc)
+        audit(root, "upload", who=who, ok=False, error=str(err)[:200], bytes=len(raw), encrypted=encrypted)
         raise
-    prune_simple(root, UPLOADED_RE, UPLOADED_KEEP)
-    audit(root, "upload", who=who, ok=True, archive=name, bytes=len(raw), members=info["members"])
-    return {"ok": True, "name": name, "files": files, "members": info["members"], "total": info["total"]}
+    finally:
+        if enc_tmp:
+            try:
+                os.unlink(enc_tmp)
+            except OSError:
+                pass
+    record_integrity(root, name, integ, sha, os.path.getsize(os.path.join(d, name)))
+    removed = prune_simple(root, UPLOADED_RE, UPLOADED_KEEP)
+    if removed:
+        update_state(root, lambda s: [(s.get("archives") or {}).pop(n, None) for n in removed])
+    audit(root, "upload", who=who, ok=True, archive=name, bytes=len(raw), members=info["members"],
+          encrypted=encrypted, integrity=integ["status"])
+    return {"ok": True, "name": name, "files": files, "members": info["members"], "total": info["total"],
+            "encrypted": encrypted, "integrity": integ["status"], "sha256": sha}
 
 
 # ── restore ─────────────────────────────────────────────────────────────────
@@ -1358,7 +1459,11 @@ def _diff(old, new, name, limit=DIFF_MAX_LINES):
 def restore_preview(root, archive_path, archive_name, member):
     """What a single-file restore would do. Read-only."""
     name, m, new = read_member(archive_path, member)
-    out = {"ok": True, "archive": archive_name, "member": name, "target": "/" + name,
+    return dict(_preview_body(root, name, m, new), ok=True, archive=archive_name)
+
+
+def _preview_body(root, name, m, new, diff_limit=DIFF_MAX_LINES):
+    out = {"member": name, "target": "/" + name,
            "new_size": len(new), "new_sha256": sha256_bytes(new), "restart_hint": service_for(name)}
     if is_firewall_member(name):
         out.update(kind="firewall", restorable=False, firewall=True,
@@ -1401,10 +1506,10 @@ def restore_preview(root, archive_path, archive_name, member):
     else:
         out["binary"] = False
         if out["kind"] == "modified":
-            d, trunc, total = _diff(old.decode("utf-8"), new.decode("utf-8"), name)
+            d, trunc, total = _diff(old.decode("utf-8"), new.decode("utf-8"), name, diff_limit)
             out.update(diff=d, diff_truncated=trunc, diff_lines=total)
         elif out["kind"] == "new":
-            d, trunc, total = _diff("", new.decode("utf-8"), name)
+            d, trunc, total = _diff("", new.decode("utf-8"), name, diff_limit)
             out.update(diff=d, diff_truncated=trunc, diff_lines=total)
         else:
             out["diff"] = ""
@@ -1464,44 +1569,12 @@ def restore_apply(root, archive_path, archive_name, member, who="", client="", c
             mode, uid, gid = live["mode"], live["uid"], live["gid"]
         else:
             mode, uid, gid = default_mode(name, m.mode), 0, 0
-        dfd, base, _missing = _walk_parent(root, name, create=True)
-        tmp = None
         try:
-            for _ in range(10):
-                cand = ".%s.tuxwall-restore-%s" % (base[:100], secrets.token_hex(6))
-                try:
-                    fd = os.open(cand, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
-                                 dir_fd=dfd)
-                    tmp = cand
-                    break
-                except FileExistsError:
-                    continue
-            if tmp is None:
-                raise OSError("could not create a temp file next to the target")
-            with os.fdopen(fd, "wb") as f:
-                f.write(new)
-                f.flush()
-                if os.geteuid() == 0:
-                    os.fchown(f.fileno(), uid, gid)
-                os.fchmod(f.fileno(), mode)
-                os.fsync(f.fileno())
-            os.rename(tmp, base, src_dir_fd=dfd, dst_dir_fd=dfd)
-            tmp = None
-            try:
-                os.fsync(dfd)
-            except OSError:
-                pass
+            _atomic_write(root, name, new, mode, uid, gid)
         except BaseException as exc:
-            if tmp:
-                try:
-                    os.unlink(tmp, dir_fd=dfd)
-                except OSError:
-                    pass
             audit(root, "restore-file", who=who, client=client, archive=archive_name, member=name,
                   ok=False, error=str(exc)[:200])
             raise
-        finally:
-            os.close(dfd)
     prune_pre_restore(root)
     rel_pre = os.path.relpath(pre_path, P(root, "/")) if pre_path else None
     audit(root, "restore-file", who=who, client=client, archive=archive_name, member=name,
@@ -1512,6 +1585,57 @@ def restore_apply(root, archive_path, archive_name, member, who="", client="", c
             "mode": "%04o" % mode, "owner": _owner_name(uid, gid),
             "pre_restore": ("/" + rel_pre) if rel_pre else None,
             "restart_required": service_for(name)}
+
+
+def _atomic_write(root, name, data, mode, uid, gid):
+    """temp + fsync + rename next to /<name>, parent opened without
+    following symlinks (missing directories are created)."""
+    dfd, base, _missing = _walk_parent(root, name, create=True)
+    tmp = None
+    try:
+        for _ in range(10):
+            cand = ".%s.tuxwall-restore-%s" % (base[:100], secrets.token_hex(6))
+            try:
+                fd = os.open(cand, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+                             dir_fd=dfd)
+                tmp = cand
+                break
+            except FileExistsError:
+                continue
+        if tmp is None:
+            raise OSError("could not create a temp file next to the target")
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            if os.geteuid() == 0:
+                os.fchown(f.fileno(), uid, gid)
+            os.fchmod(f.fileno(), mode)
+            os.fsync(f.fileno())
+        os.rename(tmp, base, src_dir_fd=dfd, dst_dir_fd=dfd)
+        tmp = None
+        try:
+            os.fsync(dfd)
+        except OSError:
+            pass
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp, dir_fd=dfd)
+            except OSError:
+                pass
+        os.close(dfd)
+
+
+def _unlink_target(root, name):
+    dfd, base, _missing = _walk_parent(root, name, create=False)
+    if dfd is None:
+        return
+    try:
+        os.unlink(base, dir_fd=dfd)
+    except FileNotFoundError:
+        pass
+    finally:
+        os.close(dfd)
 
 
 _restore_lock = threading.Lock()
@@ -1546,3 +1670,1406 @@ def firewall_snapshot_files(root, archive_path):
     for k in ("before6.rules", "after.rules", "after6.rules"):
         files.setdefault(k, "")
     return files, raw, notes
+
+
+# ── restore: several files or a whole service ───────────────────────────────
+# One preview listing every diff, one apply: all live hashes are checked
+# first, every live file is copied into ONE pre-restore folder, then each
+# file is written atomically; if any write fails the files already written
+# are put back (created ones removed). Services are never restarted here:
+# the result lists the affected units (unit_plan) for the owner to apply.
+RESTORE_MANY_MAX = 400
+PREVIEW_MANY_DIFF_LINES = 6000
+
+
+def read_members(path, names):
+    """{name: (TarInfo, bytes)} for the given safe members, in one pass."""
+    want = set(names)
+    out = {}
+    total = 0
+    with tarfile.open(path, "r:gz") as tar:
+        for m in tar:
+            n = member_safe(m.name)
+            if n not in want or n in out:
+                continue
+            if not (m.isreg() or m.islnk()):
+                raise ValueError("/%s is not a regular file in this backup" % n)
+            f = tar.extractfile(m)
+            if f is None:
+                raise ValueError("/%s cannot be read from this backup" % n)
+            with f:
+                data = f.read(MAX_MEMBER_BYTES + 1)
+            if len(data) > MAX_MEMBER_BYTES:
+                raise ValueError("/%s is too large" % n)
+            total += len(data)
+            if total > MAX_TOTAL_BYTES:
+                raise ValueError("The selection is too large to restore at once")
+            out[n] = (m, data)
+    missing = sorted(want - set(out))
+    if missing:
+        raise ValueError("Not in this backup: %s" % ", ".join("/" + n for n in missing[:3]))
+    return out
+
+
+def services_in(files):
+    """Service groups of a contents() listing: [{service, files, firewall}]."""
+    groups = {}
+    for f in files:
+        svc = f.get("service")
+        if not svc or f.get("kind") == "info":
+            continue
+        g = groups.setdefault(svc, {"service": svc, "files": 0, "firewall": 0})
+        if f.get("kind") == "firewall":
+            g["firewall"] += 1
+        else:
+            g["files"] += 1
+    return sorted(groups.values(), key=lambda g: g["service"])
+
+
+def members_for_service(path, service):
+    return [f["name"] for f in contents(path) if f.get("service") == service and f.get("kind") != "info"]
+
+
+def _clean_names(members):
+    if not isinstance(members, list) or not members:
+        raise ValueError("Select at least one file")
+    if len(members) > RESTORE_MANY_MAX:
+        raise ValueError("Select at most %d files at once" % RESTORE_MANY_MAX)
+    names = []
+    for raw in members:
+        n = member_safe(raw if isinstance(raw, str) else "")
+        if not n:
+            raise ValueError("Invalid file name: %s" % str(raw)[:80])
+        if n not in names:
+            names.append(n)
+    return names
+
+
+def restore_preview_many(root, archive_path, archive_name, members=None, service=None):
+    """Read-only preview of restoring several files (or every file of one
+    service): one entry per file with kind/diff/perms/hashes."""
+    if service:
+        members = members_for_service(archive_path, service)
+        if not members:
+            raise ValueError("No files of %s in this backup" % service)
+    names = _clean_names(members)
+    fw = [n for n in names if is_firewall_member(n)]
+    info = [n for n in names if n in TOP_FILES and n not in fw]
+    files = [n for n in names if n not in fw and n not in info]
+    data = read_members(archive_path, files) if files else {}
+    items = []
+    budget = PREVIEW_MANY_DIFF_LINES
+    for n in sorted(files):
+        m, new = data[n]
+        try:
+            item = _preview_body(root, n, m, new, diff_limit=max(0, min(DIFF_MAX_LINES, budget)))
+        except Refused as exc:
+            items.append({"member": n, "target": "/" + n, "kind": "refused", "restorable": False,
+                          "error": exc.payload.get("error")})
+            continue
+        if budget <= 0 and item.get("kind") in ("new", "modified") and not item.get("binary"):
+            item["diff"] = ""
+            item["diff_note"] = "Diff not shown (preview limit reached); the file is still restored as listed"
+        budget -= min(item.get("diff_lines") or 0, DIFF_MAX_LINES)
+        items.append(item)
+    changing = [i for i in items if i.get("restorable") and i.get("kind") in ("new", "modified")]
+    return {"ok": True, "archive": archive_name, "service": service or None, "items": items,
+            "firewall": fw, "info": info, "changes": len(changing),
+            "strict": sorted({i["strict_reason"] for i in changing if i.get("strict")}),
+            "units": unit_plan(service_for(i["member"]) for i in changing)}
+
+
+def restore_apply_many(root, archive_path, archive_name, files, who="", client="", confirm_strict=False):
+    """Restore several files in one go. files: [{"file", "expect_sha256",
+    "expect_live_sha256"}] taken from restore_preview_many."""
+    batch = time.strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(2)
+
+    def refuse(status, payload):
+        audit(root, "restore-files", who=who, client=client, archive=archive_name, batch=batch,
+              files=len(files) if isinstance(files, list) else None, ok=False, error=payload.get("error"))
+        raise Refused(status, payload)
+
+    if not isinstance(files, list) or not files or not all(isinstance(f, dict) for f in files):
+        refuse(400, {"ok": False, "error": "Select at least one file"})
+    try:
+        names = _clean_names([f.get("file") for f in files])
+    except ValueError as exc:
+        refuse(400, {"ok": False, "error": str(exc)})
+    if len(names) != len(files):
+        refuse(400, {"ok": False, "error": "A file is listed twice"})
+    expect = {member_safe(f.get("file")): (f.get("expect_sha256"), f.get("expect_live_sha256")) for f in files}
+    fw = [n for n in names if is_firewall_member(n)]
+    if fw:
+        refuse(409, {"ok": False, "firewall": True,
+                     "error": "Firewall files (%s) are restored through Firewall > Snapshots, never raw. "
+                              "Use 'Import as firewall snapshot'." % ", ".join(fw[:3])})
+    info = [n for n in names if n in TOP_FILES]
+    if info:
+        refuse(409, {"ok": False, "error": "Information files of the backup cannot be restored"})
+    strict = sorted({strict_reason(n) for n in names if strict_reason(n)})
+    if strict and not confirm_strict:
+        refuse(409, {"ok": False, "strict": True, "strict_reasons": strict,
+                     "error": "The selection includes files that %s; resubmit with the second confirmation."
+                              % "; ".join(strict)})
+    try:
+        data = read_members(archive_path, names)
+    except ValueError as exc:
+        refuse(400, {"ok": False, "error": str(exc)})
+    for n in names:
+        if not expect[n][0] or expect[n][0] != sha256_bytes(data[n][1]):
+            refuse(409, {"ok": False, "error": "Preview the restore first (the backup content of /%s does not "
+                                               "match the preview)." % n})
+    done, unchanged = [], []
+    with _restore_lock:
+        lives = {}
+        for n in names:
+            try:
+                live = _live_state(root, n)
+            except Refused as exc:
+                refuse(exc.status, exc.payload)
+            cur = sha256_bytes(live["data"]) if live["exists"] else "absent"
+            if expect[n][1] != cur:
+                refuse(409, {"ok": False, "error": "/%s changed since the preview; preview again." % n})
+            live["sha"] = cur
+            lives[n] = live
+        todo = [n for n in names if not (lives[n]["exists"] and lives[n]["data"] == data[n][1])]
+        unchanged = [n for n in names if n not in todo]
+        pre_dir = None
+        if any(lives[n]["exists"] for n in todo):
+            _private_dir(P(root, PRE_RESTORE_DIR))
+            pre_dir = _private_dir(os.path.join(P(root, PRE_RESTORE_DIR), batch))
+            meta = []
+            for n in todo:
+                lv = lives[n]
+                if lv["exists"]:
+                    p = os.path.join(pre_dir, n)
+                    _private_dir(os.path.dirname(p))
+                    _write_private(p, lv["data"])
+                meta.append({"member": n, "target": "/" + n, "existed": lv["exists"],
+                             "mode": "%04o" % lv["mode"] if lv["exists"] else None,
+                             "owner": "%d:%d" % (lv["uid"], lv["gid"]) if lv["exists"] else None,
+                             "sha256_before": lv["sha"], "sha256_after": expect[n][0]})
+            _write_private(os.path.join(pre_dir, "meta.json"), json.dumps({
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"), "who": who, "archive": archive_name,
+                "batch": batch, "files": meta}, indent=2))
+        written = []
+        try:
+            for n in todo:
+                lv = lives[n]
+                if lv["exists"]:
+                    mode, uid, gid = lv["mode"], lv["uid"], lv["gid"]
+                else:
+                    mode, uid, gid = default_mode(n, data[n][0].mode), 0, 0
+                _atomic_write(root, n, data[n][1], mode, uid, gid)
+                written.append(n)
+                done.append({"member": n, "target": "/" + n, "created": not lv["exists"], "mode": "%04o" % mode,
+                             "owner": _owner_name(uid, gid), "sha256_before": lv["sha"],
+                             "sha256_after": expect[n][0]})
+        except BaseException as exc:
+            failed_at = todo[len(written)] if len(written) < len(todo) else "?"
+            rollback_errors = []
+            for n in reversed(written):
+                lv = lives[n]
+                try:
+                    if lv["exists"]:
+                        _atomic_write(root, n, lv["data"], lv["mode"], lv["uid"], lv["gid"])
+                    else:
+                        _unlink_target(root, n)
+                except Exception as rexc:
+                    rollback_errors.append("/%s (%s)" % (n, rexc.__class__.__name__))
+            msg = ("Restore failed at /%s (%s). %d file(s) already written were put back%s."
+                   % (failed_at, str(exc)[:160], len(written) - len(rollback_errors),
+                      ("; could NOT put back: " + ", ".join(rollback_errors)) if rollback_errors else ""))
+            refuse(500, {"ok": False, "error": msg, "rolled_back": len(written) - len(rollback_errors)})
+    prune_pre_restore(root)
+    rel_pre = ("/" + os.path.relpath(pre_dir, P(root, "/"))) if pre_dir else None
+    for d in done:
+        audit(root, "restore-file", who=who, client=client, archive=archive_name, member=d["member"],
+              target=d["target"], ok=True, created=d["created"], mode=d["mode"], batch=batch,
+              sha256_before=d["sha256_before"], sha256_after=d["sha256_after"], pre_restore=rel_pre)
+    audit(root, "restore-files", who=who, client=client, archive=archive_name, batch=batch, ok=True,
+          files=len(done), unchanged=len(unchanged) or None, pre_restore=rel_pre)
+    return {"ok": True, "restored": done, "unchanged": unchanged, "pre_restore": rel_pre, "batch": batch,
+            "units": unit_plan(service_for(d["member"]) for d in done)}
+
+
+# ── applying a restore: reload/restart affected units (never automatic) ─────
+# Only units a catalog item maps to; config checks run first where a
+# checker exists; network-critical units need an explicit confirmation.
+UNIT_ACTIONS = {
+    "systemd-networkd": {"label": "Network (netplan / systemd-networkd)", "action": "reload", "critical": True,
+                         "check": ["netplan", "generate"], "cmd": ["networkctl", "reload"],
+                         "warning": "Re-applies the interface configuration: if the restored network config "
+                                    "is wrong, the LAN, the WAN and this dashboard session can drop."},
+    "kea-dhcp4-server": {"label": "KEA DHCP server", "action": "restart", "critical": True,
+                         "check": ["kea-dhcp4", "-t", "/etc/kea/kea-dhcp4.conf"],
+                         "warning": "DHCP pauses for a moment; a bad config leaves new devices without an address."},
+    "unbound": {"label": "Unbound DNS", "action": "restart", "critical": True, "check": ["unbound-checkconf"],
+                "warning": "DNS for the whole LAN stops for a few seconds; a bad config stops name resolution."},
+    "wg-quick@wg0": {"label": "WireGuard VPN (wg0)", "action": "restart", "critical": True,
+                     "warning": "Disconnects every VPN client, including you if you are connected over WireGuard."},
+    "nginx": {"label": "nginx web server", "action": "reload", "critical": True, "check": ["nginx", "-t"],
+              "warning": "nginx serves this dashboard: a bad config can make it unreachable."},
+    "tuxwall": {"label": "TuxWall dashboard API", "action": "reload", "critical": True, "self": True,
+                "warning": "Restarts this dashboard's API in place; the page reconnects after a few seconds."},
+    "cloudflared": {"label": "Cloudflare tunnel", "action": "restart", "critical": True,
+                    "warning": "Remote access through the Cloudflare tunnel drops briefly."},
+    "ssh": {"label": "SSH server", "action": "reload", "critical": False, "check": ["sshd", "-t"],
+            "warning": "Open SSH sessions stay connected; new logins use the restored config."},
+    "crowdsec": {"label": "CrowdSec", "action": "restart", "critical": False, "warning": ""},
+    "suricata": {"label": "Suricata IDS", "action": "restart", "critical": False,
+                 "warning": "The IDS is blind for the minute it takes to load its rules."},
+    "opencanary": {"label": "OpenCanary honeypot", "action": "restart", "critical": False, "warning": ""},
+    "chrony": {"label": "Time sync (chrony)", "action": "restart", "critical": False, "warning": ""},
+    "radvd": {"label": "IPv6 router advertisements (radvd)", "action": "restart", "critical": False,
+              "warning": "IPv6 clients re-learn their prefix."},
+    "systemd-resolved": {"label": "systemd-resolved", "action": "restart", "critical": False,
+                         "warning": "The router's own name lookups pause briefly."},
+    "daemon-reload": {"label": "systemd unit definitions", "action": "daemon-reload", "critical": False,
+                      "cmd": ["systemctl", "daemon-reload"],
+                      "warning": "Reloads unit files; restart the changed services yourself afterwards."},
+    "sysctl --system": {"label": "Kernel settings (sysctl.d)", "action": "apply", "critical": True,
+                        "cmd": ["sysctl", "--system"],
+                        "warning": "Re-applies every kernel setting: a wrong value (e.g. IP forwarding) can stop "
+                                   "routing for the whole LAN."},
+    "ufw": {"label": "UFW firewall", "manual": "Firewall rules are applied from Firewall > Settings (guard check, "
+                                               "automatic snapshot, confirm-or-revert), never from here."},
+}
+
+
+def unit_plan(services):
+    out = []
+    seen = set()
+    for svc in services:
+        if not svc or svc in seen:
+            continue
+        seen.add(svc)
+        spec = UNIT_ACTIONS.get(svc)
+        if spec is None:
+            out.append({"unit": svc, "label": svc, "manual": "Restart it yourself if needed."})
+            continue
+        out.append({"unit": svc, "label": spec["label"], "action": spec.get("action"),
+                    "critical": bool(spec.get("critical")), "warning": spec.get("warning", ""),
+                    "check": " ".join(spec["check"]) if spec.get("check") else None,
+                    "manual": spec.get("manual")})
+    return out
+
+
+def _unit_cmd(unit, spec):
+    if spec.get("cmd"):
+        return list(spec["cmd"])
+    return ["systemctl", spec["action"], unit]
+
+
+def run_unit_action(root, unit, confirm_critical=False, who="", client="", runner=None, defer=None):
+    """Run the reload/restart for one affected unit after its config check.
+    ``defer(cmd)`` runs commands that would kill this process (tuxwall)."""
+    runner = runner or subprocess.run
+    spec = UNIT_ACTIONS.get(unit or "")
+    if spec is None:
+        raise Refused(400, {"ok": False, "error": "Not a service a restore can affect"})
+    if spec.get("manual"):
+        raise Refused(409, {"ok": False, "manual": True, "error": spec["manual"]})
+    if spec.get("critical") and not confirm_critical:
+        raise Refused(409, {"ok": False, "critical": True, "warning": spec.get("warning"),
+                            "error": "%s is network-critical: confirm first. %s" % (spec["label"], spec.get("warning", ""))})
+    out = {"ok": True, "unit": unit, "action": spec["action"]}
+    if spec.get("check"):
+        exe = shutil.which(spec["check"][0], path="/usr/sbin:/usr/bin:/sbin:/bin")
+        if exe:
+            try:
+                p = runner([exe] + spec["check"][1:], capture_output=True, text=True, timeout=60)
+            except subprocess.TimeoutExpired:
+                p = None
+            if p is None or p.returncode != 0:
+                tail = "" if p is None else ((p.stderr or "") + (p.stdout or "")).strip()[-600:]
+                audit(root, "service-action", who=who, client=client, unit=unit, op=spec["action"], ok=False,
+                      error="config check failed")
+                raise Refused(409, {"ok": False, "check_failed": True, "output": tail,
+                                    "error": "Config check (%s) failed, so %s was NOT %sed. Fix the config first."
+                                             % (" ".join(spec["check"]), unit, spec["action"].rstrip("e"))})
+            out["check"] = "passed"
+        else:
+            out["check"] = "skipped (%s not installed)" % spec["check"][0]
+    cmd = _unit_cmd(unit, spec)
+    if spec.get("self") and defer is not None:
+        defer(cmd)
+        audit(root, "service-action", who=who, client=client, unit=unit, op=spec["action"], ok=True,
+              deferred=True)
+        out.update(pending=True, message="The dashboard API reloads in a moment; the page reconnects by itself.")
+        return out
+    try:
+        p = runner(cmd, capture_output=True, text=True, timeout=120)
+        rc, err = p.returncode, ((p.stderr or "") + (p.stdout or "")).strip()[-600:]
+    except subprocess.TimeoutExpired:
+        rc, err = None, "timed out"
+    ok = rc == 0
+    audit(root, "service-action", who=who, client=client, unit=unit, op=spec["action"], ok=ok,
+          error=None if ok else err[:200])
+    if not ok:
+        raise Refused(500, {"ok": False, "output": err,
+                            "error": "%s %s failed: %s" % (spec["action"], unit, (err or "exit %s" % rc)[-200:])})
+    if spec["action"] in ("restart", "reload") and not spec.get("cmd"):
+        try:
+            st = runner(["systemctl", "is-active", unit], capture_output=True, text=True, timeout=15)
+            out["active"] = (st.stdout or "").strip()
+        except Exception:
+            pass
+    return out
+
+
+# ── settings: schedule, USB-after-backup, stale threshold ───────────────────
+SETTINGS_FILE = "/etc/tuxwall/backups.json"
+PASSPHRASE_FILE = "/etc/tuxwall/backup-passphrase"
+STALE_DAYS_DEFAULT = 8
+STALE_DAYS_RANGE = (1, 90)
+DEFAULT_SCHEDULE = {"enabled": True, "freq": "daily", "weekday": 6, "time": "03:30"}
+WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+_TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+
+
+def _bool(v, what):
+    if isinstance(v, bool):
+        return v
+    raise ValueError("%s must be true or false" % what)
+
+
+def validate_schedule(s, base=None):
+    if not isinstance(s, dict):
+        raise ValueError("Invalid schedule")
+    out = dict(base or DEFAULT_SCHEDULE)
+    if "enabled" in s:
+        out["enabled"] = _bool(s["enabled"], "enabled")
+    if "freq" in s:
+        if s["freq"] not in ("daily", "weekly"):
+            raise ValueError("Frequency must be daily or weekly")
+        out["freq"] = s["freq"]
+    if "weekday" in s:
+        try:
+            wd = int(s["weekday"])
+        except (TypeError, ValueError):
+            raise ValueError("Invalid weekday")
+        if not 0 <= wd <= 6 or isinstance(s["weekday"], bool):
+            raise ValueError("Invalid weekday")
+        out["weekday"] = wd
+    if "time" in s:
+        m = _TIME_RE.match(str(s["time"]).strip())
+        if not m:
+            raise ValueError("Time must be HH:MM (24 h)")
+        out["time"] = "%02d:%s" % (int(m.group(1)), m.group(2))
+    return out
+
+
+def load_settings(root=""):
+    try:
+        with open(P(root, SETTINGS_FILE)) as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            raw = {}
+    except (OSError, ValueError):
+        raw = {}
+    out = {"schedule": dict(DEFAULT_SCHEDULE), "usb_after": False, "stale_days": STALE_DAYS_DEFAULT}
+    try:
+        out["schedule"] = validate_schedule(raw.get("schedule") or {})
+    except ValueError:
+        pass
+    if isinstance(raw.get("usb_after"), bool):
+        out["usb_after"] = raw["usb_after"]
+    sd = raw.get("stale_days")
+    if isinstance(sd, int) and not isinstance(sd, bool) and STALE_DAYS_RANGE[0] <= sd <= STALE_DAYS_RANGE[1]:
+        out["stale_days"] = sd
+    return out
+
+
+def save_settings(root, patch, who=""):
+    if not isinstance(patch, dict):
+        raise ValueError("Invalid settings")
+    cur = load_settings(root)
+    new = json.loads(json.dumps(cur))
+    if "schedule" in patch:
+        new["schedule"] = validate_schedule(patch["schedule"], cur["schedule"])
+    if "usb_after" in patch:
+        new["usb_after"] = _bool(patch["usb_after"], "usb_after")
+    if "stale_days" in patch:
+        try:
+            sd = int(patch["stale_days"])
+        except (TypeError, ValueError):
+            raise ValueError("Stale threshold must be a number of days")
+        if isinstance(patch["stale_days"], bool) or not STALE_DAYS_RANGE[0] <= sd <= STALE_DAYS_RANGE[1]:
+            raise ValueError("Stale threshold must be %d-%d days" % STALE_DAYS_RANGE)
+        new["stale_days"] = sd
+    path = P(root, SETTINGS_FILE)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    _write_private(path, json.dumps(new, indent=2, sort_keys=True) + "\n")
+    changed = sorted(k for k in new if new[k] != cur[k])
+    if new["schedule"] != cur["schedule"]:
+        # a changed schedule never fires for a slot that is already past
+        update_state(root, lambda s: s.setdefault("schedule", {}).update(since=int(time.time())))
+    audit(root, "settings", who=who, changed=changed or None,
+          schedule=describe_schedule(new["schedule"]) if "schedule" in changed else None,
+          usb_after=new["usb_after"] if "usb_after" in changed else None,
+          stale_days=new["stale_days"] if "stale_days" in changed else None)
+    return new
+
+
+# ── schedule (pure math + the due check the API thread polls) ───────────────
+
+def describe_schedule(s):
+    if not s.get("enabled"):
+        return "off"
+    if s.get("freq") == "weekly":
+        return "weekly on %s at %s" % (WEEKDAYS[int(s.get("weekday", 6))], s.get("time"))
+    return "daily at %s" % s.get("time")
+
+
+def schedule_slots(sched, now):
+    """(previous, next): the latest scheduled time <= now and the first one
+    > now, in local time (DST-safe via mktime). (None, None) when off."""
+    if not sched.get("enabled"):
+        return None, None
+    hh, mm = (int(x) for x in sched["time"].split(":"))
+    today = datetime.date.fromtimestamp(now)
+    prev = nxt = None
+    for d in range(-8, 9):
+        day = today + datetime.timedelta(days=d)
+        if sched.get("freq") == "weekly" and day.weekday() != int(sched.get("weekday", 6)):
+            continue
+        ts = time.mktime((day.year, day.month, day.day, hh, mm, 0, 0, 0, -1))
+        if ts <= now:
+            prev = ts
+        elif nxt is None:
+            nxt = ts
+    return prev, nxt
+
+
+def due_slot(sched, now, since, last_slot=None, last_full_started=None):
+    """Pure: the slot a scheduled run is due for, or None.
+    - one run per slot (last_slot), retried only if it could not start;
+    - a slot before ``since`` (schedule created/changed later) never fires;
+    - a missed slot (router off) still fires once, at the next check;
+    - a full backup that started at/after the slot already covers it."""
+    prev, _nxt = schedule_slots(sched, now)
+    if prev is None or since is None or prev <= since:
+        return None
+    if last_slot and last_slot >= prev:
+        return None
+    if last_full_started and last_full_started >= prev:
+        return None
+    return prev
+
+
+def schedule_due(root="", now=None):
+    now = time.time() if now is None else now
+    sched = load_settings(root)["schedule"]
+    st = load_state(root)
+    sc = st.get("schedule") or {}
+    if sc.get("since") is None:
+        update_state(root, lambda s: s.setdefault("schedule", {}).update(since=int(now)))
+        return None
+    ls = st.get("last_success") or {}
+    full = ls.get("started") if ls.get("items") == "all" else None
+    return due_slot(sched, now, sc.get("since"), sc.get("last_slot"), full)
+
+
+def mark_slot(root, slot, run):
+    def fn(s):
+        sc = s.setdefault("schedule", {})
+        sc.update(last_slot=int(slot), last_attempt=int(time.time()),
+                  last_ok=bool(run and run.get("ok")), last_result=(run or {}).get("result"),
+                  last_error=(run or {}).get("error"))
+    update_state(root, fn)
+
+
+def schedule_info(root="", now=None):
+    now = time.time() if now is None else now
+    settings = load_settings(root)
+    prev, nxt = schedule_slots(settings["schedule"], now)
+    sc = load_state(root).get("schedule") or {}
+    return dict(settings["schedule"], describe=describe_schedule(settings["schedule"]),
+                next=int(nxt) if nxt else None, last_slot=sc.get("last_slot"),
+                last_attempt=sc.get("last_attempt"), last_ok=sc.get("last_ok"),
+                last_result=sc.get("last_result"), last_error=sc.get("last_error"))
+
+
+# ── integrity: SHA256SUMS inside + the archive's own sha256 ─────────────────
+INTEGRITY_OK = ("verified", "no-manifest")
+
+
+def format_sums(pairs):
+    """sha256sum-compatible text for [(name, hexdigest)] (escaping like coreutils)."""
+    lines = []
+    for name, hexd in sorted(pairs):
+        if "\\" in name or "\n" in name or "\r" in name:
+            esc = name.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+            lines.append("\\%s  %s" % (hexd, esc))
+        else:
+            lines.append("%s  %s" % (hexd, name))
+    return "\n".join(lines) + "\n"
+
+
+def parse_sums(text):
+    out = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        escaped = line.startswith("\\")
+        if escaped:
+            line = line[1:]
+        m = re.match(r"^([0-9a-fA-F]{64}) [ *](.+)$", line)
+        if not m:
+            raise ValueError("malformed SHA256SUMS line")
+        name = m.group(2)
+        if escaped:
+            name = re.sub(r"\\(.)", lambda x: {"n": "\n", "r": "\r", "\\": "\\"}.get(x.group(1), x.group(0)), name)
+        while name.startswith("./"):
+            name = name[2:]
+        out[name] = m.group(1).lower()
+    return out
+
+
+def _norm(name):
+    name = name or ""
+    while name.startswith("./"):
+        name = name[2:]
+    return name.rstrip("/")
+
+
+def verify_members(path):
+    """Decompress the whole archive (gzip CRC included) and check every
+    regular file against SHA256SUMS. status: verified | damaged |
+    no-manifest (older backups: readable, but nothing to compare with)."""
+    hashes = {}
+    sums_text = None
+    count = total = 0
+    try:
+        with open(path, "rb") as raw, gzip.GzipFile(fileobj=raw, mode="rb") as gz:
+            with tarfile.open(fileobj=gz, mode="r|") as tar:
+                for m in tar:
+                    count += 1
+                    if count > MAX_MEMBERS:
+                        raise ValueError("more than %d members" % MAX_MEMBERS)
+                    name = _norm(m.name)
+                    if m.islnk():
+                        hashes[name] = hashes.get(_norm(m.linkname))
+                        continue
+                    if not m.isreg():
+                        continue
+                    total += m.size
+                    if m.size > MAX_MEMBER_BYTES or total > MAX_TOTAL_BYTES:
+                        raise ValueError("archive exceeds the size limits")
+                    f = tar.extractfile(m)
+                    h = hashlib.sha256()
+                    buf = b"" if name == MANIFEST_NAME else None
+                    for chunk in iter(lambda: f.read(1048576), b""):
+                        h.update(chunk)
+                        if buf is not None and len(buf) < 16 * 1048576:
+                            buf += chunk
+                    if buf is not None:
+                        sums_text = buf.decode("utf-8", errors="replace")
+                    else:
+                        hashes[name] = h.hexdigest()
+            while gz.read(1048576):
+                pass
+    except Exception as exc:
+        return {"status": "damaged", "files": len(hashes),
+                "error": "The archive cannot be read to the end (%s: %s)" % (exc.__class__.__name__, str(exc)[:120])}
+    if sums_text is None:
+        return {"status": "no-manifest", "files": len(hashes)}
+    try:
+        sums = parse_sums(sums_text)
+    except ValueError as exc:
+        return {"status": "damaged", "files": len(hashes), "error": "SHA256SUMS is unreadable (%s)" % exc}
+    bad = sorted(n for n in sums if n in hashes and hashes[n] != sums[n])
+    missing = sorted(n for n in sums if n not in hashes)
+    extra = sorted(n for n in hashes if n not in sums)
+    res = {"status": "verified" if not (bad or missing or extra) else "damaged", "files": len(hashes),
+           "nbad": len(bad), "nmissing": len(missing), "nextra": len(extra),
+           "bad": bad[:20], "missing": missing[:20], "extra": extra[:20]}
+    return res
+
+
+def integrity_summary(res):
+    if res.get("status") == "verified":
+        return "all %d files match SHA256SUMS" % res.get("files", 0)
+    if res.get("status") == "no-manifest":
+        return "older backup without SHA256SUMS: readable, but its files cannot be checked"
+    if res.get("error"):
+        return res["error"]
+    parts = []
+    if res.get("nbad"):
+        parts.append("%d file(s) differ from SHA256SUMS (%s)" % (res["nbad"], ", ".join(res["bad"][:3])))
+    if res.get("nmissing"):
+        parts.append("%d listed file(s) missing" % res["nmissing"])
+    if res.get("nextra"):
+        parts.append("%d unlisted file(s) added (%s)" % (res["nextra"], ", ".join(res["extra"][:3])))
+    return "; ".join(parts) or "damaged"
+
+
+def record_integrity(root, name, res, sha, size):
+    def fn(s):
+        recs = s.setdefault("archives", {})
+        old = recs.get(name) or {}
+        rec = {"status": res["status"], "checked": int(time.time()), "size": size, "files": res.get("files"),
+               "sha256": old.get("sha256") or sha, "summary": integrity_summary(res)[:300]}
+        if old.get("sha256") and old["sha256"] != sha:
+            rec["seen_sha256"] = sha
+        recs[name] = rec
+    update_state(root, fn)
+
+
+def check_integrity(root, name, path, force=False):
+    """Integrity of a stored archive. The sha256 recorded when it was created
+    (or first seen) must still match; otherwise or when forced, the members
+    are re-checked against SHA256SUMS. Returns the result (+ sha256)."""
+    sha = sha256_file(path)
+    size = os.path.getsize(path)
+    rec = (load_state(root).get("archives") or {}).get(name) or {}
+    if rec.get("sha256") and rec["sha256"] != sha:
+        res = verify_members(path)
+        res.update(status="damaged", error="The archive changed after it was created (its sha256 no longer "
+                                           "matches the one recorded then)")
+        record_integrity(root, name, res, sha, size)
+        return dict(res, sha256=sha, recorded_sha256=rec["sha256"])
+    if not force and rec.get("status") in INTEGRITY_OK and rec.get("sha256") == sha:
+        return {"status": rec["status"], "files": rec.get("files"), "sha256": sha, "cached": True,
+                "checked": rec.get("checked")}
+    res = verify_members(path)
+    record_integrity(root, name, res, sha, size)
+    return dict(res, sha256=sha, checked=int(time.time()))
+
+
+def require_intact(root, name, path):
+    res = check_integrity(root, name, path)
+    if res["status"] == "damaged":
+        raise Refused(409, {"ok": False, "damaged": True, "integrity": res["status"],
+                            "error": "This backup is damaged (%s). Restore refused - use another backup."
+                                     % integrity_summary(res)})
+    return res
+
+
+def forget_archive(root, name):
+    update_state(root, lambda s: (s.get("archives") or {}).pop(name, None))
+
+
+# ── encryption (OpenPGP symmetric via GnuPG) ────────────────────────────────
+# AES-256, SHA-512 iterated+salted S2K, integrity-protected packets (MDC: gpg
+# refuses to output a manipulated message). The passphrase goes to gpg over
+# a pipe fd (never argv/env), gpg runs with a throwaway 0700 homedir and no
+# agent cache. Local archives stay plaintext (root-only, next to the live
+# config they mirror); everything that leaves the box is encrypted.
+PASSPHRASE_MIN = 10
+PASSPHRASE_MAX = 512
+GPG_COMMON = ["--batch", "--yes", "--no-tty", "--quiet", "--pinentry-mode", "loopback", "--no-symkey-cache",
+              "--no-permission-warning"]
+GPG_ENCRYPT = ["--symmetric", "--cipher-algo", "AES256", "--s2k-mode", "3", "--s2k-digest-algo", "SHA512",
+               "--s2k-count", "65011712", "--compress-algo", "none"]
+GPG_TIMEOUT = 900
+
+
+class DecryptError(ValueError):
+    def __init__(self, kind, msg):
+        ValueError.__init__(self, msg)
+        self.kind = kind
+
+
+def gpg_path():
+    return shutil.which("gpg", path="/usr/bin:/bin:/usr/local/bin")
+
+
+_gpg_version_cache = {}
+
+
+def gpg_version(gpg=None):
+    gpg = gpg or gpg_path()
+    if not gpg:
+        return None
+    if gpg not in _gpg_version_cache:
+        try:
+            out = subprocess.run([gpg, "--version"], capture_output=True, text=True, timeout=10).stdout
+            _gpg_version_cache[gpg] = out.splitlines()[0].strip() if out else None
+        except Exception:
+            return None
+    return _gpg_version_cache[gpg]
+
+
+def looks_encrypted(head):
+    if head[:27] == b"-----BEGIN PGP MESSAGE-----":
+        return True
+    return bool(head) and head[0] in (0x8c, 0x8d, 0x8e, 0xc3)   # (old/new format) symmetric-key session packet
+
+
+def validate_passphrase(pw):
+    if not isinstance(pw, str):
+        raise ValueError("Passphrase missing")
+    if len(pw) < PASSPHRASE_MIN:
+        raise ValueError("Use a passphrase of at least %d characters" % PASSPHRASE_MIN)
+    if len(pw) > PASSPHRASE_MAX:
+        raise ValueError("Passphrase too long")
+    if any(ord(c) < 32 or ord(c) == 127 for c in pw):
+        raise ValueError("The passphrase cannot contain control characters or line breaks")
+    return pw
+
+
+def read_passphrase(root=""):
+    path = P(root, PASSPHRASE_FILE)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode) or st.st_mode & 0o077 or (os.geteuid() == 0 and st.st_uid != 0):
+            return None   # not root-only: ignore rather than use a possibly planted key
+        with os.fdopen(fd, "rb") as f:
+            fd = None
+            pw = f.read(PASSPHRASE_MAX * 4 + 2).decode("utf-8", errors="strict").rstrip("\n")
+    except (OSError, UnicodeDecodeError):
+        return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+    return pw or None
+
+
+def encryption_info(root=""):
+    path = P(root, PASSPHRASE_FILE)
+    on = read_passphrase(root) is not None
+    try:
+        set_at = int(os.path.getmtime(path)) if on else None
+    except OSError:
+        set_at = None
+    gpg = gpg_path()
+    return {"enabled": on, "set_at": set_at, "available": bool(gpg),
+            "tool": "GnuPG (OpenPGP symmetric, AES-256)", "version": gpg_version(gpg) if gpg else None,
+            "file": PASSPHRASE_FILE}
+
+
+def _gpg_home(root):
+    base = _private_dir(P(root, WORK_DIR))
+    return _private_dir(os.path.join(base, "gpg-" + secrets.token_hex(6)))
+
+
+def _pass_pipe(passphrase):
+    r, w = os.pipe()
+    try:
+        os.write(w, passphrase.encode("utf-8") + b"\n")
+    finally:
+        os.close(w)
+    return r
+
+
+def _gpg_env():
+    return {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C"}
+
+
+def gpg_encrypt(root, src_path, out_file, passphrase, gpg=None):
+    """Encrypt src_path into the open binary file out_file."""
+    gpg = gpg or gpg_path()
+    if not gpg:
+        raise ValueError("gpg is not installed (apt install gnupg)")
+    home = _gpg_home(root)
+    r = _pass_pipe(passphrase)
+    try:
+        with open(src_path, "rb") as inp:
+            p = subprocess.run([gpg, "--homedir", home] + GPG_COMMON + ["--passphrase-fd", str(r)] + GPG_ENCRYPT +
+                               ["--output", "-"], stdin=inp, stdout=out_file, stderr=subprocess.PIPE,
+                               pass_fds=(r,), timeout=GPG_TIMEOUT, env=_gpg_env())
+        if p.returncode != 0:
+            raise ValueError("Encryption failed (gpg exit %d)" % p.returncode)
+        out_file.flush()
+        os.fsync(out_file.fileno())
+    finally:
+        os.close(r)
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def gpg_decrypt_stream(root, src_path, passphrase, sink, cap=None, gpg=None):
+    """Decrypt src_path, feeding plaintext chunks to sink(bytes). The output
+    is capped (a compressed packet cannot inflate past it). Raises
+    DecryptError(kind=passphrase|damaged|format|limit)."""
+    gpg = gpg or gpg_path()
+    if not gpg:
+        raise DecryptError("format", "gpg is not installed (apt install gnupg)")
+    home = _gpg_home(root)
+    r = _pass_pipe(passphrase)
+    err = []
+    try:
+        p = subprocess.Popen([gpg, "--homedir", home] + GPG_COMMON + ["--passphrase-fd", str(r), "--decrypt",
+                              "--output", "-", src_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             pass_fds=(r,), env=_gpg_env())
+        os.close(r)
+        r = None
+        t = threading.Thread(target=lambda: err.append(p.stderr.read()), daemon=True)
+        t.start()
+        total = 0
+        over = False
+        try:
+            for chunk in iter(lambda: p.stdout.read(1048576), b""):
+                total += len(chunk)
+                if cap is not None and total > cap:
+                    over = True
+                    p.kill()
+                    break
+                sink(chunk)
+        finally:
+            try:
+                rc = p.wait(timeout=GPG_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                rc = p.wait()
+            t.join(5)
+            p.stdout.close()
+        if over:
+            raise DecryptError("limit", "The decrypted data is larger than allowed")
+        if rc != 0:
+            msg = (err[0] if err else b"").decode("utf-8", errors="replace")
+            if "Bad session key" in msg or "bad passphrase" in msg.lower():
+                raise DecryptError("passphrase", "Wrong passphrase")
+            if "manipulated" in msg or "MDC" in msg or "CRC" in msg or "invalid packet" in msg:
+                raise DecryptError("damaged", "The encrypted file is damaged or was modified")
+            if "no valid OpenPGP data" in msg:
+                raise DecryptError("format", "Not an OpenPGP-encrypted file")
+            if "No secret key" in msg or "public key" in msg:
+                raise DecryptError("format", "Encrypted to a key, not with a passphrase: not a TuxWall backup")
+            raise DecryptError("format", "Decryption failed (gpg exit %d)" % rc)
+    finally:
+        if r is not None:
+            os.close(r)
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def set_passphrase(root, passphrase, who="", gpg=None):
+    validate_passphrase(passphrase)
+    gpg = gpg or gpg_path()
+    if not gpg:
+        raise ValueError("gpg is not installed (apt install gnupg)")
+    fd, probe = mkstemp_private(root, prefix="probe-")
+    enc = probe + ".gpg"
+    try:
+        sample = secrets.token_bytes(256)
+        with os.fdopen(fd, "wb") as f:
+            f.write(sample)
+        with os.fdopen(os.open(enc, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "wb") as out:
+            gpg_encrypt(root, probe, out, passphrase, gpg=gpg)
+        got = []
+        gpg_decrypt_stream(root, enc, passphrase, got.append, cap=4096, gpg=gpg)
+        if b"".join(got) != sample:
+            raise ValueError("Encryption self-test failed")
+    finally:
+        for p in (probe, enc):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+    existed = read_passphrase(root) is not None
+    path = P(root, PASSPHRASE_FILE)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    _write_private(path, passphrase.encode("utf-8"))
+    audit(root, "encryption-change" if existed else "encryption-set", who=who)
+    return encryption_info(root)
+
+
+def clear_passphrase(root, who=""):
+    try:
+        os.unlink(P(root, PASSPHRASE_FILE))
+        audit(root, "encryption-remove", who=who)
+    except FileNotFoundError:
+        pass
+    return encryption_info(root)
+
+
+def encrypted_copy(root, src_path, passphrase, gpg=None):
+    """Private temp file holding src_path encrypted. Caller unlinks it."""
+    fd, tmp = mkstemp_private(root, prefix="enc-", suffix=".gpg")
+    try:
+        with os.fdopen(fd, "wb") as out:
+            gpg_encrypt(root, src_path, out, passphrase, gpg=gpg)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return tmp
+
+
+# ── USB copy (stick labelled TUXWALL-BACKUP) ────────────────────────────────
+# Picked by filesystem label only (lsblk, blkid as fallback), never a disk
+# that holds a system mount; re-probed (blkid -p) right before mounting;
+# mounted nodev,nosuid,noexec at /mnt/tuxwall-backup; only files in
+# tuxwall-backups/ that match our own names are ever written or deleted.
+# Never formats anything.
+USB_LABEL = "TUXWALL-BACKUP"
+USB_MOUNT = "/mnt/tuxwall-backup"
+USB_SUBDIR = "tuxwall-backups"
+USB_KEEP = 10
+USB_FSTYPES = ("ext4", "ext3", "ext2", "xfs", "btrfs", "vfat", "exfat")
+USB_FAT = ("vfat", "exfat")
+USB_TYPES = ("part", "disk", "loop")
+USB_FILE_RE = re.compile(r"^system-backup-(\d{8})-(\d{6})\.tar\.gz(\.gpg)?$")
+SYSTEM_MOUNTS = ("/", "/boot", "/boot/efi", "/usr", "/var", "/home", "/srv", "/opt", "/tmp", "[SWAP]")
+LSBLK_COLS = "NAME,PATH,TYPE,LABEL,FSTYPE,SIZE,TRAN,RM,HOTPLUG,MODEL,VENDOR,MOUNTPOINTS,UUID"
+
+
+def _flatten(devs, top=None, parent=None):
+    for d in devs or []:
+        d = dict(d)
+        d["_top"] = top or d.get("name")
+        d["_parent"] = parent
+        yield d
+        for c in _flatten(d.get("children"), d["_top"], d):
+            yield c
+
+
+def _mounts_of(d):
+    mp = d.get("mountpoints")
+    if mp is None and d.get("mountpoint"):
+        mp = [d.get("mountpoint")]
+    return [m for m in (mp or []) if m]
+
+
+def usb_pick(lsblk, blkid_paths=()):
+    """Pure: (device dict, error) for the one block device labelled
+    TUXWALL-BACKUP that is safe to use; (None, None) when there is none."""
+    devs = list(_flatten((lsblk or {}).get("blockdevices")))
+    system_tops = {d["_top"] for d in devs if any(m in SYSTEM_MOUNTS for m in _mounts_of(d))}
+    cands, notes = [], []
+    for d in devs:
+        if d.get("label") != USB_LABEL and d.get("path") not in blkid_paths:
+            continue
+        if d.get("type") not in USB_TYPES:
+            notes.append("%s is a %s device" % (d.get("path"), d.get("type")))
+            continue
+        if d["_top"] in system_tops:
+            notes.append("%s is on the system disk" % d.get("path"))
+            continue
+        cands.append(d)
+    if not cands:
+        return None, ("A device labelled %s was ignored: %s" % (USB_LABEL, "; ".join(notes))) if notes else None
+    if len(cands) > 1:
+        return None, ("Several devices are labelled %s (%s): attach only one"
+                      % (USB_LABEL, ", ".join(c.get("path") or "?" for c in cands)))
+    d = cands[0]
+    if (d.get("fstype") or "") not in USB_FSTYPES:
+        return None, "%s has an unsupported filesystem (%s); TuxWall never formats it" % (d.get("path"), d.get("fstype") or "none")
+    tran = d.get("tran")
+    p = d.get("_parent")
+    while not tran and p:
+        tran = p.get("tran")
+        p = p.get("_parent")
+    model = d.get("model") or ((d.get("_parent") or {}).get("model"))
+    out = {"path": d.get("path"), "name": d.get("name"), "type": d.get("type"), "fstype": d.get("fstype"),
+           "size": d.get("size"), "uuid": d.get("uuid"), "tran": tran or None,
+           "model": (model or "").strip() or None, "mounts": _mounts_of(d)}
+    return out, None
+
+
+def _run(cmd, timeout=30):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                          env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"})
+
+
+def usb_detect():
+    try:
+        p = _run(["lsblk", "-J", "-b", "-o", LSBLK_COLS], timeout=15)
+        data = json.loads(p.stdout or "{}") if p.returncode == 0 else {}
+    except Exception:
+        data = {}
+    paths = ()
+    try:
+        b = _run(["blkid", "-c", "/dev/null", "-o", "device", "-t", "LABEL=" + USB_LABEL], timeout=20)
+        paths = tuple(x.strip() for x in (b.stdout or "").splitlines() if x.strip())
+    except Exception:
+        pass
+    return usb_pick(data, paths)
+
+
+def _ext_free(dev):
+    try:
+        p = _run(["dumpe2fs", "-h", dev], timeout=15)
+    except Exception:
+        return None
+    vals = {}
+    for line in (p.stdout or "").splitlines():
+        k, _, v = line.partition(":")
+        vals[k.strip()] = v.strip()
+    try:
+        return int(vals["Free blocks"]) * int(vals["Block size"])
+    except (KeyError, ValueError):
+        return None
+
+
+def usb_status(root="", detect=None):
+    dev, err = (detect or usb_detect)()
+    out = {"label": USB_LABEL, "mount": USB_MOUNT, "folder": USB_SUBDIR, "keep": USB_KEEP,
+           "present": bool(dev), "error": err}
+    if dev:
+        out["device"] = dict(dev)
+        if (dev.get("fstype") or "").startswith("ext"):
+            out["device"]["free"] = _ext_free(dev["path"])
+    st = load_state(root).get("usb") or {}
+    for k in ("last_copy", "last_error", "last_check"):
+        out[k] = st.get(k)
+    return out
+
+
+def _unoctal(s):
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), s)
+
+
+def _mounted_at(target):
+    """(major:minor, source) of what is mounted at target, or None."""
+    try:
+        with open("/proc/self/mountinfo") as f:
+            lines = f.readlines()
+    except OSError:
+        return None
+    found = None
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 10 or _unoctal(parts[4]) != target:
+            continue
+        sep = parts.index("-") if "-" in parts else -1
+        found = (parts[2], _unoctal(parts[sep + 2]) if sep > 0 and len(parts) > sep + 2 else "")
+    return found
+
+
+def _blkdev(path):
+    real = os.path.realpath(path or "")
+    if not real.startswith("/dev/"):
+        raise Refused(409, {"ok": False, "error": "Unexpected device path"})
+    st = os.stat(real)
+    if not _stat.S_ISBLK(st.st_mode):
+        raise Refused(409, {"ok": False, "error": "%s is not a block device" % real})
+    return real, "%d:%d" % (os.major(st.st_rdev), os.minor(st.st_rdev))
+
+
+def _usb_mount(root, dev, readonly=False):
+    """Mount the stick; returns True if we mounted it (False: it already was)."""
+    real, majmin = _blkdev(dev["path"])
+    probe = _run(["blkid", "-p", "-o", "export", real], timeout=20)
+    kv = dict(line.split("=", 1) for line in (probe.stdout or "").splitlines() if "=" in line)
+    if kv.get("LABEL") != USB_LABEL or kv.get("TYPE") != dev.get("fstype"):
+        raise Refused(409, {"ok": False, "error": "%s no longer carries the %s label; nothing was mounted"
+                                                  % (real, USB_LABEL)})
+    try:
+        st = os.lstat(USB_MOUNT)
+        if not _stat.S_ISDIR(st.st_mode):
+            raise Refused(409, {"ok": False, "error": "%s is not a directory" % USB_MOUNT})
+    except FileNotFoundError:
+        os.makedirs(USB_MOUNT, mode=0o700)
+    cur = _mounted_at(USB_MOUNT)
+    if cur:
+        if cur[0] == majmin or os.path.realpath(cur[1] or "x") == real:
+            return False
+        raise Refused(409, {"ok": False, "error": "Something else is mounted at %s (%s); unmount it first"
+                                                  % (USB_MOUNT, cur[1] or cur[0])})
+    if any(m != USB_MOUNT for m in dev.get("mounts") or []):
+        raise Refused(409, {"ok": False, "error": "The stick is already mounted at %s; unmount it first"
+                                                  % ", ".join(dev["mounts"])})
+    opts = "nodev,nosuid,noexec,noatime" + (",ro" if readonly else "")
+    if dev.get("fstype") in USB_FAT:
+        opts += ",uid=0,gid=0,fmask=0177,dmask=0077"
+    update_state(root, lambda s: s.setdefault("usb", {}).update(mounted_by_us=real))
+    p = _run(["mount", "-t", dev["fstype"], "-o", opts, real, USB_MOUNT], timeout=60)
+    if p.returncode != 0:
+        update_state(root, lambda s: s.setdefault("usb", {}).pop("mounted_by_us", None))
+        raise Refused(500, {"ok": False, "error": "Mounting %s failed: %s" % (real, (p.stderr or "").strip()[-200:])})
+    return True
+
+
+def _usb_umount(root):
+    try:
+        os.sync()
+    except Exception:
+        pass
+    err = ""
+    for i in range(4):
+        p = _run(["umount", USB_MOUNT], timeout=60)
+        if p.returncode == 0 or not _mounted_at(USB_MOUNT):
+            update_state(root, lambda s: s.setdefault("usb", {}).pop("mounted_by_us", None))
+            return None
+        err = (p.stderr or "").strip()[-200:]
+        time.sleep(1 + i)
+    return "Could not unmount %s (%s); do not unplug the stick yet" % (USB_MOUNT, err)
+
+
+def usb_cleanup(root=""):
+    """After a crash/re-exec mid-copy: unmount what we mounted."""
+    st = load_state(root).get("usb") or {}
+    if st.get("mounted_by_us") and _mounted_at(USB_MOUNT):
+        return _usb_umount(root)
+    if st.get("mounted_by_us"):
+        update_state(root, lambda s: s.setdefault("usb", {}).pop("mounted_by_us", None))
+    return None
+
+
+def _fresh_sha256(path):
+    """sha256 of what is on the device, not the page cache."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        try:
+            os.fsync(fd)
+        except OSError:
+            pass
+        try:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        except (AttributeError, OSError):
+            pass
+        h = hashlib.sha256()
+        with os.fdopen(fd, "rb") as f:
+            fd = None
+            for chunk in iter(lambda: f.read(1048576), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def usb_plan_prune(names, keep=USB_KEEP):
+    """Pure: which of our files on the stick to delete (oldest first)."""
+    ours = sorted((n for n in names if USB_FILE_RE.match(n)),
+                  key=lambda n: (USB_FILE_RE.match(n).group(1) + USB_FILE_RE.match(n).group(2), n), reverse=True)
+    return sorted(ours[keep:])
+
+
+def _usb_dir(base):
+    d = os.path.join(base, USB_SUBDIR)
+    try:
+        st = os.lstat(d)
+        if not _stat.S_ISDIR(st.st_mode):
+            raise Refused(409, {"ok": False, "error": "%s on the stick is not a folder" % USB_SUBDIR})
+    except FileNotFoundError:
+        os.mkdir(d, 0o700)
+    return d
+
+
+def _usb_list(d):
+    out = []
+    for n in sorted(os.listdir(d)):
+        if USB_FILE_RE.match(n):
+            try:
+                st = os.lstat(os.path.join(d, n))
+            except OSError:
+                continue
+            if _stat.S_ISREG(st.st_mode):
+                out.append({"name": n, "size": st.st_size, "time": int(st.st_mtime), "encrypted": n.endswith(".gpg")})
+    return out
+
+
+def _read_sidecar(path):
+    try:
+        with open(path + ".sha256") as f:
+            m = re.match(r"^([0-9a-f]{64})\s", f.read(200))
+            return m.group(1) if m else None
+    except OSError:
+        return None
+
+
+def usb_copy_to(root, base, archive_path, archive_name, archive_sha, passphrase=None, gpg=None, keep=USB_KEEP):
+    """Copy (encrypting if a passphrase is given) one archive into
+    <base>/tuxwall-backups/, verify it on the medium, prune ours to keep.
+    ``base`` is the mounted stick (a plain directory in tests)."""
+    d = _usb_dir(base)
+    target = archive_name + (".gpg" if passphrase else "")
+    dst = os.path.join(d, target)
+    enc_tmp = None
+    result = {"file": target, "encrypted": bool(passphrase), "skipped": False}
+    try:
+        if os.path.lexists(dst):
+            side = _read_sidecar(dst)
+            if side and os.path.isfile(dst) and not os.path.islink(dst) and _fresh_sha256(dst) == side:
+                result.update(skipped=True, sha256=side, verified=True)
+        if not result["skipped"]:
+            src = archive_path
+            if passphrase:
+                enc_tmp = encrypted_copy(root, archive_path, passphrase, gpg=gpg)
+                src = enc_tmp
+            want = sha256_file(src)
+            need = os.path.getsize(src)
+            vfs = os.statvfs(d)
+            if vfs.f_bavail * vfs.f_frsize < need + 1048576:
+                for n in usb_plan_prune(os.listdir(d), keep=max(1, keep - 1)):
+                    for p in (os.path.join(d, n), os.path.join(d, n + ".sha256")):
+                        try:
+                            os.unlink(p)
+                        except FileNotFoundError:
+                            pass
+                vfs = os.statvfs(d)
+                if vfs.f_bavail * vfs.f_frsize < need + 1048576:
+                    raise Refused(507, {"ok": False, "error": "Not enough free space on the stick (%d MB needed)"
+                                                              % (need // 1048576 + 1)})
+            part = os.path.join(d, ".%s.%s.partial" % (target, secrets.token_hex(4)))
+            try:
+                fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
+                    shutil.copyfileobj(inp, out, 1048576)
+                    out.flush()
+                    os.fsync(out.fileno())
+                got = _fresh_sha256(part)
+                if got != want:
+                    raise Refused(500, {"ok": False, "error": "The copy on the stick is damaged (sha256 mismatch "
+                                                              "after writing); the stick may be failing"})
+                if passphrase:
+                    h = hashlib.sha256()
+                    try:
+                        gpg_decrypt_stream(root, part, passphrase, h.update, cap=MAX_TOTAL_BYTES, gpg=gpg)
+                    except DecryptError as exc:
+                        raise Refused(500, {"ok": False, "error": "The encrypted copy does not decrypt (%s)" % exc})
+                    if h.hexdigest() != archive_sha:
+                        raise Refused(500, {"ok": False, "error": "The encrypted copy does not decrypt to the backup"})
+                os.replace(part, dst)
+                part = None
+            finally:
+                if part:
+                    try:
+                        os.unlink(part)
+                    except OSError:
+                        pass
+            _write_private(dst + ".sha256", "%s  %s\n" % (want, target))
+            try:
+                dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+                os.fsync(dfd)
+                os.close(dfd)
+            except OSError:
+                pass
+            result.update(sha256=want, verified=True)
+    finally:
+        if enc_tmp:
+            try:
+                os.unlink(enc_tmp)
+            except OSError:
+                pass
+    pruned = []
+    for n in usb_plan_prune(os.listdir(d), keep=keep):
+        if n == target:
+            continue
+        for p in (os.path.join(d, n), os.path.join(d, n + ".sha256")):
+            try:
+                os.unlink(p)
+            except FileNotFoundError:
+                pass
+        pruned.append(n)
+    vfs = os.statvfs(d)
+    result.update(pruned=pruned, copies=len(_usb_list(d)), free=vfs.f_bavail * vfs.f_frsize,
+                  total=vfs.f_blocks * vfs.f_frsize)
+    return result
+
+
+def latest_system_backup(root=""):
+    names = sorted(n for n in os.listdir(P(root, SYSTEM_DIR)) if SYSTEM_RE.match(n)) \
+        if os.path.isdir(P(root, SYSTEM_DIR)) else []
+    return names[-1] if names else None
+
+
+def usb_copy(root="", name=None, who="", trigger="manual", detect=None, gpg=None):
+    """Copy the latest (or the named) system backup to the stick and verify
+    it. Holds the job lock (no overlap with a backup run)."""
+    def fail(msg, status=500, record=True, **extra):
+        if record:   # "no stick attached" is not a failed copy
+            rec = {"time": int(time.time()), "trigger": trigger, "who": who or "", "error": msg[:300]}
+            update_state(root, lambda s: s.setdefault("usb", {}).update(last_error=rec))
+        audit(root, "usb-copy", who=who, trigger=trigger, ok=False, error=msg[:200])
+        raise Refused(status, dict({"ok": False, "error": msg}, **extra))
+
+    lk = JobLock(root)
+    if not lk.acquire():
+        raise Refused(409, {"ok": False, "error": "A backup job is running; try again when it has finished"})
+    try:
+        dev, err = (detect or usb_detect)()
+        if not dev:
+            fail(err or "No USB stick labelled %s is attached" % USB_LABEL, 404, record=bool(err), absent=not err)
+        name = name or latest_system_backup(root)
+        if not name or not SYSTEM_RE.match(name):
+            fail("There is no system backup to copy yet", 409)
+        path = os.path.join(P(root, SYSTEM_DIR), name)
+        if not os.path.isfile(path):
+            fail("System backup not found", 404)
+        integ = check_integrity(root, name, path)
+        if integ["status"] == "damaged":
+            fail("%s is damaged (%s); not copied" % (name, integrity_summary(integ)), 409)
+        pw = read_passphrase(root)
+        try:
+            ours = _usb_mount(root, dev)
+        except Refused as exc:
+            fail(exc.payload.get("error") or "mount failed", exc.status)
+        res = None
+        error = None
+        try:
+            res = usb_copy_to(root, USB_MOUNT, path, name, integ["sha256"], passphrase=pw, gpg=gpg)
+        except Refused as exc:
+            error = (exc.payload.get("error"), exc.status)
+        except Exception as exc:
+            error = ("Copy to the stick failed: %s" % str(exc)[:200], 500)
+        finally:
+            um = _usb_umount(root) if ours else None
+        if error:
+            fail(error[0] + ((" (" + um + ")") if um else ""), error[1])
+        rec = {"time": int(time.time()), "trigger": trigger, "who": who or "", "archive": name,
+               "file": res["file"], "encrypted": res["encrypted"], "sha256": res["sha256"], "verified": True,
+               "skipped": res["skipped"], "copies": res["copies"], "free": res["free"], "total": res["total"],
+               "device": dev["path"], "model": dev.get("model"), "unmounted": um is None and ours,
+               "integrity": integ["status"]}
+        if um:
+            rec["warning"] = um
+
+        def fn(s):
+            u = s.setdefault("usb", {})
+            u["last_copy"] = rec
+            u.pop("last_error", None)
+        update_state(root, fn)
+        audit(root, "usb-copy", who=who, trigger=trigger, ok=True, archive=name, file=res["file"],
+              encrypted=res["encrypted"], skipped=res["skipped"] or None, pruned=len(res["pruned"]) or None)
+        return dict(rec, ok=True, pruned=res["pruned"])
+    finally:
+        lk.release()
+
+
+def usb_check(root="", detect=None):
+    """Mount read-only, list our copies and verify each against its .sha256."""
+    lk = JobLock(root)
+    if not lk.acquire():
+        raise Refused(409, {"ok": False, "error": "A backup job is running; try again when it has finished"})
+    try:
+        dev, err = (detect or usb_detect)()
+        if not dev:
+            raise Refused(404, {"ok": False, "absent": not err,
+                                "error": err or "No USB stick labelled %s is attached" % USB_LABEL})
+        ours = _usb_mount(root, dev, readonly=True)
+        try:
+            d = os.path.join(USB_MOUNT, USB_SUBDIR)
+            files = []
+            if os.path.isdir(d) and not os.path.islink(d):
+                for f in _usb_list(d):
+                    side = _read_sidecar(os.path.join(d, f["name"]))
+                    if not side:
+                        f["status"] = "unverified"
+                    else:
+                        f["status"] = "verified" if _fresh_sha256(os.path.join(d, f["name"])) == side else "damaged"
+                    files.append(f)
+            vfs = os.statvfs(USB_MOUNT)
+            free, total = vfs.f_bavail * vfs.f_frsize, vfs.f_blocks * vfs.f_frsize
+        finally:
+            um = _usb_umount(root) if ours else None
+        rec = {"time": int(time.time()), "device": dev["path"], "copies": len(files), "free": free, "total": total,
+               "damaged": sum(1 for f in files if f["status"] == "damaged")}
+        update_state(root, lambda s: s.setdefault("usb", {}).update(last_check=rec))
+        audit(root, "usb-check", ok=True, copies=len(files), damaged=rec["damaged"] or None)
+        return dict(rec, ok=True, files=files[::-1], warning=um)
+    finally:
+        lk.release()
+
+
+def usb_failure_incident(root=""):
+    """(title, detail) while the newest automatic USB copy failed, else None
+    (a failed manual copy is shown to whoever clicked)."""
+    u = load_state(root).get("usb") or {}
+    err = u.get("last_error") or {}
+    ok = u.get("last_copy") or {}
+    if not err or err.get("trigger") != "scheduled" or (ok and ok.get("time", 0) >= err.get("time", 0)):
+        return None
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(err.get("time") or 0))
+    return ("USB backup copy failed",
+            "The %s copy to the %s stick at %s failed: %s. Open System > Backups for details."
+            % (err.get("trigger") or "manual", USB_LABEL, when, err.get("error") or "unknown error"))
