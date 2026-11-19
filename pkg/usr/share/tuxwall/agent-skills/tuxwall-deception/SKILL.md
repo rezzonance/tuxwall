@@ -25,7 +25,10 @@ Live state without shell: `tuxwall_crowdsec_decisions` (pass `ip` to check one a
   exploit classes and canary egress; Block checks cut WAN forwarding (high also closes WAN input). Router-originated/loopback
   traffic is always ignored. Read-only: `sudo tuxwall-tripwire config`, `history --check C`, `test CHECK` (dry run, no side
   effects). No auto-restore: a trip is resolved deliberately by the owner in the dashboard (Security). Never change settings
-  on your own.
+  on your own. Recovery mode (`sudo tuxwall-tripwire recovery-status`): a timed window while tripped in which only the
+  router may reach the AI/push allowlist (OUTPUT rules `TUXWALL-TRIPWIRE-RECOVERY`, ipsets `tw-recovery4/6`, unbound
+  runtime zones); if you were started with an incident brief, investigate read-only and never start/extend/end recovery,
+  restore or open the firewall yourself - that is the owner's call.
 - CrowdSec (`crowdsec`, `crowdsec-firewall-bouncer`): decisions block attackers; permanent bans in `/etc/tuxwall/custom-blocklist.txt`.
 
 ## Common tasks

@@ -51,6 +51,18 @@ No auto-restore, ever: a trip holds until an administrator resolves it
 deliberately (a timer would re-open the door before the compromise is
 actually fixed; a CrowdSec ban does not un-find the way in).
 
+Recovery mode (Tripped -> Recovery -> Restored): while tripped an admin may
+start a time-boxed investigation window (default 60 min, extendable to at
+most 240 min left, persisted; expiry or `recovery-end` returns to the full
+trip, a new blocking event ends it too). The trip's rules stay; the
+router's own traffic out of the WAN is narrowed to an allowlist (HTTPS to
+the AI providers configured in opencode, opencode inference and the push
+targets; ipsets tw-recovery4/6 refreshed every 5 min), DNS leaves only from
+the resolver's uid and unbound answers only the allowlisted names (runtime
+local-zones, re-applied after an unbound restart). LAN/loopback model
+servers are reported as local models (reachable = no internet needed).
+`restore` is the dashboard's resolve: checklist + note, audited.
+
 State survives reboot: tripwire-state.json + the daemon re-enforces the
 lockdown at service start (ExecStartPre) and every 15 s while tripped, so
 neither a reboot nor a ufw reload can drop the containment.
@@ -65,7 +77,11 @@ restart; adding TUXWALL_TRIPWIRE_NETNS=<ns> applies the real rules inside
 that network namespace instead. TUXWALL_TRIPWIRE_PUSH_FILE=<file> records
 pushes instead of sending them. TUXWALL_TRIPWIRE_OWN_IPS / _LAN_NETS
 (comma lists) replace the router's addresses / internal networks that are
-otherwise read from `ip -o addr`. Never point a test at the live firewall.
+otherwise read from `ip -o addr`. Recovery: TUXWALL_TRIPWIRE_UNBOUND_CONTROL
+(a test unbound's control command; in a sandbox without it the DNS
+restriction is only recorded), _DNS (resolver ip[#port]), _FAKE_DNS (JSON
+host -> addresses), _RESOLVER_USER, _RECOVERY_REFRESH. Never point a test
+at the live firewall or the live unbound.
 """
 
 import collections
@@ -82,6 +98,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 
 ENV = os.environ.get
@@ -801,6 +818,9 @@ def lift():
     for ipt in ("iptables", "ip6tables"):
         for chain in ("FORWARD", "INPUT"):
             _delete_marked(ipt, chain, "all")
+        # recovery allowlist rules (OUTPUT) never outlive a resolve
+        _rec_delete(ipt, "OUTPUT")
+    _destroy_sets()
 
 
 def lockdown_active(mode=None):
@@ -1217,7 +1237,8 @@ def handle_event(event, cfg=None, dry=False, windows=None):
     elif action == "block":
         trip(event.get("reason") or "trip", cls=event.get("class") or "?",
              sig=event.get("sig") or "", src=event.get("src") or "",
-             dst=event.get("dst") or "", mode=decision["strength"], check=event.get("check"))
+             dst=event.get("dst") or "", mode=decision["strength"], check=event.get("check"),
+             detail=event)
     return decision
 
 
@@ -1470,27 +1491,40 @@ def import_old_log(path=None):
 
 # ── trip / resolve / mode ────────────────────────────────────────────────────
 
+TRIP_DETAIL_KEYS = ("iface", "proto", "sid", "src_port", "dst_ip", "dst_port")
+
+
 def trip(reason, cls="manual", sig="", src="", dst="", mode=None, check="manual",
-         notify_user=True):
+         notify_user=True, detail=None):
     mode = mode or get_config().get("strength")
     if mode not in STRENGTHS:
         mode = "medium"
     now = time.time()
+    extra = {k: (detail or {}).get(k) for k in TRIP_DETAIL_KEYS
+             if (detail or {}).get(k) not in (None, "")}
 
     def mark(st):
         if st.get("tripped"):
             st["trips"] = int(st.get("trips") or 0) + 1
             st["last_reason"] = reason
             return False
+        for k in TRIP_DETAIL_KEYS:
+            st.pop(k, None)
         st.update({"tripped": True, "mode": mode, "since": now, "reason": reason,
                    "class": cls, "check": check, "signature": sig, "src_ip": src,
-                   "dst": dst, "trips": 1})
+                   "dst": dst, "trips": 1}, **extra)
         st.pop("resolved_at", None)
         st.pop("resolved_by", None)
-        return True
+        return "stale" if st.pop("recovery", None) else True
     with _ACTION_LOCK:
-        if not update_state(mark):
+        fresh = update_state(mark)
+        if fresh == "stale":
+            recovery_remove_rules()
+        if not fresh:
             log("REPEAT class=%s sig=%r src=%s (already contained)" % (cls, sig, src))
+            if (load_state().get("recovery") or {}).get("active"):
+                # the attack goes on: close the investigation window
+                recovery_end("new-event", by="engine", via="engine")
             return False
         # push BEFORE the rules go on: high mode closes the WAN, and a
         # lockdown nobody hears about is a mystery outage
@@ -1509,12 +1543,16 @@ def trip(reason, cls="manual", sig="", src="", dst="", mode=None, check="manual"
     return True
 
 
-def resolve(by="admin", via="cli", client=""):
+def resolve(by="admin", via="cli", client="", checklist=None, note=None):
     with state_lock():
         st = load_state()
         if not st.get("tripped"):
             print("tripwire is not tripped")
             return False
+        in_recovery = bool((st.get("recovery") or {}).get("active"))
+        if in_recovery:
+            recovery_end("resolved", by=by, via=via, client=client)
+            st = load_state()
         lift()
         now = time.time()
         st.update({"tripped": False, "resolved_at": now, "resolved_by": by})
@@ -1534,7 +1572,8 @@ def resolve(by="admin", via="cli", client=""):
     log("RESOLVE by=%s via=%s (contained %.0f minutes, %d trip events)"
         % (by, via, minutes, st.get("trips") or 1))
     audit("resolve", by=by, via=via, client=client, trip_mode=st.get("mode"),
-          minutes=round(minutes, 1), trips=st.get("trips") or 1)
+          minutes=round(minutes, 1), trips=st.get("trips") or 1, checklist=checklist,
+          note=note or None, from_recovery=in_recovery or None)
     notify("Tripwire resolved",
            "WAN containment lifted by %s via %s. Total containment: %.0f minutes."
            % (by, via, minutes))
@@ -1637,6 +1676,921 @@ def set_mode(mode, by="admin", via="cli", client=""):
     if res["tripped"]:
         out["warning"] = _tripped_warning(load_state())
     return out
+
+
+# ── recovery mode (Tripped -> Recovery -> Restored) ─────────────────────────
+# While tripped, an admin may open a time-boxed investigation window. The
+# trip's FORWARD block stays exactly as it is; on top of it the router's own
+# traffic out of the WAN is narrowed to an allowlist: HTTPS to the AI
+# provider / opencode inference / push endpoints (ipset hash:ip,port,
+# refreshed on a timer because CDNs rotate), DNS only from the resolver's
+# uid, and DNS answers only for the allowlisted names (unbound runtime
+# local-zones: "." refuse + transparent zones, gone with an unbound restart
+# and re-applied by the watchdog). Replies to sessions others opened to the
+# router, WAN DHCP and v6 ND stay allowed. Everything else leaving the WAN
+# is rejected. In high strength the trip's WAN INPUT drop is untouched: it
+# only accepts replies to connections the router opened, which recovery
+# limits to the allowlist. The window expires (default 60 min, extendable,
+# persisted - a restart re-applies or expires it) back to the full trip;
+# restoring the network is the normal resolve (password + checklist).
+MARK_REC = "TUXWALL-TRIPWIRE-RECOVERY"
+MARK_REC_ALLOW = "TUXWALL-TRIPWIRE-RECOVERY-ALLOW"
+REC_SETS = {"iptables": "tw-recovery4", "ip6tables": "tw-recovery6"}
+REC_DEFAULT_MIN = 60
+REC_MIN_MIN, REC_MAX_MIN = 15, 240       # one start / most time left after extending
+REC_EXTEND_MIN, REC_EXTEND_MAX = 5, 120
+REC_REFRESH_S = float(ENV("TUXWALL_TRIPWIRE_RECOVERY_REFRESH") or 300)
+REC_SET_TIMEOUT = int(ENV("TUXWALL_TRIPWIRE_RECOVERY_SET_TIMEOUT") or 1800)
+OPENCODE_CONF = _p("/etc/tuxwall/opencode.json")
+MODELS_CACHE = _p("/home/tuxwall-agent/.cache/opencode/models.json")
+# runtime DNS restriction; in a sandbox it is only recorded unless a test
+# unbound is named explicitly (its control socket is NOT netns-isolated)
+UNBOUND_CONTROL = shlex.split(ENV("TUXWALL_TRIPWIRE_UNBOUND_CONTROL") or "") or (
+    [] if ROOT else ["unbound-control"])
+RESOLVER_USER = ENV("TUXWALL_TRIPWIRE_RESOLVER_USER") or "unbound"
+DNS_SENTINEL = "tuxwall-recovery.invalid."
+DNS_SENTINEL_IP = "127.0.0.9"
+OPENCODE_INFERENCE = "opencode.ai"
+# providers whose catalog entry has no "api" URL (the SDK default is used)
+PROVIDER_HOSTS = {
+    "opencode": "https://opencode.ai/zen/v1", "anthropic": "https://api.anthropic.com/v1",
+    "openai": "https://api.openai.com/v1", "google": "https://generativelanguage.googleapis.com",
+    "mistral": "https://api.mistral.ai/v1", "groq": "https://api.groq.com/openai/v1",
+    "xai": "https://api.x.ai/v1", "deepseek": "https://api.deepseek.com",
+    "togetherai": "https://api.together.xyz/v1", "fireworks-ai": "https://api.fireworks.ai/inference/v1",
+    "openrouter": "https://openrouter.ai/api/v1", "github-copilot": "https://api.githubcopilot.com",
+    "cerebras": "https://api.cerebras.ai/v1", "perplexity": "https://api.perplexity.ai",
+}
+LOCAL_PROVIDERS = {"ollama": "http://127.0.0.1:11434/v1", "lmstudio": "http://127.0.0.1:1234/v1",
+                   "llamacpp": "http://127.0.0.1:8080/v1", "vllm": "http://127.0.0.1:8000/v1"}
+_HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9])?\.)+"
+                      r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_PID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+_SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
+CHECKLIST = (("findings", "I reviewed the findings"),
+             ("cause", "The cause is fixed or understood"),
+             ("confirm", "I confirm restoring full network access"))
+
+
+def phase_of(st):
+    if not st.get("tripped"):
+        return "normal"
+    return "recovery" if (st.get("recovery") or {}).get("active") else "tripped"
+
+
+# -- allowlist -----------------------------------------------------------------
+
+def _url_target(url):
+    """(scheme, host, port) of an http(s) URL, else None."""
+    try:
+        u = urllib.parse.urlsplit(str(url or "").strip())
+        port = u.port
+    except ValueError:
+        return None
+    if u.scheme not in ("http", "https") or not u.hostname:
+        return None
+    return u.scheme, u.hostname.lower().rstrip("."), port or (443 if u.scheme == "https" else 80)
+
+
+def _is_local_host(host):
+    ip = _addr(host)
+    if ip is not None:
+        return ip.is_private or ip.is_loopback or ip.is_link_local
+    return (host in ("localhost",) or "." not in host
+            or host.endswith((".local", ".lan", ".home", ".internal", ".home.arpa")))
+
+
+def tcp_reachable(host, port, timeout=1.5):
+    import socket
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def _catalog_api(pids):
+    """provider id -> base URL from opencode's model catalog cache."""
+    if not pids:
+        return {}
+    data = read_json(MODELS_CACHE, {})
+    out = {}
+    for pid in pids:
+        p = data.get(pid)
+        if isinstance(p, dict) and isinstance(p.get("api"), str) and p["api"]:
+            out[pid] = p["api"]
+    return out
+
+
+def recovery_allowlist(providers=None, local_only=False, check_local=True):
+    """What recovery lets the router reach, derived from the opencode config
+    (custom providers' baseURLs, the default/small model's provider), the
+    providers the dashboard reports as signed in, opencode inference, and
+    the push targets in alerts.json. LAN/loopback endpoints are listed as
+    local models (never firewall entries: recovery only narrows the WAN)."""
+    conf = read_json(OPENCODE_CONF, {})
+    hosts, local, skipped = [], [], []
+    seen_local = set()
+
+    def add(host, port, why, kind):
+        for h in hosts:
+            if h["host"] == host and h["port"] == port:
+                if why not in h["why"]:
+                    h["why"].append(why)
+                if kind == "notify":
+                    h["kind"] = "notify"
+                return
+        hosts.append({"host": host, "port": port, "why": [why], "kind": kind})
+
+    def consider(url, why, kind, pid="", name="", models=()):
+        t = _url_target(url)
+        if not t:
+            skipped.append({"what": why, "why": "no usable http(s) URL"})
+            return
+        scheme, host, port = t
+        if _is_local_host(host):
+            if (host, port) not in seen_local:
+                seen_local.add((host, port))
+                local.append({"id": pid, "name": name or pid, "url": "%s://%s:%d" % (
+                    scheme, ("[%s]" % host) if ":" in host else host, port), "host": host,
+                    "port": port, "models": [str(m)[:120] for m in models][:20],
+                    "reachable": None})
+            return
+        if _addr(host) is None and not _HOST_RE.match(host):
+            skipped.append({"what": why, "why": "invalid host name"})
+            return
+        if scheme != "https":
+            skipped.append({"what": why, "host": host,
+                            "why": "plain HTTP over the internet is never allowlisted"})
+            return
+        if local_only and kind == "ai":
+            skipped.append({"what": why, "host": host, "why": "local-model-only recovery"})
+            return
+        add(host, port, why, kind)
+
+    custom = {}
+    for block, legacy in (("providers", False), ("provider", True)):
+        for pid, p in (conf.get(block) or {}).items() if isinstance(conf.get(block), dict) else ():
+            if not isinstance(p, dict) or not _PID_RE.match(str(pid)):
+                continue
+            st = p.get("options" if legacy else "settings")
+            st = st if isinstance(st, dict) else {}
+            custom[pid] = (str(st.get("baseURL") or ""), str(p.get("name") or pid),
+                           list((p.get("models") or {}).keys()) if isinstance(p.get("models"), dict)
+                           else [])
+    wanted = []
+    for key in ("model", "small_model"):
+        m = conf.get(key)
+        pid = (m.split("/", 1)[0] if isinstance(m, str) else
+               (m.get("providerID") if isinstance(m, dict) else "")) or ""
+        if pid and _PID_RE.match(pid) and pid not in wanted:
+            wanted.append(pid)
+    for pid in providers or []:
+        pid = str(pid)
+        if _PID_RE.match(pid) and pid not in wanted:
+            wanted.append(pid)
+    catalog = _catalog_api([p for p in wanted + ["opencode"] if p not in custom])
+    for pid, (base, name, models) in custom.items():
+        if base:
+            consider(base, "AI provider %s (opencode config)" % pid, "ai", pid, name,
+                     ["%s/%s" % (pid, m) for m in models])
+        elif pid not in wanted:
+            wanted.append(pid)
+    for pid in wanted:
+        if pid in custom and custom[pid][0]:
+            continue
+        url = catalog.get(pid) or PROVIDER_HOSTS.get(pid) or LOCAL_PROVIDERS.get(pid)
+        if url:
+            consider(url, "AI provider %s" % pid, "ai", pid)
+        else:
+            skipped.append({"what": "AI provider %s" % pid, "why": "endpoint unknown"})
+    consider(catalog.get("opencode") or "https://%s/zen/v1" % OPENCODE_INFERENCE,
+             "opencode inference", "ai", "opencode")
+    alerts = read_json(ALERTS_CONF, {})
+    if alerts.get("enabled"):
+        for key, label in (("ntfy_url", "push notifications (ntfy)"),
+                           ("webhook_url", "alert webhook")):
+            if alerts.get(key):
+                consider(alerts[key], label, "notify")
+    if check_local:
+        for e in local:
+            e["reachable"] = tcp_reachable(e["host"], e["port"])
+    return {"hosts": hosts, "local": local, "skipped": skipped, "local_only": bool(local_only),
+            "local_reachable": any(e.get("reachable") for e in local)}
+
+
+# -- name resolution (minimal stub resolver: the router's own unbound) ----------
+
+def _dns_server():
+    env = ENV("TUXWALL_TRIPWIRE_DNS")
+    if env:
+        return env
+    try:
+        with open("/etc/resolv.conf") as f:
+            for ln in f:
+                p = ln.split()
+                if len(p) >= 2 and p[0] == "nameserver":
+                    return p[1]
+    except OSError:
+        pass
+    return "127.0.0.1"
+
+
+def _dns_name(buf, off):
+    labels, end = [], None
+    for _ in range(128):
+        n = buf[off]
+        if n == 0:
+            off += 1
+            break
+        if n & 0xC0 == 0xC0:
+            if end is None:
+                end = off + 2
+            off = ((n & 0x3F) << 8) | buf[off + 1]
+            continue
+        labels.append(buf[off + 1:off + 1 + n].decode("ascii", "replace"))
+        off += 1 + n
+    return ".".join(labels), (end if end is not None else off)
+
+
+def dns_query(name, qtype, server=None, timeout=3.0):
+    """(rcode, [(type, address)]) for an A (1) / AAAA (28) query."""
+    import random
+    import socket
+    import struct
+    server = server or _dns_server()
+    port = 53
+    if "#" in server:
+        server, port = server.split("#", 1)
+        port = int(port)
+    qid = random.randint(0, 65535)
+    q = struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0)
+    for label in name.rstrip(".").split("."):
+        b = label.encode("ascii")
+        q += bytes([len(b)]) + b
+    q += b"\x00" + struct.pack(">HH", qtype, 1)
+    fam = socket.AF_INET6 if ":" in server else socket.AF_INET
+    s = socket.socket(fam, socket.SOCK_DGRAM)
+    s.settimeout(timeout)
+    try:
+        s.sendto(q, (server, port))
+        while True:
+            data, _ = s.recvfrom(4096)
+            if len(data) >= 12 and struct.unpack(">H", data[:2])[0] == qid:
+                break
+    finally:
+        s.close()
+    _, flags, qd, an, _, _ = struct.unpack(">HHHHHH", data[:12])
+    off, out = 12, []
+    for _ in range(qd):
+        off = _dns_name(data, off)[1] + 4
+    for _ in range(an):
+        off = _dns_name(data, off)[1]
+        t, _c, _ttl, ln = struct.unpack(">HHIH", data[off:off + 10])
+        off += 10
+        rd = data[off:off + ln]
+        off += ln
+        if t == 1 and ln == 4:
+            out.append((1, socket.inet_ntop(socket.AF_INET, rd)))
+        elif t == 28 and ln == 16:
+            out.append((28, socket.inet_ntop(socket.AF_INET6, rd)))
+    return flags & 0xF, out
+
+
+def resolve_host(host):
+    """{"v4": [...], "v6": [...], "error": ""} via the router's resolver."""
+    fake = ENV("TUXWALL_TRIPWIRE_FAKE_DNS")
+    out = {"v4": [], "v6": [], "error": ""}
+    ip = _addr(host)
+    if ip is not None:
+        out["v4" if ip.version == 4 else "v6"].append(str(ip))
+        return out
+    if fake:
+        for a in (json.loads(fake).get(host) or []):
+            i = _addr(a)
+            if i:
+                out["v4" if i.version == 4 else "v6"].append(str(i))
+        return out
+    errs = []
+    for qtype, key in ((1, "v4"), (28, "v6")):
+        try:
+            rcode, ans = dns_query(host, qtype)
+        except (OSError, ValueError, IndexError) as exc:
+            errs.append("%s: %s" % (key, type(exc).__name__))
+            continue
+        if rcode:
+            errs.append("%s: rcode %d" % (key, rcode))
+        for _t, a in ans:
+            i = _addr(a)
+            if i and not (i.is_loopback or i.is_link_local or i.is_multicast or i.is_unspecified):
+                if str(i) not in out[key]:
+                    out[key].append(str(i))
+    out["v4"], out["v6"] = out["v4"][:32], out["v6"][:32]
+    if not out["v4"] and not out["v6"]:
+        out["error"] = "; ".join(errs) or "no addresses"
+    return out
+
+
+def _resolve_all(hosts):
+    now = round(time.time(), 1)
+    return {h["host"]: dict(resolve_host(h["host"]), ts=now) for h in hosts}
+
+
+# -- ipsets + OUTPUT rules -------------------------------------------------------
+
+def _ipset(args, data=None):
+    if STUB_FIREWALL:
+        with open(ENFORCE_LOG, "a") as f:
+            f.write("ipset " + " ".join(args) + "\n")
+            for ln in (data or "").splitlines():
+                f.write("ipset-restore " + ln + "\n")
+        return 0
+    try:
+        return subprocess.run(_wrap(["ipset"] + args), input=data, capture_output=True,
+                              text=True, timeout=20).returncode
+    except Exception:
+        return 1
+
+
+def _ensure_sets():
+    for ipt, name in REC_SETS.items():
+        _ipset(["create", name, "hash:ip,port", "family",
+                "inet" if ipt == "iptables" else "inet6", "timeout", str(REC_SET_TIMEOUT),
+                "-exist"])
+
+
+def _fill_sets(hosts, resolved):
+    lines = []
+    for h in hosts:
+        r = resolved.get(h["host"]) or {}
+        for key, ipt in (("v4", "iptables"), ("v6", "ip6tables")):
+            for ip in r.get(key) or []:
+                lines.append("add %s %s,tcp:%d timeout %d" % (REC_SETS[ipt], ip, int(h["port"]),
+                                                              REC_SET_TIMEOUT))
+    if lines:
+        if _ipset(["restore", "-exist"], "\n".join(lines) + "\n") != 0:
+            log("RECOVERY-SET-FAIL could not load %d allowlist entries" % len(lines))
+    return len(lines)
+
+
+def _destroy_sets():
+    for name in REC_SETS.values():
+        _ipset(["destroy", name])
+
+
+def resolver_uid():
+    import pwd
+    try:
+        return pwd.getpwnam(RESOLVER_USER).pw_uid
+    except (KeyError, TypeError):
+        return None
+
+
+def recovery_rules(wan, uid):
+    """[(ipt, "OUTPUT", [spec, ...])] - allows first, the REJECT last."""
+    plan = []
+    for ipt in ("iptables", "ip6tables"):
+        o = ["-o", wan]
+        allow = [o + ["-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "--ctdir", "REPLY"]]
+        if ipt == "iptables":
+            allow.append(o + ["-p", "icmp", "-m", "conntrack", "--ctstate", "RELATED"])
+            allow.append(o + ["-p", "udp", "--sport", "68", "--dport", "67"])
+        else:
+            allow.append(o + ["-p", "ipv6-icmp", "-m", "conntrack", "--ctstate", "RELATED"])
+            allow.append(o + ["-p", "udp", "--sport", "546", "--dport", "547"])
+            for t in ("133", "135", "136", "143"):     # RS, NS, NA, MLDv2 report
+                allow.append(o + ["-p", "ipv6-icmp", "--icmpv6-type", t])
+        if uid is not None:
+            for proto in ("udp", "tcp"):
+                allow.append(o + ["-p", proto, "--dport", "53", "-m", "owner",
+                                  "--uid-owner", str(uid)])
+        allow.append(o + ["-p", "tcp", "-m", "set", "--match-set", REC_SETS[ipt], "dst,dst"])
+        specs = [a + _c(MARK_REC_ALLOW) + ["-j", "ACCEPT"] for a in allow]
+        specs.append(o + _c(MARK_REC) + ["-j", "REJECT"])
+        plan.append((ipt, "OUTPUT", specs))
+    return plan
+
+
+def _rec_ok(ipt, chain, specs):
+    if any(_ipt([ipt, "-C", chain] + s) != 0 for s in specs):
+        return False
+    if STUB_FIREWALL:
+        return True
+    lines = _chain_lines(ipt, chain)
+    rec = [i for i, ln in enumerate(lines) if MARK_REC in ln]
+    rej = [i for i in rec if MARK_REC_ALLOW not in lines[i]]
+    return len(rec) == len(specs) and len(rej) == 1 and all(i < rej[0] for i in rec
+                                                            if i != rej[0])
+
+
+def _rec_delete(ipt, chain="OUTPUT", keep_first=False):
+    """Delete recovery rules by their -S line (keep_first: all but the
+    first one, which the caller just inserted at position 1)."""
+    removed = 0
+    for _ in range(128):
+        lines = [ln for ln in _chain_lines(ipt, chain) if MARK_REC in ln]
+        if keep_first:
+            lines = lines[1:]
+        if not lines:
+            break
+        argv = shlex.split(lines[0])
+        argv[0] = "-D"
+        if _ipt([ipt] + argv) != 0:
+            break
+        removed += 1
+    return removed
+
+
+def recovery_enforce_rules(wan=None):
+    """Idempotently apply the recovery OUTPUT rules (REJECT first, so the
+    WAN is never open while the allows are rebuilt). True if changed."""
+    wan = wan or wan_iface()
+    if not wan:
+        log("RECOVERY-FAIL no WAN interface - recovery rules not applied")
+        return False
+    _ensure_sets()
+    changed = False
+    for ipt, chain, specs in recovery_rules(wan, resolver_uid()):
+        if _rec_ok(ipt, chain, specs):
+            continue
+        changed = True
+        if _ipt([ipt, "-I", chain, "1"] + specs[-1]) != 0:
+            log("RECOVERY-FAIL %s -I %s 1 %s" % (ipt, chain, " ".join(specs[-1])))
+        if STUB_FIREWALL:
+            for s in specs[:-1]:
+                while _ipt([ipt, "-C", chain] + s) == 0:
+                    _ipt([ipt, "-D", chain] + s)
+        else:
+            _rec_delete(ipt, chain, keep_first=True)
+        for spec in reversed(specs[:-1]):
+            if _ipt([ipt, "-I", chain, "1"] + spec) != 0:
+                log("RECOVERY-FAIL %s -I %s 1 %s" % (ipt, chain, " ".join(spec)))
+    return changed
+
+
+def recovery_rules_present():
+    if STUB_FIREWALL:
+        return any(_ipt([ipt, "-C", "OUTPUT"] + specs[-1]) == 0
+                   for ipt, _ch, specs in recovery_rules(wan_iface() or "wan", resolver_uid()))
+    return any(MARK_REC in ln for ipt in ("iptables", "ip6tables")
+               for ln in _chain_lines(ipt, "OUTPUT"))
+
+
+def recovery_remove_rules():
+    if STUB_FIREWALL:
+        for ipt, chain, specs in recovery_rules(wan_iface() or "wan", resolver_uid()):
+            for s in specs:
+                while _ipt([ipt, "-C", chain] + s) == 0:
+                    _ipt([ipt, "-D", chain] + s)
+    else:
+        for ipt in ("iptables", "ip6tables"):
+            _rec_delete(ipt, "OUTPUT")
+    _destroy_sets()
+
+
+# -- DNS restriction (unbound runtime local-zones) -------------------------------
+
+def _ubc(args, data=None):
+    if not UNBOUND_CONTROL:
+        with open(ENFORCE_LOG, "a") as f:
+            f.write("unbound-control " + " ".join(args) + "\n")
+            for ln in (data or "").splitlines():
+                f.write("unbound-control< " + ln + "\n")
+        return 0, ""
+    try:
+        p = subprocess.run(UNBOUND_CONTROL + args, input=data, capture_output=True, text=True,
+                           timeout=30)
+        return p.returncode, p.stdout or ""
+    except Exception as exc:
+        return 1, str(exc)
+
+
+def _covering_zone(fq, zones):
+    parts = fq.rstrip(".").split(".")
+    for i in range(len(parts)):
+        z = ".".join(parts[i:]) + "."
+        if z in zones:
+            return z
+    return None
+
+
+def dns_restrict(hosts, prev=None):
+    """Refuse every name except the allowlisted ones (and the router's own
+    local zones, which are more specific). Returns the DNS state; `prev`
+    (a re-apply) keeps track of the transparent zones added earlier."""
+    now = round(time.time(), 1)
+    names = sorted({h["host"] for h in hosts if _addr(h["host"]) is None})
+    zones = {}
+    if UNBOUND_CONTROL:
+        rc, out = _ubc(["list_local_zones"])
+        if rc != 0:
+            return {"state": "unavailable", "ts": now,
+                    "detail": "unbound-control failed - DNS is not restricted"}
+        for ln in out.splitlines():
+            p = ln.split()
+            if len(p) >= 2:
+                zones[p[0].lower()] = p[1]
+    if "." in zones:
+        return {"state": "unavailable", "ts": now,
+                "detail": "a root local-zone is already configured; left untouched"}
+    added, blocked, kept = [], [], []
+    ours = set((prev or {}).get("added") or [])
+    for h in names:
+        fq = h + "."
+        z = _covering_zone(fq, zones)
+        if z and zones[z] in ("transparent", "typetransparent"):
+            if z == fq and fq in ours:
+                kept.append(fq)
+            continue
+        if z:
+            blocked.append({"host": h, "zone": z, "type": zones[z]})
+            continue
+        added.append(fq)
+    data = "".join("%s transparent\n" % z for z in added) + "%s static\n" % DNS_SENTINEL
+    ok = _ubc(["local_zones"], data)[0] == 0
+    ok = _ubc(["local_data", "%s 60 IN A %s" % (DNS_SENTINEL, DNS_SENTINEL_IP)])[0] == 0 and ok
+    ok = _ubc(["local_zone", ".", "refuse"])[0] == 0 and ok
+    return {"state": "restricted" if ok else "partial", "ts": now, "added": sorted(added + kept),
+            "blocked": blocked, "root_added": True,
+            "detail": "" if ok else "some unbound-control calls failed"}
+
+
+def dns_unrestrict(dns):
+    if not (dns or {}).get("root_added"):
+        return
+    _ubc(["local_zone_remove", "."])
+    _ubc(["local_zones_remove"], "".join(z + "\n" for z in (dns.get("added") or []))
+         + DNS_SENTINEL + "\n")
+
+
+def dns_check():
+    """True while the runtime restriction is in place (unbound restarts
+    drop it; the sentinel record goes with it)."""
+    if not UNBOUND_CONTROL:
+        return True
+    try:
+        rcode, ans = dns_query(DNS_SENTINEL, 1)
+    except (OSError, ValueError, IndexError):
+        return False
+    return rcode == 0 and any(a == DNS_SENTINEL_IP for _t, a in ans)
+
+
+# -- state machine ---------------------------------------------------------------
+
+def _rec_public(rec, now=None):
+    now = now or time.time()
+    allow = rec.get("allowlist") or {}
+    res = rec.get("resolved") or {}
+    hosts = []
+    for h in allow.get("hosts") or []:
+        r = res.get(h["host"]) or {}
+        hosts.append({"host": h["host"], "port": h["port"], "why": h.get("why") or [],
+                      "kind": h.get("kind"), "v4": len(r.get("v4") or []),
+                      "v6": len(r.get("v6") or []), "error": r.get("error") or ""})
+    dns = rec.get("dns") or {}
+    return {"active": bool(rec.get("active")), "started": rec.get("started"),
+            "expires": rec.get("expires"), "minutes": rec.get("minutes"),
+            "remaining": max(0, round(float(rec.get("expires") or 0) - now)),
+            "by": rec.get("by"), "via": rec.get("via"), "local_only": bool(rec.get("local_only")),
+            "extended": rec.get("extended") or [], "hosts": hosts,
+            "local": allow.get("local") or [], "skipped": allow.get("skipped") or [],
+            "local_reachable": bool(allow.get("local_reachable")),
+            "refreshed": rec.get("refreshed"), "session_id": rec.get("session_id") or "",
+            "dns": {"state": dns.get("state") or "unknown", "detail": dns.get("detail") or "",
+                    "blocked": dns.get("blocked") or []},
+            "wan": rec.get("wan") or ""}
+
+
+def recovery_status(preview=False, providers=None, local_only=False):
+    st = load_state()
+    rec = st.get("recovery") or {}
+    out = {"ok": True, "phase": phase_of(st), "tripped": bool(st.get("tripped")),
+           "active": bool(rec.get("active")), "last": st.get("recovery_last"),
+           "limits": {"default": REC_DEFAULT_MIN, "min": REC_MIN_MIN, "max": REC_MAX_MIN,
+                      "extend_min": REC_EXTEND_MIN, "extend_max": REC_EXTEND_MAX},
+           "checklist": [{"id": k, "label": v} for k, v in CHECKLIST]}
+    if rec.get("active"):
+        out["recovery"] = _rec_public(rec)
+        out["rules_present"] = recovery_rules_present()
+    elif preview and st.get("tripped"):
+        out["preview"] = recovery_allowlist(providers, local_only)
+    return out
+
+
+def recovery_start(minutes=REC_DEFAULT_MIN, by="admin", via="cli", client="", providers=None,
+                   local_only=False):
+    minutes = _int(minutes, REC_MIN_MIN, REC_MAX_MIN, "recovery duration (minutes)")
+    providers = [str(p) for p in (providers or []) if _PID_RE.match(str(p))][:40]
+    st = load_state()
+    if not st.get("tripped"):
+        raise ValueError("Recovery mode is only available while the tripwire is tripped.")
+    if (st.get("recovery") or {}).get("active"):
+        raise ValueError("Recovery mode is already active.")
+    wan = wan_iface()
+    if not wan:
+        raise ValueError("No WAN interface found - recovery can't restrict the router's traffic.")
+    allow = recovery_allowlist(providers, bool(local_only))
+    resolved = _resolve_all(allow["hosts"])
+    now = time.time()
+    rec = {"active": True, "started": round(now, 1), "expires": round(now + minutes * 60, 1),
+           "minutes": minutes, "by": by, "via": via, "local_only": bool(local_only),
+           "providers": providers, "allowlist": allow, "resolved": resolved,
+           "refreshed": round(now, 1), "trip_since": st.get("since"), "extended": [],
+           "wan": wan, "dns": {"state": "pending"}}
+
+    def put(s):
+        if not s.get("tripped") or (s.get("recovery") or {}).get("active"):
+            return False
+        s["recovery"] = rec
+        return True
+    with _ACTION_LOCK, state_lock():
+        if not update_state(put):
+            raise ValueError("The trip state changed - reload and try again.")
+        _ensure_sets()
+        n = _fill_sets(allow["hosts"], resolved)
+        recovery_enforce_rules(wan)
+        dns = dns_restrict(allow["hosts"])
+        update_state(lambda s: (s.get("recovery") or {}).__setitem__("dns", dns))
+    names = [h["host"] for h in allow["hosts"]]
+    log("RECOVERY-START by=%s via=%s minutes=%d local_only=%s hosts=%s entries=%d dns=%s"
+        % (by, via, minutes, bool(local_only), ",".join(names), n, dns["state"]))
+    audit("recovery-start", by=by, via=via, client=client, minutes=minutes,
+          local_only=bool(local_only), hosts=names, dns=dns["state"],
+          local=[e["url"] for e in allow["local"] if e.get("reachable")] or None)
+    notify("Tripwire recovery started",
+           "%s started a %d-minute recovery window. The LAN stays cut off; only the router "
+           "may reach: %s. Back to full block at %s unless extended."
+           % (by, minutes, ", ".join(names) or "nothing on the internet",
+              time.strftime("%H:%M", time.localtime(rec["expires"]))), priority="high")
+    return recovery_status()
+
+
+def recovery_extend(minutes, by="admin", via="cli", client=""):
+    minutes = _int(minutes, REC_EXTEND_MIN, REC_EXTEND_MAX, "extension (minutes)")
+    now = time.time()
+
+    def ext(s):
+        rec = s.get("recovery") or {}
+        if not rec.get("active"):
+            raise ValueError("Recovery mode is not active.")
+        new = max(float(rec.get("expires") or now), now) + minutes * 60
+        if new - now > REC_MAX_MIN * 60 + 1:
+            raise ValueError("At most %d minutes may be left in a recovery window."
+                             % REC_MAX_MIN)
+        rec["expires"] = round(new, 1)
+        rec.setdefault("extended", []).append({"ts": round(now, 1), "by": by,
+                                               "minutes": minutes})
+        rec["extended"] = rec["extended"][-20:]
+        return rec["expires"]
+    expires = update_state(ext)
+    log("RECOVERY-EXTEND by=%s via=%s +%d min -> %s" % (
+        by, via, minutes, time.strftime("%H:%M", time.localtime(expires))))
+    audit("recovery-extend", by=by, via=via, client=client, minutes=minutes,
+          expires=expires)
+    return recovery_status()
+
+
+def recovery_end(how="ended", by="admin", via="cli", client="", notify_user=True):
+    """Leave recovery: allowlist rules, sets and the DNS restriction go;
+    the trip itself (FORWARD block, high-mode INPUT) stays."""
+    with state_lock():
+        st = load_state()
+        rec = st.get("recovery") or {}
+        if not rec.get("active"):
+            return False
+        recovery_remove_rules()
+        dns_unrestrict(rec.get("dns"))
+        now = time.time()
+        st["recovery_last"] = {"started": rec.get("started"), "ended": round(now, 1),
+                               "how": how, "by": by, "started_by": rec.get("by"),
+                               "minutes": round((now - float(rec.get("started") or now)) / 60, 1),
+                               "hosts": [h["host"] for h in (rec.get("allowlist") or {})
+                                         .get("hosts") or []],
+                               "session_id": rec.get("session_id") or ""}
+        st.pop("recovery", None)
+        write_json(STATE, st)
+    log("RECOVERY-%s by=%s via=%s after %.0f min" % (how.upper(), by, via,
+                                                    st["recovery_last"]["minutes"]))
+    audit("recovery-" + how, by=by, via=via, client=client,
+          minutes=st["recovery_last"]["minutes"])
+    if notify_user and how != "resolved":
+        words = {"expired": "The recovery window expired",
+                 "ended": "%s ended recovery" % by,
+                 "new-event": "A new blocking event arrived during recovery",
+                 "cleanup": "Recovery was cleaned up (the trip is no longer active)"}
+        notify("Tripwire recovery over", "%s. Back to full block: the router's internet "
+               "allowlist is closed again; the LAN stays contained until resolved."
+               % words.get(how, how), priority="high")
+    return True
+
+
+def recovery_set_session(sid):
+    sid = str(sid or "")
+    if not _SESSION_RE.match(sid):
+        raise ValueError("invalid session id")
+
+    def put(s):
+        rec = s.get("recovery") or {}
+        if not rec.get("active"):
+            raise ValueError("Recovery mode is not active.")
+        rec["session_id"] = sid
+    update_state(put)
+    return {"ok": True, "session_id": sid}
+
+
+def recovery_tick(now=None, refresh=True):
+    """Daemon/`enforce` step: expire, re-apply rules + DNS restriction,
+    refresh the resolved addresses. Returns what happened."""
+    st = load_state()
+    rec = st.get("recovery") or {}
+    if not rec.get("active"):
+        return None
+    now = now or time.time()
+    if not st.get("tripped"):
+        recovery_end("cleanup", by="engine", via="engine")
+        return "cleanup"
+    if now >= float(rec.get("expires") or 0):
+        recovery_end("expired", by="engine", via="timer")
+        return "expired"
+    with state_lock():
+        if not (load_state().get("recovery") or {}).get("active"):
+            return None
+        changed = recovery_enforce_rules()
+    what = "re-enforced" if changed else "ok"
+    if changed:
+        log("RECOVERY-RE-ENFORCE (rules had been removed)")
+    if not dns_check():
+        dns = dns_restrict((rec.get("allowlist") or {}).get("hosts") or [], rec.get("dns"))
+        update_state(lambda s: (s.get("recovery") or {}).__setitem__("dns", dns))
+        log("RECOVERY-DNS re-applied (%s)" % dns["state"])
+        what = "dns-reapplied"
+    if refresh and now - float(rec.get("refreshed") or 0) >= REC_REFRESH_S:
+        hosts = (rec.get("allowlist") or {}).get("hosts") or []
+        resolved = _resolve_all(hosts)
+        _ensure_sets()
+        _fill_sets(hosts, resolved)
+        local = (rec.get("allowlist") or {}).get("local") or []
+        for e in local:
+            e["reachable"] = tcp_reachable(e["host"], e["port"])
+
+        def upd(s):
+            r = s.get("recovery") or {}
+            if r.get("active"):
+                r["resolved"], r["refreshed"] = resolved, round(time.time(), 1)
+                if isinstance(r.get("allowlist"), dict):
+                    r["allowlist"]["local"] = local
+                    r["allowlist"]["local_reachable"] = any(e.get("reachable") for e in local)
+        update_state(upd)
+        if what == "ok":
+            what = "refreshed"
+    return what
+
+
+# -- incident brief + restore checklist ------------------------------------------
+
+_SECRET_RES = (
+    (re.compile(r"-----BEGIN [A-Z ]+-----.*?-----END [A-Z ]+-----", re.S), "[key redacted]"),
+    (re.compile(r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@"), r"\1[redacted]@"),
+    (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+"), r"\1 [redacted]"),
+    (re.compile(r"(?i)\b(pass(?:word|wd|phrase)?|secret|token|api[_-]?key|apikey|"
+                r"authorization|cookie|session[_-]?id|private[_-]?key|psk|key)"
+                r"(\"?\s*[=:]\s*\"?)[^\s\"',;&]+"), r"\1\2[redacted]"),
+    (re.compile(r"(?i)(https?://[^/\s\"']+)/[^\s\"'<>]+"), r"\1/[path redacted]"),
+    (re.compile(r"\b[A-Za-z0-9+/_-]{32,}={0,2}"), "[redacted]"),
+)
+
+
+def sanitize(text, limit=300):
+    s = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", " ", str(text or ""))
+    for rx, rep in _SECRET_RES:
+        s = rx.sub(rep, s)
+    return s if len(s) <= limit else s[:limit - 1] + "…"
+
+
+def _fmt_ts(ts):
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(float(ts)))
+    except (TypeError, ValueError):
+        return "?"
+
+
+def recovery_brief():
+    """Incident brief for the assistant: trip details, sanitized log and
+    history excerpts, and the investigate-read-only-first instruction."""
+    st = load_state()
+    if not st.get("tripped"):
+        raise ValueError("The tripwire is not tripped.")
+    rec = st.get("recovery") or {}
+    since = float(st.get("since") or time.time())
+    ev = {}
+    for r in history_read():
+        if r.get("action") == "block" and abs(float(r.get("ts") or 0) - since) < 120:
+            ev = r
+    check = st.get("check") or ev.get("check") or "manual"
+    label = (CHECKS.get(check) or {}).get("label") or (
+        "Manual / test trip" if check == "manual" else check)
+    src = st.get("src_ip") or ev.get("src") or "?"
+    sport = st.get("src_port") or ev.get("src_port")
+    dst = st.get("dst") or ev.get("dst") or "?"
+    title = "Tripwire incident %s - %s" % (time.strftime("%Y-%m-%d %H:%M",
+                                                        time.localtime(since)),
+                                           label.split(" (")[0])[:120]
+    lines = [
+        "Tripwire incident - investigation brief",
+        "",
+        "The TuxWall tripwire TRIPPED and the network is contained (%s strength): the LAN "
+        "is cut off from the internet." % str(st.get("mode") or "medium").upper(),
+    ]
+    if rec.get("active"):
+        lines.append("Recovery mode is active until %s: only this router may reach the "
+                     "allowlisted AI / notification endpoints; everything else is still "
+                     "blocked." % _fmt_ts(rec.get("expires")))
+    lines += [
+        "",
+        "Trip details:",
+        "- Check: %s (%s)" % (sanitize(label, 120), check),
+        "- Reason: %s" % sanitize(st.get("reason") or ev.get("decision") or "?", 200),
+        "- Class: %s" % sanitize(st.get("class") or ev.get("class") or "?", 120),
+        "- Signature: %s%s" % (sanitize(st.get("signature") or ev.get("sig") or "-", 200),
+                               (" (SID %s)" % (st.get("sid") or ev.get("sid")))
+                               if (st.get("sid") or ev.get("sid")) else ""),
+        "- Source -> destination: %s%s -> %s%s" % (
+            sanitize(src, 80), (":%s" % sport) if sport else "", sanitize(dst, 120),
+            (" (%s)" % sanitize(st.get("proto") or ev.get("proto"), 10))
+            if (st.get("proto") or ev.get("proto")) else ""),
+        "- Interface: %s" % sanitize(st.get("iface") or ev.get("iface") or "?", 20),
+        "- Time: %s" % _fmt_ts(since),
+        "- Block strength (mode): %s" % str(st.get("mode") or "medium").upper(),
+        "- Trip events while contained: %s" % (st.get("trips") or 1),
+    ]
+    hist = [r for r in history_read() if abs(float(r.get("ts") or 0) - since) <= 1800
+            and r.get("action") in ("block", "log", "counted", "excluded")][-10:]
+    if hist:
+        lines += ["", "Tripwire events within 30 minutes of the trip (sanitized):"]
+        for r in hist:
+            lines.append("- %s %s %s: %s -> %s %s" % (
+                time.strftime("%H:%M:%S", time.localtime(float(r.get("ts") or 0))),
+                r.get("check"), r.get("action"), sanitize(r.get("src"), 60),
+                sanitize(r.get("dst"), 80), sanitize(r.get("sig"), 120)))
+    try:
+        with open(LOG, errors="replace") as f:
+            tail = f.readlines()[-400:]
+    except OSError:
+        tail = []
+    cut = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(since - 1800))
+    rel = [ln.rstrip("\n") for ln in tail if ln[:19] >= cut][-15:]
+    if rel:
+        lines += ["", "Recent tripwire.log lines (sanitized):", "```"]
+        lines += [sanitize(ln, 240) for ln in rel]
+        lines.append("```")
+    lines += [
+        "",
+        "Where to look (read-only): /var/log/tuxwall/tripwire.log, "
+        "/var/lib/tuxwall/tripwire-events.jsonl, /var/log/suricata/eve.json "
+        "(fast.log), `journalctl -k` (canary egress), the TuxWall MCP tools (tuxwall_*).",
+        "",
+        "Instructions:",
+        "1. Investigate READ-ONLY first: read logs and state, explain what happened and "
+        "whether this is a true or a false positive.",
+        "2. Ask me before ANY change (files, firewall, services, packages, users) and "
+        "explain why; do not run anything that modifies the system without my approval.",
+        "3. Never try to lift the tripwire, open the firewall or end recovery - restoring "
+        "the network is my decision (Security > Tripwire, password + checklist).",
+        "4. If the router itself may be compromised, say so clearly: recovery can't be "
+        "trusted then - the safe path is reinstalling and restoring a verified backup.",
+        "5. Finish with: cause, evidence, risk, and the recommended fix.",
+    ]
+    return {"ok": True, "title": title, "text": "\n".join(lines)[:8000],
+            "session_id": rec.get("session_id") or "", "recovery_active": bool(rec.get("active"))}
+
+
+def validate_checklist(body):
+    if not isinstance(body, dict):
+        raise ValueError("restore details must be an object")
+    ck = body.get("checklist")
+    if not isinstance(ck, dict):
+        raise ValueError("The restore checklist is required.")
+    missing = [label for key, label in CHECKLIST if ck.get(key) is not True]
+    if missing:
+        raise ValueError("Tick every checklist item first: " + "; ".join(missing) + ".")
+    note = str(body.get("note") or "")
+    if len(note) > 500:
+        raise ValueError("The note is too long (500 characters at most).")
+    note = re.sub(r"[\x00-\x1f\x7f\s]+", " ", note).strip()
+    return {"checklist": {k: True for k, _ in CHECKLIST}, "note": note}
+
+
+def restore(body, by="admin", via="cli", client=""):
+    """The dashboard's resolve: checklist validated, then the normal
+    resolve (which ends recovery first) - audited with the checklist."""
+    detail = validate_checklist(body)
+    if not load_state().get("tripped"):
+        raise ValueError("The tripwire is not tripped.")
+    ok = resolve(by=by, via=via, client=client, checklist=detail["checklist"],
+                 note=detail["note"])
+    if not ok:
+        raise ValueError("The tripwire is not tripped.")
+    return {"ok": True, "detail": "resolved: containment lifted"}
 
 
 # ── watchers ─────────────────────────────────────────────────────────────────
@@ -1833,6 +2787,21 @@ def write_health(watchers, mode, started, wanted=None, enabled=None):
 
 # ── daemon ───────────────────────────────────────────────────────────────────
 
+def _recovery_step(refresh=True, at_start=False):
+    """Recovery upkeep (expiry, re-apply, refresh); never kills the loop."""
+    try:
+        st = load_state()
+        if (st.get("recovery") or {}).get("active"):
+            what = recovery_tick(refresh=refresh)
+            if at_start and what not in (None, "expired", "cleanup"):
+                log("RECOVERY re-applied at start (%s)" % what)
+        elif at_start and recovery_rules_present():
+            recovery_remove_rules()
+            log("RECOVERY-CLEANUP stale recovery rules removed at start")
+    except Exception as exc:
+        log("RECOVERY-ERROR %s: %s" % (type(exc).__name__, exc))
+
+
 def run_daemon():
     started = time.time()
     stop = threading.Event()
@@ -1857,6 +2826,7 @@ def run_daemon():
         notify("Tripwire still active after restart",
                "The tripwire service restarted while tripped; WAN containment "
                "(%s) has been re-applied." % st.get("mode"), priority="high")
+    _recovery_step(refresh=False, at_start=True)
 
     watchers = {"suricata": Watcher("suricata", tail_eve, handle_event),
                 "canary": Watcher("canary", follow_kernel, handle_event)}
@@ -1912,6 +2882,7 @@ def run_daemon():
                            "Lockdown rules were removed while tripped (ufw reload?); "
                            "containment has been re-applied.", key="reenforce",
                            priority="high")
+            _recovery_step()
             flush_notify()
         if now - last_prune >= 3600:
             last_prune = now
@@ -2005,13 +2976,13 @@ def ui_config():
             "limits": {"count": MAX_COUNT, "minutes": MAX_MINUTES, "list": MAX_LIST},
             "history": {"bytes": hsize, "max_bytes": HISTORY_MAX_BYTES, "days": HISTORY_DAYS,
                         "imported": load_state().get("history_imported")},
-            "wanted": watchers_wanted(cfg)}
+            "wanted": watchers_wanted(cfg), "recovery": recovery_status()}
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 _VALUE_OPTS = ("--by", "--via", "--client", "--mode", "--check", "--action", "--limit",
-               "--offset", "--since", "--until")
+               "--offset", "--since", "--until", "--minutes")
 
 
 def _opts(args):
@@ -2039,6 +3010,13 @@ def _stdin_json():
         raise ValueError("stdin is not valid JSON")
 
 
+def _stdin_obj():
+    body = _stdin_json()
+    if not isinstance(body, dict):
+        raise ValueError("expected a JSON object on stdin")
+    return body
+
+
 def status():
     st = load_state()
     cfg = get_config()
@@ -2057,6 +3035,10 @@ def status():
         "trips": st.get("trips"), "resolved_at": st.get("resolved_at"),
         "rules_present": any_rules_present(),
         "health": read_json(HEALTH, {}),
+        "phase": phase_of(st),
+        "recovery": _rec_public(st["recovery"]) if (st.get("recovery") or {}).get("active")
+        else None,
+        "recovery_last": st.get("recovery_last"),
     }
 
 
@@ -2134,14 +3116,50 @@ def main(argv=None):
             print("re-enforced")
         else:
             print("not tripped - nothing to enforce")
+        if (st.get("recovery") or {}).get("active"):
+            print("recovery: %s" % (recovery_tick(refresh=False) or "inactive"))
+    elif cmd == "recovery-status":
+        return _emit_json(lambda: recovery_status(
+            preview="--preview" in rest, providers=_stdin_obj().get("providers")
+            if "--preview" in rest else None, local_only="--local-only" in rest))
+    elif cmd == "recovery-start":
+        def _start():
+            body = _stdin_obj()
+            return recovery_start(opts.get("minutes") or body.get("minutes") or REC_DEFAULT_MIN,
+                                  providers=body.get("providers"),
+                                  local_only=bool(body.get("local_only")) or "--local-only" in rest,
+                                  **who)
+        return _emit_json(_start)
+    elif cmd == "recovery-extend":
+        return _emit_json(lambda: recovery_extend(opts.get("minutes") or (rest[0] if rest else
+                                                                          ""), **who))
+    elif cmd == "recovery-end":
+        def _end():
+            ended = recovery_end("ended", **who)
+            if not ended:
+                raise ValueError("Recovery mode is not active.")
+            return dict(recovery_status(), ended=True)
+        return _emit_json(_end)
+    elif cmd == "recovery-brief":
+        return _emit_json(recovery_brief)
+    elif cmd == "recovery-session":
+        return _emit_json(lambda: recovery_set_session(rest[0] if rest else ""))
+    elif cmd == "recovery-allowlist":
+        return _emit_json(lambda: dict(recovery_allowlist(
+            _stdin_obj().get("providers"), "--local-only" in rest), ok=True))
+    elif cmd == "restore":
+        return _emit_json(lambda: restore(_stdin_json(), **who))
     else:
         print(__doc__)
         print("commands: run | status | health | audit [n] | enforce | config | "
               "configure [--confirm] [--by u --via v --client ip] < patch.json | "
               "test CHECK [< overrides.json] | history [--check c --action a --limit n "
               "--offset n] | migrate | import-history | trip [reason] [--mode m] | "
-              "resolve [--by u --via v] | set-mode disabled|logonly | "
-              "evaluate [--mode m] < lines")
+              "resolve [--by u --via v] | restore [--by u ...] < checklist.json | "
+              "set-mode disabled|logonly | evaluate [--mode m] < lines | "
+              "recovery-status [--preview] | recovery-start [--minutes n] [--local-only] "
+              "[< {providers}] | recovery-extend --minutes n | recovery-end | "
+              "recovery-brief | recovery-session ID | recovery-allowlist")
         return 2
     return 0
 

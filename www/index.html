@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="/css/style.css?v=20261118202024">
   <link rel="stylesheet" href="/css/polish.css?v=20261118212902">
   <link rel="stylesheet" href="/css/firewall.css?v=202611120056">
-  <link rel="stylesheet" href="/css/bento.css?v=20261119081229">
+  <link rel="stylesheet" href="/css/bento.css?v=20261119085140">
   <link rel="stylesheet" href="/css/heroes.css?v=202611120056">
   <link rel="stylesheet" href="/css/sidebar.css?v=202611120056">
   <link rel="stylesheet" href="/css/action-icons.css?v=202611120056">
@@ -1749,9 +1749,16 @@
           <p class="trip-message-reason" id="sec-trip-msg-reason"></p>
           <dl class="trip-message-grid" id="sec-trip-msg-grid"></dl>
           <form class="trip-resolve" id="sec-trip-resolve" data-nosubmit hidden>
+            <fieldset class="trip-checklist" id="sec-trip-checklist">
+              <legend>Before restoring the network</legend>
+              <label class="trip-inline"><input type="checkbox" data-trip-ck="findings"> I reviewed the findings</label>
+              <label class="trip-inline"><input type="checkbox" data-trip-ck="cause"> The cause is fixed or understood</label>
+              <label class="trip-inline"><input type="checkbox" data-trip-ck="confirm"> I confirm restoring full network access</label>
+            </fieldset>
+            <label class="fw-field trip-resolve-field trip-resolve-notefield"><span>Note (optional, kept in the audit log)</span><input type="text" id="sec-trip-note" maxlength="500" autocomplete="off" placeholder="e.g. false positive: Home Assistant update"></label>
             <label class="fw-field trip-resolve-field"><span>Admin password</span><input type="password" id="sec-trip-pass" autocomplete="off"></label>
-            <button id="sec-trip-resolve-btn" class="btn btn-sm btn-danger btn-act" type="button">Resolve &amp; restore network</button>
-            <span class="trip-resolve-note">Investigate first. Needs an admin session <b>and</b> the password &mdash; a stolen session alone can't re-open the network.</span>
+            <button id="sec-trip-resolve-btn" class="btn btn-sm btn-danger btn-act" type="button" disabled>Resolve &amp; restore network</button>
+            <span class="trip-resolve-note">Investigate first. Needs an admin session, the password <b>and</b> the checklist &mdash; a stolen session alone can't re-open the network. Ends recovery mode too.</span>
           </form>
         </div>
         <div class="trip-health" id="sec-trip-health" data-ok="unknown">
@@ -1797,6 +1804,71 @@
           </div>
         </div>
       </div>
+      </div>
+
+      <div class="card trip-rec-card" id="sec-trip-rec-card" data-phase="tripped" hidden>
+        <div class="card-head">
+          <h2>Recovery mode</h2>
+          <span class="muted" id="sec-trip-rec-hint">Investigate with the assistant while the LAN stays contained</span>
+          <div class="trip-head-meta">
+            <span class="trip-badge" id="sec-trip-rec-badge" data-state="off">Not started</span>
+          </div>
+        </div>
+        <p class="trip-rec-warn" role="note"><b>Only if you trust the router itself.</b> Recovery runs on the router: if the router may be compromised (unknown processes, changed system files, the trip came from the router), its answers can't be trusted &mdash; reinstall and restore a verified backup instead.</p>
+        <div class="trip-rec-body" id="sec-trip-rec-idle">
+          <p class="trip-rec-lead">A time-boxed window for investigating with the assistant. The LAN stays cut off; <b>only the router</b> may reach the endpoints below over HTTPS, and DNS answers only those names. When the timer runs out it returns to the full block on its own.</p>
+          <div class="trip-rec-cols">
+            <section class="trip-rec-col" aria-labelledby="sec-trip-rec-allow-h">
+              <h3 id="sec-trip-rec-allow-h">Allowlist (router only, HTTPS)</h3>
+              <ul class="trip-rec-list" id="sec-trip-rec-allow"><li class="muted">Loading &hellip;</li></ul>
+            </section>
+            <section class="trip-rec-col" aria-labelledby="sec-trip-rec-local-h">
+              <h3 id="sec-trip-rec-local-h">Local model</h3>
+              <div class="trip-rec-local" id="sec-trip-rec-local"><span class="muted">Checking &hellip;</span></div>
+            </section>
+          </div>
+          <form class="trip-rec-form" id="sec-trip-rec-form" data-nosubmit>
+            <label class="fw-field trip-rec-dur"><span>Duration</span>
+              <select id="sec-trip-rec-min">
+                <option value="30">30 minutes</option>
+                <option value="60" selected>60 minutes</option>
+                <option value="90">90 minutes</option>
+                <option value="120">2 hours</option>
+              </select>
+            </label>
+            <label class="fw-field trip-rec-pass"><span>Admin password</span><input type="password" id="sec-trip-rec-pass" autocomplete="off"></label>
+            <button id="sec-trip-rec-start" class="btn btn-sm btn-primary btn-act" type="button">Start recovery</button>
+            <label class="trip-inline trip-rec-localonly" id="sec-trip-rec-lo-wrap" hidden><input type="checkbox" id="sec-trip-rec-lo"> Use only the local model (no AI traffic to the internet)</label>
+          </form>
+        </div>
+        <div class="trip-rec-body" id="sec-trip-rec-active" hidden>
+          <div class="trip-rec-timer">
+            <div class="trip-rec-clock">
+              <span class="trip-rec-count" id="sec-trip-rec-count">--:--</span>
+              <span class="trip-rec-count-sub" id="sec-trip-rec-count-sub">left</span>
+            </div>
+            <div class="trip-rec-bar" aria-hidden="true"><span id="sec-trip-rec-bar"></span></div>
+            <div class="trip-rec-actions">
+              <button type="button" class="btn btn-sm btn-primary" id="sec-trip-rec-ask">Open assistant</button>
+              <button type="button" class="btn btn-sm" data-trip-extend="15">+15 min</button>
+              <button type="button" class="btn btn-sm" data-trip-extend="30">+30 min</button>
+              <button type="button" class="btn btn-sm btn-danger" id="sec-trip-rec-end">End recovery</button>
+            </div>
+          </div>
+          <div class="trip-rec-cols">
+            <section class="trip-rec-col" aria-labelledby="sec-trip-rec-allow2-h">
+              <h3 id="sec-trip-rec-allow2-h">Allowlist (router only, HTTPS)</h3>
+              <ul class="trip-rec-list" id="sec-trip-rec-allow2"></ul>
+              <p class="trip-rec-dns" id="sec-trip-rec-dns"></p>
+            </section>
+            <section class="trip-rec-col" aria-labelledby="sec-trip-rec-local2-h">
+              <h3 id="sec-trip-rec-local2-h">Local model</h3>
+              <div class="trip-rec-local" id="sec-trip-rec-local2"></div>
+            </section>
+          </div>
+          <p class="trip-rec-meta" id="sec-trip-rec-meta"></p>
+        </div>
+        <p class="trip-rec-msg" id="sec-trip-rec-msg" role="status" hidden></p>
       </div>
 
       <div class="card trip-checks-card" id="sec-trip-checks-card">
@@ -1849,7 +1921,7 @@
         </div>
       </div>
 
-      <p class="muted bl-note trip-about"><b>About Tripwire.</b> A kill switch for confirmed intrusion-class events: each check is <b>Off</b>, <b>Log only</b> (record + push) or <b>Block</b>, and the master switch turns them all off without losing settings. Exclusions (addresses, signature IDs, <b>internet-only</b>) and thresholds keep false positives out; router-originated, loopback and deception-port traffic never counts. A block uses the <b>block strength</b> &mdash; <b>Medium</b> cuts all forwarding while the router stays reachable (WireGuard too), <b>High</b> also closes new connections from the internet to the router. A trip never restores itself: investigate, then resolve with your admin password. Every change is audited in <code>/var/log/tuxwall/tripwire-audit.log</code>.</p>
+      <p class="muted bl-note trip-about"><b>About Tripwire.</b> A kill switch for confirmed intrusion-class events: each check is <b>Off</b>, <b>Log only</b> (record + push) or <b>Block</b>, and the master switch turns them all off without losing settings. Exclusions (addresses, signature IDs, <b>internet-only</b>) and thresholds keep false positives out; router-originated, loopback and deception-port traffic never counts. A block uses the <b>block strength</b> &mdash; <b>Medium</b> cuts all forwarding while the router stays reachable (WireGuard too), <b>High</b> also closes new connections from the internet to the router. A trip never restores itself: investigate &mdash; optionally in <b>recovery mode</b>, a timed window in which only the router may reach the assistant's AI endpoints and your push server while the LAN stays cut off &mdash; then resolve with your admin password and the restore checklist. Every change is audited in <code>/var/log/tuxwall/tripwire-audit.log</code>.</p>
       </div>
 
       <div class="fw-pane" data-sec-pane="sensors" hidden>
@@ -4077,7 +4149,7 @@
   </div>
 </div>
 <script src="/scripts/worldmap.js?v=202611120056"></script>
-<script src="/scripts/dashboard.js?v=20261119081229"></script>
+<script src="/scripts/dashboard.js?v=20261119085140"></script>
 <script src="/scripts/enhance.js?v=20261118204958"></script>
 <script src="/scripts/netmap.js?v=20261119081229"></script>
 <script src="/scripts/insights.js?v=20261112182249"></script>

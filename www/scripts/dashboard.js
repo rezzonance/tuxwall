@@ -4291,7 +4291,11 @@
     const strength = d.strength === "high" ? "high" : "medium";
     const tripMode = d.trip_mode === "medium" ? "MEDIUM" : "HIGH";
 
-    if (state === "tripped") {
+    const rx = d.phase === "recovery" ? ((d.recovery || {}).recovery || null) : null;
+    if (state === "tripped" && rx) {
+      tripStat("state", "Recovery", `${tripMode} · ${formatDuration(rx.remaining || 0)} left`, "amber",
+        "Recovery mode: the network is still contained; only the router may reach the allowlist until the timer runs out.");
+    } else if (state === "tripped") {
       const age = Math.max(1, Date.now() / 1000 - (d.since || Date.now() / 1000));
       tripStat("state", "Tripped", `${tripMode} · contained ${formatDuration(age)}`, "red");
     } else if (state === "armed") {
@@ -4398,6 +4402,9 @@
         tripKv("Destination", d.dst || "—"),
         tripKv("Containment", d.rules_present ? (tripMode === "high" ? "Forward + internet → router dropped" : "All forwarding dropped") : "Rules not present (re-applied by the watchdog)"),
         tripKv("Tripped at", d.since ? formatDateTime(d.since) : "—"),
+        tripKv("Recovery mode", d.phase === "recovery" && (d.recovery || {}).recovery
+          ? "Active until " + formatTime(Date.now() / 1000 + ((d.recovery.recovery || {}).remaining || 0))
+          : "Not active — see Recovery mode below"),
         tripKv("Signature", d.signature || "—", true),
       ].join("");
       return;
@@ -4513,7 +4520,7 @@
     if (els.secTripBadge) {
       els.secTripBadge.dataset.state = state;
       els.secTripBadge.textContent = d.tripped
-        ? String(tripMode).toUpperCase() + " · CONTAINED"
+        ? String(tripMode).toUpperCase() + (d.phase === "recovery" ? " · RECOVERY" : " · CONTAINED")
         : ({ armed: "ARMED · " + (d.strength === "high" ? "HIGH" : "MEDIUM"), logonly: "LOG ONLY", off: "OFF" })[state];
     }
     if (els.secTripHint) {
@@ -4534,11 +4541,23 @@
     renderTripStats(d);
     renderTripHealth(d);
     renderTripMessage(d);
+    renderTripRecovery(d);
     if (!d.tripped) showTripNotice("");
     if (els.secTripResolve) els.secTripResolve.hidden = !d.tripped;
+    tripResolveReady();
     if (els.tripBanner) {
-      if (d.tripped) {
+      const rx = d.phase === "recovery" ? ((d.recovery || {}).recovery || null) : null;
+      if (rx) {
         els.tripBanner.hidden = false;
+        els.tripBanner.dataset.phase = "recovery";
+        els.tripBanner.textContent = "TRIPWIRE RECOVERY MODE: the network is still contained (" +
+          String(d.trip_mode || "?").toUpperCase() + "); only the router may reach " +
+          ((rx.hosts || []).length ? (rx.hosts || []).length + " allowlisted service" + ((rx.hosts || []).length === 1 ? "" : "s") : "no internet service") +
+          " until " + formatTime(Date.now() / 1000 + (rx.remaining || 0)) +
+          ", then the full block returns. Security > Tripwire.";
+      } else if (d.tripped) {
+        els.tripBanner.hidden = false;
+        els.tripBanner.dataset.phase = "tripped";
         els.tripBanner.textContent = "TRIPWIRE TRIPPED (" +
           String(d.trip_mode || "?").toUpperCase() + "): network contained - " +
           (d.reason || "intrusion-class event") +
@@ -5235,16 +5254,248 @@
   setInterval(refreshTripwire, 30000);
   refreshTripwire();
 
+  // ---- Restore checklist (password + three ticks + optional note) ---------------
+  const tripCkBoxes = () => Array.from(document.querySelectorAll("#sec-trip-checklist [data-trip-ck]"));
+  function tripResolveReady() {
+    const ok = tripCkBoxes().every((b) => b.checked) && !!(els.secTripPass && els.secTripPass.value);
+    if (els.secTripResolveBtn) els.secTripResolveBtn.disabled = !ok;
+    return ok;
+  }
+  tripCkBoxes().forEach((b) => b.addEventListener("change", tripResolveReady));
+  if (els.secTripPass) els.secTripPass.addEventListener("input", tripResolveReady);
   if (els.secTripResolveBtn) els.secTripResolveBtn.addEventListener("click", async () => {
     if (!els.secTripPass.value) { els.secTripPass.focus(); return; }
+    if (!tripResolveReady()) { const b = tripCkBoxes().find((x) => !x.checked); if (b) b.focus(); return; }
     if (!(await (window.twConfirm || window.confirm)("Resolve the trip and restore network access now?\nTriggered by: " +
         (els.secTripMsgReason && els.secTripMsgReason.textContent || "unknown") +
+        (tripRec.phase === "recovery" ? "\n\nThis also ends recovery mode." : "") +
         "\n\nOnly resolve after investigating."))) return;
+    const checklist = {};
+    tripCkBoxes().forEach((b) => { checklist[b.dataset.tripCk] = b.checked; });
+    const noteEl = document.getElementById("sec-trip-note");
     try {
-      await postJSON("/api/security/tripwire/resolve", { password: els.secTripPass.value });
+      await postJSON("/api/security/tripwire/resolve", {
+        password: els.secTripPass.value, checklist, note: noteEl ? noteEl.value : "",
+      });
       els.secTripPass.value = "";
+      if (noteEl) noteEl.value = "";
+      tripCkBoxes().forEach((b) => { b.checked = false; });
+      tripResolveReady();
       refreshTripwire();
     } catch (err) { showBanner(true, "Tripwire resolve: " + err.message); }
+  });
+
+  // ---- Recovery mode (Tripped -> Recovery -> Restored) ------------------------
+  const recEl = (id) => document.getElementById("sec-trip-rec-" + id);
+  const tripRec = { phase: "normal", expiresAt: 0, total: 0, timer: null, preview: null,
+    previewAt: 0, previewBusy: false, localModel: "", localOnly: false, expiredPoll: 0 };
+
+  function tripRecMsg(text, bad) {
+    const m = recEl("msg");
+    if (!m) return;
+    m.textContent = text || "";
+    m.hidden = !text;
+    m.dataset.bad = bad ? "1" : "";
+  }
+
+  function tripRecLeft(s) {
+    s = Math.max(0, Math.round(s));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
+    return (h ? h + ":" + String(m).padStart(2, "0") : String(m)) + ":" + String(x).padStart(2, "0");
+  }
+
+  function tripRecHosts(list, el, live) {
+    if (!el) return;
+    if (!list) { el.innerHTML = `<li class="muted">Loading …</li>`; return; }
+    if (!list.length) { el.innerHTML = `<li class="muted">Nothing on the internet — the router stays offline.</li>`; return; }
+    el.innerHTML = list.map((h) => {
+      const why = (h.why || []).join(" · ");
+      let state = "";
+      if (live) {
+        const n = (h.v4 || 0) + (h.v6 || 0);
+        state = n ? `<span class="trip-rec-ip">${n} addr</span>`
+          : `<span class="trip-rec-ip is-bad" title="${esc(h.error || "no addresses")}">unresolved</span>`;
+      }
+      return `<li><span class="trip-rec-kind" data-kind="${h.kind === "notify" ? "notify" : "ai"}">${h.kind === "notify" ? "Push" : "AI"}</span>` +
+        `<span class="trip-rec-host"><b>${esc(h.host)}${h.port && h.port !== 443 ? ":" + esc(h.port) : ""}</b><small>${esc(why)}</small></span>${state}</li>`;
+    }).join("");
+  }
+
+  function tripRecLocal(local, el) {
+    if (!el) return null;
+    const loc = local || [];
+    if (!loc.length) {
+      el.innerHTML = `<p class="muted">No LAN model server is configured for the assistant (AI Assistant › Models &amp; providers), so the assistant needs the internet allowlist.</p>`;
+      return null;
+    }
+    let first = null;
+    el.innerHTML = loc.map((e) => {
+      if (e.reachable && !first) first = e;
+      const st = e.reachable ? `<span class="trip-rec-st" data-ok="1">reachable</span>`
+        : (e.reachable === false ? `<span class="trip-rec-st" data-ok="0">unreachable</span>` : `<span class="trip-rec-st">not checked</span>`);
+      return `<div class="trip-rec-model"><span class="trip-rec-model-name"><b>${esc(e.name || e.id || "Local model")}</b><span class="mono">${esc(e.url || "")}</span></span>${st}</div>`;
+    }).join("") + (first
+      ? `<p class="trip-rec-note" data-ok="1">A model on your LAN answers: the assistant can investigate <b>without any internet access</b>.</p>`
+      : `<p class="trip-rec-note">No local model answers right now — the assistant will use the internet allowlist.</p>`);
+    return first;
+  }
+
+  async function tripRecPreview(force) {
+    if (tripRec.previewBusy || (!force && tripRec.preview && Date.now() - tripRec.previewAt < 60000)) return;
+    tripRec.previewBusy = true;
+    try {
+      const d = await fetchJSON("/api/security/tripwire/recovery");
+      if (d && d.ok && d.preview) { tripRec.preview = d.preview; tripRec.previewAt = Date.now(); }
+    } catch (_) { /* keep the last preview */ }
+    finally { tripRec.previewBusy = false; }
+    if (tripRec.phase === "tripped") tripRecRenderIdle();
+  }
+
+  function tripRecRenderIdle() {
+    const p = tripRec.preview;
+    tripRecHosts(p ? p.hosts : null, recEl("allow"), false);
+    const first = p ? tripRecLocal(p.local, recEl("local")) : null;
+    if (!p && recEl("local")) recEl("local").innerHTML = `<span class="muted">Checking …</span>`;
+    const wrap = recEl("lo-wrap");
+    if (wrap) wrap.hidden = !first;
+    if (!first && recEl("lo")) recEl("lo").checked = false;
+    tripRec.localModel = first && first.models && first.models[0] ? first.models[0] : "";
+  }
+
+  function tripRecStopTimer() {
+    if (tripRec.timer) { clearInterval(tripRec.timer); tripRec.timer = null; }
+  }
+
+  function tripRecTick() {
+    const left = tripRec.expiresAt - Date.now() / 1000;
+    const c = recEl("count");
+    if (c) c.textContent = tripRecLeft(left);
+    const sub = recEl("count-sub");
+    if (sub) sub.textContent = left > 0 ? "left · then back to full block" : "expired · returning to full block …";
+    const bar = recEl("bar");
+    if (bar) bar.style.width = Math.max(0, Math.min(100, (left / (tripRec.total || 1)) * 100)) + "%";
+    const card = recEl("card");
+    if (card) card.dataset.low = left < 300 ? "1" : "";
+    if (left <= 0) {
+      // the engine expires it within ~15 s; poll until the phase changes
+      if (Date.now() - tripRec.expiredPoll > 5000) { tripRec.expiredPoll = Date.now(); refreshTripwire(); }
+    }
+  }
+
+  function renderTripRecovery(d) {
+    const card = recEl("card");
+    if (!card) return;
+    const r = d.recovery || {};
+    const phase = d.phase || (d.tripped ? "tripped" : "normal");
+    tripRec.phase = phase;
+    card.hidden = phase === "normal";
+    if (phase === "normal") { tripRecStopTimer(); tripRecMsg(""); return; }
+    const x = phase === "recovery" ? r.recovery : null;
+    card.dataset.phase = x ? "recovery" : "tripped";
+    recEl("idle").hidden = !!x;
+    recEl("active").hidden = !x;
+    const badge = recEl("badge");
+    if (!x) {
+      tripRecStopTimer();
+      badge.dataset.state = "off";
+      badge.textContent = "Not started";
+      const last = r.last;
+      const how = { expired: "expired", ended: "ended", "new-event": "closed by a new blocking event", cleanup: "cleaned up", resolved: "resolved" };
+      recEl("hint").textContent = last && last.ended
+        ? `Last window ${how[last.how] || last.how} ${formatRelative(last.ended)}${last.by && last.by !== "engine" ? " by " + last.by : ""} — the full block is in force`
+        : "Investigate with the assistant while the LAN stays contained";
+      tripRecRenderIdle();
+      tripRecPreview(false);
+      return;
+    }
+    tripRec.expiresAt = Date.now() / 1000 + (x.remaining || 0);
+    tripRec.total = Math.max(60, (x.expires || 0) - (x.started || 0));
+    tripRec.localOnly = !!x.local_only;
+    badge.dataset.state = "on";
+    badge.textContent = "Active";
+    recEl("hint").textContent = `Started by ${x.by || "admin"} ${formatRelative(x.started)} · full block again at ${formatTime(x.expires)}`;
+    tripRecHosts(x.hosts || [], recEl("allow2"), true);
+    const dns = x.dns || {};
+    const blocked = (dns.blocked || []).map((b) => b.host);
+    recEl("dns").innerHTML = (dns.state === "restricted"
+      ? "DNS: only these names resolve — every other lookup is refused."
+      : `<b>DNS is not restricted</b> (${esc(dns.detail || dns.state || "unknown")}); the firewall allowlist still applies.`) +
+      (blocked.length ? ` Blocked by your DNS blocklists: ${esc(blocked.join(", "))}.` : "");
+    recEl("dns").dataset.bad = dns.state === "restricted" ? "" : "1";
+    const first = tripRecLocal(x.local, recEl("local2"));
+    tripRec.localModel = first && first.models && first.models[0] ? first.models[0] : "";
+    const ext = (x.extended || []).map((e) => `+${e.minutes} min by ${e.by}`);
+    const meta = [];
+    if (x.local_only) meta.push("Local model only: no AI provider on the internet is allowlisted.");
+    if (ext.length) meta.push("Extended: " + ext.join(", ") + ".");
+    if (r.rules_present === false) meta.push("Recovery rules are missing — the engine re-applies them within 15 s.");
+    meta.push("Started " + formatDateTime(x.started) + (x.session_id ? " · incident session ready in the assistant" : "") + ".");
+    recEl("meta").textContent = meta.join(" ");
+    tripRecTick();
+    if (!tripRec.timer) tripRec.timer = setInterval(tripRecTick, 1000);
+  }
+
+  function tripRecOpenAssistant(res) {
+    const brief = (res && res.brief) || {};
+    if (typeof window.twAsk !== "function") {
+      tripRecMsg("The assistant panel isn't available here (admins only, with the AI assistant installed).", true);
+      return;
+    }
+    try {
+      if (res.session_id && window.twAgent && window.twAgent.setSession) window.twAgent.setSession(res.session_id);
+      if (tripRec.localOnly && tripRec.localModel && window.twAgent && window.twAgent.setModel) window.twAgent.setModel(tripRec.localModel);
+    } catch (_) { /* the panel falls back to its current session/model */ }
+    window.twAsk({ text: brief.text || "", context: "Security › Tripwire — recovery mode (incident brief)" });
+    tripRecMsg((res.session_id ? `Incident brief pre-filled in the assistant (session “${brief.title || "Tripwire incident"}”). ` : "Incident brief pre-filled in the assistant. ") +
+      "Nothing was sent: review it, then press Send." + (res.session_error ? " (No titled session: " + res.session_error + ")" : ""));
+  }
+
+  const recStart = recEl("start");
+  if (recStart) recStart.addEventListener("click", async () => {
+    const pass = recEl("pass");
+    if (!pass.value) { pass.focus(); return; }
+    const minutes = parseInt(recEl("min").value, 10) || 60;
+    const localOnly = !!(recEl("lo") && recEl("lo").checked && !recEl("lo-wrap").hidden);
+    const hosts = ((tripRec.preview || {}).hosts || []).filter((h) => !localOnly || h.kind === "notify").map((h) => h.host);
+    if (!(await (window.twConfirm || window.confirm)(`Start a ${minutes}-minute recovery window?\n\nThe LAN stays cut off. Only the router may reach: ${hosts.join(", ") || "nothing on the internet"}.\nWhen the timer runs out the full block returns on its own.`))) return;
+    recStart.disabled = true;
+    tripRecMsg("Starting recovery …");
+    try {
+      const res = await postJSON("/api/security/tripwire/recovery/start", { password: pass.value, minutes, local_only: localOnly });
+      pass.value = "";
+      tripRec.localOnly = localOnly;
+      await refreshTripwire();
+      tripRecOpenAssistant(res);
+    } catch (err) {
+      tripRecMsg("Recovery not started: " + err.message, true);
+    } finally { recStart.disabled = false; }
+  });
+  const recAsk = recEl("ask");
+  if (recAsk) recAsk.addEventListener("click", async () => {
+    recAsk.disabled = true;
+    try { tripRecOpenAssistant(await postJSON("/api/security/tripwire/recovery/brief", {})); }
+    catch (err) { tripRecMsg("Couldn't prepare the brief: " + err.message, true); }
+    finally { recAsk.disabled = false; }
+  });
+  document.querySelectorAll("#sec-trip-rec-card [data-trip-extend]").forEach((b) => b.addEventListener("click", async () => {
+    b.disabled = true;
+    try {
+      await postJSON("/api/security/tripwire/recovery/extend", { minutes: parseInt(b.dataset.tripExtend, 10) });
+      tripRecMsg(`Extended by ${b.dataset.tripExtend} minutes.`);
+      refreshTripwire();
+    } catch (err) { tripRecMsg("Not extended: " + err.message, true); }
+    finally { b.disabled = false; }
+  }));
+  const recEnd = recEl("end");
+  if (recEnd) recEnd.addEventListener("click", async () => {
+    if (!(await (window.twConfirm || window.confirm)("End recovery now?\n\nThe router's internet allowlist closes and the full block returns. The LAN stays cut off until you resolve the trip."))) return;
+    recEnd.disabled = true;
+    try {
+      await postJSON("/api/security/tripwire/recovery/end", {});
+      tripRecMsg("Recovery ended — back to the full block.");
+      refreshTripwire();
+    } catch (err) { tripRecMsg("Couldn't end recovery: " + err.message, true); }
+    finally { recEnd.disabled = false; }
   });
 
   async function refreshHoneypot() {

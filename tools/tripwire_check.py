@@ -86,8 +86,9 @@ def load_engine():
 E = load_engine()
 # hard stop: every path below must live in the sandbox, firewall stubbed
 assert E.STUB_FIREWALL and not E.NETNS, "engine not sandboxed - refusing to test"
+assert not E.UNBOUND_CONTROL, "the live unbound must never be driven by a test"
 for p in (E.CONFIG, E.STATE, E.LOG, E.AUDIT, E.HEALTH, E.LOCK, E.ENFORCE_LOG, E.HISTORY,
-          E.HISTORY_LOCK):
+          E.HISTORY_LOCK, E.OPENCODE_CONF, E.MODELS_CACHE, E.ALERTS_CONF):
     assert p.startswith(ROOT), p
 
 
@@ -974,11 +975,462 @@ def test_daemon():
     check("DAEMON stop" in open(E.LOG).read(), "daemon stops cleanly on SIGTERM")
 
 
+# ── recovery mode ───────────────────────────────────────────────────────────
+SECRET_KEY = "sk-test-0123456789abcdefghijklmnopqrstuvwxyz"
+NTFY_TOPIC = "tw-secret-topic-9f3k2"
+FAKE_DNS = {"llm.example.com": ["198.51.100.7", "2001:db8:7::7"],
+            "opencode.ai": ["198.51.100.8"], "api.anthropic.com": ["198.51.100.9"],
+            "ntfy.sh": ["198.51.100.10", "2001:db8:10::10"], "openrouter.ai": ["198.51.100.11"]}
+
+
+def write_recovery_env():
+    os.makedirs(ROOT + "/home/tuxwall-agent/.cache/opencode", exist_ok=True)
+    with open(E.OPENCODE_CONF, "w") as f:
+        json.dump({"model": "opencode/iceman-free", "small_model": "anthropic/claude-x",
+                   "providers": {
+                       "custom": {"name": "Custom", "settings": {
+                           "baseURL": "https://llm.example.com/v1", "apiKey": SECRET_KEY},
+                           "models": {"m1": {}}},
+                       "unsloth": {"name": "Unsloth", "settings": {
+                           "baseURL": "http://192.168.1.12:3000/v1", "apiKey": "{file:/x}"},
+                           "models": {"unsloth/Qwen3.5-9B-GGUF": {"name": "Qwen"}}},
+                       "plain": {"settings": {"baseURL": "http://plain.example.net/v1"}}}}, f)
+    with open(E.MODELS_CACHE, "w") as f:
+        json.dump({"opencode": {"api": "https://opencode.ai/zen/v1"},
+                   "anthropic": {"api": None}}, f)
+    with open(E.ALERTS_CONF, "w") as f:
+        json.dump({"enabled": True, "ntfy_url": "https://ntfy.sh/" + NTFY_TOPIC,
+                   "webhook_url": ""}, f)
+
+
+def enforce_log():
+    try:
+        return open(E.ENFORCE_LOG).read()
+    except OSError:
+        return ""
+
+
+def audit_actions():
+    return [a.get("action") for a in E.audit_tail(200)]
+
+
+def test_recovery():
+    reset()
+    write_recovery_env()
+    os.environ["TUXWALL_TRIPWIRE_FAKE_DNS"] = json.dumps(FAKE_DNS)
+    old_reach = E.tcp_reachable
+    E.tcp_reachable = lambda h, p, timeout=1.5: h == "192.168.1.12"
+    try:
+        _test_recovery()
+    finally:
+        E.tcp_reachable = old_reach
+        os.environ.pop("TUXWALL_TRIPWIRE_FAKE_DNS", None)
+
+
+def _test_recovery():
+    # allowlist building
+    al = E.recovery_allowlist(["openrouter", "bad id!"])
+    hp = {(h["host"], h["port"]) for h in al["hosts"]}
+    check(hp == {("llm.example.com", 443), ("opencode.ai", 443), ("api.anthropic.com", 443),
+                 ("ntfy.sh", 443), ("openrouter.ai", 443)}, "allowlist hosts (%s)" % sorted(hp))
+    kinds = {h["host"]: h["kind"] for h in al["hosts"]}
+    check(kinds["ntfy.sh"] == "notify" and kinds["opencode.ai"] == "ai", "allowlist kinds")
+    check(any("opencode inference" in w for h in al["hosts"] if h["host"] == "opencode.ai"
+              for w in h["why"]), "opencode inference always listed")
+    check(len(al["local"]) == 1 and al["local"][0]["host"] == "192.168.1.12"
+          and al["local"][0]["port"] == 3000 and al["local"][0]["reachable"] is True
+          and al["local_reachable"], "LAN provider = reachable local model")
+    check(al["local"][0]["models"] == ["unsloth/unsloth/Qwen3.5-9B-GGUF"], "local model ids")
+    check(any(s.get("host") == "plain.example.net" for s in al["skipped"]),
+          "plain HTTP provider never allowlisted")
+    check(SECRET_KEY not in json.dumps(al), "allowlist carries no API key")
+    lo = E.recovery_allowlist(local_only=True)
+    check([h["host"] for h in lo["hosts"]] == ["ntfy.sh"], "local-only: push target only")
+    with open(E.ALERTS_CONF, "w") as f:
+        json.dump({"enabled": False, "ntfy_url": "https://ntfy.sh/x"}, f)
+    check("ntfy.sh" not in {h["host"] for h in E.recovery_allowlist()["hosts"]},
+          "alerts disabled: no push host")
+    write_recovery_env()
+
+    # rule plan
+    plan = E.recovery_rules("wan0", 106)
+    check([(i, c) for i, c, _ in plan] == [("iptables", "OUTPUT"), ("ip6tables", "OUTPUT")],
+          "recovery rules: OUTPUT v4 + v6")
+    for ipt, _c, specs in plan:
+        j = [" ".join(s) for s in specs]
+        check(specs[-1][-1] == "REJECT" and E.MARK_REC in specs[-1]
+              and E.MARK_REC_ALLOW not in specs[-1], "%s: REJECT last" % ipt)
+        check(all(s[-1] == "ACCEPT" and E.MARK_REC_ALLOW in s for s in specs[:-1]),
+              "%s: allows above it" % ipt)
+        check(all(s[:2] == ["-o", "wan0"] for s in specs), "%s: WAN egress only" % ipt)
+        check(sum("--uid-owner 106" in x and "--dport 53" in x for x in j) == 2,
+              "%s: DNS only from the resolver uid (udp+tcp)" % ipt)
+        check(any("--match-set %s dst,dst" % E.REC_SETS[ipt] in x for x in j),
+              "%s: allowlist set" % ipt)
+        check(not any("NEW" in x for x in j), "%s: no blanket NEW" % ipt)
+    j6 = [" ".join(s) for s in plan[1][2]]
+    check(sum("--icmpv6-type" in x for x in j6) == 4 and any("--sport 546" in x for x in j6),
+          "v6: ND + DHCPv6 out")
+    check(len(E.recovery_rules("wan0", None)[0][2]) == len(plan[0][2]) - 2,
+          "no resolver user: no DNS hole")
+
+    # state machine
+    try:
+        E.recovery_start(60, by="dana")
+        check(False, "recovery refused while not tripped")
+    except ValueError:
+        check(True, "recovery refused while not tripped")
+    check(E.recovery_status()["phase"] == "normal", "phase normal")
+    E.trip("Suricata priority-1 alert", cls="Attempted Administrator Privilege Gain",
+           sig="ET EXPLOIT test", src="203.0.113.9", dst="192.168.1.20:443", mode="medium",
+           check="suricata.attempted-admin",
+           detail={"iface": "wan0", "proto": "TCP", "sid": 2000001, "src_port": 40000})
+    st = E.load_state()
+    check(st.get("iface") == "wan0" and st.get("sid") == 2000001 and st.get("src_port") == 40000,
+          "trip keeps iface/proto/sid/src_port")
+    check(E.recovery_status()["phase"] == "tripped", "phase tripped")
+    pv = E.recovery_status(preview=True)
+    check(pv["preview"]["hosts"] and not pv["active"], "preview while tripped")
+    for bad in (5, 241, "x", True):
+        try:
+            E.recovery_start(bad, by="dana")
+            check(False, "duration %r refused" % (bad,))
+        except ValueError:
+            check(True, "duration %r refused" % (bad,))
+    open(E.ENFORCE_LOG, "a").close()
+    before_push = len(pushes())
+    t0 = time.time()
+    res = E.recovery_start(60, by="dana", via="dashboard", providers=["openrouter"])
+    rec = E.load_state()["recovery"]
+    check(res["phase"] == "recovery" and rec["active"], "phase recovery")
+    check(abs(rec["expires"] - (t0 + 3600)) < 5, "60-minute timer")
+    log_ = enforce_log()
+    check("iptables -I OUTPUT 1 -o wan0 -m comment --comment %s -j REJECT" % E.MARK_REC in log_
+          and "ip6tables -I OUTPUT 1 -o wan0 -m comment --comment %s -j REJECT" % E.MARK_REC
+          in log_, "recovery REJECT v4 + v6 applied (stub)")
+    check("ipset create tw-recovery4 hash:ip,port family inet" in log_
+          and "ipset create tw-recovery6 hash:ip,port family inet6" in log_, "sets created")
+    check("add tw-recovery4 198.51.100.7,tcp:443" in log_
+          and "add tw-recovery6 2001:db8:7::7,tcp:443" in log_
+          and "add tw-recovery4 198.51.100.11,tcp:443" in log_, "resolved IPs in the sets")
+    check("unbound-control local_zone . refuse" in log_
+          and "unbound-control< llm.example.com. transparent" in log_
+          and "unbound-control< ntfy.sh. transparent" in log_, "DNS restricted to the allowlist")
+    check(rec["dns"]["state"] == "restricted" and rec["dns"]["root_added"], "dns state")
+    check(E.recovery_rules_present() and E.lockdown_active("medium"),
+          "recovery rules on top of the trip block")
+    check(len(pushes()) == before_push + 1 and "recovery started" in pushes()[-1]["title"],
+          "push on start")
+    check("recovery-start" in audit_actions(), "start audited")
+    try:
+        E.recovery_start(60, by="dana")
+        check(False, "second start refused")
+    except ValueError:
+        check(True, "second start refused")
+    pub = E.recovery_status()["recovery"]
+    check(pub["remaining"] > 3500 and {h["host"] for h in pub["hosts"]} >= {"ntfy.sh"}
+          and pub["local_reachable"], "public view")
+
+    # extend
+    exp0 = E.load_state()["recovery"]["expires"]
+    E.recovery_extend(30, by="erin")
+    check(abs(E.load_state()["recovery"]["expires"] - exp0 - 1800) < 1, "extend +30 min")
+    for bad in (0, 121, "x"):
+        try:
+            E.recovery_extend(bad, by="erin")
+            check(False, "extend %r refused" % (bad,))
+        except ValueError:
+            check(True, "extend %r refused" % (bad,))
+    E.recovery_extend(120, by="erin")
+    try:
+        E.recovery_extend(60, by="erin")
+        check(False, "more than 240 min left refused")
+    except ValueError:
+        check(True, "more than 240 min left refused")
+    check(audit_actions().count("recovery-extend") == 2, "extend audited")
+
+    # tick: rules removed behind our back -> re-applied; refresh
+    E.recovery_remove_rules()
+    check(not E.recovery_rules_present(), "rules removed (simulated flush)")
+    check(E.recovery_tick() == "re-enforced" and E.recovery_rules_present(), "tick re-applies")
+    E.update_state(lambda s: s["recovery"].__setitem__("refreshed", 0))
+    check(E.recovery_tick() == "refreshed" and E.load_state()["recovery"]["refreshed"] > 0,
+          "tick refreshes the resolved addresses")
+
+    # expiry -> full block (trip kept)
+    E.update_state(lambda s: s["recovery"].__setitem__("expires", time.time() - 1))
+    check(E.recovery_tick() == "expired", "expiry")
+    st = E.load_state()
+    check(st["tripped"] and "recovery" not in st and st["recovery_last"]["how"] == "expired",
+          "expired: back to tripped")
+    check(not E.recovery_rules_present() and E.lockdown_active("medium"),
+          "expired: allowlist closed, trip block kept")
+    log_ = enforce_log()
+    check("unbound-control local_zone_remove ." in log_ and "ipset destroy tw-recovery4" in log_,
+          "expired: DNS restriction + sets removed")
+    check("recovery over" in pushes()[-1]["title"].lower(), "push on expiry")
+    check("recovery-expired" in audit_actions(), "expiry audited")
+
+    # end recovery manually
+    E.recovery_start(15, by="dana")
+    check(E.recovery_end("ended", by="dana") and E.load_state()["tripped"]
+          and not E.recovery_rules_present() and E.lockdown_active("medium"),
+          "end: back to full block")
+    check(not E.recovery_end("ended", by="dana"), "end when inactive is a no-op")
+    try:
+        E.recovery_extend(15, by="dana")
+        check(False, "extend refused when inactive")
+    except ValueError:
+        check(True, "extend refused when inactive")
+
+    # a new blocking event during recovery closes the window
+    E.recovery_start(15, by="dana")
+    E.trip("again", mode="medium")
+    st = E.load_state()
+    check("recovery" not in st and st["recovery_last"]["how"] == "new-event"
+          and not E.recovery_rules_present(), "new blocking event ends recovery")
+
+    # session id + brief (no secrets)
+    E.recovery_start(60, by="dana")
+    for bad in ("", "../x", "a b", "x" * 101):
+        try:
+            E.recovery_set_session(bad)
+            check(False, "session id %r refused" % bad)
+        except ValueError:
+            check(True, "session id %r refused" % bad)
+    E.recovery_set_session("ses_abc123")
+    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    with open(E.LOG, "a") as f:
+        f.write("%s TRIP mode=medium class=x src=203.0.113.9 -> 192.168.1.20:443 "
+                "reason=r action=lockdown\n" % now)
+        f.write("%s NOTE password=hunter2 token: tok3n Authorization: Bearer XYZSECRET123 "
+                "url=https://ntfy.sh/%s apikey=%s\n" % (now, NTFY_TOPIC, SECRET_KEY))
+        f.write("%s NOTE -----BEGIN PRIVATE KEY-----MIIEabc-----END PRIVATE KEY-----\n" % now)
+    E.history_append({"ts": E.load_state()["since"], "check": "suricata.attempted-admin",
+                      "action": "block", "src": "203.0.113.9", "dst": "192.168.1.20:443",
+                      "sig": "ET EXPLOIT test", "iface": "wan0", "decision": "Block"})
+    b = E.recovery_brief()
+    txt = b["text"]
+    check(b["title"].startswith("Tripwire incident ") and "attempted administrator" in
+          b["title"].lower(), "brief title (%s)" % b["title"])
+    for want in ("203.0.113.9:40000 -> 192.168.1.20:443", "Interface: wan0", "MEDIUM",
+                 "ET EXPLOIT test", "SID 2000001", "READ-ONLY", "Ask me before ANY change",
+                 "reinstalling and restoring a verified backup", "Recovery mode is active",
+                 "TRIP mode=medium"):
+        check(want in txt, "brief has %r" % want)
+    for secret in ("hunter2", "tok3n", "XYZSECRET123", NTFY_TOPIC, SECRET_KEY, "MIIEabc"):
+        check(secret not in txt and secret not in b["title"], "brief hides %s" % secret[:6])
+    check(b["session_id"] == "ses_abc123", "brief returns the session id")
+    s = E.sanitize("GET https://h.example/a/b?token=1 key=abc cookie: c00kie "
+                   "deadbeefdeadbeefdeadbeefdeadbeef00")
+    check("/a/b" not in s and "abc" not in s and "c00kie" not in s and "deadbeef" not in s
+          and "https://h.example/" in s, "sanitize (%s)" % s)
+
+    # checklist + restore (resolve from recovery)
+    for bad in (None, [], {}, {"checklist": {"findings": True, "cause": True}},
+                {"checklist": {"findings": True, "cause": True, "confirm": "yes"}},
+                {"checklist": {"findings": True, "cause": True, "confirm": True},
+                 "note": "x" * 501}):
+        try:
+            E.validate_checklist(bad)
+            check(False, "checklist %r refused" % (bad,))
+        except ValueError:
+            check(True, "checklist refused")
+    ok = E.validate_checklist({"checklist": {"findings": True, "cause": True, "confirm": True},
+                               "note": " fixed\x00 the\nrule "})
+    check(ok["note"] == "fixed the rule" and all(ok["checklist"].values()), "checklist ok")
+    try:
+        E.restore({"checklist": {"findings": True}}, by="dana")
+        check(False, "restore needs the full checklist")
+    except ValueError:
+        check(True, "restore needs the full checklist")
+    check(E.load_state()["tripped"], "refused restore changes nothing")
+    with contextlib.redirect_stdout(io.StringIO()):
+        r = E.restore({"checklist": {"findings": True, "cause": True, "confirm": True},
+                       "note": "false positive"}, by="dana", via="dashboard")
+    st = E.load_state()
+    check(r["ok"] and not st["tripped"] and "recovery" not in st
+          and st["recovery_last"]["how"] == "resolved", "restore from recovery")
+    check(not E.recovery_rules_present() and not E.lockdown_active("medium"),
+          "restore removes everything")
+    res = [a for a in E.audit_tail(50) if a.get("action") == "resolve"][-1]
+    check(res.get("by") == "dana" and res.get("checklist", {}).get("confirm") is True
+          and res.get("note") == "false positive" and res.get("from_recovery") is True,
+          "resolve audited with checklist + note")
+    check("recovery-resolved" in audit_actions(), "recovery end on resolve audited")
+    try:
+        E.restore({"checklist": {"findings": True, "cause": True, "confirm": True}}, by="d")
+        check(False, "restore when not tripped refused")
+    except ValueError:
+        check(True, "restore when not tripped refused")
+    try:
+        E.recovery_brief()
+        check(False, "brief only while tripped")
+    except ValueError:
+        check(True, "brief only while tripped")
+
+
+def test_dns_restrict():
+    """unbound-control handling with a fake control channel."""
+    reset()
+    calls = []
+    zones = ".\x00"
+
+    def fake(args, data=None):
+        calls.append((args, data))
+        if args == ["list_local_zones"]:
+            return 0, zones
+        return 0, "ok"
+    old = (E.UNBOUND_CONTROL, E._ubc)
+    E.UNBOUND_CONTROL, E._ubc = ["fake"], fake
+    try:
+        hosts = [{"host": "api.example.com"}, {"host": "ntfy.sh"}, {"host": "x.home.arpa"},
+                 {"host": "198.51.100.1"}]
+        zones = "home.arpa. static\nntfy.sh. always_nxdomain\nexample.com. transparent\n"
+        d = E.dns_restrict(hosts)
+        check(d["state"] == "restricted" and d["added"] == [], "already-transparent not re-added")
+        check([b["host"] for b in d["blocked"]] == ["ntfy.sh", "x.home.arpa"],
+              "names under an owner zone are reported, never overridden")
+        check((["local_zone", ".", "refuse"], None) in calls, "root refuse added")
+        add = [c for c in calls if c[0] == ["local_zones"]][0][1]
+        check(E.DNS_SENTINEL + " static" in add and "transparent" not in add, "sentinel zone")
+        calls.clear()
+        zones = "localhost. static\n"
+        d = E.dns_restrict([{"host": "api.example.com"}])
+        check(d["added"] == ["api.example.com."], "allowlisted name added transparent")
+        zones = "localhost. static\napi.example.com. transparent\n"
+        d2 = E.dns_restrict([{"host": "api.example.com"}], prev=d)
+        check(d2["added"] == ["api.example.com."], "re-apply keeps track of its own zones")
+        E.dns_unrestrict(d)
+        check((["local_zone_remove", "."], None) in calls and any(
+            c[0] == ["local_zones_remove"] and "api.example.com." in c[1]
+            and E.DNS_SENTINEL in c[1] for c in calls), "unrestrict removes what it added")
+        calls.clear()
+        zones = ". static\n"
+        d = E.dns_restrict([{"host": "api.example.com"}])
+        check(d["state"] == "unavailable" and not d.get("root_added")
+              and not any(c[0][0] == "local_zone" for c in calls),
+              "existing root zone: left untouched")
+        E.dns_unrestrict(d)
+        check(not any(c[0][0] == "local_zone_remove" for c in calls),
+              "never removes a root zone it didn't add")
+    finally:
+        E.UNBOUND_CONTROL, E._ubc = old
+
+
+def test_dns_client():
+    """The stub resolver against a tiny UDP responder (CNAME chain +
+    compression)."""
+    import socket
+    import struct
+    srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    srv.bind(("127.0.0.1", 0))
+    port = srv.getsockname()[1]
+
+    def serve():
+        data, peer = srv.recvfrom(512)
+        qid = data[:2]
+        q = data[12:]
+        name_end = q.index(b"\x00") + 5
+        question = q[:name_end]
+        qtype = struct.unpack(">H", question[-4:-2])[0]
+        ans = b""
+        cname = b"\x04edge\x03cdn\x04test\x00"
+        ans += b"\xc0\x0c" + struct.pack(">HHIH", 5, 1, 60, len(cname)) + cname
+        ptr = 12 + len(question) + 12
+        if qtype == 1:
+            ans += struct.pack(">H", 0xC000 | ptr) + struct.pack(">HHIH", 1, 1, 60, 4) + \
+                bytes([192, 0, 2, 11])
+            an = 2
+        else:
+            an = 1
+        srv.sendto(qid + struct.pack(">HHHHH", 0x8180, 1, an, 0, 0) + question + ans, peer)
+    for qtype, want in ((1, ["192.0.2.11"]), (28, [])):
+        t = threading.Thread(target=serve, daemon=True)
+        t.start()
+        rcode, out = E.dns_query("cdn.allowed.test", qtype, server="127.0.0.1#%d" % port)
+        t.join(2)
+        check(rcode == 0 and [a for _t, a in out] == want, "dns client qtype %d (%s)" % (qtype, out))
+    srv.close()
+
+
+def test_recovery_daemon():
+    """Persistence: a recovery survives a restart (re-applied) and the
+    daemon expires it on time."""
+    reset()
+    write_recovery_env()
+    set_mode_file("logonly")
+    open(KLOG, "w").close()
+    open(EVE_PATH, "w").close()
+    env = dict(os.environ, TUXWALL_TRIPWIRE_TICK="0.3", TUXWALL_TRIPWIRE_BEAT="0.5",
+               TUXWALL_TRIPWIRE_ENFORCE_S="0.5", TUXWALL_TRIPWIRE_FAKE_DNS=json.dumps(FAKE_DNS))
+    E.trip("manual", mode="high", notify_user=False)
+    os.environ["TUXWALL_TRIPWIRE_FAKE_DNS"] = json.dumps(FAKE_DNS)
+    try:
+        E.recovery_start(60, by="dana", local_only=True)
+    finally:
+        os.environ.pop("TUXWALL_TRIPWIRE_FAKE_DNS", None)
+    E.recovery_remove_rules()                       # "reboot": rules gone, state kept
+    check(not E.recovery_rules_present(), "rules gone before restart")
+    r = subprocess.run([sys.executable, "-B", ENGINE, "enforce"], env=env, capture_output=True,
+                       text=True)
+    check("recovery: re-enforced" in r.stdout and E.recovery_rules_present()
+          and E.lockdown_active("high"), "ExecStartPre enforce re-applies trip + recovery")
+    E.recovery_remove_rules()
+    E.update_state(lambda s: s["recovery"].__setitem__("expires", time.time() + 4))
+    p = subprocess.Popen([sys.executable, "-B", ENGINE, "run"], env=env,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        check(wait_for(E.recovery_rules_present, 3), "daemon start re-applies recovery")
+        check(E.load_state()["recovery"]["active"], "recovery survived the restart")
+        check(wait_for(lambda: "recovery" not in E.load_state(), 10), "daemon expires it")
+        st = E.load_state()
+        check(st["tripped"] and st["recovery_last"]["how"] == "expired"
+              and st["recovery_last"]["by"] == "engine", "expired by the timer")
+        check(wait_for(lambda: not E.recovery_rules_present(), 3) and E.lockdown_active("high"),
+              "after expiry: full high-mode block only")
+        r = subprocess.run([sys.executable, "-B", ENGINE, "recovery-status"], env=env,
+                           capture_output=True, text=True)
+        js = json.loads(r.stdout)
+        check(js["phase"] == "tripped" and js["last"]["how"] == "expired"
+              and len(js["checklist"]) == 3, "CLI recovery-status")
+        r = subprocess.run([sys.executable, "-B", ENGINE, "recovery-start", "--minutes", "5"],
+                           env=env, input="{}", capture_output=True, text=True)
+        check(r.returncode == 2 and "between 15 and 240" in r.stdout, "CLI refuses 5 min")
+        r = subprocess.run([sys.executable, "-B", ENGINE, "recovery-start", "--minutes", "20",
+                            "--by", "erin", "--via", "dashboard"], env=env,
+                           input=json.dumps({"providers": ["openrouter"]}),
+                           capture_output=True, text=True)
+        js = json.loads(r.stdout.splitlines()[-1])
+        check(r.returncode == 0 and js["phase"] == "recovery"
+              and "openrouter.ai" in {h["host"] for h in js["recovery"]["hosts"]},
+              "CLI recovery-start")
+        r = subprocess.run([sys.executable, "-B", ENGINE, "recovery-end", "--by", "erin"],
+                           env=env, capture_output=True, text=True)
+        js = json.loads(r.stdout.splitlines()[-1])
+        check(r.returncode == 0 and js["ended"] and js["phase"] == "tripped", "CLI recovery-end")
+        r = subprocess.run([sys.executable, "-B", ENGINE, "restore", "--by", "erin"], env=env,
+                           input=json.dumps({"checklist": {"findings": True}}),
+                           capture_output=True, text=True)
+        check(r.returncode == 2 and "checklist" in r.stdout.lower(), "CLI restore validates")
+    finally:
+        p.terminate()
+        try:
+            p.wait(15)
+        except subprocess.TimeoutExpired:
+            p.kill()
+    err = p.stderr.read().decode() if p.stderr else ""
+    check("Traceback" not in err, "recovery daemon without tracebacks" + (": " + err[-400:]
+                                                                          if err else ""))
+    check("RECOVERY re-applied at start" in open(E.LOG).read(), "start re-apply logged")
+
+
 def main():
     try:
         for t in (test_eval, test_rules, test_notify, test_state, test_mode_resolve,
                   test_config, test_exclusions, test_threshold, test_test_path,
-                  test_history, test_eve_tail, test_kernel, test_daemon):
+                  test_history, test_eve_tail, test_kernel, test_daemon, test_recovery,
+                  test_dns_restrict, test_dns_client, test_recovery_daemon):
             t()
     finally:
         shutil.rmtree(ROOT, ignore_errors=True)

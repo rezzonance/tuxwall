@@ -4486,7 +4486,12 @@ def tripwire_status():
             "checks": (ui or {}).get("checks") or [],
             "coming_later": (ui or {}).get("coming_later") or [],
             "history_info": (ui or {}).get("history") or {},
-            "config_available": ui is not None}
+            "config_available": ui is not None,
+            # recovery mode: phase normal | tripped | recovery (+ details)
+            "phase": ((ui or {}).get("recovery") or {}).get("phase") or (
+                ("recovery" if (st.get("recovery") or {}).get("active") else "tripped")
+                if st.get("tripped") else "normal"),
+            "recovery": (ui or {}).get("recovery") or {}}
 
 
 def _tripwire_cli(args, timeout=30):
@@ -4611,22 +4616,48 @@ def tripwire_set_mode(body, identity=None, client_ip=""):
                                "--client", client_ip or ""])
 
 
-def tripwire_resolve(body, identity, client_ip=""):
-    """Lift the lockdown. Deliberate two-step: admin session PLUS the
-    acting admin's password - a stolen dashboard session must never be
-    enough to re-open the WAN during a trip."""
+def _tripwire_check_password(identity, password):
     if not identity:
         raise PermissionError("Authentication required")
     users = _load_users()
     user = _find_user(users, identity["username"])
     if user is None:
         raise PermissionError("Account no longer exists")
-    current = str(body.get("password") or "")
-    if not hmac.compare_digest(_hash_password(current, user["salt"]), user["hash"]):
+    if not hmac.compare_digest(_hash_password(str(password or ""), user["salt"]), user["hash"]):
         raise PermissionError("Password is incorrect")
-    out = _tripwire_cli(["resolve", "--by", identity["username"], "--via", "dashboard",
-                         "--client", client_ip or ""], timeout=60)
-    return {"ok": True, "detail": out[:200]}
+
+
+def tripwire_resolve(body, identity, client_ip=""):
+    """Lift the lockdown. Deliberate two-step: admin session PLUS the
+    acting admin's password - a stolen dashboard session must never be
+    enough to re-open the WAN during a trip - plus the restore checklist
+    (findings reviewed, cause fixed/understood, confirm) and an optional
+    note, validated and audited by the engine (`restore`), which ends a
+    recovery window first."""
+    _tripwire_check_password(identity, body.get("password"))
+    res = _tripwire_json_cli(["restore", "--by", identity["username"], "--via", "dashboard",
+                              "--client", client_ip or ""],
+                             {"checklist": body.get("checklist"), "note": body.get("note") or ""},
+                             timeout=90)
+    return {"ok": True, "detail": str(res.get("detail") or "")[:200]}
+
+
+def _tripwire_who(identity, client_ip):
+    return ["--by", (identity or {}).get("username", "") or "unknown", "--via", "dashboard",
+            "--client", client_ip or ""]
+
+
+def tripwire_recovery_extend(body, identity, client_ip=""):
+    minutes = body.get("minutes")
+    if isinstance(minutes, bool) or not isinstance(minutes, (int, str)):
+        raise ValueError("minutes must be a whole number")
+    return _tripwire_json_cli(["recovery-extend", "--minutes", str(minutes)]
+                              + _tripwire_who(identity, client_ip))
+
+
+def tripwire_recovery_end(identity, client_ip=""):
+    """Back to the full block (less access, so no password needed)."""
+    return _tripwire_json_cli(["recovery-end"] + _tripwire_who(identity, client_ip), timeout=60)
 
 
 def build_canary():
@@ -13451,6 +13482,64 @@ class Handler(BaseHTTPRequestHandler):
             "hint": "see: journalctl -u tuxwall.service -t -n 50 | grep agent",
         }
 
+    # ── tripwire recovery mode (needs the agent for providers + session) ─
+    def _tripwire_agent_providers(self):
+        """Catalog providers with a stored credential: their endpoints join
+        the recovery allowlist (ids only - never key material)."""
+        try:
+            if not self._agent_is_v2():
+                return []
+            return sorted({c["integrationID"] for c in self._agent_credentials()
+                           if c.get("integrationID")})[:40]
+        except Exception:
+            return []
+
+    def _tripwire_incident_session(self, title):
+        """Create the incident's assistant session (titled, empty: the brief
+        is pre-filled in the browser, never auto-sent). Returns (id, error)."""
+        try:
+            data = self._agent_call("POST", "/session",
+                                    {"title": str(title or "Tripwire incident")[:120]})
+        except Exception as exc:
+            return "", str(exc)[:200]
+        if isinstance(data, dict) and isinstance(data.get("data"), dict):
+            data = data["data"]
+        sid = str((data or {}).get("id") or "") if isinstance(data, dict) else ""
+        if not AGENT_OBJ_ID_RE.match(sid):
+            return "", "the assistant did not return a session id"
+        try:
+            _tripwire_json_cli(["recovery-session", sid])
+        except Exception:
+            pass
+        return sid, ""
+
+    def _tripwire_recovery_preview(self, identity):
+        providers = self._tripwire_agent_providers() if _is_admin(identity) else []
+        return _tripwire_json_cli(["recovery-status", "--preview"], {"providers": providers},
+                                  timeout=45)
+
+    def _tripwire_recovery_start(self, body, identity, client_ip):
+        _tripwire_check_password(identity, body.get("password"))
+        minutes = body.get("minutes", 60)
+        if isinstance(minutes, bool) or not isinstance(minutes, (int, str)):
+            raise ValueError("minutes must be a whole number")
+        res = _tripwire_json_cli(["recovery-start", "--minutes", str(minutes)]
+                                 + _tripwire_who(identity, client_ip),
+                                 {"providers": self._tripwire_agent_providers(),
+                                  "local_only": body.get("local_only") is True}, timeout=120)
+        out = dict(res)
+        out.update(self._tripwire_brief(identity))
+        return out
+
+    def _tripwire_brief(self, identity):
+        """Incident brief + the incident session (created once per recovery)."""
+        b = _tripwire_json_cli(["recovery-brief"])
+        sid, err = b.get("session_id") or "", ""
+        if not sid and b.get("recovery_active") and _is_admin(identity):
+            sid, err = self._tripwire_incident_session(b.get("title"))
+        return {"brief": {"title": b.get("title") or "", "text": b.get("text") or ""},
+                "session_id": sid, "session_error": err}
+
     # ── providers / API keys / models (phase E, see OPENCODE_CONF) ─────
     _AGENT_INTEG_CACHE = {"t": 0.0, "data": None}
 
@@ -14611,6 +14700,13 @@ class Handler(BaseHTTPRequestHandler):
                     urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)))
             except ValueError as exc:
                 self._send(400, {"ok": False, "error": str(exc)})
+        elif path == "/api/security/tripwire/recovery":
+            try:
+                self._send(200, self._tripwire_recovery_preview(identity))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)[:200]})
         elif path == "/api/agent/models":
             try:
                 if self._agent_is_v2():
@@ -15637,11 +15733,24 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200 if result.get("ok") else 400, result)
 
         elif path in ("/api/security/tripwire/config", "/api/security/tripwire/resolve",
-                      "/api/security/tripwire/checks", "/api/security/tripwire/test"):
+                      "/api/security/tripwire/checks", "/api/security/tripwire/test",
+                      "/api/security/tripwire/recovery/start",
+                      "/api/security/tripwire/recovery/extend",
+                      "/api/security/tripwire/recovery/end",
+                      "/api/security/tripwire/recovery/brief"):
             # errors used to escape the handler (dropped connection, so the
             # dashboard never showed "Password is incorrect")
             try:
-                if path.endswith("/config") and "mode" in body:
+                if path.endswith("/recovery/start"):
+                    self._send(200, self._tripwire_recovery_start(body, identity,
+                                                                  _client_key(self)))
+                elif path.endswith("/recovery/extend"):
+                    self._send(200, tripwire_recovery_extend(body, identity, _client_key(self)))
+                elif path.endswith("/recovery/end"):
+                    self._send(200, tripwire_recovery_end(identity, _client_key(self)))
+                elif path.endswith("/recovery/brief"):
+                    self._send(200, dict(self._tripwire_brief(identity), ok=True))
+                elif path.endswith("/config") and "mode" in body:
                     self._send(200, tripwire_set_mode(body, identity, _client_key(self)))
                 elif path.endswith("/config"):
                     self._send(200, tripwire_configure(body, identity, _client_key(self)))

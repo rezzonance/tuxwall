@@ -80,3 +80,31 @@ stops the watchers, re-enforcement, CLI resolve). Real iptables rules are
 validated separately inside a throwaway `ip netns` (never on a live
 firewall): run the engine with `TUXWALL_TRIPWIRE_ROOT=<tmp>` plus
 `TUXWALL_TRIPWIRE_NETNS=<ns>`.
+
+Recovery mode (phase 4) in the same sandbox: allowlist building from the
+opencode config / model catalog / alerts.json (LAN servers = local models,
+plain HTTP never allowlisted, no key material), the OUTPUT rule plan (v4+v6,
+REJECT last, DNS only from the resolver uid, ipset match), the state machine
+(start only while tripped, durations, extend cap, re-apply after a flush,
+refresh, expiry back to the full block, end, a new blocking event closes the
+window, restart persistence via `enforce` and the daemon), the unbound
+runtime-zone handling (fake control channel: owner zones never overridden, a
+pre-existing root zone left alone), the stub DNS client (CNAME + compression),
+the incident brief (trip details, no secrets) and the restore checklist.
+
+## tripwire_netns_check.py — recovery firewall + DNS in namespaces (root, manual)
+
+```bash
+sudo python3 tools/tripwire_netns_check.py
+```
+
+Not in CI. Builds three throwaway namespaces (router / WAN / LAN, veths
+created inside them), a WAN DNS stub, TLS endpoints, a LAN "local model" and
+an unconfined copy of unbound as the router's resolver
+(`tripwire_netns_helpers.py`), then runs the real engine inside the router
+namespace for MEDIUM and HIGH: trip, recovery (allowed endpoints reachable
+over v4+v6, denied names refused, denied IPs blocked, direct DNS blocked, LAN
+still blocked, WAN->router closed in high), extend, expiry, end, daemon
+re-apply after a flush + simulated unbound restart, daemon expiry, and
+resolve (everything removed). Snapshots of the live iptables/ip6tables/ipset/
+unbound zones before and after must match; the namespaces are always deleted.
