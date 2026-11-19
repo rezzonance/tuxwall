@@ -63,4 +63,10 @@ err = str(result.get("error", ""))
 assert "not defined" not in err, \
     f"undefined name survived to runtime: {err}"
 
+# --- Backups: sibling module loads, legacy dashboard-backup routes are gone
+assert mod._bk is not None, "includes/backups.py failed to import"
+assert "/api/backups/restore" in mod.LEGACY_BACKUP_PATHS
+assert callable(getattr(mod, "restore_system_backup_member", None))
+assert mod._bk.failure_incident("/nonexistent-root") is None
+
 print("api_server smoke test OK")

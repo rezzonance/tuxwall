@@ -33,10 +33,14 @@ case "$OUTDIR" in
     exit 2 ;;
 esac
 
+# Archives hold secrets: nothing this script creates is ever group/world readable.
+umask 077
+
 TS="$(date +%Y%m%d-%H%M%S)"
 NAME="system-backup-${TS}.tar.gz"
 STAGE="$(mktemp -d /tmp/sysbackup.XXXXXX)"
-trap 'rm -rf "$STAGE"' EXIT
+PARTIAL=""
+trap 'rm -rf "$STAGE"; [ -n "$PARTIAL" ] && rm -f "$PARTIAL"' EXIT
 
 progress() { echo "PROGRESS $1 $2"; }
 
@@ -64,10 +68,32 @@ CONFIG_PATHS=(
   "/etc/hosts.deny|etc/hosts.deny"
   "/usr/local/bin|usr/local/bin"
   "/usr/local/sbin|usr/local/sbin"
+  "/var/www/html|var/www/html"
+  "/etc/default/ufw|etc/default/ufw"
+  "/etc/nftables.conf|etc/nftables.conf"
+  "/etc/ssh|etc/ssh"
+  "/etc/letsencrypt|etc/letsencrypt"
+  "/etc/suricata|etc/suricata"
+  "/etc/opencanaryd|etc/opencanaryd"
+  "/etc/chrony|etc/chrony"
+  "/etc/systemd/resolved.conf|etc/systemd/resolved.conf"
+  "/etc/sudoers.d|etc/sudoers.d"
+  "/etc/cron.d|etc/cron.d"
+  "/etc/networkd-dispatcher|etc/networkd-dispatcher"
+  "/etc/modules-load.d|etc/modules-load.d"
+  "/var/lib/tuxwall|var/lib/tuxwall"
+  "/var/lib/kea|var/lib/kea"
 )
 
+# Keep these three lists in sync with www/includes/backups.py (checked by
+# tools/backup_safety_check.py).
 # Subdirs to skip inside /etc/crowdsec (regenerable / downloadable)
 CROWDSEC_EXCLUDE=("hub" "patterns" "lists")
+# Dashboard: skip bytecode, logs, editor/deploy leftovers
+WWW_EXCLUDE=("__pycache__" "logs" "backups" ".git" "*.pyc" "*.bak-*" "*.orig" "*.pre-*" "*.tmp" "index.nginx-debian.html")
+# /var/lib/tuxwall: only state needed to rebuild (no GeoIP DBs, caches,
+# histories, hit logs or the backups themselves)
+TUXWALL_STATE_ONLY=("fw-snapshots" "firewall-backups" "wireguard.json" "canary-token" "whitelist.json" "rpz.json" "rpz-feeds.json" "blocklists.json" "honeypot.json" "reported-decisions.json")
 
 # Optional include filter: keep only CONFIG_PATHS entries whose arcname
 # appears in INCLUDE_FILE. No file / empty file = include everything.
@@ -97,12 +123,18 @@ for entry in "${CONFIG_PATHS[@]}"; do
   mkdir -p "$STAGE/$(dirname "$arc")"
   if [ -d "$src" ]; then
     mkdir -p "$STAGE/$arc"
-    if [ "$src" = "/etc/crowdsec" ]; then
+    if [ "$src" = "/etc/crowdsec" ] || [ "$src" = "/var/www/html" ]; then
       args=(-a)
-      for sub in "${CROWDSEC_EXCLUDE[@]}"; do
+      if [ "$src" = "/etc/crowdsec" ]; then excl=("${CROWDSEC_EXCLUDE[@]}"); else excl=("${WWW_EXCLUDE[@]}"); fi
+      for sub in "${excl[@]}"; do
         args+=(--exclude "$sub")
       done
       rsync "${args[@]}" "$src"/ "$STAGE/$arc/" 2>/dev/null || echo "WARN: could not fully read $src" >&2
+    elif [ "$src" = "/var/lib/tuxwall" ]; then
+      for sub in "${TUXWALL_STATE_ONLY[@]}"; do
+        [ -e "$src/$sub" ] || continue
+        cp -a "$src/$sub" "$STAGE/$arc/" 2>/dev/null || echo "WARN: could not read $src/$sub" >&2
+      done
     else
       cp -a "$src"/. "$STAGE/$arc/" 2>/dev/null || echo "WARN: could not fully read $src" >&2
     fi
@@ -110,6 +142,8 @@ for entry in "${CONFIG_PATHS[@]}"; do
     cp -a "$src" "$STAGE/$arc" 2>/dev/null || echo "WARN: could not read $src" >&2
   fi
 done
+# Bytecode caches are regenerated; never back them up (GLOBAL_EXCLUDE).
+find "$STAGE" -depth -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 progress 30 "Configuration files collected"
 
 # package state (requires root)
@@ -134,9 +168,14 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
 
-echo "==> Restoring system configuration (etc/, usr/local/)"
+echo "==> Restoring system configuration (etc/, usr/local/, var/)"
 [ -d etc ] && cp -a etc/. /etc/
 [ -d usr/local ] && cp -a usr/local/. /usr/local/
+[ -d var/lib/tuxwall ] && mkdir -p /var/lib/tuxwall && cp -a var/lib/tuxwall/. /var/lib/tuxwall/
+[ -d var/lib/kea ] && mkdir -p /var/lib/kea && cp -a var/lib/kea/. /var/lib/kea/
+[ -d var/www/html ] && mkdir -p /var/www/html && cp -a var/www/html/. /var/www/html/
+# NOTE: iptables-save.txt / ip6tables-save.txt are a reference only; the
+# firewall comes back from etc/ufw (+ ufw reload below).
 
 echo "==> Reloading systemd unit definitions"
 systemctl daemon-reload || true
@@ -186,12 +225,24 @@ progress 70 "Writing manifest"
   done
   echo ""
   echo "Also included: dpkg-selections.txt, apt-manual.txt, package-versions.txt, iptables-save.txt, ip6tables-save.txt"
+  echo "Not included: databases (CrowdSec/reports/MariaDB: see the USB backup), GeoIP databases,"
+  echo "              caches, logs, histories, home directories (incl. the opencode credential store)"
 } > "$STAGE/manifest.txt"
 
 progress 85 "Compressing archive"
 mkdir -p "$OUTDIR"
-tar -C "$STAGE" -czf "$OUTDIR/$NAME" .
-chmod 600 "$OUTDIR/$NAME"
+# Write under a temporary name and rename only after the archive verifies,
+# so a failed or interrupted run never leaves a valid-looking backup.
+PARTIAL="$OUTDIR/.${NAME}.partial"
+tar -C "$STAGE" -czf "$PARTIAL" .
+chmod 600 "$PARTIAL"
+progress 92 "Verifying archive"
+if ! tar -tzf "$PARTIAL" >/dev/null 2>&1; then
+  echo "ERROR: archive verification failed (tar -tzf)" >&2
+  exit 4
+fi
+mv -f "$PARTIAL" "$OUTDIR/$NAME"
+PARTIAL=""
 st="$OUTDIR/$NAME"
 progress 95 "Archive written: $st"
 

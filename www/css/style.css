@@ -555,6 +555,27 @@ input[type="file"]::file-selector-button:active {
 }
 .bk-msg-ok { color: var(--green); }
 .bk-msg-err { color: var(--red); }
+/* Backups phase 1 (2026-11-18): persistent last-run error + restore preview. */
+.bk-lasterr { margin: 10px 14px; padding: 10px 14px; border-radius: 10px; font-size: 12.5px; line-height: 1.5;
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 35%, transparent); color: var(--text); }
+.bk-lasterr > b { color: var(--red); }
+.bk-lasterr details { margin-top: 6px; }
+.bk-lasterr pre, .bk-preview pre { margin: 6px 0 0; max-height: 320px; overflow: auto; padding: 8px 10px;
+  border-radius: 8px; background: color-mix(in srgb, var(--text) 5%, transparent);
+  font-family: var(--tw-font-mono, monospace); font-size: 12px; line-height: 1.45; white-space: pre; }
+.bk-preview { margin: 12px 0 4px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; }
+.bk-preview-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.bk-preview-head .mono { overflow-wrap: anywhere; min-width: 0; }
+.bk-preview-meta { margin: 6px 0; font-size: 12.5px; overflow-wrap: anywhere; }
+.bk-preview-strict { margin: 8px 0; padding: 8px 12px; border-radius: 8px; font-size: 12.5px;
+  background: color-mix(in srgb, var(--amber, #d29922) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber, #d29922) 38%, transparent); }
+.bk-preview-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.bk-diff-add { color: var(--green); }
+.bk-diff-del { color: var(--red); }
+.bk-diff-hunk { color: var(--muted); }
+.bk-kind { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
 
 .empty { padding: 40px; text-align: center; color: var(--muted); }
 

@@ -339,6 +339,8 @@
     bkSysFilesEmpty: document.getElementById("bk-sys-files-empty"),
     bkSysDrop: document.getElementById("bk-sys-drop"),
     bkSysFileHint: document.getElementById("bk-sys-file-hint"),
+    bkSysLastErr: document.getElementById("bk-sys-lasterr"),
+    bkSysPreview: document.getElementById("bk-sys-preview"),
     sysCpu: document.getElementById("sys-cpu"),
     sysMem: document.getElementById("sys-mem"),
     sysUptime: document.getElementById("sys-uptime"),
@@ -6949,10 +6951,11 @@
         <td class="muted">${esc(f.service || "—")}</td>
         <td class="td-right">
           ${actBtn("download", "Download this file", `data-name="${esc(data.backup)}" data-file="${esc(f.name)}"`, "bk-file-dl")}
-          ${actBtn("backup", "Restore this file from the backup", `data-name="${esc(data.backup)}" data-file="${esc(f.name)}" data-service="${esc(f.service || "")}"`, "bk-file-restore")}
+          ${f.kind === "info" ? "" : actBtn("backup", f.kind === "firewall" ? "Import as firewall snapshot (preview first)" : "Preview and restore this file", `data-name="${esc(data.backup)}" data-file="${esc(f.name)}"`, "bk-file-restore")}
         </td>
       </tr>`).join("") || `<tr><td colspan="4" class="muted">No files.</td></tr>`;
     els.bkSysContents.hidden = false;
+    hideBkPreview();
     if (els.bkSysFilesSearch) els.bkSysFilesSearch.value = "";
     filterSystemBackupFiles();
     requestAnimationFrame(revealBackupContents);
@@ -6968,10 +6971,29 @@
     }
   }
 
+  function renderBkLastError(d) {
+    const box = els.bkSysLastErr;
+    if (!box) return;
+    const lr = d && d.last_run;
+    if (!d || d.running || !lr || lr.ok !== false) {
+      box.hidden = true;
+      box.innerHTML = "";
+      return;
+    }
+    const when = lr.finished ? new Date(lr.finished * 1000).toLocaleString() : "";
+    const tail = (lr.stderr_tail || "").trim();
+    box.innerHTML =
+      `<b>Last backup failed</b>${when ? ` <span class="muted">(${esc(when)}${lr.who ? ", " + esc(lr.who) : ""})</span>` : ""}: ` +
+      `${esc(lr.error || "unknown error")}. An incident stays open until the next successful backup.` +
+      (tail ? `<details><summary>Script output (last lines)</summary><pre>${esc(tail)}</pre></details>` : "");
+    box.hidden = false;
+  }
+
   async function refreshSystemBackups() {
     try {
       const data = await fetchJSON("/api/backups/system");
       renderSystemBackups(data);
+      renderBkLastError(data);
       return data;
     } catch (err) {
       setBkSysMsg("System backups: " + err.message, true);
@@ -7059,8 +7081,8 @@
         updateBackupFileHint();
         renderSystemBackupContents({ backup: data.name, files: data.files });
         setBkSysMsg(
-          `Examined "${data.name}" — ${(data.files || []).length} restorable file(s) listed below. ` +
-          "Choose which to restore; current files get a timestamped .bak.", false);
+          `Examined "${data.name}" — ${(data.files || []).length} file(s) listed below. ` +
+          "Each restore shows a preview first; the current file is copied to the pre-restore folder.", false);
       } catch (err) {
         setBkSysMsg("Upload: " + err.message, true);
       }
@@ -7112,8 +7134,9 @@
       const san = e.target.closest(".bk-sys-san");
       if (san) {
         if (!(await (window.twConfirm || window.confirm)(`Create a sanitized export of "${san.dataset.name}"?\n\n` +
-          "Secrets (WireGuard keys, CrowdSec/cloudflared credentials, tuxwall auth) are removed or redacted. " +
-          "The export downloads automatically and a copy stays on this server."))) return;
+          "Only config files go in (no dashboard code, DHCP leases or binaries). Private keys, tokens, " +
+          "passwords, API keys, webhook URLs and plugin secrets are removed or redacted, and the export is " +
+          "re-scanned before it is written. The export downloads automatically and a copy stays on this server."))) return;
         try {
           const res = await postJSON("/api/backups/system/sanitize", { name: san.dataset.name });
           if (!res.ok || !res.name) throw new Error(res.error || "sanitize failed");
@@ -7134,6 +7157,7 @@
           await postJSON("/api/backups/system/delete", { name: del.dataset.name });
           setBkSysMsg("System backup deleted.", false);
           els.bkSysContents.hidden = true;
+          hideBkPreview();
           await refreshSystemBackups();
         } catch (err) {
           setBkSysMsg(err.message, true);
@@ -7150,33 +7174,153 @@
         return;
       }
       const rst = e.target.closest(".bk-file-restore");
-      if (rst) {
-        const svc = rst.dataset.service;
-        const isFw = rst.dataset.file === "iptables-save.txt" || rst.dataset.file === "ip6tables-save.txt";
-        const isCode = rst.dataset.file.startsWith("var/www/html/includes/") ||
-          rst.dataset.file.startsWith("var/www/html/scripts/");
-        if (!(await (window.twConfirm || window.confirm)(`Restore "${rst.dataset.file}" from this backup?\n\n` +
-          (isFw
-            ? "This atomically replaces the ENTIRE live ruleset (IPv4 or IPv6) with the rules from the backup. Do this from a LAN connection."
-            : "The current file is kept as a timestamped .bak alongside it." +
-              (svc ? `\nAfterwards, apply it with: sudo systemctl restart ${svc}` : ""))))) return;
-        if (isCode && !(await (window.twConfirm || window.confirm)(`SECOND CONFIRMATION — "${rst.dataset.file}" is executable dashboard code.\n\n` +
-          "Restoring it changes what the dashboard itself runs. Only proceed if you trust this backup."))) return;
-        try {
-          const res = await postJSON("/api/backups/system/restore-file", {
-            name: rst.dataset.name, file: rst.dataset.file,
-            confirm_code_replace: isCode,
-          });
-          if (!res.ok) throw new Error(res.error || "restore failed");
-          setBkSysMsg(
-            `Restored ${res.restored}.` +
-            (res.restart_required ? ` To apply, run: sudo systemctl restart ${res.restart_required}` : "") +
-            (res.note ? ` (${res.note})` : ""), false);
-        } catch (err) {
-          setBkSysMsg("Restore: " + err.message, true);
-        }
-      }
+      if (rst) await previewBkRestore(rst.dataset.name, rst.dataset.file);
     });
+
+    if (els.bkSysPreview) els.bkSysPreview.addEventListener("click", onBkPreviewClick);
+  }
+
+  // ---- Single-file restore: preview (diff vs live) -> confirm(s) -> apply ----
+  let bkPreview = null;
+
+  async function bkApi(url, body) {
+    const opts = body === undefined ? { cache: "no-store" } : {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body), cache: "no-store",
+    };
+    const res = await fetch(url, opts);
+    if (res.status === 401) handleSessionExpired();
+    let data = null;
+    try { data = await res.json(); } catch (_) { data = null; }
+    if (!res.ok || !data || !data.ok) {
+      const err = new Error((data && data.error) || `HTTP ${res.status}`);
+      err.data = data;
+      throw err;
+    }
+    return data;
+  }
+
+  function hideBkPreview() {
+    bkPreview = null;
+    if (!els.bkSysPreview) return;
+    els.bkSysPreview.hidden = true;
+    els.bkSysPreview.innerHTML = "";
+  }
+
+  function bkDiffHtml(text) {
+    return String(text || "").split("\n").map((l) => {
+      const c = l.startsWith("@@") ? "bk-diff-hunk"
+        : (l.startsWith("+") && !l.startsWith("+++")) ? "bk-diff-add"
+          : (l.startsWith("-") && !l.startsWith("---")) ? "bk-diff-del" : "";
+      return c ? `<span class="${c}">${esc(l)}</span>` : esc(l);
+    }).join("\n");
+  }
+
+  function renderBkPreview(p) {
+    const box = els.bkSysPreview;
+    const kinds = { new: "New file", modified: "Changes the live file", identical: "Identical to the live file",
+      firewall: "Firewall file", info: "Backup information" };
+    let body = "";
+    if (p.kind === "firewall" || p.kind === "info") {
+      body = `<p class="bk-preview-meta">${esc(p.message || "")}</p>` +
+        `<div class="bk-preview-actions">` +
+        (p.kind === "firewall" ? `<button type="button" class="btn btn-sm btn-primary" data-bk-act="fwimport">Import as firewall snapshot</button>` : "") +
+        `<button type="button" class="btn btn-sm" data-bk-act="close">Close</button></div>`;
+    } else {
+      const perms = p.perms || {};
+      const diff = p.binary ? `<p class="muted">Binary file — no text diff (${formatBytes(p.old_size || 0)} → ${formatBytes(p.new_size || 0)}).</p>`
+        : p.diff_note ? `<p class="muted">${esc(p.diff_note)}.</p>`
+          : p.diff ? `<pre>${bkDiffHtml(p.diff)}</pre>` +
+            (p.diff_truncated ? `<p class="muted">Diff truncated (${p.diff_lines} lines in total).</p>` : "")
+            : "";
+      body =
+        `<p class="bk-preview-meta">Target <span class="mono">${esc(p.target)}</span> · ` +
+        `permissions <span class="mono">${esc(perms.mode || "?")} ${esc(perms.owner || "")}</span> ` +
+        `<span class="muted">(${esc(perms.source || "")})</span>` +
+        (p.creates_dirs ? ` · creates <span class="mono">${esc(p.creates_dirs)}</span>` : "") +
+        (p.restart_hint ? ` · afterwards: <span class="mono">${esc(p.restart_hint === "daemon-reload" ? "sudo systemctl daemon-reload" : p.restart_hint.indexOf(" ") > 0 ? "sudo " + p.restart_hint : "sudo systemctl restart " + p.restart_hint)}</span>` : "") +
+        `</p>` +
+        (p.strict ? `<div class="bk-preview-strict"><b>Needs a second confirmation:</b> this file ${esc(p.strict_reason || "is sensitive")}.</div>` : "") +
+        diff +
+        `<div class="bk-preview-actions">` +
+        (p.kind === "identical"
+          ? `<button type="button" class="btn btn-sm" disabled>Nothing to restore</button>`
+          : `<button type="button" class="btn btn-sm btn-primary" data-bk-act="apply">Restore this file</button>`) +
+        `<button type="button" class="btn btn-sm" data-bk-act="close">Cancel</button></div>`;
+    }
+    box.innerHTML =
+      `<div class="bk-preview-head"><b>Restore preview</b> <span class="mono">${esc(p.member)}</span>` +
+      `<span class="bk-kind">${esc(kinds[p.kind] || p.kind)}</span></div>` + body;
+    box.hidden = false;
+    box.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  async function previewBkRestore(name, file) {
+    try {
+      const p = await bkApi("/api/backups/system/preview?name=" + encodeURIComponent(name) +
+        "&file=" + encodeURIComponent(file));
+      bkPreview = { name, file, p };
+      renderBkPreview(p);
+      setBkSysMsg("");
+    } catch (err) {
+      hideBkPreview();
+      setBkSysMsg("Preview: " + err.message, true);
+    }
+  }
+
+  async function onBkPreviewClick(e) {
+    const b = e.target.closest("[data-bk-act]");
+    if (!b || !bkPreview) return;
+    const act = b.dataset.bkAct;
+    const { name, file, p } = bkPreview;
+    const ask = window.twConfirm || window.confirm;
+    if (act === "close") { hideBkPreview(); return; }
+    if (act === "fwimport") {
+      try {
+        b.disabled = true;
+        const r = await bkApi("/api/backups/system/import-firewall", { name });
+        els.bkSysPreview.innerHTML =
+          `<div class="bk-preview-head"><b>Imported as firewall snapshot</b> <span class="mono">${esc(r.id)}</span></div>` +
+          `<p class="bk-preview-meta">${esc(r.message || "")}</p>` +
+          ((r.notes || []).length ? `<p class="muted">${esc(r.notes.join(" · "))}</p>` : "") +
+          `<div class="bk-preview-actions"><button type="button" class="btn btn-sm btn-primary" data-bk-act="fwopen">Open firewall snapshots</button>` +
+          `<button type="button" class="btn btn-sm" data-bk-act="close">Close</button></div>`;
+      } catch (err) {
+        b.disabled = false;
+        setBkSysMsg("Firewall import: " + err.message, true);
+      }
+      return;
+    }
+    if (act === "fwopen") {
+      hideBkPreview();
+      if (window.twGo) await window.twGo("firewall", "settings");
+      if (window.twFwSnapshots) window.twFwSnapshots();
+      return;
+    }
+    if (act !== "apply") return;
+    if (!(await ask(`Restore "${file}" from ${name}?\n\n` +
+      (p.kind === "new" ? `This creates ${p.target} (mode ${(p.perms || {}).mode}).` : `This overwrites ${p.target} with the version shown in the preview.`) +
+      " The current file is copied to /var/lib/tuxwall/backups/pre-restore/ first; the write is atomic. " +
+      "Services are not restarted."))) return;
+    if (p.strict && !(await ask(`SECOND CONFIRMATION — "${file}" ${p.strict_reason || "is sensitive"}.\n\n` +
+      "Only proceed if you trust this backup and know how to undo the change."))) return;
+    try {
+      b.disabled = true;
+      const res = await bkApi("/api/backups/system/restore-file", {
+        name, file, confirm_strict: !!p.strict,
+        expect_sha256: p.new_sha256, expect_live_sha256: p.old_sha256,
+      });
+      hideBkPreview();
+      const hint = res.restart_required
+        ? (res.restart_required === "daemon-reload" ? " Then run: sudo systemctl daemon-reload"
+          : res.restart_required.indexOf(" ") > 0 ? ` Then run: sudo ${res.restart_required}`
+            : ` To apply, run: sudo systemctl restart ${res.restart_required}`) : "";
+      setBkSysMsg(`Restored ${res.target} (mode ${res.mode}).` +
+        (res.pre_restore ? ` Previous version saved to ${res.pre_restore}.` : "") + hint, false);
+    } catch (err) {
+      b.disabled = false;
+      setBkSysMsg("Restore: " + err.message, true);
+    }
   }
 
   function renderUpdates(d) {

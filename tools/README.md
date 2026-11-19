@@ -39,3 +39,18 @@ catch these). Exit 1 on any violation.
 `python3 -m py_compile` / `node --check` still matter (syntax). The three
 together: syntax, import-time names, boot-time DOM — each one catches what
 the others can't.
+
+## backup_safety_check.py — backups module (CI)
+
+```bash
+python3 tools/backup_safety_check.py                 # pure tests in a temp root
+sudo python3 tools/backup_safety_check.py --live     # + sanitize the newest real backup in memory
+```
+
+Checks `www/includes/backups.py`: catalog vs `system-backup.sh`, item size
+estimates, retention (7 daily / 4 weekly / 3 monthly, newest + pinned kept),
+persisted job state and the `backup:failed` incident, the sanitized export
+against a synthetic archive containing every known leak type (and, with
+`--live`, every secret value of the real archive), upload limits, and the
+single-file restore (preview, atomic write, permissions, pre-restore copy,
+symlink refusal, strict second confirm, firewall routing, audit log).

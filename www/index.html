@@ -6,7 +6,7 @@
   <title>TuxWall - Network Dashboard</title>
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
-  <link rel="stylesheet" href="/css/style.css?v=20261117001203">
+  <link rel="stylesheet" href="/css/style.css?v=20261118202024">
   <link rel="stylesheet" href="/css/polish.css?v=202611120056">
   <link rel="stylesheet" href="/css/firewall.css?v=202611120056">
   <link rel="stylesheet" href="/css/bento.css?v=202611120056">
@@ -3153,8 +3153,9 @@
             <button class="btn btn-sm btn-primary btn-act" id="bk-sys-create" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v7c0 1.7 3.1 3 7 3h1"/><path d="M19 6v5"/><path d="M5 10c0 1.7 3.1 3 7 3"/><path d="M16 17h6m-3-3-3 3 3 3"/></svg><span>Create system backup</span></button>
           </div>
         </div>
-        <p class="muted">Snapshot of the configs selected below into a single archive, saved to <code>/var/lib/tuxwall/backups/system</code> on this server. Includes live firewall rules, installed-package state, and the dashboard files. Download and store a copy on another computer.</p>
-        <p class="bk-warn"><b>Warning:</b> archives contain secrets (WireGuard keys, CrowdSec keys) — never share them as-is; use <b>Export sanitized</b> instead.</p>
+        <p class="muted">Snapshot of the items selected below into a single archive (root-only), saved to <code>/var/lib/tuxwall/backups/system</code> on this server, plus installed-package lists and a reference dump of the live firewall rules. Not included: databases (CrowdSec, reports), GeoIP data, logs and caches. Older backups are pruned automatically (7 daily, 4 weekly, 3 monthly; the newest is always kept). Download and store a copy on another computer.</p>
+        <p class="bk-warn"><b>Warning:</b> archives contain secrets (WireGuard, SSH host and TLS keys, tokens, passwords) — never share them as-is; use <b>Export sanitized</b> instead.</p>
+        <div class="bk-lasterr" id="bk-sys-lasterr" role="alert" hidden></div>
         <div class="upd-progress" id="bk-sys-progress" hidden>
           <div class="bar upd-bar"><div class="bar-fill" id="bk-sys-bar" style="width:0%"></div></div>
           <p class="muted upd-status" id="bk-sys-status"></p>
@@ -3176,7 +3177,7 @@
         </div>
         <div id="bk-sys-contents" hidden>
           <h3 id="bk-sys-contents-title"></h3>
-          <p class="muted">Download any file, or restore a single file to its live location. Restores never auto-restart services — apply the suggested restart yourself when ready.</p>
+          <p class="muted">Download any file, or restore a single file to its live location: you see a preview (diff against the live file) first, the current file is copied to <code>/var/lib/tuxwall/backups/pre-restore/</code>, and the write is atomic. Firewall files are imported as a firewall snapshot instead (guard check, 60 s confirm-or-revert). Restores never auto-restart services — apply the suggested restart yourself when ready.</p>
           <div class="card-toolbar bk-files-toolbar">
             <input type="search" id="bk-sys-files-search" placeholder="Filter files or services…" autocomplete="off" spellcheck="false">
             <span class="toolbar-spacer"></span>
@@ -3189,10 +3190,11 @@
             </table>
           </div>
           <p class="muted bk-files-empty" id="bk-sys-files-empty" hidden>No files match that filter.</p>
+          <div class="bk-preview" id="bk-sys-preview" hidden></div>
         </div>
         <h3>Restore from uploaded backup</h3>
         <div class="bk-upload" id="bk-sys-drop">
-          <p class="muted">Upload a system backup <b>.tar.gz</b> to examine it and choose which files to restore (e.g. KEA config, Unbound config, firewall rules). The archive is kept on this server until replaced.</p>
+          <p class="muted">Upload a system backup <b>.tar.gz</b> to examine it and choose which files to restore (e.g. KEA config, Unbound config, firewall rules). Uploads are checked (size and member limits, no unsafe paths); the last two are kept on this server.</p>
           <div class="bk-upload-row">
             <input type="file" id="bk-sys-file" accept=".tar.gz,application/gzip">
             <button class="btn btn-sm" id="bk-sys-upload" type="button" disabled>Upload &amp; examine</button>
@@ -3740,7 +3742,7 @@
   </div>
 </div>
 <script src="/scripts/worldmap.js?v=202611120056"></script>
-<script src="/scripts/dashboard.js?v=20261114113005"></script>
+<script src="/scripts/dashboard.js?v=20261118202024"></script>
 <script src="/scripts/enhance.js?v=20261114075640"></script>
 <script src="/scripts/netmap.js?v=202611120056"></script>
 <script src="/scripts/insights.js?v=20261112182249"></script>

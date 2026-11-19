@@ -3,7 +3,6 @@ import base64
 import gzip
 import hashlib
 import hmac
-import copy
 import io
 import ipaddress
 import json
@@ -18,7 +17,6 @@ import signal
 import socket
 import subprocess
 import sys
-import tarfile
 import tempfile
 import threading
 import time
@@ -45,6 +43,11 @@ try:
 except Exception as _exc:
     print("tuxwall: firewall guard/snapshot modules unavailable: %r" % _exc, flush=True)
     _fw_guard = _fw_snap = None
+try:
+    import backups as _bk
+except Exception as _exc:
+    print("tuxwall: backups module unavailable: %r" % _exc, flush=True)
+    _bk = None
 try:
     import fw_lint as _fw_lint
     import fw_edit as _fw_edit
@@ -11125,352 +11128,149 @@ def set_hostname(name):
 
 
 BACKUP_DIR = "/var/lib/tuxwall/backups"
-WWW_DIR = "/var/www/html"
-SOURCE_DIR = "/var/www/html"
-BACKUP_RE = re.compile(r"^[A-Za-z0-9._-]+\.tar\.gz$")
-BACKUP_TARGETS = ("index.html", "css", "scripts", "includes", "images")
-SOURCE_SYNC = ("index.html", "css/style.css", "scripts/dashboard.js", "includes/api_server.py")
 
-# --- Restore confirmation gate (live patch 2026-09-06) ---
-# Archive members under these prefixes replace executable code and need
-# an explicit confirm_code_replace flag before restore proceeds.
-RESTORE_CODE_PREFIXES = ("includes/", "scripts/")
-
-
-def list_backups():
-    try:
-        entries = []
-        for name in sorted(os.listdir(BACKUP_DIR), reverse=True):
-            if not BACKUP_RE.match(name):
-                continue
-            path = os.path.join(BACKUP_DIR, name)
-            try:
-                st = os.stat(path)
-            except OSError:
-                continue
-            entries.append({
-                "name": name,
-                "size": st.st_size,
-                "time": int(st.st_mtime),
-            })
-        return {"ok": True, "backups": entries}
-    except OSError as exc:
-        return {"ok": False, "error": str(exc), "backups": []}
-
-
-def create_backup():
-    os.makedirs(BACKUP_DIR, exist_ok=True)
-    name = "tuxwall-backup-" + time.strftime("%Y%m%d-%H%M%S") + ".tar.gz"
-    dest = os.path.join(BACKUP_DIR, name)
-    with tarfile.open(dest, "w:gz") as tar:
-        for entry in BACKUP_TARGETS:
-            path = os.path.join(WWW_DIR, entry)
-            if os.path.exists(path):
-                tar.add(path, arcname=entry)
-    os.chmod(dest, 0o600)
-    st = os.stat(dest)
-    return {"ok": True, "backup": {"name": name, "size": st.st_size, "time": int(st.st_mtime)}}
-
-
-def _tar_member_safe(member):
-    if not member.isreg():
-        return False
-    name = member.name.replace("\\", "/")
-    if name.startswith("/") or ".." in name.split("/"):
-        return False
-    return True
-
-
-def restore_backup(filename, raw=None):
-    if raw is None:
-        base = os.path.basename(filename or "")
-        if not BACKUP_RE.match(base):
-            raise ValueError("Invalid backup name")
-        path = os.path.join(BACKUP_DIR, base)
-        if not os.path.isfile(path):
-            raise ValueError("Backup not found")
-    else:
-        os.makedirs(BACKUP_DIR, exist_ok=True)
-        base = os.path.basename(filename or "") or "tuxwall-restore.tar.gz"
-        if not base.endswith(".tar.gz"):
-            base += ".tar.gz"
-        path = os.path.join(BACKUP_DIR, base)
-        with open(path, "wb") as f:
-            f.write(raw)
-
-    restored = []
-    try:
-        tar = tarfile.open(path, "r:gz")
-    except (tarfile.TarError, OSError, EOFError) as exc:
-        raise ValueError("Not a valid .tar.gz backup")
-    with tar:
-        for member in tar.getmembers():
-            if not _tar_member_safe(member):
-                continue
-            top = member.name.split("/", 1)[0]
-            if top not in BACKUP_TARGETS:
-                continue
-            dest = os.path.join(WWW_DIR, member.name)
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            with tar.extractfile(member) as src, open(dest, "wb") as out:
-                shutil.copyfileobj(src, out)
-            restored.append(member.name)
-
-    for rel in SOURCE_SYNC:
-        src = os.path.join(WWW_DIR, rel)
-        if os.path.isfile(src):
-            dst = os.path.join(SOURCE_DIR, rel)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(src, dst)
-
-    return {
-        "restored": sorted(restored),
-        "restart_required": "includes/api_server.py" in restored,
-    }
-
-
-def _preview_backup_file(path):
-    """Inspect a .tar.gz without extracting: sha256, safe member list,
-    and whether it touches executable code. Raises ValueError if invalid."""
-    import hashlib as _hl
-    h = _hl.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1048576), b""):
-            h.update(chunk)
-    try:
-        tar = tarfile.open(path, "r:gz")
-    except (tarfile.TarError, OSError, EOFError):
-        raise ValueError("Not a valid .tar.gz backup")
-    members = []
-    with tar:
-        for member in tar.getmembers():
-            if not _tar_member_safe(member):
-                continue
-            top = member.name.split("/", 1)[0]
-            if top not in BACKUP_TARGETS:
-                continue
-            members.append(member.name)
-    members.sort()
-    touches_code = any(m.startswith(RESTORE_CODE_PREFIXES) for m in members)
-    return {"sha256": h.hexdigest(), "members": members,
-            "touches_code": touches_code}
-
-
-def _stage_restore_upload(filename, raw):
-    """Persist uploaded bytes as a staged backup file, return its basename."""
-    os.makedirs(BACKUP_DIR, exist_ok=True)
-    base = os.path.basename(filename or "") or "tuxwall-restore.tar.gz"
-    if not base.endswith(".tar.gz"):
-        base += ".tar.gz"
-    if not BACKUP_RE.match(base):
-        base = "tuxwall-restore-upload.tar.gz"
-    path = os.path.join(BACKUP_DIR, base)
-    with open(path, "wb") as f:
-        f.write(raw)
-    return base, path
-
-
-def _snapshot_live_code():
-    """Snapshot the running backend before it can be overwritten."""
-    src = os.path.join(WWW_DIR, "includes", "api_server.py")
-    if not os.path.isfile(src):
-        return None
-    dst = os.path.join(BACKUP_DIR, "api_server.py.bak-"
-                        + time.strftime("%Y%m%d%H%M%S"))
-    try:
-        shutil.copy2(src, dst)
-        return dst
-    except OSError:
-        return None
-
-
-def delete_backup(filename):
-    base = os.path.basename(filename or "")
-    if not BACKUP_RE.match(base):
-        raise ValueError("Invalid backup name")
-    path = os.path.join(BACKUP_DIR, base)
-    if not os.path.isfile(path):
-        raise ValueError("Backup not found")
-    os.remove(path)
-    return {"ok": True, "deleted": base}
+# The dashboard-only backups (/api/backups, /create, /delete, /download,
+# /restore) were never used by the UI and could overwrite /var/www/html from
+# an uploaded archive. Removed in Backups phase 1 (2026-11-18): they answer
+# 410 Gone. System backups live under /api/backups/system/*.
+LEGACY_BACKUP_PATHS = frozenset({"/api/backups", "/api/backups/create", "/api/backups/delete",
+                                 "/api/backups/download", "/api/backups/restore"})
+LEGACY_BACKUP_GONE = {"ok": False, "gone": True,
+                      "error": "The dashboard-only backup endpoints were removed; use the system "
+                               "backups under System > Backups."}
 
 
 SYSTEM_BACKUP_DIR = os.path.join(BACKUP_DIR, "system")
 SYSTEM_BACKUP_RE = re.compile(r"^system-backup-\d{8}-\d{6}\.tar\.gz$")
-SYSTEM_BACKUP_SCRIPT = "/usr/local/sbin/system-backup.sh"
+SANITIZED_RE = re.compile(r"^sanitized-\d{8}-\d{6}\.tar\.gz$")
+UPLOADED_RE = re.compile(r"^uploaded-\d{8}-\d{6}\.tar\.gz$")
 
-# Catalog of capturable config groups. key = arcname passed to the backup
-# script's -i filter; service = hint shown after a single-file restore.
-SYSTEM_BACKUP_ITEMS = [
-    {"arc": "etc/netplan", "path": "/etc/netplan", "label": "Network interfaces (netplan)", "service": "systemd-networkd"},
-    {"arc": "etc/systemd/network", "path": "/etc/systemd/network", "label": "systemd-networkd", "service": "systemd-networkd"},
-    {"arc": "etc/kea", "path": "/etc/kea", "label": "KEA DHCP server", "service": "kea-dhcp4-server"},
-    {"arc": "etc/unbound", "path": "/etc/unbound", "label": "Unbound DNS resolver", "service": "unbound"},
-    {"arc": "etc/ufw", "path": "/etc/ufw", "label": "UFW firewall", "service": "ufw"},
-    {"arc": "etc/nginx", "path": "/etc/nginx", "label": "nginx web server", "service": "nginx"},
-    {"arc": "etc/systemd/system", "path": "/etc/systemd/system", "label": "systemd units", "service": "daemon-reload"},
-    {"arc": "etc/sysctl.d", "path": "/etc/sysctl.d", "label": "Kernel settings (sysctl.d)", "service": "sysctl --system"},
-    {"arc": "etc/radvd.conf", "path": "/etc/radvd.conf", "label": "RA/NDP daemon (radvd)", "service": "radvd"},
-    {"arc": "etc/wireguard", "path": "/etc/wireguard", "label": "WireGuard VPN", "service": "wg-quick@wg0"},
-    {"arc": "etc/cloudflared", "path": "/etc/cloudflared", "label": "cloudflared", "service": "cloudflared"},
-    {"arc": "etc/tuxwall", "path": "/etc/tuxwall", "label": "TuxWall", "service": "tuxwall"},
-    {"arc": "etc/crowdsec", "path": "/etc/crowdsec", "label": "CrowdSec", "service": "crowdsec"},
-    {"arc": "etc/apt/sources.list", "path": "/etc/apt/sources.list", "label": "APT sources.list", "service": None},
-    {"arc": "etc/apt/sources.list.d", "path": "/etc/apt/sources.list.d", "label": "APT sources.list.d", "service": None},
-    {"arc": "etc/hosts", "path": "/etc/hosts", "label": "/etc/hosts", "service": None},
-    {"arc": "etc/hostname", "path": "/etc/hostname", "label": "/etc/hostname", "service": None},
-    {"arc": "etc/fstab", "path": "/etc/fstab", "label": "/etc/fstab", "service": None},
-    {"arc": "etc/hosts.allow", "path": "/etc/hosts.allow", "label": "/etc/hosts.allow", "service": None},
-    {"arc": "etc/hosts.deny", "path": "/etc/hosts.deny", "label": "/etc/hosts.deny", "service": None},
-    {"arc": "usr/local/bin", "path": "/usr/local/bin", "label": "/usr/local/bin scripts", "service": None},
-    {"arc": "usr/local/sbin", "path": "/usr/local/sbin", "label": "/usr/local/sbin scripts", "service": None},
-    {"arc": "var/www/html", "path": "/var/www/html", "label": "TuxWall dashboard files", "service": "tuxwall"},
-]
-
-# Map from archive arc prefix -> service hint for restores
-_SYSTEM_BACKUP_SERVICE_BY_ARC = {i["arc"]: i["service"] for i in SYSTEM_BACKUP_ITEMS}
-
+# Catalog, retention, job state, sanitizer and restore live in
+# includes/backups.py (tested by tools/backup_safety_check.py); this file
+# keeps the in-memory progress of the dashboard-started run and the routes.
 _system_backup_job = {"running": False, "pct": 0, "step": "", "result": None, "error": None}
 _system_backup_lock = threading.Lock()
 
 
+def _bk_required():
+    if _bk is None:
+        raise RuntimeError("Backup module unavailable (includes/backups.py failed to import)")
+
+
 def system_backup_items():
-    """List the capturable config groups with existence + rough size."""
-    items = []
-    for item in SYSTEM_BACKUP_ITEMS:
+    _bk_required()
+    return {"ok": True, "items": _bk.items_listing()}
+
+
+def _backup_incident_refresh():
+    """Open/clear backup:failed right away instead of at the next tick."""
+    def run():
         try:
-            st = os.stat(item["path"])
-            if os.path.isdir(item["path"]):
-                total = 0
-                for root, dirs, files in os.walk(item["path"]):
-                    for fn in files:
-                        try:
-                            total += os.path.getsize(os.path.join(root, fn))
-                        except OSError:
-                            pass
-                size = total
-            else:
-                size = st.st_size
-            items.append({**item, "exists": True, "size": size})
-        except OSError:
-            items.append({**item, "exists": False, "size": 0})
-    return {"ok": True, "items": items}
+            run_incident_check()
+        except Exception as exc:
+            print("[backup] incident refresh failed: %r" % exc, flush=True)
+    threading.Thread(target=run, daemon=True).start()
 
 
-def _system_backup_worker(include_file=None):
-    global _system_backup_job
+def _system_backup_worker(include, who):
+    def progress(pct, step):
+        with _system_backup_lock:
+            _system_backup_job["pct"] = pct
+            _system_backup_job["step"] = step
+    result = error = None
     try:
-        os.makedirs(SYSTEM_BACKUP_DIR, exist_ok=True)
-        script = SYSTEM_BACKUP_SCRIPT
-        if not os.path.isfile(script):
-            raise FileNotFoundError(
-                "Backup script missing (%s). Install it: sudo bash ~/tuxwall-blocklist/deploy.sh" % script
-            )
-        cmd = [script, "-o", SYSTEM_BACKUP_DIR]
-        if include_file:
-            cmd += ["-i", include_file]
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        result = None
-        error = None
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            m = re.match(r"^PROGRESS\s+(\d+)\s*(.*)$", line)
-            if m:
-                with _system_backup_lock:
-                    _system_backup_job["pct"] = int(m.group(1))
-                    _system_backup_job["step"] = m.group(2)
-                continue
-            m = re.match(r"^RESULT\s+(\S+)$", line)
-            if m:
-                result = m.group(1)
-                continue
-        proc.wait()
-        if proc.returncode != 0:
-            error = "Backup script exited with status %d" % proc.returncode
-        if not error:
-            _prune_system_backups()
-        with _system_backup_lock:
-            _system_backup_job["result"] = result if result and not error else None
-            _system_backup_job["error"] = error
+        run = _bk.run_job(include=include, who=who, trigger="manual", on_progress=progress)
+        if run.get("ok"):
+            result = run.get("result")
+        else:
+            error = run.get("error") or "Backup failed"
+    except _bk.Refused as exc:
+        error = exc.payload.get("error") or str(exc)
     except Exception as exc:
-        with _system_backup_lock:
-            _system_backup_job["error"] = str(exc)
-    finally:
-        if include_file:
-            try:
-                os.unlink(include_file)
-            except OSError:
-                pass
-        with _system_backup_lock:
-            _system_backup_job["running"] = False
-            _system_backup_job["pct"] = 100 if _system_backup_job["error"] else _system_backup_job["pct"]
+        error = str(exc)
+    with _system_backup_lock:
+        _system_backup_job.update({"running": False, "result": result, "error": error,
+                                   "pct": 100 if error else _system_backup_job["pct"]})
+    print("[backup] system backup by %s: %s" % (who or "?", result or ("FAILED: %s" % error)), flush=True)
+    _backup_incident_refresh()
 
 
-def create_system_backup(include=None):
-    include_file = None
+def create_system_backup(include=None, who=""):
+    _bk_required()
     if include is not None:
         if not isinstance(include, list) or not include:
             raise ValueError("Invalid include list")
-        valid = {i["arc"] for i in SYSTEM_BACKUP_ITEMS}
-        unknown = [a for a in include if a not in valid]
+        unknown = [a for a in include if a not in _bk.ITEM_BY_ARC]
         if unknown:
-            raise ValueError("Unknown config item(s): %s" % ", ".join(unknown[:3]))
-        include_file = os.path.join(SYSTEM_BACKUP_DIR, ".include-%d" % int(time.time()))
-        with open(include_file, "w") as f:
-            f.write("\n".join(include) + "\n")
+            raise ValueError("Unknown config item(s): %s" % ", ".join(str(a) for a in unknown[:3]))
     with _system_backup_lock:
-        if _system_backup_job["running"]:
+        if _system_backup_job["running"] or _bk.job_is_locked():
             raise ValueError("A system backup is already running")
         _system_backup_job.update({"pct": 0, "step": "Starting", "result": None, "error": None, "running": True})
-    threading.Thread(target=_system_backup_worker, args=(include_file,), daemon=True).start()
+    threading.Thread(target=_system_backup_worker, args=(include, who), daemon=True).start()
     return {"ok": True, "running": True}
+
+
+def _public_run(run):
+    if not run:
+        return None
+    keep = ("id", "started", "finished", "running", "ok", "trigger", "who", "result", "error",
+            "stderr_tail", "size", "pruned")
+    out = {k: run.get(k) for k in keep if k in run}
+    items = run.get("items")
+    out["items"] = items if items == "all" else len(items or [])
+    return out
 
 
 def system_backup_status():
     with _system_backup_lock:
-        return {
-            "ok": True,
-            "running": _system_backup_job["running"],
-            "pct": _system_backup_job["pct"],
-            "step": _system_backup_job["step"],
-            "result": _system_backup_job["result"],
-            "error": _system_backup_job["error"],
-            "backups": list_system_backups().get("backups", []),
-        }
+        job = dict(_system_backup_job)
+    st = {}
+    failed = None
+    if _bk is not None:
+        try:
+            st = _bk.load_state() if job["running"] else _bk.reconcile_interrupted()
+            failed = _bk.failure_incident()
+        except Exception as exc:
+            print("[backup] state read failed: %r" % exc, flush=True)
+    return {
+        "ok": True,
+        "running": job["running"],
+        "pct": job["pct"],
+        "step": job["step"],
+        "result": job["result"],
+        "error": job["error"],
+        "backups": list_system_backups().get("backups", []),
+        "last_run": _public_run(st.get("last_run")),
+        "last_success": _public_run(st.get("last_success")),
+        "last_failure": _public_run(st.get("last_failure")),
+        "failed": bool(failed),
+        "pinned": st.get("pinned") or [],
+        "retention": dict(_bk.RETENTION) if _bk else {},
+    }
 
 
 def list_system_backups():
-    try:
-        entries = []
-        for name in sorted(os.listdir(SYSTEM_BACKUP_DIR), reverse=True):
-            if not SYSTEM_BACKUP_RE.match(name):
-                continue
-            path = os.path.join(SYSTEM_BACKUP_DIR, name)
-            try:
-                st = os.stat(path)
-            except OSError:
-                continue
-            entries.append({"name": name, "size": st.st_size, "time": int(st.st_mtime)})
-        return {"ok": True, "backups": entries}
-    except OSError as exc:
-        return {"ok": False, "error": str(exc), "backups": []}
+    if _bk is None:
+        return {"ok": False, "error": "Backup module unavailable", "backups": []}
+    return {"ok": True, "backups": _bk.list_archives()}
 
 
-def delete_system_backup(filename):
+def delete_system_backup(filename, who="", client=""):
     base = os.path.basename(filename or "")
-    if not SYSTEM_BACKUP_RE.match(base):
+    if not (SYSTEM_BACKUP_RE.match(base) or SANITIZED_RE.match(base) or UPLOADED_RE.match(base)):
         raise ValueError("Invalid system backup name")
     path = os.path.join(SYSTEM_BACKUP_DIR, base)
     if not os.path.isfile(path):
-        raise ValueError("System backup not found")
+        raise FileNotFoundError("Backup not found")
     os.remove(path)
+    if _bk is not None:
+        try:
+            if base in (_bk.load_state().get("pinned") or []):
+                _bk.set_pinned("", base, False, who=who)
+            _bk.audit("", "delete", who=who, client=client, archive=base)
+        except Exception:
+            pass
     return {"ok": True, "deleted": base}
 
 
@@ -11730,304 +11530,83 @@ def _system_backup_path(filename, sanitized=False):
     return base, path
 
 
-UPLOADED_RE = re.compile(r"^uploaded-\d{8}-\d{6}\.tar\.gz$")
-UPLOADED_KEEP = 1
-
-
-def upload_system_backup(raw):
-    """Accept an uploaded system-backup archive, validate it, store it
-    (root-only), and return its examinable contents for selective restore."""
-    if not raw or len(raw) < 64:
-        raise ValueError("Upload is empty")
-    if raw[:2] != b"\x1f\x8b":
-        raise ValueError("Not a .tar.gz archive")
-    name = "uploaded-" + time.strftime("%Y%m%d-%H%M%S") + ".tar.gz"
-    path = os.path.join(SYSTEM_BACKUP_DIR, name)
-    with open(path, "wb") as f:
-        f.write(raw)
-    os.chmod(path, 0o600)
-    try:
-        contents = system_backup_contents(name)
-    except Exception as exc:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-        raise ValueError("Archive unreadable: %s" % exc)
-    # prune older uploads
-    try:
-        names = sorted(n for n in os.listdir(SYSTEM_BACKUP_DIR)
-                       if UPLOADED_RE.match(n))
-        for n in names[:-UPLOADED_KEEP] if len(names) > UPLOADED_KEEP else []:
-            try:
-                os.remove(os.path.join(SYSTEM_BACKUP_DIR, n))
-            except OSError:
-                pass
-    except OSError:
-        pass
-    return {"ok": True, "name": name, "files": contents["files"]}
-
-
-def _system_member_safe(member_name):
-    """A member is safe if it's a regular file, has no traversal, and lands
-    under a known prefix (etc/ or usr/local/ or a top-level dump file)."""
-    name = member_name.replace("\\", "/")
-    while name.startswith("./"):
-        name = name[2:]
-    if not name or ".." in name.split("/"):
-        return None
-    if not (name.startswith("etc/") or name.startswith("usr/local/")
-            or name.startswith("var/www/html/")):
-        if name not in ("iptables-save.txt", "ip6tables-save.txt", "manifest.txt",
-                        "dpkg-selections.txt", "apt-manual.txt", "package-versions.txt"):
-            return None
-    return name
+def upload_system_backup(raw, who=""):
+    """Validate (gzip, member-count and decompressed-size limits, no unsafe
+    members) and store an uploaded system backup (root-only), then list it."""
+    _bk_required()
+    return _bk.store_upload("", raw, who=who)
 
 
 def system_backup_contents(filename):
-    """List the files inside a system backup archive."""
+    _bk_required()
     base, path = _system_backup_path(filename)
-    files = []
-    with tarfile.open(path, "r:gz") as tar:
-        for m in tar.getmembers():
-            name = _system_member_safe(m.name)
-            if not name or not m.isreg():
-                continue
-            service = None
-            for arc, svc in _SYSTEM_BACKUP_SERVICE_BY_ARC.items():
-                if name.startswith(arc + "/") or name == arc:
-                    service = svc
-                    break
-            if name == "iptables-save.txt":
-                service = "iptables-restore"
-            elif name == "ip6tables-save.txt":
-                service = "ip6tables-restore"
-            files.append({"name": name, "size": m.size, "service": service})
-    files.sort(key=lambda f: f["name"])
-    return {"ok": True, "backup": base, "files": files}
-
-
-def system_backup_member_path(filename, member):
-    """Validate name/member, open archive, return (base, tar, member)."""
-    base, path = _system_backup_path(filename)
-    name = _system_member_safe(member or "")
-    if not name:
-        raise ValueError("Invalid file name")
-    tar = tarfile.open(path, "r:gz")
-    try:
-        m = tar.getmember(name)
-    except KeyError:
-        try:
-            m = tar.getmember("./" + name)
-        except KeyError:
-            tar.close()
-            raise ValueError("File not found in backup")
-    if not m.isreg():
-        tar.close()
-        raise ValueError("Not a regular file")
-    return base, tar, m
+    _bk.check_archive(path, strict=bool(UPLOADED_RE.match(base)))
+    return {"ok": True, "backup": base, "files": _bk.contents(path)}
 
 
 def download_system_backup_member(filename, member):
-    base, tar, m = system_backup_member_path(filename, member)
-    out = os.path.join(tempfile.gettempdir(), "tuxwall-dl-" + os.path.basename(m.name))
-    try:
-        with tar.extractfile(m) as src, open(out, "wb") as dst:
-            shutil.copyfileobj(src, dst)
-    finally:
-        tar.close()
-    return out
-
-
-# Archive prefixes whose restore replaces executable dashboard code.
-# Restoring these requires body.confirm_code_replace (wired in the
-# /api/backups/system/restore-file handler below).
-SYSTEM_RESTORE_CODE_PREFIXES = ("var/www/html/includes/",
-                                "var/www/html/scripts/")
-
-
-def restore_system_backup_member(filename, member, allow_code=False):
-    """Restore a single file from a system backup to its live location.
-    Firewall rule dumps are applied with iptables-restore (atomic + verified);
-    config files are copied to their /etc or /usr/local path with a timestamped
-    .bak of the current file. Services are NOT restarted automatically."""
-    base, tar, m = system_backup_member_path(filename, member)
-    name = _system_member_safe(member)
-    if (not allow_code and name
-            and name.startswith(SYSTEM_RESTORE_CODE_PREFIXES)):
-        tar.close()
-        raise ValueError(
-            "Refusing to overwrite executable dashboard code %r without "
-            "confirm_code_replace. The current file is untouched." % name)
-    try:
-        if name == "iptables-save.txt":
-            proc = subprocess.run(
-                ["iptables-restore", "--wait", "5", "/dev/stdin"],
-                input=_extract_text(tar, m), capture_output=True, text=True, timeout=120)
-            if proc.returncode != 0:
-                raise RuntimeError((proc.stderr or "iptables-restore failed").strip())
-            return {"ok": True, "restored": name, "restart_required": None,
-                    "note": "IPv4 rules applied atomically; no service restart needed"}
-        if name == "ip6tables-save.txt":
-            proc = subprocess.run(
-                ["ip6tables-restore", "--wait", "5", "/dev/stdin"],
-                input=_extract_text(tar, m), capture_output=True, text=True, timeout=120)
-            if proc.returncode != 0:
-                raise RuntimeError((proc.stderr or "ip6tables-restore failed").strip())
-            return {"ok": True, "restored": name, "restart_required": None,
-                    "note": "IPv6 rules applied atomically; no service restart needed"}
-        dest = "/" + name
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        bak = None
-        if os.path.exists(dest):
-            bak = dest + ".bak-" + time.strftime("%Y%m%d%H%M%S")
-            shutil.copy2(dest, bak)
-        with tar.extractfile(m) as src, open(dest, "wb") as out:
-            shutil.copyfileobj(src, out)
-    finally:
-        tar.close()
-    restart_required = None
-    for arc, svc in _SYSTEM_BACKUP_SERVICE_BY_ARC.items():
-        if (name.startswith(arc + "/") or name == arc) and svc:
-            restart_required = svc
-            break
-    if name.startswith("etc/systemd/"):
-        restart_required = "daemon-reload"
-    return {"ok": True, "restored": name, "restart_required": restart_required,
-            "backup_of_previous": bak}
-
-
-def _extract_text(tar, member):
-    with tar.extractfile(member) as f:
-        return f.read().decode("utf-8", errors="replace")
-
-
-# ---- Sanitized exports (secrets stripped, safe to share) ----
-
-SANITIZED_RE = re.compile(r"^sanitized-\d{8}-\d{6}\.tar\.gz$")
-SANITIZED_KEEP = 3
-
-# Name fragments that mark a member as secret -> dropped from sanitized export
-SANITIZE_DROP_SUBSTR = (
-    "llm.json", "auth.json", "opencode.json", "credentials",
-    "cert.pem", "privatekey", "publickey", "agent/api.token", "agent/keys/",
-)
-# (arc prefix, regex pattern, replacement) applied to text files
-SANITIZE_TEXT_RULES = [
-    ("etc/wireguard/",
-     re.compile(r"(?m)^(\s*(?:PrivateKey|PresharedKey)\s*=\s*).*$"),
-     r"\1<REDACTED>"),
-    ("etc/cloudflared/",
-     re.compile(r'("TunnelSecret"\s*:\s*")[^"]*(")'),
-     r"\1<REDACTED>\2"),
-    ("etc/kea/",
-     re.compile(r'("secret"\s*:\s*")[^"]*(")'),
-     r"\1<REDACTED>\2"),
-    ("etc/crowdsec/",
-     re.compile(r"(?mi)^(\s*#?\s*(?:password|api_key|api-key|secret|token|"
-                r"credentials?)\s*:\s*).*$"),
-     r"\1<REDACTED>"),
-    ("etc/systemd/",
-     re.compile(r"(?mi)^(\s*Environment=[A-Za-z0-9_]*"
-                r"(?:PASSWORD|SECRET|TOKEN|KEY)[A-Za-z0-9_]*=).*$"),
-     r"\1<REDACTED>"),
-]
-
-
-def _member_is_secret(name):
-    low = name.lower()
-    return any(frag in low for frag in SANITIZE_DROP_SUBSTR)
-
-
-def sanitize_system_backup(filename):
-    """Create a sanitized copy of a system backup with secrets removed,
-    suitable for sharing (e.g. as an AI setup template)."""
+    """(member name, bytes) - read in memory with a size cap, no temp file."""
+    _bk_required()
     base, path = _system_backup_path(filename)
-    out_name = "sanitized-" + time.strftime("%Y%m%d-%H%M%S") + ".tar.gz"
-    out_path = os.path.join(SYSTEM_BACKUP_DIR, out_name)
-    dropped = []
-    redacted = 0
-    with tarfile.open(path, "r:gz") as src, \
-            tarfile.open(out_path, "w:gz") as dst:
-        for m in src.getmembers():
-            name = _system_member_safe(m.name)
-            if not name:
-                continue
-            if _member_is_secret(name):
-                if m.isreg():
-                    dropped.append(name)
-                continue
-            body = None
-            if m.isreg():
-                for prefix, pattern, repl in SANITIZE_TEXT_RULES:
-                    if name.startswith(prefix):
-                        text = _extract_text(src, m)
-                        new_text, n = pattern.subn(repl, text)
-                        if n:
-                            redacted += n
-                            body = new_text.encode("utf-8")
-                        break
-            if body is not None:
-                info = copy.copy(m)
-                info.name = m.name
-                info.size = len(body)
-                dst.addfile(info, io.BytesIO(body))
-            elif m.isreg():
-                with src.extractfile(m) as f:
-                    dst.addfile(m, f)
-            else:
-                dst.addfile(m)
-        note = ("TuxWall sanitized export\n"
-                "Created: %s\nSource: %s\n"
-                "Dropped %d secret file(s); redacted %d key(s)/secret(s).\n"
-                "WireGuard PrivateKey/PresharedKey, cloudflared TunnelSecret, "
-                "KEA secrets, and credential files were removed or replaced "
-                "with <REDACTED>. Verify before sharing.\n"
-                % (time.strftime("%Y-%m-%d %H:%M:%S"), base, len(dropped), redacted))
-        info = tarfile.TarInfo("SANITIZED.txt")
-        info.size = len(note.encode())
-        dst.addfile(info, io.BytesIO(note.encode()))
-    os.chmod(out_path, 0o600)
-    _prune_sanitized()
-    return {"ok": True, "name": out_name, "dropped": dropped, "redacted": redacted}
+    name, _m, data = _bk.read_member(path, member, limit=_bk.DOWNLOAD_MEMBER_MAX)
+    return name, data
 
 
-def _prune_sanitized():
-    try:
-        names = sorted(n for n in os.listdir(SYSTEM_BACKUP_DIR)
-                      if SANITIZED_RE.match(n))
-    except OSError:
-        return
-    for n in names[:-SANITIZED_KEEP] if len(names) > SANITIZED_KEEP else []:
-        try:
-            os.remove(os.path.join(SYSTEM_BACKUP_DIR, n))
-        except OSError:
-            pass
+def preview_system_restore(filename, member):
+    _bk_required()
+    base, path = _system_backup_path(filename)
+    _bk.check_archive(path, strict=bool(UPLOADED_RE.match(base)))
+    return _bk.restore_preview("", path, base, member)
 
 
-# ---- Auto-prune: keep only the newest N system backups ----
+def restore_system_backup_member(filename, member, who="", client="", confirm_strict=False,
+                                 expect_new=None, expect_old=None):
+    """Single-file restore through backups.restore_apply: needs the preview
+    hashes, a second confirm for strict paths, writes atomically with safe
+    permissions, keeps a pre-restore copy and audits. Firewall files are
+    refused here (import them as a firewall snapshot instead). Services are
+    never restarted automatically."""
+    _bk_required()
+    base, path = _system_backup_path(filename)
+    res = _bk.restore_apply("", path, base, member, who=who, client=client,
+                            confirm_strict=confirm_strict, expect_new=expect_new, expect_old=expect_old)
+    print("[backup] RESTORE-FILE /%s from %s by %s (pre-restore copy: %s)"
+          % (res["restored"], base, who or "?", res.get("pre_restore") or "none, new file"), flush=True)
+    return res
 
-SYSTEM_BACKUP_KEEP = 1
+
+def import_system_backup_firewall(filename, identity=None, client_ip=""):
+    """Turn the firewall files of a system backup (etc/ufw rules, defaults,
+    iptables dumps) into an uploaded firewall snapshot. Nothing is applied:
+    restore happens in Firewall > Settings > Snapshots (preview, guard,
+    automatic snapshot first, 60 s confirm-or-revert)."""
+    _bk_required()
+    if _fw_snap is None:
+        raise RuntimeError("Firewall snapshot module unavailable")
+    who = (identity or {}).get("username", "")
+    base, path = _system_backup_path(filename)
+    files, raw, notes = _bk.firewall_snapshot_files("", path)
+    ufw = {k: files.get(k, "") for k in _fw_snap.UFW_FILES}
+    errs = _fw_snap.validate_files({k: v for k, v in ufw.items() if v})
+    if errs:
+        raise _bk.Refused(409, {"ok": False, "error": "The firewall files in this backup failed validation: "
+                                + "; ".join(errs[:3])})
+    m = _fw_snap.create(_fw_ctx(client_ip), note="From system backup %s" % base, kind="upload", who=who,
+                        version=TUXWALL_VERSION, files=ufw, raw=raw)
+    _bk.audit("", "firewall-import", who=who, client=client_ip, archive=base, snapshot=m.get("id"))
+    print("[backup] FW-IMPORT %s -> firewall snapshot %s by %s" % (base, m.get("id"), who or "?"), flush=True)
+    return {"ok": True, "id": m.get("id"), "snapshot": m, "notes": notes,
+            "message": "Imported as firewall snapshot %s. Preview and restore it in Firewall > Settings > "
+                       "Snapshots (guard check, 60 s confirm-or-revert)." % m.get("id")}
 
 
-def _prune_system_backups():
-    """After a successful backup, delete older system backups beyond
-    SYSTEM_BACKUP_KEEP (newest kept). Download anything you want preserved."""
-    try:
-        names = sorted(n for n in os.listdir(SYSTEM_BACKUP_DIR)
-                       if SYSTEM_BACKUP_RE.match(n))
-    except OSError:
-        return []
-    keep = names[-SYSTEM_BACKUP_KEEP:] if SYSTEM_BACKUP_KEEP > 0 else names
-    removed = []
-    for n in names:
-        if n not in keep:
-            try:
-                os.remove(os.path.join(SYSTEM_BACKUP_DIR, n))
-                removed.append(n)
-            except OSError:
-                pass
-    return removed
+def sanitize_system_backup(filename, who=""):
+    """Shareable copy with secrets removed; refuses to write an export that
+    fails its own secret re-scan."""
+    _bk_required()
+    base, path = _system_backup_path(filename)
+    _bk.check_archive(path, strict=bool(UPLOADED_RE.match(base)))
+    return dict(_bk.sanitize_to_dir("", path, base, who=who), ok=True)
 
 
 UNBOUND_ROUTER_CONF = "/etc/unbound/unbound.conf.d/router-dns.conf"
@@ -14372,19 +13951,20 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_file(self, path, download_name):
+        # Streamed in 1 MB chunks: archives are not read into memory.
         with open(path, "rb") as f:
-            data = f.read()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/gzip")
-        self.send_header("Content-Disposition", 'attachment; filename="{}"'.format(download_name))
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(data)
+            size = os.fstat(f.fileno()).st_size
+            self.send_response(200)
+            self.send_header("Content-Type", "application/gzip")
+            self.send_header("Content-Disposition", 'attachment; filename="{}"'.format(download_name))
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            shutil.copyfileobj(f, self.wfile, 1048576)
 
-    def _send_bytes(self, data, download_name):
+    def _send_bytes(self, data, download_name, content_type="application/gzip"):
         self.send_response(200)
-        self.send_header("Content-Type", "application/gzip")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Disposition", 'attachment; filename="{}"'.format(download_name))
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
@@ -14406,6 +13986,47 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _backup_post(self, path, body, raw, identity):
+        """POST /api/backups/system/{create,restore-file,import-firewall,
+        sanitize,upload,delete,pin} (admin-only via the default-deny gate)."""
+        who = (identity or {}).get("username", "")
+        client = _client_key(self)
+        try:
+            if path == "/api/backups/system/create":
+                res = create_system_backup(body.get("include"), who=who)
+            elif path == "/api/backups/system/restore-file":
+                res = restore_system_backup_member(
+                    body.get("name"), body.get("file"), who=who, client=client,
+                    confirm_strict=bool(body.get("confirm_strict") or body.get("confirm_code_replace")),
+                    expect_new=body.get("expect_sha256"), expect_old=body.get("expect_live_sha256"))
+            elif path == "/api/backups/system/import-firewall":
+                res = import_system_backup_firewall(body.get("name"), identity, client)
+            elif path == "/api/backups/system/sanitize":
+                res = sanitize_system_backup(body.get("name"), who=who)
+            elif path == "/api/backups/system/upload":
+                res = upload_system_backup(raw, who=who)
+            elif path == "/api/backups/system/delete":
+                res = delete_system_backup((body.get("name") or "").strip(), who=who, client=client)
+            elif path == "/api/backups/system/pin":
+                _bk_required()
+                res = {"ok": True, "pinned": _bk.set_pinned("", body.get("name"), bool(body.get("pinned", True)),
+                                                            who=who)}
+            else:
+                self._send(404, {"ok": False, "error": "Not found"})
+                return
+        except Exception as exc:
+            if _bk is not None and isinstance(exc, _bk.Refused):
+                self._send(exc.status, exc.payload)
+            elif isinstance(exc, FileNotFoundError):
+                self._send(404, {"ok": False, "error": str(exc)})
+            elif isinstance(exc, ValueError):
+                self._send(400, {"ok": False, "error": str(exc)})
+            else:
+                print("[backup] %s failed: %r" % (path, exc), flush=True)
+                self._send(500, {"ok": False, "error": str(exc)})
+            return
+        self._send(200, res)
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -14731,14 +14352,33 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
 
-        elif path == "/api/backups":
-            self._send(200, list_backups())
+        elif path in LEGACY_BACKUP_PATHS:
+            self._send(410, LEGACY_BACKUP_GONE)
 
         elif path == "/api/backups/system":
             self._send(200, system_backup_status())
 
         elif path == "/api/backups/system/items":
-            self._send(200, system_backup_items())
+            try:
+                self._send(200, system_backup_items())
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/backups/system/preview":
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            try:
+                self._send(200, preview_system_restore((qs.get("name") or [""])[0],
+                                                       (qs.get("file") or [""])[0]))
+            except Exception as exc:
+                if _bk is not None and isinstance(exc, _bk.Refused):
+                    self._send(exc.status, exc.payload)
+                elif isinstance(exc, ValueError):
+                    self._send(400, {"ok": False, "error": str(exc)})
+                else:
+                    self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/backups/system/audit":
+            self._send(200, {"ok": True, "entries": _bk.audit_tail("", 100) if _bk else []})
 
         elif path == "/api/backups/system/contents":
             qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -14755,14 +14395,9 @@ class Handler(BaseHTTPRequestHandler):
             name = (qs.get("name") or [None])[0] or ""
             member = (qs.get("file") or [None])[0] or ""
             try:
-                tmp = download_system_backup_member(name, member)
-                try:
-                    self._send_file(tmp, os.path.basename(member))
-                finally:
-                    try:
-                        os.unlink(tmp)
-                    except OSError:
-                        pass
+                mname, data = download_system_backup_member(name, member)
+                fname = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(mname)) or "file"
+                self._send_bytes(data, fname, "application/octet-stream")
             except ValueError as exc:
                 self._send(400, {"ok": False, "error": str(exc)})
             except Exception as exc:
@@ -14841,19 +14476,6 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
 
-        elif path == "/api/backups/download":
-            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
-            name = (qs.get("name") or [None])[0] or ""
-            base = os.path.basename(name)
-            if not BACKUP_RE.match(base):
-                self._send(400, {"ok": False, "error": "Invalid backup name"})
-                return
-            fpath = os.path.join(BACKUP_DIR, base)
-            if not os.path.isfile(fpath):
-                self._send(404, {"ok": False, "error": "Backup not found"})
-                return
-            self._send_file(fpath, base)
-
         elif path == "/api/themes":
             self._send(200, list_themes())
 
@@ -14885,8 +14507,7 @@ class Handler(BaseHTTPRequestHandler):
         raw = b""
         body = {}
         if length:
-            maxlen = 104857600 if path in ("/api/backups/restore",
-                                           "/api/backups/system/upload") else 262144
+            maxlen = 104857600 if path == "/api/backups/system/upload" else 262144
             if path == "/api/firewall/snapshots/upload":
                 maxlen = 4 * 1024 * 1024
             if length > maxlen:
@@ -15546,68 +15167,11 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
 
-        elif path == "/api/backups/create":
-            try:
-                self._send(200, create_backup())
-            except Exception as exc:
-                self._send(500, {"ok": False, "error": str(exc)})
+        elif path in LEGACY_BACKUP_PATHS:
+            self._send(410, LEGACY_BACKUP_GONE)
 
-        elif path == "/api/backups/system/create":
-            try:
-                self._send(200, create_system_backup(body.get("include")))
-            except Exception as exc:
-                self._send(500, {"ok": False, "error": str(exc)})
-
-        elif path == "/api/backups/system/restore-file":
-            try:
-                self._send(200, restore_system_backup_member(
-                    body.get("name"), body.get("file"),
-                    allow_code=bool(body.get("confirm_code_replace"))))
-            except ValueError as exc:
-                self._send(400, {"ok": False, "error": str(exc)})
-            except Exception as exc:
-                self._send(500, {"ok": False, "error": str(exc)})
-
-        elif path == "/api/backups/system/sanitize":
-            try:
-                self._send(200, sanitize_system_backup(body.get("name")))
-            except ValueError as exc:
-                self._send(400, {"ok": False, "error": str(exc)})
-            except Exception as exc:
-                self._send(500, {"ok": False, "error": str(exc)})
-
-        elif path == "/api/backups/system/upload":
-            try:
-                self._send(200, upload_system_backup(raw))
-            except ValueError as exc:
-                self._send(400, {"ok": False, "error": str(exc)})
-            except Exception as exc:
-                self._send(500, {"ok": False, "error": str(exc)})
-
-        elif path == "/api/backups/system/delete":
-            name = (body.get("name") or "").strip()
-            base = os.path.basename(name)
-            if SANITIZED_RE.match(base) or UPLOADED_RE.match(base):
-                fpath = os.path.join(SYSTEM_BACKUP_DIR, base)
-                if not os.path.isfile(fpath):
-                    self._send(404, {"ok": False, "error": "Backup not found"})
-                    return
-                os.remove(fpath)
-                self._send(200, {"ok": True, "deleted": base})
-                return
-            try:
-                self._send(200, delete_system_backup(name))
-            except Exception as exc:
-                self._send(500, {"ok": False, "error": str(exc)})
-
-        elif path == "/api/backups/delete":
-            filename = (body.get("name") or "").strip()
-            try:
-                self._send(200, delete_backup(filename))
-            except ValueError as exc:
-                self._send(400, {"ok": False, "error": str(exc)})
-            except Exception as exc:
-                self._send(500, {"ok": False, "error": str(exc)})
+        elif path.startswith("/api/backups/system/"):
+            self._backup_post(path, body, raw, identity)
 
         elif path in ("/api/system/kea-config", "/api/system/unbound-config"):
             kind = "kea" if path.endswith("kea-config") else "unbound"
@@ -16056,67 +15620,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, {"ok": False, "error": str(exc)})
                 return
             self._send(200, {"ok": True, "hostname": new_name})
-
-        elif path == "/api/backups/restore":
-            # Two-step restore: without {"confirm": true} this only stages
-            # (uploads) and previews the archive. Nothing is extracted.
-            upload_raw = raw if not (body and body.get("name")) else None
-            if upload_raw:
-                filename = ((qs.get("name") or [None])[0]
-                            or self.headers.get("X-Filename")
-                            or "tuxwall-restore.tar.gz")
-                try:
-                    base, path = _stage_restore_upload(filename, upload_raw)
-                    preview = _preview_backup_file(path)
-                except ValueError as exc:
-                    self._send(400, {"ok": False, "error": str(exc)})
-                    return
-                except Exception as exc:
-                    self._send(500, {"ok": False, "error": str(exc)})
-                    return
-                self._send(200, {"ok": True, "staged": True, "name": base,
-                                 "confirm_required": True, **preview})
-                return
-            name = (body.get("name") or "").strip() if body else ""
-            if not name:
-                self._send(400, {"ok": False, "error": "No file uploaded"})
-                return
-            base = os.path.basename(name)
-            if not BACKUP_RE.match(base):
-                self._send(400, {"ok": False, "error": "Invalid backup name"})
-                return
-            if not os.path.isfile(os.path.join(BACKUP_DIR, base)):
-                self._send(404, {"ok": False, "error": "Backup not found"})
-                return
-            if not (body and body.get("confirm")):
-                try:
-                    preview = _preview_backup_file(os.path.join(BACKUP_DIR, base))
-                except ValueError as exc:
-                    self._send(400, {"ok": False, "error": str(exc)})
-                    return
-                self._send(200, {"ok": True, "staged": False, "name": base,
-                                 "confirm_required": True, **preview})
-                return
-            try:
-                preview = _preview_backup_file(os.path.join(BACKUP_DIR, base))
-            except ValueError as exc:
-                self._send(400, {"ok": False, "error": str(exc)})
-                return
-            if preview["touches_code"] and not (body and body.get("confirm_code_replace")):
-                self._send(409, {"ok": False,
-                                 "error": "Backup replaces executable code "
-                                 "(includes/scripts). Resubmit with "
-                                 "confirm_code_replace: true.",
-                                 "confirm_required": True, **preview})
-                return
-            if preview["touches_code"]:
-                _snapshot_live_code()
-            try:
-                result = restore_backup(base)
-            except Exception as exc:
-                self._send(500, {"ok": False, "error": str(exc)})
-                return
-            self._send(200, {"ok": True, **result, **preview})
 
         elif path == "/api/reservations/add":
             try:
@@ -18792,6 +18295,16 @@ def _incident_conditions():
         elif now - latest > 8 * 86400:
             add("backup:stale", "warning", "System backup is stale",
                 "Last system backup is %.0f days old." % ((now - latest) / 86400))
+    except Exception:
+        pass
+    # A failed run (persisted in backups/state.json) stays an incident until
+    # the next successful backup; an interrupted run counts as failed.
+    try:
+        if _bk is not None:
+            _bk.reconcile_interrupted()
+            failed = _bk.failure_incident()
+            if failed:
+                add("backup:failed", "warning", failed[0], failed[1])
     except Exception:
         pass
 
