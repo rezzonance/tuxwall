@@ -12,9 +12,17 @@ open around any of it. Fix the specific thing (one IP, one port, one rule) inste
 Live state without shell: `tuxwall_crowdsec_decisions` (pass `ip` to check one address), `tuxwall_security_events`,
 `tuxwall_firewall_rules` with `owner` honeypot / canary.
 - Honeypot tarpit (inside the tuxwall API): config `/var/lib/tuxwall/honeypot.json` {enabled, ports, auto_ban, ban_threshold};
-  listens on WAN decoy ports opened by ufw rules commented `tuxwall-honeypot`. Hits -> CrowdSec ban (long) -> community report.
-- OpenCanary (`opencanary.service`, user `opencanary`): fake services on WAN ports opened by ufw rules commented
-  `tuxwall-canary` / `tuxwall-canary-snmp`. Log `/var/log/opencanary/opencanary.log`; alerts reach the dashboard webhook.
+  listens on WAN decoy ports (v4 + v6) opened by ufw rules commented `tuxwall-honeypot`. Caps: 8 held connections per source,
+  256 total, 4 h max. Hits >= threshold -> CrowdSec ban (long) -> community report, once per source.
+- OpenCanary (`opencanary.service`, user `opencanary`): fake SSH/VNC/MSSQL/Redis on the WAN IPv4 only, opened by IPv4 ufw
+  rules commented `tuxwall-canary` (the SNMP decoy was retired 2026-11-19). The API's canary watchdog closes those rules when
+  the canary is down and reopens them when it is back; a Finding "Canary rule ... not running / without a listener" is a
+  leftover it will remove. Log `/var/log/opencanary/opencanary.log` (logrotate weekly); alerts reach the dashboard webhook.
+- Never-ban guard: no deception path bans or reports LAN/VLAN/VPN addresses (incl. the delegated global IPv6 prefix), the
+  router's own or recent WAN addresses, protected infrastructure (Cloudflare, model APIs, collector-published ranges) or
+  infrastructure the router depends on (DNS forwarders, NTP, gateways, resolvers, APT mirrors).
+- Community reporting: `/etc/tuxwall/reporting.json` (root 0600, holds the install key - never print it) `enabled` is the
+  off switch; reports go through the persistent retry queue `/var/lib/tuxwall/report-queue.json` (no key inside).
 - Canary egress containment: owner-match rules in `/etc/ufw/before.rules` and `/etc/ufw/before6.rules` (ufw-before-output) let the
   opencanary user reach only the dashboard webhook (127.0.0.1:8008) and local DNS; everything else is logged
   `[TUXWALL-CANARY-EGRESS]` and rejected. A similar block contains the forum user. Never delete or duplicate these blocks.

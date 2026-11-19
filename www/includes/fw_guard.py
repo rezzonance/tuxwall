@@ -28,8 +28,7 @@ except ImportError:  # pragma: no cover
         _CE = None
 
 HONEYPOT_TAG = "tuxwall-honeypot"
-CANARY_PORTS = (22, 5900, 1433, 6379)
-CANARY_SNMP_PORT = 161
+CANARY_PORTS = (22, 5900, 1433, 6379)   # TCP on the WAN IPv4 (SNMP 161/udp retired 2026-11-19)
 MGMT_PORTS = (22, 80, 443, 8008, 4096, 8744, 53, 67)
 DASHBOARD_PORTS = (80, 443)
 SEVERITIES = ("critical", "high", "medium", "low", "info")
@@ -698,6 +697,32 @@ def deception_ports(rs, ctx):
     return out
 
 
+def _canary_listening(ctx, family, proto, dport):
+    """True when the canary (twistd) listens on dport/proto in that family
+    on a non-loopback address."""
+    p = _single_port(dport)
+    if not p:
+        return False
+    for l in ctx.listeners:
+        if l["port"] != p or not str(l["proto"]).startswith(proto) or "twistd" not in (l["proc"] or ""):
+            continue
+        try:
+            a = ipaddress.ip_address(l["addr"])
+        except ValueError:
+            if l["addr"] in ("*",):
+                return True
+            continue
+        if a.is_loopback:
+            continue
+        if a.is_unspecified or ("v6" if a.version == 6 else "v4") == family:
+            if a.is_unspecified and a.version == 6 and family == "v4":
+                return True        # [::] dual-stack wildcard
+            if a.is_unspecified and a.version == 4 and family == "v6":
+                continue
+            return True
+    return False
+
+
 def canary_egress_repair(text, fam):
     """Repair hint for missing canary containment: the exact insertion the
     installer/postinst make (preview only; applied via canary_egress.py)."""
@@ -736,10 +761,12 @@ def invariants(rs, ctx, cur=None):
                                 {"kind": "ufw-add", "family": fam,
                                  "rule": "allow in on %s to any port %d proto tcp comment %s"
                                          % (wan, p, HONEYPOT_TAG)}, "honeypot"))
-    # 2. canary ports present while the canary runs
+    # 2. canary ports present while the canary runs (IPv4 only: the canary
+    #    binds the WAN IPv4, so removing an IPv6 / retired-SNMP leftover is fine)
     if ctx.canary_installed and ctx.canary_active and cur is not None:
-        want = {(r["family"], r["dport"], r["proto"], r["comment"]) for r in cur["v4"] + cur["v6"]
-                if (r["comment"] or "").startswith("tuxwall-canary")}
+        want = {(r["family"], r["dport"], r["proto"], r["comment"]) for r in cur["v4"]
+                if (r["comment"] or "").startswith("tuxwall-canary")
+                and _canary_listening(ctx, "v4", r["proto"], r["dport"])}
         have = {(r["family"], r["dport"], r["proto"], r["comment"]) for r in rs["v4"] + rs["v6"]
                 if (r["comment"] or "").startswith("tuxwall-canary")}
         for fam, port, proto, com in sorted(want - have):
@@ -749,6 +776,28 @@ def invariants(rs, ctx, cur=None):
                         {"kind": "ufw-add", "family": fam,
                          "rule": "allow in on %s to any port %s proto %s comment %s"
                                  % (wan, port, proto, com)}, "canary"))
+    # 2b. canary rules no wider than the canary: a tuxwall-canary allow with
+    #     no canary behind it opens the port for whatever binds it next
+    #     (the API's canary watchdog closes these within ~2 minutes)
+    for r in rs["v4"] + rs["v6"]:
+        if not (r["comment"] or "").startswith("tuxwall-canary"):
+            continue
+        if r["route"] or r["dir"] != "in" or r["action"] not in ("allow", "limit"):
+            continue
+        fix = {"kind": "run", "cmd": ["ufw", "delete", "allow", "in", "on", r["in"] or wan or "<wan>",
+                                      "to", "::/0" if r["family"] == "v6" else "0.0.0.0/0",
+                                      "port", str(r["dport"]), "proto", r["proto"]]}
+        if not (ctx.canary_installed and ctx.canary_active):
+            v.append(_v("canary-leftover:%s" % r["key"], "medium",
+                        "Canary rule open while the canary is not running: %s" % r["text"],
+                        "Nothing emulates this port; a service that binds it later would be "
+                        "reachable from the WAN.", fix, "canary"))
+        elif not _canary_listening(ctx, r["family"], r["proto"], r["dport"]):
+            v.append(_v("canary-no-listener:%s" % r["key"], "medium",
+                        "Canary rule without a canary listener (%s): %s" % (r["family"], r["text"]),
+                        "The canary does not listen on %s/%s over %s (it binds the WAN IPv4 only)."
+                        % (r["dport"], r["proto"], "IPv6" if r["family"] == "v6" else "IPv4"),
+                        fix, "canary"))
     # deception rules must be WAN-only
     dports = deception_ports(rs, ctx)
     for r in rs["v4"] + rs["v6"]:

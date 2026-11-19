@@ -3922,6 +3922,16 @@
       p.hidden = p.dataset.secPane !== pane;
     });
     if (pane === "tripwire") refreshTripwire();
+    if (pane === "deception") refreshDeceptionIfVisible();
+  }
+
+  // Deception data (honeypot + canary) is only fetched while its sub-pane
+  // is on screen; it used to be polled on every Security sub-pane.
+  function refreshDeceptionIfVisible() {
+    const pane = document.querySelector('#view-security .fw-pane[data-sec-pane="deception"]');
+    if (!pane || pane.hidden) return;
+    refreshHoneypot();
+    refreshCanary();
   }
   document.querySelectorAll("#sec-subtabs .fw-subtab").forEach((btn) => {
     btn.addEventListener("click", () => setSecTab(btn.dataset.secPane));
@@ -5592,7 +5602,7 @@
   function bindCanaryActions() {
     els.secCanaryToggle.addEventListener("click", async () => {
       const enabling = els.secCanaryToggle.dataset.on !== "1";
-      if (enabling && !(await (window.twConfirm || window.confirm)("Enable the deception canary? Starts the emulators (SSH 22, VNC 5900, MSSQL 1433, Redis 6379, SNMP 161) on the WAN address and opens WAN rules only for the ports they bind."))) return;
+      if (enabling && !(await (window.twConfirm || window.confirm)("Enable the deception canary? Starts the emulators (SSH 22, VNC 5900, MSSQL 1433, Redis 6379) on the WAN IPv4 address and opens IPv4 WAN rules only for the ports they bind."))) return;
       if (!enabling && !(await (window.twConfirm || window.confirm)("Disable the deception canary? Stops the emulators and closes their WAN ports (the tarpit is unaffected)."))) return;
       els.secCanaryToggle.disabled = true;
       try {
@@ -12394,8 +12404,7 @@
         refreshZeek();
         refreshZeekQuic();
       refreshAide();
-      refreshHoneypot();
-      refreshCanary();
+      refreshDeceptionIfVisible();
       }
     }, SECURITY_POLL_MS);
     if (state.wgTimer) clearInterval(state.wgTimer);
@@ -12568,8 +12577,7 @@
       refreshZeek();
       refreshZeekQuic();
       refreshAide();
-      refreshHoneypot();
-      refreshCanary();
+      refreshDeceptionIfVisible();
     } else if (state.activeView === "crowdsec") {
       refreshCrowdsec();
     }
@@ -13751,8 +13759,7 @@
         refreshZeek();
         refreshZeekQuic();
       refreshAide();
-      refreshHoneypot();
-      refreshCanary();
+      refreshDeceptionIfVisible();
             initTrafficMonitor();
         initDiagnose();
         setTimeout(() => { if (secMap) secMap.map.invalidateSize(); }, 60);
@@ -15552,8 +15559,7 @@
       refreshZeek();
       refreshZeekQuic();
       refreshAide();
-      refreshHoneypot();
-      refreshCanary();
+      refreshDeceptionIfVisible();
       refreshCrowdsec();
       refreshCustomBlocklist();
       refreshBandwidth();

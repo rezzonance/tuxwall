@@ -101,7 +101,7 @@ The base is stock Ubuntu. `apt`, `systemd`, `journalctl` and every tool you alre
 | **Intrusion detection** | Network threat detection on WAN and LAN with daily rule updates. | Suricata IDS/IPS |
 | **Collaborative blocking** | Local decisions and community threat intelligence with automatic bans. | CrowdSec |
 | **Honeypot tarpit** | WAN-only port garden that holds scanners open and auto-bans completed handshakes. | Built into the dashboard |
-| **Deception canaries** | SSH, VNC, MSSQL, Redis and SNMP emulators that capture credential sprays. | OpenCanary |
+| **Deception canaries** | SSH, VNC, MSSQL and Redis emulators (WAN IPv4) that capture credential sprays. | OpenCanary |
 | **File integrity** | Baseline and nightly AIDE checks with section-aware change reporting. | AIDE |
 | **Attack map and bandwidth** | Live attacker geography, per-client traffic and top talkers. | Leaflet, nftables counters |
 | **Community bans** | Trap catches are shared as verified threat evidence and consumed as a public ban list. | tuxwall.org collector |

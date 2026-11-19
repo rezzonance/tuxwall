@@ -72,7 +72,10 @@ os.environ.update({"TUXWALL_TRIPWIRE_ROOT": ROOT, "TUXWALL_TRIPWIRE_PUSH_FILE": 
                    # WAN 73.0.0.2 on wan0, loopback
                    "TUXWALL_TRIPWIRE_OWN_IPS": "192.168.1.1/24 2001:db8:1::1/64 10.0.0.1/24 "
                                                "73.0.0.2/24 127.0.0.1/8 ::1/128",
-                   "TUXWALL_TRIPWIRE_LAN_NETS": "192.168.1.1/24 2001:db8:1::1/64 10.0.0.1/24"})
+                   "TUXWALL_TRIPWIRE_LAN_NETS": "192.168.1.1/24 2001:db8:1::1/64 10.0.0.1/24",
+                   # the WAN addresses the decoys listen on (v4 + v6)
+                   "TUXWALL_TRIPWIRE_WAN_IPS": "73.0.0.2/24 2001:db8:ff::2/64"})
+WAN4, WAN6 = "73.0.0.2", "2001:db8:ff::2"
 
 
 def load_engine():
@@ -98,6 +101,27 @@ def reset():
         shutil.rmtree(p) if os.path.isdir(p) else os.unlink(p)
     os.makedirs(ROOT + "/etc/tuxwall")
     os.makedirs(ROOT + "/var/log/tuxwall")
+    write_decoys()
+
+
+def write_decoys(honeypot=True, hp_ports=(23, 2323, 3389, 445, 5555), canary=True, snmp=False):
+    """The live-config shape of the two decoys: the tarpit on the WAN
+    addresses, OpenCanary on the WAN IPv4 (SNMP retired)."""
+    os.makedirs(ROOT + "/var/lib/tuxwall", exist_ok=True)
+    os.makedirs(ROOT + "/etc/opencanaryd", exist_ok=True)
+    with open(E.HONEYPOT_CONF, "w") as f:
+        json.dump({"enabled": honeypot, "ports": list(hp_ports)}, f)
+    cc = {"device.listen_addr": WAN4, "ssh.enabled": True, "ssh.port": 22,
+          "vnc.enabled": True, "vnc.port": 5900, "mssql.enabled": True, "mssql.port": 1433,
+          "redis.enabled": True, "redis.port": 6379}
+    if snmp:
+        cc.update({"snmp.enabled": True, "snmp.port": 161})
+    if canary:
+        with open(E.CANARY_CONF, "w") as f:
+            json.dump(cc, f)
+    elif os.path.exists(E.CANARY_CONF):
+        os.unlink(E.CANARY_CONF)
+    E._DECEPTION.update(ts=0.0, val=None)
 
 
 def set_mode_file(mode):
@@ -169,6 +193,7 @@ LO_FP = ("[TUXWALL-CANARY-EGRESS] IN= OUT=lo SRC=192.168.1.1 DST=192.168.1.1 LEN
 
 # ── pre-filter, normalisation, evaluate ─────────────────────────────────────
 def test_eval():
+    write_decoys()
     flow = json.dumps({"event_type": "flow", "src_ip": "1.2.3.4"}, separators=(",", ":"))
     check(not E.eve_prefilter(flow.encode()), "prefilter drops flow lines")
     check(not E.eve_prefilter(eve_line(sev=3).encode()), "prefilter drops severity 3")
@@ -194,8 +219,9 @@ def test_eval():
     for mode, action in expect.items():
         check(E.evaluate(ev, mode)["action"] == action, "evaluate %s -> %s" % (mode, action))
     check(E.evaluate(ev, "high")["strength"] == "high", "block carries the strength")
-    absorbed = E.event_from_eve_line(eve_line(port=5555))
-    check("deception layer" in absorbed["dst"], "deception port annotated")
+    absorbed = E.event_from_eve_line(eve_line(dst=WAN4, port=5555))
+    check("deception layer" in absorbed["dst"] and absorbed["deception"] == "honeypot",
+          "deception port annotated")
     for mode in ("logonly", "medium", "high"):
         check(E.evaluate(absorbed, mode)["action"] == "absorb", "absorbed in %s" % mode)
     check(E.evaluate(absorbed, "disabled")["action"] == "off", "off check: not even absorbed")
@@ -205,6 +231,53 @@ def test_eval():
     check(E.event_from_kernel("random kernel line") is None, "unrelated kernel line ignored")
     check(E.evaluate(k, "medium")["action"] == "block", "canary egress blocks in medium")
     check(set(E.CHECKS) >= {"canary.egress", "suricata.shellcode-detect"}, "registry")
+
+
+def test_absorb_scope():
+    """Absorbed only when the destination is a live decoy: the WAN address
+    the decoy listens on AND a port in its live config (phase 1 fix: a real
+    attack on 22/445/3389 of a LAN host used to be marked absorbed)."""
+    reset()
+    cfg = write_cfg("log")
+
+    def act(dst, port, proto="TCP"):
+        e = E.event_from_eve_line(eve_line(src="8.8.8.8", dst=dst, port=port))
+        e["proto"] = proto
+        if proto != "TCP":          # re-derive with the protocol
+            e.pop("deception", None)
+        return E.evaluate(e, cfg)["action"]
+    check(act(WAN4, 5555) == "absorb", "honeypot port on the WAN v4: absorbed")
+    check(act(WAN6, 445) == "absorb", "honeypot port on the WAN v6: absorbed")
+    check(act(WAN4, 22) == "absorb", "canary ssh on the WAN v4: absorbed")
+    check(act(WAN6, 22) == "log", "canary is IPv4-only: ssh on the WAN v6 is real")
+    for port in (22, 445, 3389, 5555, 1433):
+        check(act("192.168.1.20", port) == "log", "LAN host port %d is a real attack" % port)
+    check(act("198.51.100.20", 3389) == "log", "other public dst: real")
+    check(act(WAN4, 8080) == "log", "non-decoy port on the WAN: real")
+    check(act(WAN4, 161, "UDP") == "log", "SNMP retired: 161/udp no longer absorbed")
+    write_decoys(snmp=True)
+    check(act(WAN4, 161, "UDP") == "absorb", "SNMP enabled in the config: absorbed (udp)")
+    check(act(WAN4, 161, "TCP") == "log", "...but never 161/tcp")
+    write_decoys(honeypot=False)
+    check(act(WAN4, 5555) == "log", "honeypot disabled: its ports are real")
+    check(act(WAN4, 22) == "absorb", "canary still absorbs")
+    write_decoys(hp_ports=(2323,))
+    check(act(WAN4, 2323) == "absorb" and act(WAN4, 23) == "log", "custom honeypot ports")
+    write_decoys(canary=False)
+    check(act(WAN4, 22) == "log", "no canary config: 22 is real")
+    write_decoys()
+    # records written before the fix (no "deception" verdict) are re-checked
+    legacy = {"check": "suricata.attempted-admin", "source": "suricata", "src": "8.8.8.8",
+              "dst_ip": "192.168.1.20", "dst_port": 5555,
+              "dst": "192.168.1.20:5555 [deception layer - absorbed]", "ts": time.time()}
+    check(E.evaluate(legacy, cfg)["action"] == "log", "legacy label on a LAN host: re-checked")
+    legacy.update(dst_ip=WAN4, dst="%s:5555 [deception layer - absorbed]" % WAN4)
+    check(E.evaluate(legacy, cfg)["action"] == "absorb", "legacy WAN decoy: absorbed")
+    text_only = {"check": "suricata.attempted-admin", "source": "suricata", "src": "8.8.8.8",
+                 "dst": "%s:5555 [deception layer - absorbed]" % WAN4, "ts": time.time()}
+    check(E.evaluate(text_only, cfg)["action"] == "absorb", "text-only import keeps its label")
+    check(E.dst_label("192.168.1.20", 445) == "192.168.1.20:445", "label: LAN host unannotated")
+    check("absorbed" in E.dst_label(WAN4, 445), "label: decoy annotated")
 
 
 # ── rule plan + stubbed enforcement ─────────────────────────────────────────
@@ -582,7 +655,7 @@ def test_exclusions():
     check(E.evaluate(e, write_cfg("block", enabled=False))["action"] == "off", "master off")
     check(E.evaluate(e, write_cfg("block", suricata__trojan_activity="log"))["action"] == "log",
           "per-check Log next to Block checks")
-    d = E.evaluate(ev(src="8.8.4.4", port=5555), cx)
+    d = E.evaluate(ev(src="8.8.4.4", dst=WAN4, port=5555), cx)
     check(d["action"] == "absorb", "deception absorb comes before exclusions")
     check(E.evaluate(E.event_from_kernel(KLINE), cx)["action"] == "excluded",
           "canary destination excluded")
@@ -644,8 +717,10 @@ def test_test_path():
           "test: excluded because router-originated")
     r = E.test_check("canary.egress", {"iface": "lo"})
     check(r["decision"]["action"] == "excluded", "test: loopback canary excluded")
-    r = E.test_check("suricata.trojan-activity", {"dst_port": 5555})
+    r = E.test_check("suricata.trojan-activity", {"dst_ip": WAN4, "dst_port": 5555})
     check(r["decision"]["action"] == "absorb", "test: deception port absorbed")
+    r = E.test_check("suricata.trojan-activity", {"dst_port": 5555})
+    check(r["decision"]["action"] not in ("absorb", "off"), "test: decoy port on another host is real")
     for cid, over in (("aide.change", None), ("nope", None),
                       ("canary.egress", {"src": "not-an-ip"}),
                       ("canary.egress", {"iface": "a b"}),
@@ -686,7 +761,7 @@ def test_history():
     cfg = write_cfg("log")
     for e in (E.event_from_eve_line(HA_FP), E.event_from_kernel(LO_FP),
               E.event_from_eve_line(eve_line(src="8.8.8.8", sig="real one")),
-              E.event_from_eve_line(eve_line(src="8.8.8.8", port=5555)),
+              E.event_from_eve_line(eve_line(src="8.8.8.8", dst=WAN4, port=5555)),
               E.event_from_kernel(KLINE)):
         E.handle_event(e, cfg, windows={})
     rows = history()
@@ -887,7 +962,7 @@ def test_daemon():
                 f.write(eve_line(src="8.8.8.%d" % i, dst="192.168.1.20", port=443,
                                  sig="ET real x%d" % i) + "\n")
             f.write(HA_FP + "\n")
-            f.write(eve_line(src="8.8.8.8", port=5555) + "\n")
+            f.write(eve_line(src="8.8.8.8", dst=WAN4, port=5555) + "\n")
         with open(KLOG, "a") as f:
             f.write(LO_FP + "\n")
         check(wait_for(lambda: E.load_state().get("logonly_events") == 6), "logonly counted")
@@ -1427,7 +1502,7 @@ def test_recovery_daemon():
 
 def main():
     try:
-        for t in (test_eval, test_rules, test_notify, test_state, test_mode_resolve,
+        for t in (test_eval, test_absorb_scope, test_rules, test_notify, test_state, test_mode_resolve,
                   test_config, test_exclusions, test_threshold, test_test_path,
                   test_history, test_eve_tail, test_kernel, test_daemon, test_recovery,
                   test_dns_restrict, test_dns_client, test_recovery_daemon):

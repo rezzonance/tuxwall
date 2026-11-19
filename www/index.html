@@ -2093,7 +2093,7 @@
           </table>
         </div>
         <div class="dec-meta" id="sec-canary-meta" hidden></div>
-        <p class="muted bl-note">The <b>OpenCanary</b> deception emulators — SSH, VNC, MSSQL, Redis, SNMP — bound on the <b>WAN address only</b>, running as a sandboxed service user. Any interaction is hostile by definition (nothing legitimate connects to services that do not exist), so sources are <b>auto-banned via CrowdSec (1 year)</b> and the catch is shared with the community list above. The SSH canary on port 22 <b>captures the credentials bruteforcers spray</b> — usernames and passwords appear in the Detail column; they are attacker-submitted guesses at your router, not real credentials. <b>Enable</b> starts the service and opens WAN rules only for the ports it actually bound; <b>Disable</b> stops it and closes exactly its ports. The full record lives at <code>/var/log/opencanary/opencanary.log</code>.</p>
+        <p class="muted bl-note">The <b>OpenCanary</b> deception emulators — SSH, VNC, MSSQL, Redis — bound on the <b>WAN IPv4 address only</b>, running as a sandboxed service user. Any interaction is hostile by definition (nothing legitimate connects to services that do not exist), so sources are <b>auto-banned via CrowdSec (1 year)</b> and the catch is shared with the community list above. The SSH canary on port 22 <b>captures the credentials bruteforcers spray</b> — usernames and passwords appear in the Detail column; they are attacker-submitted guesses at your router, not real credentials. <b>Enable</b> starts the service and opens IPv4 WAN rules only for the ports it actually bound (closed again automatically if the canary stops); <b>Disable</b> stops it and closes exactly its ports. The full record lives at <code>/var/log/opencanary/opencanary.log</code>.</p>
       </div>
 
       </div>
@@ -4149,7 +4149,7 @@
   </div>
 </div>
 <script src="/scripts/worldmap.js?v=202611120056"></script>
-<script src="/scripts/dashboard.js?v=20261119085140"></script>
+<script src="/scripts/dashboard.js?v=20261119182133"></script>
 <script src="/scripts/enhance.js?v=20261118204958"></script>
 <script src="/scripts/netmap.js?v=20261119081229"></script>
 <script src="/scripts/insights.js?v=20261112182249"></script>

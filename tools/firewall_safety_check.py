@@ -141,8 +141,8 @@ BASE_SPECS = [
     {"route": True, "in": "eth1.10", "out": WAN, "comment": "tuxwall-policy:opt1->wan"},
     {"in": WAN, "proto": "tcp", "dport": 23},
     {"in": WAN, "proto": "tcp", "dport": 445},
-    {"in": WAN, "proto": "tcp", "dport": 6379, "comment": "tuxwall-canary"},
-    {"in": WAN, "proto": "udp", "dport": 161, "comment": "tuxwall-canary-snmp"},
+    # the canary binds the WAN IPv4 only: IPv4-only rule (SNMP retired)
+    {"in": WAN, "proto": "tcp", "dport": 6379, "comment": "tuxwall-canary", "fam": "v4"},
 ]
 
 BEFORE = """# fixture before.rules
@@ -198,6 +198,7 @@ COMMIT
 COMMIT
 """
 SS = """tcp LISTEN 0 4096 203.0.113.5:23 0.0.0.0:* users:(("python3",pid=1,fd=3))
+tcp LISTEN 0 50 203.0.113.5:6379 0.0.0.0:* users:(("twistd",pid=4,fd=7))
 tcp LISTEN 0 4096 192.168.1.1:22 0.0.0.0:* users:(("sshd",pid=2,fd=3))
 tcp LISTEN 0 4096 0.0.0.0:443 0.0.0.0:* users:(("nginx",pid=3,fd=3))
 """
@@ -295,7 +296,8 @@ def t_classify():
           "honeypot matched_by config")
     check(own("allow in on eth0 from any to any port 23 proto tcp", "v6") == "honeypot", "honeypot v6")
     check(own("allow in on eth0 from any to any port 6379 proto tcp") == "canary", "canary tag")
-    check(own("allow in on eth0 from any to any port 161 proto udp") == "canary", "canary snmp tag")
+    check(("allow in on eth0 from any to any port 6379 proto tcp", "v6") not in by,
+          "canary rule is IPv4-only (SNMP retired)")
     check(own("route allow in on eth1.10 out on eth0 from any to any") == "policy", "policy tag")
     check(by[("route allow in on eth1.10 out on eth0 from any to any", "v4")]["group"] == "policy", "policy group")
     check(own("route allow in on eth1 out on eth0 from any to any") == "nat", "installer LAN->WAN")
@@ -885,6 +887,47 @@ def t_canary():
         shutil.rmtree(r)
 
 
+def t_canary_rules():
+    """Canary rules no wider than the canary (deception phase 1): IPv4-only,
+    leftovers flagged, removing an IPv6/SNMP leftover never refused."""
+    legacy = [sp for sp in BASE_SPECS if "canary" not in sp.get("comment", "")] + [
+        {"in": WAN, "proto": "tcp", "dport": 6379, "comment": "tuxwall-canary"},     # v4 + v6
+        {"in": WAN, "proto": "udp", "dport": 161, "comment": "tuxwall-canary-snmp"}]  # v4 + v6
+    root = make_root(specs=legacy)
+    try:
+        ctx, _ = mkctx(root, canary_active=True)
+        cur = G.load_ruleset(ctx)
+        vs = {v["id"]: v for v in G.invariants(cur, ctx, cur)}
+        nl = sorted(k.split(":", 1)[1] for k in vs if k.startswith("canary-no-listener:"))
+        check(len(nl) == 3 and all(vs["canary-no-listener:" + k]["severity"] == "medium" for k in nl),
+              "canary: v6 6379 + v4/v6 SNMP without a listener flagged medium (%s)" % nl)
+        check(not any(k.startswith("canary-no-listener:v4|False|allow|tcp|6379") for k in vs),
+              "canary: v4 6379 with twistd listening is fine")
+        check(not [v for v in vs.values() if v["severity"] in G.BLOCKING],
+              "canary: leftovers never block")
+        fx = vs["canary-no-listener:" + nl[0]]["repair"]
+        check(fx["kind"] == "run" and fx["cmd"][:3] == ["ufw", "delete", "allow"], "canary: repair command")
+        v6 = next(i for i, r in enumerate(G.numbered(cur), 1)
+                  if r["family"] == "v6" and r["dport"] == "6379")
+        g = G.check(cur, G.proposed_delete(cur, v6), ctx)
+        check(g["ok"], "canary: deleting the IPv6 leftover is not refused")
+        v4 = next(i for i, r in enumerate(G.numbered(cur), 1)
+                  if r["family"] == "v4" and r["dport"] == "6379")
+        g = G.check(cur, G.proposed_delete(cur, v4), ctx)
+        check(not g["ok"] and any(v["id"].startswith("canary-missing:6379:tcp:v4")
+                                  for v in g["new"]), "canary: deleting the live IPv4 rule is refused")
+        ctx2, _ = mkctx(root, canary_active=False)
+        vs2 = [v["id"] for v in G.invariants(cur, ctx2, cur)]
+        check(len([x for x in vs2 if x.startswith("canary-leftover:")]) == 4,
+              "canary not running: every canary rule is a leftover")
+        check(not [x for x in vs2 if x.startswith("canary-missing")], "canary not running: nothing missing")
+        fs = [f for f in L.findings(cur, ctx) if f["id"].startswith("guard:canary-no-listener")]
+        check(len(fs) == 3 and fs[0]["fix"]["kind"] == "manual" and fs[0]["rules"],
+              "canary: lint findings with the rule + a manual fix")
+    finally:
+        shutil.rmtree(root)
+
+
 def t_lint():
     root = lint_root()
     ctx, run = mkctx(root)
@@ -1162,6 +1205,8 @@ def t_api():
 
 def main():
     t_canary()
+    if HAVE_UFW:
+        t_canary_rules()
     t_lint()
     if HAVE_UFW:
         t_edit()

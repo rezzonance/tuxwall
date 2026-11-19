@@ -10,8 +10,7 @@
   "mssql.port": 1433,
   "redis.enabled": true,
   "redis.port": 6379,
-  "snmp.enabled": true,
-  "snmp.port": 161,
+  "snmp.enabled": false,
   "logger": {
     "class": "PyLogger",
     "kwargs": {
@@ -21,7 +20,7 @@
           "filename": "/var/log/opencanary/opencanary.log"
         },
         "slack": {
-          "()": "opencanary.logger.SlackHandler",
+          "()": "tuxwall_canary_handler.TimeoutSlackHandler",
           "webhook_url": "http://127.0.0.1:8008/api/canary/hit?token=__TOKEN__",
           "level": "NOTSET"
         }

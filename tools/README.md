@@ -108,3 +108,23 @@ still blocked, WAN->router closed in high), extend, expiry, end, daemon
 re-apply after a flush + simulated unbound restart, daemon expiry, and
 resolve (everything removed). Snapshots of the live iptables/ip6tables/ipset/
 unbound zones before and after must match; the namespaces are always deleted.
+
+## deception_check.py — deception layer (CI)
+
+```bash
+python3 tools/deception_check.py
+```
+
+Imports `www/includes/api_server.py` with every path remapped into a temp
+dir, `subprocess.run` faked (cscli/ufw/ss/systemctl answered from fixtures)
+and the collector transport stubbed — nothing is banned, opened or sent.
+Covers the tarpit slot accounting (per-IP / total caps reserved before a
+thread exists, thread-start failure, accept() errors), the `>=` threshold
+with its once-per-source flag, bounded TTL maps, the LAN guard incl. the
+delegated global IPv6 prefix, the never-ban guard on every ban/report path
+(own/recent WAN, protected ranges, infrastructure IPs), cscli return codes,
+retired SNMP/UDP evidence, the reporting switch + persistent retry queue
+(no key on disk, 0600 atomic writes, backoff, restart), report categories,
+the canary firewall plan (IPv4 only, grace before closing) and the cached
+tail read of `opencanary.log`. A loopback load test (127.0.0.2, never the
+WAN) proves one client cannot exceed the per-IP cap and fds stay bounded.

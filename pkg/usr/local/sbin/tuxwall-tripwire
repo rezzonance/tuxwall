@@ -29,7 +29,9 @@ Checks (CHECKS registry):
      classes successful-admin, attempted-admin, trojan-activity,
      web-application-attack, shellcode-detect
      - BUT ONLY when the attack landed on something REAL. Events whose
-       destination is a deception-layer port (canary/tarpit) are delegated:
+       destination is a live decoy - the WAN address a canary/tarpit
+       listens on AND one of its configured ports (read from
+       honeypot.json / opencanary.conf, never a fixed list) - are delegated:
        the honeypot absorbed the attack and the ban pipeline owns the
        response - the tripwire never contains for them (a Mirai scan
        hitting the fake ADB port is weather, not an incident). They are
@@ -77,7 +79,8 @@ restart; adding TUXWALL_TRIPWIRE_NETNS=<ns> applies the real rules inside
 that network namespace instead. TUXWALL_TRIPWIRE_PUSH_FILE=<file> records
 pushes instead of sending them. TUXWALL_TRIPWIRE_OWN_IPS / _LAN_NETS
 (comma lists) replace the router's addresses / internal networks that are
-otherwise read from `ip -o addr`. Recovery: TUXWALL_TRIPWIRE_UNBOUND_CONTROL
+otherwise read from `ip -o addr`; _WAN_IPS lists the WAN addresses (decoy
+destinations) in that mode. Recovery: TUXWALL_TRIPWIRE_UNBOUND_CONTROL
 (a test unbound's control command; in a sandbox without it the DNS
 restriction is only recorded), _DNS (resolver ip[#port]), _FAKE_DNS (JSON
 host -> addresses), _RESOLVER_USER, _RECOVERY_REFRESH. Never point a test
@@ -151,11 +154,16 @@ HISTORY_MAX_BYTES = int(ENV("TUXWALL_TRIPWIRE_HISTORY_MAX") or 5 * 1024 * 1024)
 HISTORY_DAYS = 90
 NETS_TTL_S = 60
 
-# Destination ports owned by the deception layer: traffic landing here hit
-# a FAKE service by design - the canary/tarpit absorbed it and the ban
-# pipeline owns the response. Annotated so the reader can instantly tell
-# "absorbed" from "landed on something real".
-DECEPTION_PORTS = {22, 23, 161, 5555, 2323, 3389, 445, 5900, 1433, 6379}
+# The deception layer's decoys, read from the LIVE configs (never a fixed
+# port list): an alert is "absorbed" only when its destination is the WAN
+# address a decoy actually listens on AND the port is one of that decoy's
+# configured ports. The same port on a real host (an attack on 22/445/3389
+# of a LAN machine behind a port forward) is a real attack.
+HONEYPOT_CONF = _p("/var/lib/tuxwall/honeypot.json")
+HONEYPOT_DEFAULT_PORTS = (23, 2323, 3389, 445, 5555)
+CANARY_CONF = _p("/etc/opencanaryd/opencanary.conf")
+CANARY_UDP_MODULES = ("snmp", "ntp", "tftp", "sip")
+DECEPTION_TTL_S = 60
 
 # ── check registry ───────────────────────────────────────────────────────────
 # eve.json alerts carry the classification DESCRIPTION in "category"
@@ -566,9 +574,11 @@ def local_networks(refresh=False):
     if not refresh and _NETS["val"] and now - _NETS["ts"] < NETS_TTL_S:
         return _NETS["val"]
     wan = wan_iface()
+    wan_addrs = []
     if ENV("TUXWALL_TRIPWIRE_OWN_IPS") is not None or ENV("TUXWALL_TRIPWIRE_LAN_NETS") is not None:
         own = [i.ip for i in _addr_list(ENV("TUXWALL_TRIPWIRE_OWN_IPS"))]
         lan = [i.network for i in _addr_list(ENV("TUXWALL_TRIPWIRE_LAN_NETS"))]
+        wan_addrs = [i.ip for i in _addr_list(ENV("TUXWALL_TRIPWIRE_WAN_IPS"))]
     else:
         own, lan = [], []
         try:
@@ -588,10 +598,75 @@ def local_networks(refresh=False):
             own.append(itf.ip)
             if ifname not in (wan, "lo") and not itf.ip.is_link_local:
                 lan.append(itf.network)
-    val = {"own": own, "lan": lan, "wan": wan}
+            if wan and ifname == wan and not itf.ip.is_link_local:
+                wan_addrs.append(itf.ip)
+    val = {"own": own, "lan": lan, "wan": wan, "wan_addrs": wan_addrs}
     if own or lan:
         _NETS.update(ts=now, val=val)
     return val
+
+
+_DECEPTION = {"ts": 0.0, "val": None}
+
+
+def _port_set(values, proto):
+    out = set()
+    for p in values or ():
+        try:
+            p = int(p)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= p <= 65535:
+            out.add((p, proto))
+    return out
+
+
+def deception_targets(refresh=False):
+    """[(owner, {addresses}, {(port, proto)})] for every decoy that is
+    configured right now: the tarpit (honeypot.json enabled -> its ports on
+    the WAN addresses, v4 + v6) and OpenCanary (enabled modules' ports on
+    device.listen_addr, the WAN IPv4). Cached DECEPTION_TTL_S."""
+    now = time.time()
+    if not refresh and _DECEPTION["val"] is not None and now - _DECEPTION["ts"] < DECEPTION_TTL_S:
+        return _DECEPTION["val"]
+    wan_addrs = set(local_networks().get("wan_addrs") or [])
+    out = []
+    hp = read_json(HONEYPOT_CONF, {})
+    if hp.get("enabled"):
+        ports = _port_set(hp.get("ports") or HONEYPOT_DEFAULT_PORTS, "tcp")
+        if ports and wan_addrs:
+            out.append(("honeypot", wan_addrs, ports))
+    cc = read_json(CANARY_CONF, {})
+    if cc:
+        ports = set()
+        for k, v in cc.items():
+            if k.endswith(".enabled") and v is True:
+                name = k[:-len(".enabled")]
+                ports |= _port_set([cc.get(name + ".port")],
+                                   "udp" if name in CANARY_UDP_MODULES else "tcp")
+        listen = _addr(cc.get("device.listen_addr"))
+        addrs = {listen} if listen is not None and not listen.is_unspecified else wan_addrs
+        if ports and addrs:
+            out.append(("canary", addrs, ports))
+    _DECEPTION.update(ts=now, val=out)
+    return out
+
+
+def deception_owner(dest_ip, dest_port, proto="TCP"):
+    """"honeypot" / "canary" when (dest_ip, dest_port, proto) is a live decoy
+    on the WAN address, else None."""
+    ip = _addr(dest_ip)
+    try:
+        port = int(dest_port or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if ip is None or not port:
+        return None
+    pr = "udp" if str(proto or "").lower() == "udp" else "tcp"
+    for owner, addrs, ports in deception_targets():
+        if ip in addrs and (port, pr) in ports:
+            return owner
+    return None
 
 
 # ── state store (thread lock + cross-process flock) ──────────────────────────
@@ -927,15 +1002,24 @@ def flush_notify():
 
 # ── events + evaluation ──────────────────────────────────────────────────────
 
-def dst_label(dest_ip, dest_port):
-    try:
-        port = int(dest_port or 0)
-    except (TypeError, ValueError):
-        port = 0
+def dst_label(dest_ip, dest_port, proto="TCP"):
     where = "%s:%s" % (dest_ip or "?", dest_port or "?")
-    if port in DECEPTION_PORTS:
+    if deception_owner(dest_ip, dest_port, proto):
         return "%s [deception layer - absorbed]" % where
     return where
+
+
+def is_absorbed(event):
+    """True when the event landed on a live decoy. Events carry the verdict
+    made when they were read ("deception"); older records without it are
+    re-checked against the live config (dst_ip/dst_port) and only text-only
+    imports fall back to the label."""
+    if "deception" in event:
+        return bool(event.get("deception"))
+    if event.get("dst_ip"):
+        return deception_owner(event.get("dst_ip"), event.get("dst_port"),
+                               event.get("proto") or "TCP") is not None
+    return "deception layer" in (event.get("dst") or "")
 
 
 def eve_prefilter(line):
@@ -961,13 +1045,17 @@ def event_from_eve(ev):
         port = int(ev.get("dest_port") or 0)
     except (TypeError, ValueError):
         port = 0
+    owner = deception_owner(ev.get("dest_ip"), port, ev.get("proto") or "TCP")
+    where = "%s:%s" % (ev.get("dest_ip") or "?", ev.get("dest_port") or "?")
     return {"check": check, "source": "suricata", "reason": SURICATA_REASON,
             "class": alert.get("classtype") or alert.get("category") or "?",
             "sig": (alert.get("signature") or "")[:160],
             "sid": alert.get("signature_id"),
             "src": ev.get("src_ip") or "?", "src_port": ev.get("src_port"),
             "dst_ip": ev.get("dest_ip") or "",
-            "dst_port": port, "dst": dst_label(ev.get("dest_ip"), ev.get("dest_port")),
+            "dst_port": port,
+            "dst": "%s [deception layer - absorbed]" % where if owner else where,
+            "deception": owner,
             "proto": ev.get("proto") or "", "iface": ev.get("in_iface") or "",
             "ts": time.time()}
 
@@ -1073,10 +1161,11 @@ def evaluate(event, cfg=None, now=None, windows=None, nets=None):
 
     src_ip, dst_ip = _addr(event.get("src")), _addr(event.get("dst_ip"))
     if event.get("source") == "suricata":
-        if "deception layer" in (event.get("dst") or ""):
+        if is_absorbed(event):
             out.update(action="absorb",
-                       reason="landed on a deception-layer port: absorbed by the honeypot, "
-                              "the ban pipeline owns the response")
+                       reason="landed on a live decoy (%s) on the WAN address: absorbed by "
+                              "the deception layer, the ban pipeline owns the response"
+                              % (event.get("deception") or "deception layer"))
             return out
         nets = nets or local_networks()
         if src_ip and (_is_loopback(src_ip) or src_ip in nets["own"]):
@@ -2934,8 +3023,8 @@ def synthetic_event(cid, over=None):
                 "class": c["classtype"], "sig": sig or "TUXWALL TEST: simulated %s alert"
                 % c["category"], "sid": sid, "src": str(over.get("src") or "203.0.113.10"),
                 "src_port": 40000, "dst_ip": dst_ip, "dst_port": port,
-                "dst": dst_label(dst_ip, port), "proto": "TCP", "iface": iface,
-                "ts": now, "test": True}
+                "dst": dst_label(dst_ip, port), "deception": deception_owner(dst_ip, port),
+                "proto": "TCP", "iface": iface, "ts": now, "test": True}
     dst_ip = str(over.get("dst_ip") or "198.51.100.20")
     return {"check": cid, "source": "canary", "reason": CANARY_REASON,
             "class": "canary-egress",

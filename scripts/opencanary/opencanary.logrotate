@@ -1,0 +1,14 @@
+# OpenCanary event log (captured attacker credentials: root/opencanary only).
+# copytruncate: the canary keeps the file open (logging.FileHandler, append
+# mode), so it is truncated in place instead of being re-opened.
+/var/log/opencanary/opencanary.log {
+    su opencanary opencanary
+    weekly
+    maxsize 20M
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

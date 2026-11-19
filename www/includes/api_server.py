@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import base64
+import errno
 import gzip
 import hashlib
 import hmac
 import io
 import ipaddress
+import itertools
 import json
 import mimetypes
 import os
@@ -24,7 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from collections import deque
+from collections import OrderedDict, deque
 from datetime import datetime, timezone
 from uuid import uuid4
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -3736,12 +3738,85 @@ def save_llm_conf(body):
     return {"ok": True, "backup": bak if os.path.exists(bak) else None}
 
 
+class BoundedTTLMap:
+    """Thread-safe LRU map with a per-entry TTL (from the last write) and a
+    hard size cap. The deception layer keys these by attacker address, so
+    they must never grow with the internet (2026-11-19: the honeypot hit
+    counter and the canary dedupe map were unbounded)."""
+
+    def __init__(self, maxlen, ttl):
+        self.maxlen = max(1, int(maxlen))
+        self.ttl = float(ttl)
+        self._d = OrderedDict()        # key -> (written_at, value), oldest first
+        self._lock = threading.Lock()
+        self.evicted = 0
+
+    def _expire(self, now):
+        d = self._d
+        while d:
+            k = next(iter(d))
+            if now - d[k][0] < self.ttl:
+                break
+            del d[k]
+            self.evicted += 1
+
+    def get(self, key, now=None):
+        now = time.time() if now is None else now
+        with self._lock:
+            hit = self._d.get(key)
+            if hit is None:
+                return None
+            if now - hit[0] >= self.ttl:
+                del self._d[key]
+                return None
+            return hit[1]
+
+    def set(self, key, value, now=None):
+        now = time.time() if now is None else now
+        with self._lock:
+            self._d.pop(key, None)
+            self._d[key] = (now, value)
+            self._expire(now)
+            while len(self._d) > self.maxlen:
+                self._d.popitem(last=False)
+                self.evicted += 1
+
+    def pop(self, key, default=None):
+        with self._lock:
+            hit = self._d.pop(key, None)
+            return default if hit is None else hit[1]
+
+    def items(self, now=None):
+        now = time.time() if now is None else now
+        with self._lock:
+            self._expire(now)
+            return [(k, v) for k, (_, v) in self._d.items()]
+
+    def clear(self):
+        with self._lock:
+            self._d.clear()
+
+    def __len__(self):
+        with self._lock:
+            return len(self._d)
+
+
 # --- Community ban reporting (tuxwall.org) --------------------------------
-# When enabled, the dashboard reports every ban (CrowdSec / custom blocklist)
-# to the tuxwall.org collector, which aggregates them into a public community
-# ban list. The per-install key in /etc/tuxwall/reporting.json is what lets
-# the collector count *distinct* reporting installs for severity; the key is
-# only ever sent over HTTPS and hashed server-side (never stored in plaintext).
+# Deception catches (honeypot + canary) are reported to the tuxwall.org
+# collector, which aggregates them into the public community ban list. The
+# per-install key in /etc/tuxwall/reporting.json is what lets the collector
+# count *distinct* reporting installs for severity; the key is only ever sent
+# over HTTPS and hashed server-side (never stored in plaintext).
+#
+# 2026-11-19 (deception phase 1):
+#   - reporting.json "enabled" is honoured (absent = on, the historical
+#     behaviour); off means nothing is queued or sent.
+#   - the file holds the key: written atomically, root 0600, and only when
+#     the settings change (the per-report status lives in the queue state).
+#   - every report goes through a persistent retry queue
+#     (/var/lib/tuxwall/report-queue.json, no key inside): network errors,
+#     429 and 5xx retry with exponential backoff; refusals (4xx) are dropped.
+#   - reporting_status() is the one summary for the settings UI.
 REPORTING_CONF_FILE = "/etc/tuxwall/reporting.json"
 REPORTING_DEFAULT_URL = "https://tuxwall.org/report"
 # Tuxwall version sent with every community report/registration. tuxwall.org
@@ -3750,28 +3825,30 @@ REPORTING_DEFAULT_URL = "https://tuxwall.org/report"
 # Keep in sync with pkg/DEBIAN/control.
 TUXWALL_VERSION = "3.3.1"
 REPORTING_TIMEOUT = 10
+REPORT_QUEUE_FILE = os.path.join(BLOCKLIST_DIR, "report-queue.json")
+REPORT_QUEUE_MAX = 2000              # queued reports kept at most (oldest dropped)
+REPORT_QUEUE_MAX_AGE = 7 * 86400     # stale evidence is dropped, not sent late
+REPORT_RETRY_BASE = 30               # seconds; doubles per attempt
+REPORT_RETRY_MAX = 3600
+REPORT_BATCH = 25                    # sends per worker pass
 _report_status_lock = threading.Lock()
 
 
 def load_reporting_conf():
     conf = {
-        "enabled": False,
+        "enabled": True,
         "url": REPORTING_DEFAULT_URL,
         "key": "",
-        "last_report": None,
-        "last_error": None,
     }
     try:
         with open(REPORTING_CONF_FILE, "r") as f:
             data = json.load(f)
         if isinstance(data, dict):
-            conf["enabled"] = bool(data.get("enabled"))
+            conf["enabled"] = bool(data.get("enabled", True))
             url = str(data.get("url") or "").strip().rstrip("/")
             if url:
                 conf["url"] = url
             conf["key"] = str(data.get("key") or "")
-            conf["last_report"] = data.get("last_report")
-            conf["last_error"] = data.get("last_error")
     except (OSError, ValueError):
         pass
     return conf
@@ -3783,20 +3860,35 @@ def _mask_key(key):
     return "****" if key else ""
 
 
-def _write_report_status(ok, error):
-    """Record the outcome of the last report attempt in the conf file."""
+def _write_private_json(path, data):
+    """Atomic root-only write: temp file (mkstemp = 0600) in the same
+    directory, fsync, rename. The reporting key never sits in a 0644 file
+    or a half-written one."""
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", dir=d)
     try:
-        with _report_status_lock:
-            data = load_reporting_conf()
-            if ok:
-                data["last_report"] = time.time()
-                data["last_error"] = None
-            else:
-                data["last_error"] = (error or "")[:200]
-            with open(REPORTING_CONF_FILE, "w") as f:
-                json.dump(data, f, indent=2)
-    except OSError:
-        pass
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _save_reporting_conf(conf):
+    """Persist the reporting settings (enabled/url/key) atomically, 0600."""
+    data = {"enabled": bool(conf.get("enabled", True)),
+            "url": str(conf.get("url") or REPORTING_DEFAULT_URL),
+            "key": str(conf.get("key") or "")}
+    _write_private_json(REPORTING_CONF_FILE, data)
+    return data
 
 
 REPORT_CATEGORIES = ["ssh", "rdp", "bruteforce", "scan", "web", "spam", "dos",
@@ -3836,89 +3928,389 @@ def report_category_for(reason, source):
     return "other"
 
 
+# Deception categories: the decoy knows exactly which fake service was hit,
+# so reports carry the port/service instead of falling back to "other".
+DECEPTION_SERVICES = {
+    21: "FTP", 22: "SSH", 23: "telnet", 25: "SMTP", 80: "HTTP", 110: "POP3",
+    143: "IMAP", 443: "HTTPS", 445: "SMB", 1433: "MSSQL", 1521: "Oracle",
+    2323: "telnet", 3306: "MySQL", 3389: "RDP", 5432: "PostgreSQL",
+    5555: "ADB", 5900: "VNC", 6379: "Redis", 8080: "HTTP", 8443: "HTTPS",
+    9200: "Elasticsearch", 11211: "memcached", 27017: "MongoDB",
+}
+_DECEPTION_PORT_CATEGORY = {22: "ssh", 3389: "rdp", 25: "spam", 80: "web",
+                            443: "web", 8080: "web", 8443: "web"}
+# Redis commands scanners use to plant cron jobs / rogue replicas
+_REDIS_EXPLOIT_CMDS = ("config", "slaveof", "replicaof", "module", "eval",
+                       "flushall", "script")
+
+
+def deception_service(port):
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return "unknown service"
+    return DECEPTION_SERVICES.get(port, "port %d" % port)
+
+
+def deception_category(source, port=None, logtype=None, logdata=None):
+    """Report category for a deception catch from what was actually hit:
+    honeypot = a bare connection to a fake service (scan, or the service's
+    own class for SSH/RDP/web/mail ports); canary = what the emulator saw
+    (SSH session, a login against MSSQL/VNC, a Redis exploit command)."""
+    try:
+        port = int(port) if port not in (None, "") else None
+    except (TypeError, ValueError):
+        port = None
+    if source == "canary":
+        lt = int(logtype or 0)
+        if lt in (4000, 4001, 4002):
+            return "ssh"
+        if lt in (9001, 9002, 12001):
+            return "bruteforce"
+        if lt == 17001:
+            cmd = str((logdata or {}).get("CMD") or "").strip().lower()
+            return "malware" if cmd in _REDIS_EXPLOIT_CMDS else "scan"
+    return _DECEPTION_PORT_CATEGORY.get(port, "scan")
+
+
 def ensure_reporting_key():
     """Create the anonymous per-install reporting key on first use."""
-    conf = load_reporting_conf()
-    if conf["key"]:
-        return conf
-    conf["key"] = secrets.token_hex(16)
-    try:
-        os.makedirs(os.path.dirname(REPORTING_CONF_FILE), exist_ok=True)
-        with open(REPORTING_CONF_FILE, "w") as f:
-            json.dump(conf, f, indent=2)
+    with _report_status_lock:
+        conf = load_reporting_conf()
+        if conf["key"]:
+            return conf
+        conf["key"] = secrets.token_hex(16)
         try:
-            os.chmod(REPORTING_CONF_FILE, 0o600)
-        except OSError:
+            _save_reporting_conf(conf)
+        except OSError as exc:
+            print("[report] could not save the reporting key: %r" % (exc,), flush=True)
+        return conf
+
+
+def set_reporting_enabled(enabled):
+    """The real off switch (phase 3 wires it into the settings UI)."""
+    with _report_status_lock:
+        conf = load_reporting_conf()
+        conf["enabled"] = bool(enabled)
+        _save_reporting_conf(conf)
+    if not enabled:
+        _report_q_discard_all("community reporting switched off")
+    return reporting_status()
+
+
+# --- report queue -------------------------------------------------------------
+REPORT_Q = {"loaded": False, "items": [], "stats": {}}
+REPORT_Q_LOCK = threading.RLock()
+REPORT_Q_WAKE = threading.Event()
+_REPORT_WORKER = {"thread": None}
+
+
+def _report_q_default_stats():
+    return {"last_report": None, "last_error": None, "last_error_at": None,
+            "sent_total": 0, "refused_total": 0, "dropped_total": 0,
+            "retries_total": 0, "sent_recent": []}
+
+
+def _report_q_load():
+    with REPORT_Q_LOCK:
+        if REPORT_Q["loaded"]:
+            return
+        items, stats = [], _report_q_default_stats()
+        try:
+            with open(REPORT_QUEUE_FILE) as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                items = [i for i in (data.get("items") or [])
+                         if isinstance(i, dict) and isinstance(i.get("payload"), dict)]
+                if isinstance(data.get("stats"), dict):
+                    stats.update(data["stats"])
+        except (OSError, ValueError):
             pass
-    except OSError:
-        pass
-    return conf
+        # the legacy last-report fields lived in reporting.json
+        if stats.get("last_report") is None:
+            try:
+                with open(REPORTING_CONF_FILE) as f:
+                    old = json.load(f)
+                if isinstance(old, dict):
+                    stats["last_report"] = old.get("last_report")
+                    stats["last_error"] = old.get("last_error")
+            except (OSError, ValueError):
+                pass
+        REPORT_Q.update(loaded=True, items=items[-REPORT_QUEUE_MAX:], stats=stats)
+
+
+def _report_q_save():
+    """Persist the queue + counters (never the key). Caller holds the lock."""
+    now = time.time()
+    st = REPORT_Q["stats"]
+    st["sent_recent"] = [t for t in (st.get("sent_recent") or [])
+                         if isinstance(t, (int, float)) and now - t < 86400][-5000:]
+    try:
+        _write_private_json(REPORT_QUEUE_FILE, {"version": 1, "items": REPORT_Q["items"],
+                                                "stats": st})
+    except OSError as exc:
+        print("[report] queue save failed: %r" % (exc,), flush=True)
+
+
+def _report_q_discard_all(why):
+    _report_q_load()
+    with REPORT_Q_LOCK:
+        n = len(REPORT_Q["items"])
+        if n:
+            REPORT_Q["items"] = []
+            REPORT_Q["stats"]["dropped_total"] = int(REPORT_Q["stats"].get("dropped_total") or 0) + n
+            REPORT_Q["stats"]["last_error"] = "%d queued report(s) discarded: %s" % (n, why)
+            REPORT_Q["stats"]["last_error_at"] = time.time()
+            _report_q_save()
+    return n
+
+
+def _report_payload(ip, hits=0, reason="", source="", category="", suricata=None):
+    """The report body WITHOUT the key (the key is added at send time, so
+    the persisted queue never holds it). None for a non-global address."""
+    try:
+        addr = ipaddress.ip_address((ip or "").strip())
+    except ValueError:
+        return None
+    if not addr.is_global:
+        return None
+    payload = {
+        "ip": str(addr),
+        "hits": max(0, int(hits or 0)),
+        "reason": (reason or "")[:96],
+        "source": (source or "")[:24] or "tuxwall",
+        "category": (category if category in REPORT_CATEGORIES
+                     else report_category_for(reason, source)),
+    }
+    # Suricata signatures observed from this IP (top 5, sanitized) —
+    # rendered on the tuxwall.org report card. Bounded so a hostile or
+    # buggy caller can't inflate the ingest payload.
+    if isinstance(suricata, list):
+        clean = []
+        for item in suricata[:5]:
+            if not isinstance(item, dict):
+                continue
+            sig = str(item.get("sig") or "").strip()[:120]
+            if not sig:
+                continue
+            try:
+                count = max(1, min(1000000, int(item.get("count") or 1)))
+            except (TypeError, ValueError):
+                count = 1
+            try:
+                sid = int(item.get("sid") or 0)
+            except (TypeError, ValueError):
+                sid = 0
+            clean.append({"sig": sig, "count": count, "sid": sid})
+        if clean:
+            payload["suricata"] = clean
+    return payload
+
+
+def _report_enqueue(payload, now=None):
+    """Queue one report (persisted) and wake the sender. Returns a status
+    dict; nothing is queued while reporting is switched off."""
+    if not payload:
+        return {"ok": False, "reason": "invalid or non-global ip"}
+    if not load_reporting_conf()["enabled"]:
+        return {"ok": False, "reason": "community reporting is switched off"}
+    now = now or time.time()
+    _report_q_load()
+    with REPORT_Q_LOCK:
+        items = REPORT_Q["items"]
+        for it in items:
+            p = it["payload"]
+            if p.get("ip") == payload["ip"] and p.get("source") == payload["source"]:
+                p["hits"] = max(int(p.get("hits") or 0), int(payload.get("hits") or 0))
+                return {"ok": True, "queued": True, "merged": True, "id": it["id"]}
+        item = {"id": secrets.token_hex(6), "payload": payload, "created": now,
+                "attempts": 0, "next_try": now, "last_error": None}
+        items.append(item)
+        dropped = 0
+        cutoff = now - REPORT_QUEUE_MAX_AGE
+        keep = [i for i in items if float(i.get("created") or now) >= cutoff]
+        dropped += len(items) - len(keep)
+        if len(keep) > REPORT_QUEUE_MAX:
+            dropped += len(keep) - REPORT_QUEUE_MAX
+            keep = keep[-REPORT_QUEUE_MAX:]
+        REPORT_Q["items"] = keep
+        if dropped:
+            REPORT_Q["stats"]["dropped_total"] = int(REPORT_Q["stats"].get("dropped_total") or 0) + dropped
+        _report_q_save()
+    _report_worker_ensure()
+    REPORT_Q_WAKE.set()
+    return {"ok": True, "queued": True, "id": item["id"]}
+
+
+def _report_http_post(url, body, headers, timeout):
+    """The only network call of the reporting path (tests replace it).
+    Returns (http status, parsed JSON dict or {})."""
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read(65536)
+            code = resp.status
+    except urllib.error.HTTPError as exc:
+        code = exc.code
+        try:
+            raw = exc.read(65536)
+        except Exception:
+            raw = b""
+    try:
+        parsed = json.loads((raw or b"{}").decode("utf-8", "replace") or "{}")
+    except ValueError:
+        parsed = {}
+    return code, parsed if isinstance(parsed, dict) else {}
+
+
+def _report_send_one(item, conf):
+    """-> ("sent" | "retry" | "refused", detail). Transient failures
+    (network, timeouts, 429, 5xx) retry; a 4xx refusal (invalid, protected,
+    revoked key, version) is final."""
+    body = dict(item["payload"], key=conf["key"])
+    try:
+        code, parsed = _report_http_post(
+            conf["url"], json.dumps(body).encode("utf-8"),
+            {"Content-Type": "application/json", "User-Agent": "tuxwall-report/1.0",
+             "X-Tuxwall-Version": TUXWALL_VERSION},
+            REPORTING_TIMEOUT)
+    except Exception as exc:
+        return "retry", ("network: %s" % (exc,))[:200]
+    err = str(parsed.get("error") or "")[:160]
+    if 200 <= code < 300:
+        if parsed.get("ok"):
+            return "sent", ("duplicate" if parsed.get("duplicate") else "accepted")
+        return "refused", ("HTTP %d: %s" % (code, err or "not ok"))[:200]
+    if code == 429 or code >= 500:
+        return "retry", ("HTTP %d: %s" % (code, err))[:200]
+    return "refused", ("HTTP %d: %s" % (code, err))[:200]
+
+
+def _report_backoff(attempts):
+    delay = min(REPORT_RETRY_MAX, REPORT_RETRY_BASE * (2 ** max(0, attempts - 1)))
+    return delay + secrets.randbelow(max(1, int(delay // 5) + 1))
+
+
+def _report_q_process(now=None, limit=REPORT_BATCH):
+    """Send every due item once (oldest first). Returns {sent, retry,
+    refused, discarded, left}. Never raises."""
+    now = now or time.time()
+    out = {"sent": 0, "retry": 0, "refused": 0, "discarded": 0, "left": 0}
+    _report_q_load()
+    conf = load_reporting_conf()
+    if not conf["enabled"]:
+        out["discarded"] = _report_q_discard_all("community reporting is switched off")
+        return out
+    with REPORT_Q_LOCK:
+        due = [dict(i) for i in REPORT_Q["items"]
+               if float(i.get("next_try") or 0) <= now][:limit]
+    if due and not conf["key"]:
+        conf = ensure_reporting_key()
+    for item in due:
+        result, detail = _report_send_one(item, conf)
+        t = time.time()
+        with REPORT_Q_LOCK:
+            st = REPORT_Q["stats"]
+            live = next((i for i in REPORT_Q["items"] if i["id"] == item["id"]), None)
+            if result == "sent":
+                out["sent"] += 1
+                st["last_report"] = t
+                st["sent_total"] = int(st.get("sent_total") or 0) + 1
+                st.setdefault("sent_recent", []).append(t)
+                if live is not None:
+                    REPORT_Q["items"].remove(live)
+            elif result == "refused":
+                out["refused"] += 1
+                st["refused_total"] = int(st.get("refused_total") or 0) + 1
+                st["last_error"] = "%s (%s, not retried)" % (detail, item["payload"].get("ip"))
+                st["last_error_at"] = t
+                if live is not None:
+                    REPORT_Q["items"].remove(live)
+            else:
+                out["retry"] += 1
+                st["retries_total"] = int(st.get("retries_total") or 0) + 1
+                st["last_error"] = "%s (will retry)" % detail
+                st["last_error_at"] = t
+                if live is not None:
+                    live["attempts"] = int(live.get("attempts") or 0) + 1
+                    live["last_error"] = detail
+                    live["next_try"] = t + _report_backoff(live["attempts"])
+            _report_q_save()
+    with REPORT_Q_LOCK:
+        out["left"] = len(REPORT_Q["items"])
+    return out
+
+
+def _report_q_next_due():
+    with REPORT_Q_LOCK:
+        if not REPORT_Q["items"]:
+            return None
+        return min(float(i.get("next_try") or 0) for i in REPORT_Q["items"])
+
+
+def _report_worker_loop():
+    _report_q_load()
+    while True:
+        try:
+            _report_q_process()
+        except Exception as exc:
+            print("[report] worker pass failed: %r" % (exc,), flush=True)
+        nxt = _report_q_next_due()
+        wait = 300.0 if nxt is None else max(1.0, min(300.0, nxt - time.time()))
+        REPORT_Q_WAKE.wait(wait)
+        REPORT_Q_WAKE.clear()
+
+
+def _report_worker_ensure():
+    with REPORT_Q_LOCK:
+        t = _REPORT_WORKER["thread"]
+        if t is not None and t.is_alive():
+            return t
+        t = threading.Thread(target=_report_worker_loop, name="report-queue", daemon=True)
+        t.start()
+        _REPORT_WORKER["thread"] = t
+    return t
+
+
+def reporting_status():
+    """Local reporting state in one place (phase 3: settings + queue UI):
+    switch, key present (never the key), URL, last report / error, 24 h
+    count, queue length and next retry."""
+    conf = load_reporting_conf()
+    _report_q_load()
+    now = time.time()
+    with REPORT_Q_LOCK:
+        st = dict(REPORT_Q["stats"])
+        items = list(REPORT_Q["items"])
+    nxt = min((float(i.get("next_try") or 0) for i in items), default=None)
+    return {
+        "enabled": conf["enabled"],
+        "key_present": bool(conf["key"]),
+        "url": conf["url"],
+        "last_report": st.get("last_report"),
+        "last_error": st.get("last_error"),
+        "last_error_at": st.get("last_error_at"),
+        "sent_24h": len([t for t in (st.get("sent_recent") or [])
+                         if isinstance(t, (int, float)) and now - t < 86400]),
+        "sent_total": int(st.get("sent_total") or 0),
+        "refused_total": int(st.get("refused_total") or 0),
+        "dropped_total": int(st.get("dropped_total") or 0),
+        "queue_length": len(items),
+        "queue_retrying": len([i for i in items if int(i.get("attempts") or 0) > 0]),
+        "next_retry": nxt,
+        "worker_alive": bool(_REPORT_WORKER["thread"] and _REPORT_WORKER["thread"].is_alive()),
+    }
 
 
 def report_ban_to_org(ip, hits=0, reason="", source="", category="",
                       suricata=None):
-    """Send a ban report to tuxwall.org. Never raises; returns a status dict.
-    run a daemon thread when it outlives the request."""
+    """Queue a ban report for tuxwall.org (sent by the report-queue worker,
+    retried on failure). Never raises; returns a status dict."""
     try:
-        # Deception-source reporting is always on: every trap catch is a
-        # verified threat (a completed handshake to a service that does not
-        # exist) and carries no contributor judgment or user data. The
-        # per-install key is generated on first use.
-        conf = load_reporting_conf()
-        if not conf["key"]:
-            conf = ensure_reporting_key()
-        ip = (ip or "").strip()
-        try:
-            addr = ipaddress.ip_address(ip)
-        except ValueError:
-            return {"ok": False, "reason": "invalid ip"}
-        if not addr.is_global:
-            return {"ok": False, "reason": "non-global"}
-        payload = {
-            "key": conf["key"],
-            "ip": str(addr),
-            "hits": max(0, int(hits or 0)),
-            "reason": (reason or "")[:96],
-            "source": (source or "")[:24] or "tuxwall",
-            "category": (category or report_category_for(reason, source)),
-        }
-        # Suricata signatures observed from this IP (top 5, sanitized) —
-        # rendered on the tuxwall.org report card. Bounded so a hostile or
-        # buggy caller can't inflate the ingest payload.
-        if isinstance(suricata, list):
-            clean = []
-            for item in suricata[:5]:
-                if not isinstance(item, dict):
-                    continue
-                sig = str(item.get("sig") or "").strip()[:120]
-                if not sig:
-                    continue
-                try:
-                    count = max(1, min(1000000, int(item.get("count") or 1)))
-                except (TypeError, ValueError):
-                    count = 1
-                try:
-                    sid = int(item.get("sid") or 0)
-                except (TypeError, ValueError):
-                    sid = 0
-                clean.append({"sig": sig, "count": count, "sid": sid})
-            if clean:
-                payload["suricata"] = clean
-        req = urllib.request.Request(
-            conf["url"],
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json",
-                     "User-Agent": "tuxwall-report/1.0",
-                     "X-Tuxwall-Version": TUXWALL_VERSION},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=REPORTING_TIMEOUT) as resp:
-            parsed = json.loads(resp.read().decode("utf-8") or "{}")
-        ok = bool(parsed.get("ok"))
-        _write_report_status(ok, None if ok else str(parsed))
-        return {"ok": ok}
+        if not load_reporting_conf()["enabled"]:
+            return {"ok": False, "reason": "community reporting is switched off"}
+        return _report_enqueue(_report_payload(ip, hits, reason, source, category, suricata))
     except Exception as exc:
-        _write_report_status(False, str(exc))
         return {"ok": False, "reason": str(exc)}
 
 
@@ -3972,12 +4364,122 @@ def _is_own_or_recent_wan(ip):
     return ip and ip in set(_recent_wan_ips()) | {_honey_wan_ip(), _honey_wan6()}
 
 
-def _spawn_report(ip, reason, source, category=""):
-    """Fire a ban report in a daemon thread so the ban endpoint stays fast.
+# --- Deception never-ban guard (every honeypot/canary ban + report path) -----
+# 2026-11-19 (deception phase 1): the honeypot and canary used to ban and
+# report any source with only a LAN/self check (and the IPv6 LAN guard
+# missed the delegated global prefix). _deception_guard() is now consulted
+# by _deception_cscli_ban() and _spawn_report(), i.e. by every path that
+# bans or reports a deception catch.
+_NEVER_BAN = {"ts": 0.0, "ips": None, "refreshing": False}
+_NEVER_BAN_LOCK = threading.Lock()
+_NEVER_BAN_TTL = 600
 
-    Self-guard: any WAN address this router holds - or recently held (the
-    WAN is dynamic; a self-capture of the rotated-away address is still a
-    self-capture) - is never reported, on any path.
+
+def _never_ban_refresh():
+    try:
+        ips = frozenset(_community_never_ban_ips())
+    except Exception as exc:
+        print("[deception] never-ban refresh failed: %r" % (exc,), flush=True)
+        ips = None
+    with _NEVER_BAN_LOCK:
+        if ips is not None:
+            _NEVER_BAN.update(ts=time.time(), ips=ips)
+        _NEVER_BAN["refreshing"] = False
+    return ips
+
+
+def _deception_never_ban_ips():
+    """Addresses this router depends on (DNS forwarders, NTP, gateways, own
+    interface addresses, resolvers, APT mirrors), cached _NEVER_BAN_TTL. The
+    first call loads synchronously; afterwards a stale set is refreshed in
+    the background so a canary webhook never waits on DNS lookups."""
+    with _NEVER_BAN_LOCK:
+        ips, ts = _NEVER_BAN["ips"], _NEVER_BAN["ts"]
+        stale = ips is None or time.time() - ts >= _NEVER_BAN_TTL
+        start = stale and ips is not None and not _NEVER_BAN["refreshing"]
+        if start:
+            _NEVER_BAN["refreshing"] = True
+    if ips is None:
+        return _never_ban_refresh() or frozenset()
+    if start:
+        try:
+            threading.Thread(target=_never_ban_refresh, name="never-ban", daemon=True).start()
+        except RuntimeError:
+            with _NEVER_BAN_LOCK:
+                _NEVER_BAN["refreshing"] = False
+    return ips
+
+
+def _community_published_protected():
+    """Collector-published protected ranges from the cached community list
+    (no fetch here)."""
+    with COMMUNITY_BANS_LOCK:
+        data = COMMUNITY_BANS_CACHE.get("data") or {}
+    nets = []
+    for r in data.get("protected") or []:
+        try:
+            nets.append(ipaddress.ip_network(str(r)))
+        except ValueError:
+            continue
+    return nets
+
+
+def _deception_guard(ip):
+    """Why `ip` must never be banned or reported by the deception layer,
+    or None when it may be."""
+    try:
+        addr = _plain_ip(ipaddress.ip_address(str(ip or "").strip().split("%")[0]))
+    except ValueError:
+        return "invalid address"
+    s = str(addr)
+    if not addr.is_global:
+        return "non-global address"
+    if _honey_is_lan(s):
+        return "LAN/VLAN/VPN address (incl. the delegated IPv6 prefix)"
+    if _honey_is_self(s) or _is_own_or_recent_wan(s):
+        return "this router's own (or recent) WAN address"
+    if _ip_in_protected(s):
+        return "protected infrastructure range"
+    pub = _community_published_protected()
+    if pub and _ip_in_published(s, pub):
+        return "collector-published protected range"
+    if s in _deception_never_ban_ips():
+        return "infrastructure this router depends on (DNS/NTP/gateway/resolver/APT)"
+    return None
+
+
+def _deception_cscli_ban(ip, duration, reason):
+    """The deception layer's only CrowdSec ban call: guard first, return
+    code checked. -> (ok, error or None)."""
+    why = _deception_guard(ip)
+    if why:
+        return False, "refused by the never-ban guard: " + why
+    try:
+        proc = subprocess.run(
+            [CROWDSEC_BIN, "decisions", "add", "--ip", ip,
+             "--duration", duration, "--reason", reason],
+            capture_output=True, text=True, timeout=CROWDSEC_TIMEOUT,
+        )
+    except Exception as exc:
+        return False, ("CrowdSec unavailable: %s" % (exc,))[:200]
+    if proc.returncode != 0:
+        msg = (proc.stderr or proc.stdout or "cscli failed").strip().splitlines()
+        return False, ("cscli rc=%d: %s" % (proc.returncode, msg[-1] if msg else ""))[:200]
+    try:
+        _invalidate_crowdsec_decisions_cache()
+    except Exception:
+        pass
+    return True, None
+
+
+def _spawn_report(ip, reason, source, category=""):
+    """Queue a ban report (the report-queue worker sends and retries it).
+
+    Guard: _deception_guard() - LAN/VPN (incl. the delegated global v6
+    prefix), any WAN address this router holds or recently held (a
+    self-capture of the rotated-away address is still a self-capture),
+    protected infrastructure and the never-ban set - is never reported, on
+    any path.
 
     Evidence is attached so the tuxwall.org report card reflects the observed
     abuse type instead of how the IP happened to be banned locally:
@@ -3987,8 +4489,10 @@ def _spawn_report(ip, reason, source, category=""):
          the firewall (port scan, service probe) becomes the category and
          is appended to the reason.
     """
-    if _is_own_or_recent_wan(ip):
-        return
+    why = _deception_guard(ip)
+    if why:
+        _honey_log("report skipped for {}: {}".format(ip, why))
+        return {"ok": False, "reason": why}
     try:
         sur_cat, sur_sig = suricata_evidence_for_ip(ip)
     except Exception:
@@ -4015,10 +4519,13 @@ def _spawn_report(ip, reason, source, category=""):
         if len(reason) + len(suffix) > 96:
             reason = reason[:max(20, 96 - len(suffix))]
         reason = (reason + suffix)[:96]
-    if sur_cat:
-        category = sur_cat
-    elif ev_cat:
-        category = ev_cat
+    # A deception catch already knows the service it hit (ssh/rdp/web/...):
+    # only a generic "scan"/"other" is refined by Suricata or the UFW record.
+    if category not in REPORT_CATEGORIES or category in ("scan", "other"):
+        if sur_cat:
+            category = sur_cat
+        elif ev_cat:
+            category = ev_cat
     try:
         sur_alerts = suricata_alerts_for_ip(ip)
     except Exception:
@@ -4032,11 +4539,7 @@ def _spawn_report(ip, reason, source, category=""):
         # Monitor window missed the IP (e.g. log rotated) — the firewall's
         # own drop count is a fair stand-in.
         hits = ufw_ev["packets"]
-    threading.Thread(
-        target=lambda: report_ban_to_org(ip, hits, reason, source, category,
-                                         sur_alerts),
-        daemon=True,
-    ).start()
+    return report_ban_to_org(ip, hits, reason, source, category, sur_alerts)
 
 
 # --- OpenCanary deception services (receiver, status, control) ---------------
@@ -4051,8 +4554,7 @@ CANARY_LOG = "/var/log/opencanary/opencanary.log"
 CANARY_CONF = "/etc/opencanaryd/opencanary.conf"
 CANARY_SERVICE = "opencanary.service"
 CANARY_BAN_PREFIX = "canary/"
-CANARY_PORTS = (22, 5900, 1433, 6379)
-CANARY_SNMP_PORT = 161
+CANARY_PORTS = (22, 5900, 1433, 6379)    # TCP, WAN IPv4 only (SNMP 161/udp retired 2026-11-19)
 CANARY_EVENT_WINDOW = 86400
 CANARY_READ_LINES = 300
 CANARY_LOGTYPES = {
@@ -4122,9 +4624,14 @@ def _canary_ban_snapshot():
         return CANARY_BAN_CACHE["count"], CANARY_BAN_CACHE["last_ip"]
 
 
-CANARY_RECENT = {}
 CANARY_RECENT_TTL = 3600
+CANARY_RECENT_MAX = 8192
+CANARY_RECENT = BoundedTTLMap(CANARY_RECENT_MAX, CANARY_RECENT_TTL)   # ip -> handled at
 CANARY_LOCK = threading.Lock()
+# OpenCanary modules whose evidence is UDP (spoofable source address).
+# The SNMP decoy was retired on 2026-11-19 (owner decision); any UDP event
+# that still arrives is logged and never banned or reported.
+CANARY_UDP_LOGTYPES = (13001,)
 
 
 def _canary_token():
@@ -4246,7 +4753,8 @@ def _is_infra_ip(ip):
 
 
 def handle_canary_hit(body):
-    """Parse an OpenCanary webhook alert; ban + report global sources."""
+    """Parse an OpenCanary webhook alert; ban + report global sources that
+    pass the never-ban guard (TCP evidence only)."""
     fields = {}
     atts = body.get("attachments") if isinstance(body, dict) else None
     if isinstance(atts, list) and atts and isinstance(atts[0], dict):
@@ -4270,50 +4778,52 @@ def handle_canary_hit(body):
         return {"ok": False, "error": "invalid source host"}
     if _honey_is_self(ip):
         return {"ok": True, "ignored": True, "message": "self"}
+    # 2026-11-09 audit: UDP-source evidence (SNMP, logtype 13001) is
+    # SPOOFABLE - one forged packet with a fake source would earn a ban.
+    # The SNMP decoy is retired (2026-11-19); UDP evidence is never acted on.
+    if logtype in CANARY_UDP_LOGTYPES:
+        _honey_log("canary: ignored UDP event from {} ({}) - spoofable source, "
+                   "never banned or reported".format(ip, what))
+        return {"ok": True, "ignored": True, "ip": ip, "local_only": True,
+                "message": "UDP evidence is spoofable - never banned"}
+    try:
+        port = int(fields.get("dst_port") or 0)
+    except (TypeError, ValueError):
+        port = 0
     with CANARY_LOCK:
-        last = CANARY_RECENT.get(ip)
         now = time.time()
+        last = CANARY_RECENT.get(ip, now)
         if last and now - last < CANARY_RECENT_TTL:
             return {"ok": True, "ignored": True, "message": "recently handled"}
-        CANARY_RECENT[ip] = now
-    # 2026-11-09 audit: UDP-source canary evidence (SNMP, logtype 13001)
-    # is SPOOFABLE - one forged packet with a fake source lands here and
-    # used to earn a 1-year ban + a community report. TCP canaries are
-    # handshake-authenticated (source is real) and keep both. UDP
-    # evidence: short local ban, NEVER community-reported.
-    udp_evidence = (logtype == 13001)
-    duration = "24h" if udp_evidence else CUSTOM_BLOCKLIST_DURATION
-
-    # 2026-11-10 audit follow-up: exempt IPs the box ITSELF depends on.
-    # A spoofed UDP canary "hit" from an NTP server or DNS forwarder
-    # would locally ban that service for the duration, breaking time
-    # sync (which breaks TOTP login) or DNS. The exemption set is read
-    # from the actual service configs, not a static list.
-    if udp_evidence and _is_infra_ip(ip):
-        _honey_log("canary: IGNORED spoofable UDP 'hit' from {} ({}) - "
-                   "this is a configured infrastructure IP (DNS/NTP); "
-                   "the source was forged".format(ip, what))
-        return {"ok": True, "ignored": True, "ip": ip,
-                "message": "infrastructure IP exempt from canary bans "
-                           "(spoofed UDP evidence)", "infra_exempt": True}
-    try:
-        subprocess.run(
-            [CROWDSEC_BIN, "decisions", "add", "--ip", ip,
-             "--duration", duration,
-             "--reason", "canary/" + what.replace(" ", "-")],
-            capture_output=True, text=True, timeout=CROWDSEC_TIMEOUT,
-        )
-    except Exception:
-        pass
-    if udp_evidence:
-        _honey_log("canary: LOCAL-ONLY 24h ban {} ({}) - UDP evidence "
-                   "spoofable, not community-reported".format(ip, what))
-        return {"ok": True, "banned": True, "ip": ip,
-                "message": what, "local_only": True}
-    _honey_log("canary: auto-banned {} ({})".format(ip, what))
-    _spawn_report(ip, "deception service: %s" % what, "canary",
-                  report_category_for(what, "canary"))
-    return {"ok": True, "banned": True, "ip": ip, "message": what}
+        CANARY_RECENT.set(ip, now, now)
+    why = _deception_guard(ip)
+    if why:
+        with HONEY_APPLY_LOCK:
+            HONEY_STATE["stats"]["guarded"] = HONEY_STATE["stats"].get("guarded", 0) + 1
+        _honey_log("canary: {} NOT banned/reported ({}) - {}".format(ip, what, why))
+        return {"ok": True, "ignored": True, "ip": ip, "guard": why,
+                "message": "never banned: " + why}
+    ok, err = _deception_cscli_ban(ip, CUSTOM_BLOCKLIST_DURATION,
+                                   "canary/" + what.replace(" ", "-"))
+    if ok:
+        _honey_log("canary: auto-banned {} ({})".format(ip, what))
+    else:
+        _honey_log("canary: {} NOT banned locally ({}): {}".format(ip, what, err))
+    logdata = fields.get("logdata")
+    if isinstance(logdata, str):
+        try:
+            logdata = json.loads(logdata)
+        except ValueError:
+            logdata = {}
+    svc = deception_service(port) if port else "canary"
+    reason = "canary: %s (%s%s)" % (what, svc, " %d/tcp" % port if port else "")
+    _spawn_report(ip, reason, "canary",
+                  deception_category("canary", port, logtype,
+                                     logdata if isinstance(logdata, dict) else {}))
+    out = {"ok": True, "banned": ok, "ip": ip, "message": what}
+    if not ok:
+        out["ban_error"] = err
+    return out
 
 
 def _canary_event_detail(logtype, logdata):
@@ -4660,7 +5170,41 @@ def tripwire_recovery_end(identity, client_ip=""):
     return _tripwire_json_cli(["recovery-end"] + _tripwire_who(identity, client_ip), timeout=60)
 
 
+CANARY_TAIL_BYTES = 512 * 1024
+CANARY_VIEW_TTL = 10
+_CANARY_VIEW = {"ts": 0.0, "data": None}
+_CANARY_VIEW_LOCK = threading.Lock()
+
+
+def _canary_tail_lines(path, max_bytes, max_lines):
+    """The last max_lines complete lines of a file, reading at most
+    max_bytes from its end (the log is never read whole)."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        start = max(0, size - max_bytes)
+        f.seek(start)
+        data = f.read(max_bytes)
+    lines = data.decode("utf-8", "replace").splitlines()
+    if start and lines:
+        lines = lines[1:]          # first line is partial
+    return lines[-max_lines:]
+
+
 def build_canary():
+    """Cached (CANARY_VIEW_TTL) view of _build_canary(): every Security poll
+    used to re-read the whole opencanary.log."""
+    now = time.time()
+    with _CANARY_VIEW_LOCK:
+        if _CANARY_VIEW["data"] is not None and now - _CANARY_VIEW["ts"] < CANARY_VIEW_TTL:
+            return _CANARY_VIEW["data"]
+    data = _build_canary()
+    with _CANARY_VIEW_LOCK:
+        _CANARY_VIEW.update(ts=time.time(), data=data)
+    return data
+
+
+def _build_canary():
     """Deception-services overview: emulated ports, events (with captured
     credentials), CrowdSec bans originated by the canary, and stat-card
     counters matching the honeypot card's grid."""
@@ -4690,8 +5234,7 @@ def build_canary():
     seen = set()
     now = time.time()
     try:
-        with open(CANARY_LOG, "r") as f:
-            lines = f.readlines()[-CANARY_READ_LINES:]
+        lines = _canary_tail_lines(CANARY_LOG, CANARY_TAIL_BYTES, CANARY_READ_LINES)
         for line in lines:
             line = line.strip()
             if not line:
@@ -4757,11 +5300,14 @@ def set_canary_enabled(enabled):
 
     Enable: start the service first, then open WAN rules only for the
     ports it actually bound (bind-first, the tarpit's invariant). Disable:
-    stop the service and close exactly its ports - the tarpit's ports and
-    every other rule stay untouched.
+    stop the service and close exactly its rules - the tarpit's ports and
+    every other rule stay untouched. Both go through _canary_fw_reconcile()
+    (IPv4-only rules: the canary binds the WAN IPv4 only).
     """
     if not _canary_can_manage():
         return {"ok": False, "error": "opencanary is not installed on this host"}
+    with _CANARY_VIEW_LOCK:
+        _CANARY_VIEW.update(ts=0.0, data=None)
     if enabled:
         try:
             subprocess.run(["systemctl", "enable", "--now", CANARY_SERVICE],
@@ -4769,54 +5315,205 @@ def set_canary_enabled(enabled):
             time.sleep(4)     # let the emulators bind before opening rules
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
-        wan_ip = _honey_wan_ip()
-        opened = []
-        if wan_ip:
-            try:
-                proc = subprocess.run(
-                    ["ss", "-tln"], capture_output=True, text=True, timeout=10)
-                for line in (proc.stdout or "").splitlines():
-                    for p in CANARY_PORTS:
-                        if "{}:{}".format(wan_ip, p) in line:
-                            _ufw(["allow", "in", "on", _honey_wan_iface(), "to", "any",
-                                  "port", str(p), "proto", "tcp",
-                                  "comment", "tuxwall-canary"])
-                            opened.append(p)
-            except Exception:
-                pass
-        if os.popen("ss -uln 2>/dev/null | grep ':161 '").read().strip():
-            # ufw comments must be a single token in argv form: a
-            # multi-word value passes as separate args and ufw rejects the
-            # stray words ("Invalid token 'canary'") - which killed this
-            # route's response (nginx 502 HTML -> browser JSON error).
-            _ufw(["allow", "in", "on", _honey_wan_iface(), "to", "any",
-                  "port", str(CANARY_SNMP_PORT), "proto", "udp",
-                  "comment", "tuxwall-canary-snmp"])
-            opened.append(CANARY_SNMP_PORT)
+        res = _canary_fw_reconcile(force=True)
+        opened = sorted(set(res.get("open_ports") or []))
         _honey_log("canary enabled (ports {})".format(opened))
         return {"ok": True, "enabled": True, "ports": opened}
-    else:
+    try:
+        subprocess.run(["systemctl", "disable", "--now", CANARY_SERVICE],
+                       capture_output=True, text=True, timeout=30)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    res = _canary_fw_reconcile(force=True)
+    closed = sorted({r[1] for r in res.get("removed") or []})
+    _honey_log("canary disabled (ports closed: {})".format(closed))
+    return {"ok": True, "enabled": False, "ports": closed}
+
+
+# --- Canary firewall watchdog ------------------------------------------------
+# The canary's WAN allow rules must never be wider than its live listeners
+# (same invariant as the tarpit watchdog): every CANARY_FW_INTERVAL the
+# tuxwall-canary rules are reconciled with what twistd actually has bound on
+# the WAN IPv4 - rules close when the canary is down (after a grace pass, so
+# a Restart=always blip never flaps the firewall) and reopen when it is back.
+# IPv4 only: the canary binds the WAN IPv4, an IPv6 rule would open a port
+# with no listener. Old IPv6 / SNMP rules are removed by the same pass.
+CANARY_FW_INTERVAL = 60
+CANARY_UDP_MODULES = ("snmp", "ntp", "tftp", "sip")
+CANARY_FW_STATE = {"pending": None, "last": None, "thread": None, "restart_at": 0.0}
+CANARY_FW_LOCK = threading.Lock()
+CANARY_RESTART_MIN_GAP = 900
+
+
+def _canary_conf_data():
+    try:
+        with open(CANARY_CONF, "r") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _canary_conf_ports(conf=None):
+    """{(port, proto)} of the modules enabled in the live OpenCanary config."""
+    conf = _canary_conf_data() if conf is None else conf
+    out = set()
+    for k, v in conf.items():
+        if not (k.endswith(".enabled") and v is True):
+            continue
+        name = k[:-len(".enabled")]
         try:
-            subprocess.run(["systemctl", "disable", "--now", CANARY_SERVICE],
-                           capture_output=True, text=True, timeout=30)
+            p = int(conf.get(name + ".port"))
+        except (TypeError, ValueError):
+            continue
+        if 1 <= p <= 65535:
+            out.add((p, "udp" if name in CANARY_UDP_MODULES else "tcp"))
+    return out
+
+
+def _canary_bound_tcp(wan_ip, ss_out):
+    """TCP ports twistd listens on at the WAN IPv4 (from `ss -Htlnp`)."""
+    ports = set()
+    for line in (ss_out or "").splitlines():
+        f = line.split()
+        if len(f) < 4 or "twistd" not in line:
+            continue
+        addr, _, port = f[3].rpartition(":")
+        if addr.strip("[]") != wan_ip:
+            continue
+        try:
+            ports.add(int(port))
+        except ValueError:
+            continue
+    return ports
+
+
+def _canary_fw_plan(active, bound_tcp, conf_ports, rules):
+    """Pure: (add, remove). `rules` = {(family, port, proto)} tuxwall-canary
+    rules present now. Wanted = an IPv4 TCP rule per configured TCP port
+    twistd has bound on the WAN IPv4 (nothing when the canary is down)."""
+    want = set()
+    if active:
+        want = {("v4", p, "tcp") for p in bound_tcp if (p, "tcp") in conf_ports}
+    add = sorted(want - set(rules))
+    remove = sorted(set(rules) - want)
+    return add, remove
+
+
+def _canary_fw_rules(wan):
+    rs = _fw_guard.load_ruleset(_fw_ctx(raw=False))
+    out = set()
+    for r in rs["v4"] + rs["v6"]:
+        if not (r.get("comment") or "").startswith("tuxwall-canary"):
+            continue
+        if r.get("route") or r.get("dir") != "in" or r.get("in") != wan:
+            continue
+        if r.get("action") != "allow" or not (_fw_guard._any(r.get("src"))
+                                              and _fw_guard._any(r.get("dst"))):
+            continue        # hand-made variant: never touched automatically
+        p = _fw_guard._single_port(r.get("dport"))
+        if p:
+            out.add((r["family"], int(p), r.get("proto") or "tcp"))
+    return out
+
+
+def _canary_fw_reconcile(force=False):
+    """One reconcile pass. Removals need the same plan twice in a row
+    (one CANARY_FW_INTERVAL apart) unless force=True; additions apply at
+    once (bind-first: only ports twistd really holds). Never raises."""
+    res = {"ok": True, "added": [], "removed": [], "pending": [], "open_ports": []}
+    try:
+        if _fw_guard is None or not _canary_can_manage():
+            return {"ok": True, "skipped": "canary not managed here"}
+        wan = _honey_wan_iface()
+        wan_ip = _honey_wan_ip()
+        try:
+            active = subprocess.run(["systemctl", "is-active", CANARY_SERVICE],
+                                    capture_output=True, text=True,
+                                    timeout=10).stdout.strip() == "active"
+            ss = subprocess.run(["ss", "-Htlnp"], capture_output=True, text=True, timeout=10)
         except Exception as exc:
-            return {"ok": False, "error": str(exc)}
-        closed = []
-        for p in CANARY_PORTS:
-            try:
-                _ufw(["delete", "allow", "in", "on", _honey_wan_iface(), "to", "any",
-                      "port", str(p), "proto", "tcp"])
-                closed.append(p)
-            except Exception:
-                pass
-        try:
-            _ufw(["delete", "allow", "in", "on", _honey_wan_iface(), "to", "any",
-                  "port", str(CANARY_SNMP_PORT), "proto", "udp"])
-            closed.append(CANARY_SNMP_PORT)
-        except Exception:
-            pass
-        _honey_log("canary disabled (ports closed: {})".format(closed))
-        return {"ok": True, "enabled": False, "ports": closed}
+            return {"ok": False, "error": "probe failed: %s" % (exc,)}
+        if ss.returncode != 0 or not wan:
+            return {"ok": False, "error": "ss failed or no WAN interface - nothing changed"}
+        bound = _canary_bound_tcp(wan_ip, ss.stdout) if (active and wan_ip) else set()
+        rules = _canary_fw_rules(wan)
+        add, remove = _canary_fw_plan(active, bound, _canary_conf_ports(), rules)
+        with CANARY_FW_LOCK:
+            prev = CANARY_FW_STATE["pending"]
+            CANARY_FW_STATE["pending"] = list(remove) if remove else None
+        do_remove = list(remove) if force else [r for r in remove if prev and r in prev]
+        res["pending"] = [r for r in remove if r not in do_remove]
+        with _fw_move_lock:
+            for fam, port, proto in do_remove:
+                try:
+                    _ufw(["delete", "allow", "in", "on", wan, "to",
+                          "::/0" if fam == "v6" else "0.0.0.0/0",
+                          "port", str(port), "proto", proto])
+                    res["removed"].append((fam, port, proto))
+                except Exception as exc:
+                    res["ok"] = False
+                    res.setdefault("errors", []).append("%s %d/%s: %s" % (fam, port, proto, exc))
+            for fam, port, proto in add:
+                try:
+                    _ufw(["allow", "in", "on", wan, "to", "0.0.0.0/0", "port", str(port),
+                          "proto", proto, "comment", "tuxwall-canary"])
+                    res["added"].append((fam, port, proto))
+                except Exception as exc:
+                    res["ok"] = False
+                    res.setdefault("errors", []).append("%s %d/%s: %s" % (fam, port, proto, exc))
+        if res["removed"]:
+            with CANARY_FW_LOCK:
+                CANARY_FW_STATE["pending"] = None
+            _honey_log("canary watchdog: closed {} ({})".format(
+                ", ".join("%d/%s %s" % (p, pr, f) for f, p, pr in res["removed"]),
+                "canary active" if active else "canary not running"))
+        if res["added"]:
+            _honey_log("canary watchdog: opened {} (twistd bound on {})".format(
+                ", ".join("%d/%s v4" % (p, pr) for _, p, pr in res["added"]), wan_ip))
+        res["open_ports"] = sorted({p for f, p, pr in (rules - set(res["removed"]))
+                                    | set(res["added"]) if f == "v4"})
+        res["active"] = active
+        # The canary renders its config with the WAN IPv4 at start; after a
+        # WAN change it listens on a dead address until restarted.
+        listen = str(_canary_conf_data().get("device.listen_addr") or "")
+        if active and wan_ip and listen and listen != wan_ip:
+            with CANARY_FW_LOCK:
+                due = time.time() - CANARY_FW_STATE["restart_at"] >= CANARY_RESTART_MIN_GAP
+                if due:
+                    CANARY_FW_STATE["restart_at"] = time.time()
+            if due:
+                _honey_log("canary watchdog: WAN IPv4 changed ({} -> {}) - restarting "
+                           "the canary to rebind".format(listen, wan_ip))
+                subprocess.run(["systemctl", "restart", CANARY_SERVICE],
+                               capture_output=True, text=True, timeout=60)
+                res["restarted"] = True
+    except Exception as exc:
+        res = {"ok": False, "error": repr(exc)}
+    with CANARY_FW_LOCK:
+        CANARY_FW_STATE["last"] = dict(res, at=time.time())
+    return res
+
+
+def _canary_fw_watchdog():
+    while True:
+        time.sleep(CANARY_FW_INTERVAL)
+        r = _canary_fw_reconcile()
+        if not r.get("ok"):
+            print("[canary-fw] %s" % (r.get("error") or r.get("errors")), flush=True)
+
+
+def start_canary_fw_watchdog():
+    if not _canary_can_manage():
+        return None
+    with CANARY_FW_LOCK:
+        t = CANARY_FW_STATE["thread"]
+        if t is not None and t.is_alive():
+            return t
+        t = threading.Thread(target=_canary_fw_watchdog, name="canary-fw", daemon=True)
+        CANARY_FW_STATE["thread"] = t
+    t.start()
+    return t
 
 
 # --- Community reporting policy ---------------------------------------------
@@ -5348,16 +6045,28 @@ HONEY_MAX_HOLD = 4 * 3600    # hold a single connection at most 4 hours
 HONEY_TICK = 10              # poll interval / dribble period (seconds)
 HONEY_REASON = "honeypot/tuxwall"
 
+# 2026-11-19 (deception phase 1): the slot accounting is done with real
+# per-IP / total counters reserved BEFORE a tarpit thread exists (the old
+# map was keyed (ip, port), so the per-IP cap never fired and one source
+# could hold unlimited threads/fds), and the hit counter is a bounded TTL map.
+HONEY_HITS_MAX = 20000       # distinct sources remembered for the threshold
+HONEY_HITS_TTL = 86400       # ... for a day after their last connection
+HONEY_ACCEPT_BACKOFF = 1.0   # seconds to pause after an accept() error
+
 HONEY_STATE = {
     "listening": False,
     "wan_ip": None,
     "wan_ip6": None,
     "ports": [],
     "threads": [],
-    "active": {},            # (ip, port) -> {"ip","port","connected_at"}
+    "active": {},            # slot id -> {"ip","port","connected_at"}
+    "per_ip": {},            # ip -> live tarpit slots
+    "gen": 0,                # bumped on stop: older tarpit threads exit
     "traps": [],              # closed connection history (bounded)
-    "hits": {},               # ip -> total connection count
-    "stats": {"total": 0, "unique": 0, "wasted": 0, "banned": 0, "lan_guard": 0},
+    "hits": BoundedTTLMap(HONEY_HITS_MAX, HONEY_HITS_TTL),  # ip -> {"hits","first","last","actioned"}
+    "stats": {"total": 0, "unique": 0, "wasted": 0, "banned": 0, "lan_guard": 0,
+              "dropped": 0, "guarded": 0, "ban_failed": 0, "reported": 0,
+              "accept_errors": 0, "thread_errors": 0},
     "log": [],
     "started_at": None,
     "error": None,
@@ -5366,26 +6075,90 @@ HONEY_STATE = {
 }
 HONEY_STOP = threading.Event()
 HONEY_APPLY_LOCK = threading.RLock()
-HONEY_LAN_NETS = []  # populated at first use from _lan_subnets()
+HONEY_SLOT_IDS = itertools.count(1)
+HONEY_LAN_TTL = 300
+_HONEY_LAN = {"ts": 0.0, "nets": None}
+_HONEY_ACCEPT_ERR_LOGGED = {}
+
+
+def _deception_lan_nets():
+    """Every network the router serves - LAN, VLANs, OPT ports, WireGuard -
+    including GLOBAL IPv6 prefixes (the delegated /64 on the LAN is
+    globally routable, so `not is_global` alone missed it). Read from the
+    interfaces (never the WAN), plus interfaces.json/network.json and
+    loopback."""
+    nets = list(_lan_subnets())
+    wan = _honey_wan_iface()
+    try:
+        out = subprocess.run(["ip", "-o", "addr", "show"], capture_output=True,
+                             text=True, timeout=5).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) < 4 or parts[2] not in ("inet", "inet6"):
+                continue
+            iface = parts[1].split("@")[0]
+            if iface == "lo" or not wan or iface == wan or iface.startswith(wan + "."):
+                continue
+            try:
+                net = ipaddress.ip_interface(parts[3]).network
+            except ValueError:
+                continue
+            if net.is_link_local:
+                continue
+            if net.version == 4 and not net.is_private:
+                continue        # a public v4 on a LAN port is not ours to guard
+            if net.version == 6 and net.prefixlen < 48:
+                continue
+            if net not in nets:
+                nets.append(net)
+    except Exception:
+        pass
+    topo = {}
+    try:
+        with open("/etc/tuxwall/interfaces.json") as f:
+            topo = json.load(f) or {}
+    except (OSError, ValueError):
+        topo = {}
+    for sect in [topo.get("lan") or {}] + list(topo.get("opt") or []) + list(topo.get("vpn") or []):
+        if not isinstance(sect, dict):
+            continue
+        for key in ("address", "address6"):
+            try:
+                net = ipaddress.ip_interface(str(sect.get(key) or "")).network
+            except ValueError:
+                continue
+            if net not in nets:
+                nets.append(net)
+    for extra in ("127.0.0.0/8", "::1/128"):
+        n = ipaddress.ip_network(extra)
+        if n not in nets:
+            nets.append(n)
+    return nets
 
 
 def _honey_lan_nets():
-    global HONEY_LAN_NETS
-    if not HONEY_LAN_NETS:
-        HONEY_LAN_NETS = _lan_subnets()
-    return HONEY_LAN_NETS
+    now = time.time()
+    nets = _HONEY_LAN["nets"]
+    if nets is None or now - _HONEY_LAN["ts"] >= HONEY_LAN_TTL:
+        try:
+            nets = _deception_lan_nets()
+        except Exception:
+            nets = nets or [ipaddress.ip_network("127.0.0.0/8")]
+        _HONEY_LAN.update(ts=now, nets=nets)
+    return nets
 
 
 def _honey_is_lan(ip):
+    """True for anything the deception layer must treat as ours: invalid,
+    non-global IPv6 (ULA, link-local, loopback), or inside any LAN/VLAN/VPN
+    network incl. the delegated global IPv6 prefix."""
     try:
-        a = ipaddress.ip_address(ip)
+        a = _plain_ip(ipaddress.ip_address(str(ip).split("%")[0]))
     except ValueError:
         return True
-    if a.version == 6:
-        # Guard everything not globally routable: ULA (fc00::/7 covers the
-        # LAN fd00:1::/64 and WireGuard fd00:2::/64), link-local, loopback.
-        return not a.is_global
-    return any(a in net for net in _honey_lan_nets())
+    if a.version == 6 and not a.is_global:
+        return True
+    return any(a.version == net.version and a in net for net in _honey_lan_nets())
 
 
 def _honey_load_conf():
@@ -5421,6 +6194,7 @@ def _honey_save_conf(conf):
     with open(tmp, "w") as f:
         json.dump(conf, f, indent=2)
     os.replace(tmp, HONEY_CONF_FILE)
+    _HONEY_CONF_CACHE["conf"] = None
 
 
 def _honey_log(line):
@@ -5476,29 +6250,105 @@ def _honey_wan6():
 
 
 def _honey_ban(ip):
-    """Best-effort local CrowdSec ban for a trapped scanner.
+    """Best-effort local CrowdSec ban for a trapped scanner (guarded, rc
+    checked).
 
     Deliberately does NOT report to tuxwall.org: community reporting for
-    honeypot catches happens at the catch site (see the accept loop), so
-    a missing or failing CrowdSec binary never silently drops a consented
+    honeypot catches happens at the catch site (_honey_catch), so a
+    missing or failing CrowdSec binary never silently drops a consented
     deception-layer report.
     """
-    try:
-        subprocess.run(
-            [CROWDSEC_BIN, "decisions", "add", "--ip", ip,
-             "--duration", CUSTOM_BLOCKLIST_DURATION, "--reason", HONEY_REASON],
-            capture_output=True, text=True, timeout=CROWDSEC_TIMEOUT,
-        )
-    except Exception:
-        _honey_log("caught {} (CrowdSec unavailable - not banned locally)"
-                   .format(ip))
-        return
+    ok, err = _deception_cscli_ban(ip, CUSTOM_BLOCKLIST_DURATION, HONEY_REASON)
     with HONEY_APPLY_LOCK:
-        HONEY_STATE["stats"]["banned"] += 1
-    _honey_log("auto-banned {} (CrowdSec 1y)".format(ip))
+        HONEY_STATE["stats"]["banned" if ok else "ban_failed"] += 1
+    if ok:
+        _honey_log("auto-banned {} (CrowdSec 1y)".format(ip))
+    else:
+        _honey_log("caught {} - NOT banned locally: {}".format(ip, err))
+    return ok
 
 
-def _honey_tarpit(conn, ip, port):
+def _honey_catch(ip, port, auto_ban):
+    """Threshold reached for `ip` (once per IP): guard, then the optional
+    local ban and the community report (unconditional: enabling the
+    deception layer IS the opt-in to share trap catches; reporting.json
+    "enabled" is the off switch)."""
+    why = _deception_guard(ip)
+    if why:
+        with HONEY_APPLY_LOCK:
+            HONEY_STATE["stats"]["guarded"] += 1
+        _honey_log("guard: {} not banned/reported ({})".format(ip, why))
+        return
+    if auto_ban:
+        _honey_ban(ip)
+    svc = deception_service(port)
+    res = _spawn_report(ip, "honeypot: %s probe on %d/tcp" % (svc, port), "honeypot",
+                        deception_category("honeypot", port))
+    if isinstance(res, dict) and res.get("ok"):
+        with HONEY_APPLY_LOCK:
+            HONEY_STATE["stats"]["reported"] += 1
+
+
+def _honey_count_hit(ip, threshold, now=None):
+    """Count one connection from ip. -> (hits, act): act is True exactly
+    once per remembered source, on the first connection with
+    hits >= threshold (>=, not ==: a connection dropped over capacity still
+    counts, so the threshold can never be skipped)."""
+    now = time.time() if now is None else now
+    with HONEY_APPLY_LOCK:
+        cur = HONEY_STATE["hits"].get(ip, now)
+        e = dict(cur) if cur else {"hits": 0, "first": now, "actioned": False}
+        e["hits"] = int(e.get("hits") or 0) + 1
+        e["last"] = now
+        act = (not e.get("actioned")) and e["hits"] >= max(1, int(threshold or 1))
+        if act:
+            e["actioned"] = True
+        HONEY_STATE["hits"].set(ip, e, now)
+        HONEY_STATE["stats"]["total"] += 1
+        if cur is None:
+            HONEY_STATE["stats"]["unique"] += 1
+    return e["hits"], act
+
+
+def _honey_unaction(ip):
+    """The catch could not be started: let the next connection retry."""
+    with HONEY_APPLY_LOCK:
+        cur = HONEY_STATE["hits"].get(ip)
+        if cur:
+            HONEY_STATE["hits"].set(ip, dict(cur, actioned=False))
+
+
+def _honey_admit(ip, port, now=None):
+    """Reserve a tarpit slot BEFORE any thread exists. None when the total
+    or the per-IP cap is reached (the caller closes the connection)."""
+    with HONEY_APPLY_LOCK:
+        st = HONEY_STATE
+        if (len(st["active"]) >= HONEY_MAX_TOTAL
+                or st["per_ip"].get(ip, 0) >= HONEY_MAX_PER_IP):
+            st["stats"]["dropped"] += 1
+            return None
+        sid = next(HONEY_SLOT_IDS)
+        st["active"][sid] = {"ip": ip, "port": port,
+                             "connected_at": time.time() if now is None else now}
+        st["per_ip"][ip] = st["per_ip"].get(ip, 0) + 1
+        return sid
+
+
+def _honey_release(sid):
+    with HONEY_APPLY_LOCK:
+        st = HONEY_STATE
+        a = st["active"].pop(sid, None)
+        if a is None:
+            return None
+        n = st["per_ip"].get(a["ip"], 0) - 1
+        if n > 0:
+            st["per_ip"][a["ip"]] = n
+        else:
+            st["per_ip"].pop(a["ip"], None)
+        return a
+
+
+def _honey_tarpit(conn, ip, port, sid=None, gen=None):
     """Hold one scanner connection open, dribbling one byte per tick."""
     start = time.time()
     sent = 0
@@ -5509,6 +6359,7 @@ def _honey_tarpit(conn, ip, port):
         except (AttributeError, OSError):
             pass
         while (not HONEY_STOP.is_set()
+               and (gen is None or HONEY_STATE["gen"] == gen)
                and time.time() - start < HONEY_MAX_HOLD):
             try:
                 if not conn.recv(1024):
@@ -5528,8 +6379,9 @@ def _honey_tarpit(conn, ip, port):
         except OSError:
             pass
         duration = time.time() - start
+        if sid is not None:
+            _honey_release(sid)
         with HONEY_APPLY_LOCK:
-            HONEY_STATE["active"].pop((ip, port), None)
             HONEY_STATE["stats"]["wasted"] += duration
             HONEY_STATE["traps"].append({
                 "ip": ip, "port": port, "connected_at": start,
@@ -5564,66 +6416,87 @@ def _honey_bind(port, family, addr):
         return None
 
 
+_HONEY_CONF_CACHE = {"ts": 0.0, "conf": None}
+HONEY_CONF_TTL = 5
+
+
+def _honey_conf_cached():
+    """honeypot.json, re-read at most every HONEY_CONF_TTL seconds (the
+    accept loop used to read the file for every connection)."""
+    now = time.time()
+    c = _HONEY_CONF_CACHE
+    if c["conf"] is None or now - c["ts"] >= HONEY_CONF_TTL:
+        c.update(ts=now, conf=_honey_load_conf())
+    return c["conf"]
+
+
+def _honey_accept_error(port, exc):
+    """accept() failed with the socket still open (EMFILE/ENFILE/ENOBUFS/
+    ENOMEM/ECONNABORTED...): count it, log at most once a minute per port,
+    and keep the trap alive - an error must never kill the listener."""
+    with HONEY_APPLY_LOCK:
+        HONEY_STATE["stats"]["accept_errors"] += 1
+        now = time.time()
+        if now - _HONEY_ACCEPT_ERR_LOGGED.get(port, 0) < 60:
+            return
+        _HONEY_ACCEPT_ERR_LOGGED[port] = now
+    _honey_log("port {}: accept() failed ({}) - trap kept, retrying".format(
+        port, errno.errorcode.get(getattr(exc, "errno", 0) or 0, exc)))
+
+
+def _honey_close(conn):
+    try:
+        conn.close()
+    except OSError:
+        pass
+
+
 def _honey_listener(sock, port):
     """Accept loop for one bound honeypot socket."""
+    with HONEY_APPLY_LOCK:
+        gen = HONEY_STATE["gen"]
     try:
-        while not HONEY_STOP.is_set():
+        while not HONEY_STOP.is_set() and HONEY_STATE["gen"] == gen:
             try:
                 conn, addr = sock.accept()
             except socket.timeout:
                 continue
-            except OSError:
-                return
+            except OSError as exc:
+                if HONEY_STOP.is_set() or sock.fileno() == -1 or HONEY_STATE["gen"] != gen:
+                    return
+                _honey_accept_error(port, exc)
+                time.sleep(HONEY_ACCEPT_BACKOFF)
+                continue
             ip = addr[0]
             if _honey_is_lan(ip) or _honey_is_self(ip):
                 with HONEY_APPLY_LOCK:
                     HONEY_STATE["stats"]["lan_guard"] += 1
-                try:
-                    conn.close()
-                except OSError:
-                    pass
+                _honey_close(conn)
                 continue
-            with HONEY_APPLY_LOCK:
-                st = HONEY_STATE
-                active_total = len(st["active"])
-                active_ip = sum(1 for k in st["active"] if k[0] == ip)
-                hits = st["hits"].get(ip, 0) + 1
-                st["hits"][ip] = hits
-                st["stats"]["total"] += 1
-                if hits == 1:
-                    st["stats"]["unique"] += 1
-                conf_auto = None  # decide outside lock below
-            conf = _honey_load_conf()
-            threshold_hit = hits == int(conf.get("ban_threshold") or 1)
-            if active_total >= HONEY_MAX_TOTAL or active_ip >= HONEY_MAX_PER_IP:
-                # over capacity: drop instead of trap so memory stays bounded
+            conf = _honey_conf_cached()
+            _, act = _honey_count_hit(ip, conf.get("ban_threshold") or 1)
+            if act:
                 try:
-                    conn.close()
-                except OSError:
-                    pass
+                    threading.Thread(target=_honey_catch,
+                                     args=(ip, port, bool(conf.get("auto_ban"))),
+                                     name="honey-catch", daemon=True).start()
+                except RuntimeError:
+                    _honey_unaction(ip)
+                    with HONEY_APPLY_LOCK:
+                        HONEY_STATE["stats"]["thread_errors"] += 1
+            sid = _honey_admit(ip, port)
+            if sid is None:
+                # over capacity: drop instead of trap so threads/fds stay bounded
+                _honey_close(conn)
                 continue
-            with HONEY_APPLY_LOCK:
-                HONEY_STATE["active"][(ip, port)] = {
-                    "ip": ip, "port": port, "connected_at": time.time(),
-                }
-            if threshold_hit:
-                # Local ban is opt-in via auto_ban and best-effort (CrowdSec
-                # may not be installed) - but the community report is
-                # unconditional: enabling the deception layer IS the opt-in
-                # consent to share trap catches, and a missing CrowdSec
-                # binary or auto_ban=False must never silently drop that
-                # consented evidence.
-                if conf.get("auto_ban"):
-                    threading.Thread(target=_honey_ban, args=(ip,),
-                                     daemon=True).start()
-                threading.Thread(
-                    target=lambda: _spawn_report(ip, "trapped by honeypot",
-                                                 "honeypot", "honeypot"),
-                    daemon=True,
-                ).start()
-            threading.Thread(
-                target=_honey_tarpit, args=(conn, ip, port), daemon=True,
-            ).start()
+            try:
+                threading.Thread(target=_honey_tarpit, args=(conn, ip, port, sid, gen),
+                                 name="honey-tarpit", daemon=True).start()
+            except RuntimeError:
+                _honey_release(sid)
+                _honey_close(conn)
+                with HONEY_APPLY_LOCK:
+                    HONEY_STATE["stats"]["thread_errors"] += 1
     finally:
         try:
             sock.close()
@@ -5718,6 +6591,8 @@ def _honey_ufw_deny(port):
 
 
 def _honey_stop_listeners():
+    with HONEY_APPLY_LOCK:
+        HONEY_STATE["gen"] += 1     # listeners + tarpits of this generation exit
     HONEY_STOP.set()
     for t in HONEY_STATE["threads"]:
         t.join(timeout=3)
@@ -5727,8 +6602,9 @@ def _honey_stop_listeners():
         HONEY_STATE["listening"] = False
         HONEY_STATE["ports"] = []
         HONEY_STATE["sockets"] = {}
-        # close any tarpit threads' bookkeeping; sockets close on their own
-        HONEY_STATE["active"] = {}
+        # live tarpit slots stay counted until their threads close them
+        # (within one HONEY_TICK): resetting the map here let a WAN rebind
+        # double the real number of held fds
 
 
 def apply_honeypot(conf, touch_ufw=False):
@@ -5824,7 +6700,8 @@ def build_honeypot():
         )[:50]
         traps = list(reversed(HONEY_STATE["traps"][-30:]))
         top = sorted(
-            HONEY_STATE["hits"].items(), key=lambda kv: -kv[1])[:15]
+            ((ip, int(e.get("hits") or 0)) for ip, e in HONEY_STATE["hits"].items()),
+            key=lambda kv: -kv[1])[:15]
         state = {
             "listening": HONEY_STATE["listening"],
             "wan_ip": HONEY_STATE["wan_ip"],
@@ -5834,6 +6711,8 @@ def build_honeypot():
             "error": HONEY_STATE["error"],
             "stats": dict(HONEY_STATE["stats"]),
             "active_count": len(HONEY_STATE["active"]),
+            "limits": {"total": HONEY_MAX_TOTAL, "per_ip": HONEY_MAX_PER_IP,
+                       "hold": HONEY_MAX_HOLD},
             "active": active,
             "traps": traps,
             "top": [{"ip": ip, "hits": n} for ip, n in top],
@@ -18739,7 +19618,7 @@ def _incident_conditions():
             live_ports = [int(p) for p in (HONEY_STATE.get("ports") or [])]
         for p in set(conf_ports) | set(live_ports):
             deception_ports[int(p)] = "the deception layer (tarpit)"
-        for p in list(CANARY_PORTS) + [CANARY_SNMP_PORT]:
+        for p in set(CANARY_PORTS) | {cp for cp, _ in _canary_conf_ports()}:
             deception_ports.setdefault(int(p), "the deception layer (canary)")
     except Exception:
         pass
@@ -19485,12 +20364,34 @@ def _self_restart(signum, frame):
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
+NOFILE_SOFT_TARGET = 8192
+
+
+def _raise_nofile_limit():
+    """Soft RLIMIT_NOFILE up to NOFILE_SOFT_TARGET (never above the hard
+    limit): the unit inherits 1024, which the tarpit's 256 slots plus the
+    API's own sockets and pipes came too close to. Survives the SIGUSR1
+    re-exec."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        want = NOFILE_SOFT_TARGET if hard == resource.RLIM_INFINITY else min(hard, NOFILE_SOFT_TARGET)
+        if soft != resource.RLIM_INFINITY and soft < want:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    except Exception as exc:
+        print("[startup] RLIMIT_NOFILE unchanged: %r" % (exc,), flush=True)
+
+
 def main():
     signal.signal(signal.SIGUSR1, _self_restart)
+    _raise_nofile_limit()
     _ensure_service_reload()
     _ensure_unbound_local_actions()
     _restore_nat_on_boot()
     start_honeypot_at_boot()
+    start_canary_fw_watchdog()    # canary WAN rules follow its live listeners (IPv4, 60 s)
+    _report_worker_ensure()       # sends reports queued before a restart (persistent queue)
+    threading.Thread(target=_deception_never_ban_ips, name="never-ban", daemon=True).start()
     get_security_monitor()
     get_system_monitor()
     get_latency_monitor()
