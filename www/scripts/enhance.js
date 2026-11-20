@@ -466,7 +466,7 @@
 
   // Trusted clicks on nav / sub-tabs create history entries.
   var pendingFrom = null, syncTimer = 0;
-  document.addEventListener("click", function (e) {
+  function trackNav(e) {
     if (!e.isTrusted || applying) return;
     var t = e.target.closest && e.target.closest(".nav-item[data-view], .fw-subtab, .ov-post-link[data-view], .ov-issue[data-view]");
     if (!t) return;
@@ -485,6 +485,13 @@
       history.replaceState(null, "", from || location.pathname);
       history.pushState(null, "", h);
     }, 90);
+  }
+  document.addEventListener("click", trackNav, true);
+  // Arrow/Home/End on a sub-tab strip switch tabs with a synthetic click
+  // (dashboard.js initSubtabs), so follow the trusted keydown instead.
+  document.addEventListener("keydown", function (e) {
+    if (["ArrowLeft", "ArrowRight", "Home", "End"].indexOf(e.key) === -1) return;
+    if (e.target.closest && e.target.closest(".fw-subtab")) trackNav(e);
   }, true);
   window.addEventListener("popstate", applyHash);
   window.addEventListener("hashchange", applyHash);
