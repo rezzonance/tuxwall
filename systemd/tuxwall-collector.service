@@ -7,13 +7,56 @@ Type=simple
 ExecStart=/usr/bin/python3 /opt/tuxwall-collector/tuxwall-collector.py
 Restart=always
 RestartSec=3
+
+# Dedicated unprivileged user; the SQLite DB lives in the StateDirectory
+# (/var/lib/tuxwall-collector, owned by the service user, 0700).
+User=tuxwall-collector
+Group=tuxwall-collector
+StateDirectory=tuxwall-collector
+StateDirectoryMode=0700
+UMask=0077
+# Safety net: a root tool (backup copy, sqlite3 shell) opening the DB while
+# the service is down would leave root-owned -wal/-shm files behind.
+ExecStartPre=+/bin/chown -R tuxwall-collector:tuxwall-collector /var/lib/tuxwall-collector
+
+# Admin keys stay root-owned in /etc/tuxwall-collector; systemd hands the
+# service private copies ($CREDENTIALS_DIRECTORY). admin-api.key is the
+# scoped ban-admin key (optional). Rotating a key needs a restart.
+LoadCredential=admin.key:/etc/tuxwall-collector/admin.key
+LoadCredential=admin-api.key:/etc/tuxwall-collector/admin-api.key
+
+# Only the two DB-IP databases are visible from /var/lib/tuxwall.
+TemporaryFileSystem=/var/lib/tuxwall:ro
+BindReadOnlyPaths=-/var/lib/tuxwall/dbip-city-lite.mmdb -/var/lib/tuxwall/dbip-asn-lite.mmdb
+
+# Sandbox
 NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-# SQLite DB + the shared DB-IP MMDB databases are read from /var/lib/tuxwall.
-ReadWritePaths=/var/lib/tuxwall-collector
-ReadOnlyPaths=/var/lib/tuxwall
+ProtectSystem=strict
 ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryHigh=384M
+MemoryMax=512M
+TasksMax=256
 
 [Install]
 WantedBy=multi-user.target

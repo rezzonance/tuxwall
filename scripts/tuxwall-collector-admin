@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""tuxwall-collector-admin - manage tuxwall.org reporter keys (root).
+
+Talks to the collector's loopback-only admin API with the admin key
+(/etc/tuxwall-collector/admin.key). Keys are identified by their SHA-256
+hash (the collector never stores raw keys); any unique prefix of 8+ hex
+characters works.
+
+  tuxwall-collector-admin list [--status pending|approved|revoked] [--json]
+  tuxwall-collector-admin pending            # keys waiting for approval
+  tuxwall-collector-admin approve <id>       # pending -> approved (full weight)
+  tuxwall-collector-admin revoke <id> [--transfer-to <id>]
+        revoked keys are refused at ingest and never count toward severity;
+        --transfer-to moves the old key's evidence to an approved key
+        (key rotation of the same install)
+  tuxwall-collector-admin hash               # SHA-256 of a raw key read from
+                                             # stdin (to find its id)
+
+Options: --url (default http://127.0.0.1:8009, env TUXWALL_COLLECTOR_URL),
+         --key-file (default /etc/tuxwall-collector/admin.key).
+"""
+import argparse
+import hashlib
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+DEFAULT_URL = os.environ.get("TUXWALL_COLLECTOR_URL") or "http://127.0.0.1:8009"
+DEFAULT_KEY_FILE = "/etc/tuxwall-collector/admin.key"
+
+
+def die(msg, code=1):
+    print("tuxwall-collector-admin: " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def admin_key(path):
+    try:
+        with open(path) as f:
+            key = f.read().strip()
+    except PermissionError:
+        die("cannot read %s - run as root (sudo)" % path)
+    except OSError as exc:
+        die("cannot read %s: %s" % (path, exc.strerror))
+    if not key:
+        die("%s is empty" % path)
+    return key
+
+
+def call(args, method, path, body=None):
+    url = args.url.rstrip("/") + path
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method=method, headers={
+        "X-Admin-Key": admin_key(args.key_file),
+        "Content-Type": "application/json",
+        "User-Agent": "tuxwall-collector-admin/1.0",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        try:
+            err = json.loads(exc.read().decode("utf-8") or "{}").get("error")
+        except ValueError:
+            err = None
+        die("HTTP %d: %s" % (exc.code, err or exc.reason))
+    except (urllib.error.URLError, OSError) as exc:
+        die("collector unreachable at %s: %s" % (args.url, getattr(exc, "reason", exc)))
+
+
+def fmt_ts(ts):
+    if not ts:
+        return "-"
+    return time.strftime("%Y-%m-%d %H:%M", time.gmtime(float(ts)))
+
+
+def cmd_list(args, status=None):
+    status = status or args.status
+    d = call(args, "GET", "/api/admin/keys" + ("?status=" + status if status else ""))
+    keys = d.get("keys") or []
+    if args.json:
+        print(json.dumps(keys, indent=2))
+        return
+    if not keys:
+        print("no %skeys" % (status + " " if status else ""))
+    else:
+        print("%-18s %-9s %-16s %-16s %8s %8s" % (
+            "ID (hash prefix)", "STATUS", "CREATED (UTC)", "LAST SEEN", "IPS", "EV/24H"))
+        for k in keys:
+            print("%-18s %-9s %-16s %-16s %8d %8d" % (
+                k["key"][:16], k["status"], fmt_ts(k.get("created")),
+                fmt_ts(k.get("last_seen")), int(k.get("reported_ips") or 0),
+                int(k.get("events_24h") or 0)))
+    if "new_keys_24h" in d:
+        print("new keys in the last 24 h: %s (cap %s)" % (d["new_keys_24h"], d.get("new_keys_cap")))
+
+
+def cmd_approve(args):
+    d = call(args, "POST", "/api/admin/keys/%s/approve" % args.id)
+    print("%s... %s (approved %s UTC)" % (d["key"][:16], d["status"], fmt_ts(d.get("approved_at"))))
+
+
+def cmd_revoke(args):
+    body = {"transfer_to": args.transfer_to} if args.transfer_to else None
+    d = call(args, "POST", "/api/admin/keys/%s/revoke" % args.id, body)
+    print("%s... revoked%s" % (d["key"][:16], " (was already revoked)" if d.get("already_revoked") else ""))
+    if d.get("transferred") is not None:
+        print("evidence moved to %s...: %s" % (args.transfer_to[:16], d["transferred"]))
+
+
+def cmd_hash(_args):
+    raw = sys.stdin.readline().strip()
+    if len(raw) < 16:
+        die("expected a raw key (16+ chars) on stdin")
+    print(hashlib.sha256(raw.encode("utf-8")).hexdigest())
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="tuxwall-collector-admin",
+                                 description="Manage tuxwall.org reporter keys.")
+    ap.add_argument("--url", default=DEFAULT_URL)
+    ap.add_argument("--key-file", default=DEFAULT_KEY_FILE)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("list", help="list reporter keys")
+    p.add_argument("--status", choices=("pending", "approved", "revoked"))
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("pending", help="keys waiting for approval")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("approve", help="approve a pending key")
+    p.add_argument("id")
+    p = sub.add_parser("revoke", help="revoke a key")
+    p.add_argument("id")
+    p.add_argument("--transfer-to", metavar="ID",
+                   help="move the revoked key's evidence to this approved key")
+    sub.add_parser("hash", help="print the id (SHA-256) of a raw key read from stdin")
+    args = ap.parse_args()
+    if args.cmd == "list":
+        cmd_list(args)
+    elif args.cmd == "pending":
+        args.status = None
+        cmd_list(args, "pending")
+    elif args.cmd == "approve":
+        cmd_approve(args)
+    elif args.cmd == "revoke":
+        cmd_revoke(args)
+    elif args.cmd == "hash":
+        cmd_hash(args)
+
+
+if __name__ == "__main__":
+    main()

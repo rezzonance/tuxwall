@@ -1,95 +1,106 @@
-# Collector trust floor for medium severity (draft)
+# Collector trust model: admin approval
 
-Status: **draft on branch `draft/collector-trust-floor`, not deployed.**
+Status: **deployed 2026-11-19 (deception phase 2).** Replaces the 7-day
+"trusted after a week of history" floor (2026-11-12, kept below as history).
 
-## Problem
+## Why
 
-Installs in Automatic mode (`CommunityAutoWorker`) enforce every feed entry
-at **medium or above** as a 90-day local ban. In 3.3.0 the collector rates an
-IP medium when *any* of these is true: two reporters, 50+ hits, or
-canary/honeypot evidence. All three are cheap to fake:
+Installs in Automatic mode (`CommunityAutoWorker`) enforce every feed entry at
+**medium or above** as a 90-day local ban. Reporter keys are free, and
+`source` ("canary") and `hits` are self-reported. Under the 7-day rule a
+"sleeper" key only had to wait a week before its claims reached every
+subscriber, and a farm of keys registered in advance could poison the feed.
 
-- reporter keys are free and auto-registered on the first report;
-- `source` ("canary") and `hits` are self-reported by the sender;
-- two keys are as easy to make as one.
+## Rule
 
-So one request from a key created seconds earlier could put any IP outside
-the protected ranges on every subscribed install's blocklist for 90 days.
+A reporter key is one of:
 
-The router-side comment in `CommunityAutoWorker._pass` already assumed the
-opposite ("a forged report must clear the multi-reporter trust floor"); the
-collector didn't enforce it.
+| Status | Meaning |
+|---|---|
+| `pending` | New key (from `POST /register` or its first report). Reports are stored and published, at **low** only. Never counts toward medium+. |
+| `approved` | An admin vouched for it (`tuxwall-collector-admin approve`). Full weight at once. |
+| `revoked` | Refused at ingest; never counts. Final (cannot be re-approved). |
 
-## Change
+Severity is computed from **approved evidence only**:
 
-`severity_for()` now requires at least one **trusted** reporter (a key with
-`TRUST_SECONDS` = 7 days of registration history) for medium:
+- `trusted` = distinct approved reporters for the IP
+- `hits` = hits reported by approved keys
+- `deception` = an approved key has canary/honeypot evidence for the IP
 
-| Severity | Rule |
+| Severity | Rule (unchanged thresholds) |
 |---|---|
 | critical | 5+ trusted reporters |
 | high | 2+ trusted reporters, or 1 trusted reporter with 500+ hits |
-| medium | 1+ trusted reporter **and** canary/honeypot evidence, 50+ hits, or a second reporter |
+| medium | 1+ trusted reporter **and** canary/honeypot evidence, 50+ hits, or a second trusted reporter |
 | low | everything else |
 
-Reports from new keys still land in the database and on the public list at
-**low**. They are visible on report cards but never auto-enforced, until the
-key has a week of history or a trusted install sees the same IP.
+The thresholds and the deception-only publication gate are the same as
+before; what changed is who counts as trusted, and that a pending key's hits
+or evidence can no longer lift an approved report (e.g. an approved
+1-hit canary report stays medium even if a pending key claims 100000 hits).
 
-`top_bans()` exact-tier filters (`tier=`) are rewritten to match
-`severity_for()`. They previously used hit/reporter thresholds that no longer
-matched the trust-based rules, so a tier page could list an IP under a
-different tier than the feed gave it.
+`top_bans(tier=...)` uses the same rule in SQL (`_severity_rank_sql`), so the
+public tier filters always agree with the feed (checked by
+`tools/collector_severity_check.py`, also against a copy of the live DB).
 
-## Impact (measured on a copy of the live database, 2026-11-12)
+## Migration (idempotent, on first start)
 
-- 9,213 published IPs: all medium before, all medium after. **No change today**:
-  both active reporter keys are older than a week.
-- Effect is on future reports only: a new install's catches publish at low
-  for its first 7 days unless a trusted install corroborates them. The
-  dashboard's "register up front" button starts that clock at install time.
+- `reporter_keys` gains `approved_at` / `revoked_at`.
+- Legacy `active` keys that were already trusted under the 7-day rule become
+  `approved` (so no published severity changes at migration); younger ones
+  become `pending`. On 2026-11-19: the router key (9d0a84c8…) -> approved; the
+  only other key (e1101414…) was already revoked. Distribution before/after
+  on a copy of the live DB: 12,487 medium -> 12,487 medium, identical.
+
+## Admin
+
+Loopback-only admin API (`X-Admin-Key`, refused when proxy headers are
+present), driven by the root CLI:
+
+```
+sudo tuxwall-collector-admin pending            # keys waiting for approval
+sudo tuxwall-collector-admin list [--status approved|pending|revoked] [--json]
+sudo tuxwall-collector-admin approve <id>       # id = key hash or 8+ hex prefix
+sudo tuxwall-collector-admin revoke <id> [--transfer-to <id>]
+echo '<raw key>' | tuxwall-collector-admin hash # id of a raw key
+```
+
+`revoke --transfer-to` is for key rotation of the same install: the old key's
+`report_reports` / `report_events` / `whitelist_hits` rows are re-attributed
+to the (already approved) new key in one transaction, so the install's
+history keeps its weight. A plain revoke drops the key's evidence to low.
+
+Endpoints: `GET /api/admin/keys[?status=]`, `POST /api/admin/keys/<id>/approve`,
+`POST /api/admin/keys/<id>/revoke` (`{"transfer_to": "<id>"}`), legacy
+`DELETE /api/admin/keys/<id>`. The scoped ban-admin key
+(`/etc/tuxwall-collector/admin-api.key`) only reaches `/api/admin/bans*`.
+
+## Abuse limits
+
+- per client IP (real client from nginx `X-Real-IP` = `CF-Connecting-IP`,
+  trusted from loopback only; IPv6 grouped per /64): `/report` 600/h,
+  `/register` 20 registrations/h, 240 status lookups/h;
+- per reporter key: `/report` 120/h (unchanged);
+- global: at most 100 new keys per 24 h (registration and auto-registration
+  on `/report` answer 429 "paused for today" beyond it);
+- nginx `tuxwall_report` zone (30 r/m per client) stays in front.
+
+## Registration API
+
+`POST /register {"key"}` registers (pending) and returns
+`{status, approved, created, approved_at, trusted_after}` (`trusted_after` =
+approval time, `null` while pending - kept for older dashboards).
+`POST /register {"key", "action": "status"}` is a pure lookup. The legacy
+`GET /register?key=` still answers, but neither the collector log nor the
+nginx access log records query strings that carry a key.
 
 ## Residual risk
 
-A "sleeper" key that registers, waits a week, then lies is trusted, so one
-of its canary claims reaches medium. The remaining guards are the
-protected ranges (built-in plus the admin-managed list), each install's own
-never-ban list (DNS, NTP, gateway, own addresses, APT mirrors; added
-2026-11-12), per-key rate limits, and key revocation through
-`/api/admin/keys`. Requiring two independent trusted reporters for medium
-would close it, at the cost of single-install catches never being enforced
-by others.
+An approved install that turns hostile can still put single-reporter
+mediums on the feed until it is revoked; the protected ranges, each
+install's own never-ban list and per-key limits remain the backstop.
 
-## Registration rate limit (same branch)
+## History: 7-day floor (2026-11-12)
 
-`/register` rate-limited by `client_address`, which behind nginx is always
-`127.0.0.1`. Every install shared one bucket of `RATE_LIMIT_PER_HOUR` (120)
-registrations per hour, so a burst of new installs, or one abuser sending
-120 requests, made "register up front" fail for everyone for an hour.
-Reports still auto-register, but those installs' 7-day trust clock started
-late.
-
-`Handler._rate_client()` now keys the limiter on the real client from
-nginx's `X-Real-IP` (already set on `/register`; upstream `real_ip_header
-CF-Connecting-IP`). The header is trusted only when the peer is loopback;
-IPv6 clients are bucketed per /64; IPv4-mapped forms are normalised. The
-value is used only for the in-memory limiter, never logged or stored, so
-reporters stay anonymous. `RateLimiter` prunes idle entries once it tracks
-more than 20,000 clients. No nginx change is needed.
-
-## Verification
-
-`python3 tools/collector_severity_check.py [copy-of-reports.db]`, also added
-to CI. It covers the severity rules, the tier filters and the registration
-rate-limit identity; it fails on the 3.3.0 collector and passes on this
-branch.
-
-## Rollout
-
-1. Merge, then install `collector/tuxwall-collector.py` to
-   `/opt/tuxwall-collector/` and `systemctl restart tuxwall-collector`.
-   No database migration; severity is computed per request.
-2. No client change is needed. Installs already enforce medium+.
-3. Optional: add one sentence to the Deception notice in `www/index.html`:
-   "New installs' catches are enforced by other installs once their key is
-   7 days old."
+Medium required one key with 7 days of registration history. Superseded by
+admin approval because key age is free to accumulate.

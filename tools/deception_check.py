@@ -60,13 +60,15 @@ spec.loader.exec_module(A)
 TMP = tempfile.mkdtemp(prefix="deception-check-")
 A.REPORTING_CONF_FILE = os.path.join(TMP, "etc", "reporting.json")
 A.REPORT_QUEUE_FILE = os.path.join(TMP, "lib", "report-queue.json")
+A.REPORT_PAUSE_FILE = os.path.join(TMP, "lib", "report-queue.pause")
 A.RECENT_WAN_FILE = os.path.join(TMP, "lib", "recent-wan-ips.json")
 A.HONEY_CONF_FILE = os.path.join(TMP, "lib", "honeypot.json")
 A.CANARY_CONF = os.path.join(TMP, "opencanaryd", "opencanary.conf")
 A.CANARY_LOG = os.path.join(TMP, "opencanary", "opencanary.log")
 for d in ("etc", "lib", "opencanaryd", "opencanary"):
     os.makedirs(os.path.join(TMP, d), exist_ok=True)
-for name in ("REPORTING_CONF_FILE", "REPORT_QUEUE_FILE", "RECENT_WAN_FILE", "HONEY_CONF_FILE",
+for name in ("REPORTING_CONF_FILE", "REPORT_QUEUE_FILE", "REPORT_PAUSE_FILE", "RECENT_WAN_FILE",
+             "HONEY_CONF_FILE",
              "CANARY_CONF", "CANARY_LOG"):
     assert getattr(A, name).startswith(TMP), name
 
@@ -163,7 +165,22 @@ def fake_post(url, body, headers, timeout):
         return 429, {"ok": False, "error": "Rate limit exceeded"}
     if m == "400":
         return 400, {"ok": False, "error": "Refusing protected infrastructure IP"}
+    if m == "rotate":
+        # the old key is revoked and the key file changes mid-pass
+        if data.get("key") == ROTATE["old"]:
+            write_reporting({"url": "https://collector.invalid/report", "key": ROTATE["new"]})
+            return 403, {"ok": False, "error": "Reporter key revoked"}
+        return 200, {"ok": True, "accepted": True}
+    if m == "register":
+        if data.get("action") == "status":
+            return 200, {"ok": True, "found": True, "status": "pending", "approved": False,
+                         "created": 1.0, "trusted_after": None}
+        return 200, {"ok": True, "status": "pending", "approved": False, "created": 1.0,
+                     "trusted_after": None}
     raise AssertionError(m)
+
+
+ROTATE = {"old": "old-key-" + "a" * 24, "new": "new-key-" + "b" * 24}
 
 
 A._report_http_post = fake_post
@@ -591,7 +608,78 @@ def t_reporting():
     finally:
         A.REPORT_QUEUE_MAX = old_max
     check(A.report_ban_to_org("10.1.2.3", 1, "x", "honeypot")["ok"] is False, "non-global never queued")
+    # maintenance pause (key rotation): nothing sent, nothing lost
     reset_queue()
+    write_reporting({"url": "https://collector.invalid/report", "key": ROTATE["old"]})
+    TRANSPORT["mode"] = "rotate"
+    A.report_ban_to_org(ATTACKER, 1, "x", "canary", "ssh")
+    A.report_ban_to_org(ATTACKER2, 1, "x", "honeypot", "scan")
+    open(A.REPORT_PAUSE_FILE, "w").close()
+    out = A._report_q_process()
+    check(out["paused"] and out["sent"] == 0 and not SENT and out["left"] == 2,
+          "paused: nothing sent, queue kept")
+    check(A.reporting_status()["paused"] is True, "status shows the pause")
+    old_t = time.time() - A.REPORT_PAUSE_MAX_AGE - 5
+    os.utime(A.REPORT_PAUSE_FILE, (old_t, old_t))
+    check(not A._report_q_paused(), "a forgotten pause file expires")
+    os.unlink(A.REPORT_PAUSE_FILE)
+    # key rotated mid-pass: the old key's 403 is retried with the new key
+    out = A._report_q_process()
+    check(out["refused"] == 0 and out["retry"] >= 1, "403 after a key change -> retry, not drop")
+    for it in A.REPORT_Q["items"]:
+        it["next_try"] = 0
+    out = A._report_q_process()
+    check(not A.REPORT_Q["items"] and SENT[-1]["body"]["key"] == ROTATE["new"],
+          "every queued report delivered with the new key")
+    check(A.reporting_status()["refused_total"] == 0, "nothing lost during the rotation")
+    # registration / status: POST with the key in the body, never in a URL
+    SENT.clear()
+    TRANSPORT["mode"] = "register"
+    st = A.community_reporting_status()
+    r = A.community_reporting_register()
+    check(st["registered"] and st["status"] == "pending" and st["approved"] is False
+          and r["ok"] and r["status"] == "pending", "status + register parse the collector reply")
+    check(len(SENT) == 2 and all(x["url"] == "https://collector.invalid/register"
+                                 and "?" not in x["url"] for x in SENT)
+          and SENT[0]["body"] == {"key": ROTATE["new"], "action": "status"}
+          and SENT[1]["body"]["key"] == ROTATE["new"],
+          "register/status POST the key in the body (no query string)")
+    TRANSPORT["mode"] = "ok"
+    reset_queue()
+
+
+def t_community_pages():
+    rows = [{"ip": "45.95.150.%d" % i, "severity": "medium"} for i in range(12)]
+    calls = []
+    state = {"gen": "g1", "flip": False}
+
+    def fake_page(offset):
+        calls.append(offset)
+        gen = state["gen"]
+        if state["flip"] and offset > 0:
+            gen, state["flip"] = "g2", False
+        page = rows[offset:offset + 5]
+        nxt = offset + len(page)
+        return {"ok": True, "generated": gen, "bans": list(page),
+                "next_offset": nxt if nxt < len(rows) else None}
+
+    real = A._fetch_community_bans_page
+    A._fetch_community_bans_page = fake_page
+    try:
+        first, bans = A._fetch_community_bans_pages()
+        check([b["ip"] for b in bans] == [r["ip"] for r in rows] and calls == [0, 5, 10],
+              "community list paged with next_offset (3 pages, all rows once)")
+        calls.clear()
+        state["flip"] = True
+        first, bans = A._fetch_community_bans_pages()
+        check(len(bans) == 12 and calls == [0, 5, 0, 5, 10],
+              "snapshot change mid-paging -> start over once")
+        old = {"ok": True, "generated": "x", "bans": rows[:3]}   # pre-paging collector
+        A._fetch_community_bans_page = lambda off: dict(old)
+        first, bans = A._fetch_community_bans_pages()
+        check(len(bans) == 3, "old collector without next_offset: one page")
+    finally:
+        A._fetch_community_bans_page = real
 
 
 def t_canary_fw():
@@ -784,7 +872,7 @@ def _peer_alive(c):
 def main():
     try:
         for t in (t_ttl_map, t_slots, t_threshold, t_listener, t_lan_guard, t_guard_paths,
-                  t_categories, t_reporting, t_canary_fw, t_canary_log, t_load):
+                  t_categories, t_reporting, t_community_pages, t_canary_fw, t_canary_log, t_load):
             t()
         bad = [c for c in RUN.calls if os.path.basename(c[0]) == "cscli"
                and any(x in c for x in ("192.168.1.50", WAN4, WAN6, CF, NTP))]

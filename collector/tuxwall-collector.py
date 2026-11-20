@@ -6,11 +6,17 @@ SQLite, enriches them with geo/ASN data, and serves:
 
   POST /report                   - ingest {key, ip, hits, reason, source,
                                    category?, suricata?: [{sig, count, sid}]}
+  POST /register                 - register a key {key} or look it up
+                                   {key, action: "status"} (GET ?key= kept
+                                   for old clients; query never logged)
   GET  /healthz                  - liveness probe
-  GET  /api/public/bans          - JSON list of aggregated bans
+  GET  /api/public/bans          - JSON list of aggregated bans (paginated:
+                                   limit<=5000 public, offset, next_offset)
   GET  /api/public/stats         - uncapped totals (ips, hits, countries, ...)
   GET  /api/admin/bans           - loopback-only admin listing (X-Admin-Key)
   DELETE /api/admin/bans/<ip>    - loopback-only admin removal (X-Admin-Key)
+  GET  /api/admin/keys           - reporter keys (?status=pending|approved|revoked)
+  POST /api/admin/keys/<id>/approve | /revoke {transfer_to?}
   GET  /bans                     - public HTML page
   GET  /ip/<addr>                - AbuseIPDB-style per-IP report card
   GET  /lists/community-bans.txt - plain-text IPs (severity-filterable)
@@ -19,10 +25,15 @@ Reporter identity is never stored: the per-install report key is hashed
 with SHA-256 and only the hash is kept, giving the distinct-reporter count
 without leaking who reported what.
 
+Trust model (admin approval): a new key is "pending" - its reports are
+stored and published at low, but never count toward the medium+ floors -
+until an admin approves it (tuxwall-collector-admin approve <id>).
+
 Data (c) DB-IP.com, licensed under CC BY 4.0 (https://db-ip.com/db/lite.php)
 """
 import hashlib
 import hmac
+import html
 import ipaddress
 import json
 import os
@@ -31,6 +42,7 @@ import re
 import sqlite3
 import threading
 import time
+import urllib.parse
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,19 +56,52 @@ GEO_CITY_DB = os.path.join(DATA_DIR, "dbip-city-lite.mmdb")
 GEO_ASN_DB = os.path.join(DATA_DIR, "dbip-asn-lite.mmdb")
 
 RETENTION_DAYS = 90
-RATE_LIMIT_PER_HOUR = 120
+RATE_LIMIT_PER_HOUR = 120  # per reporter key (/report)
+REPORT_IP_PER_HOUR = 600   # per client IP (/report; IPv6 per /64)
+REGISTER_IP_PER_HOUR = 20  # per client IP: registration attempts (/register)
+STATUS_IP_PER_HOUR = 240   # per client IP: key status lookups (/register)
+NEW_KEYS_PER_DAY = 100     # global cap on new reporter keys per 24 h
 DEDUPE_SECONDS = 300       # ignore a report for (ip, reporter) seen this recently
 PRUNE_EVERY = 200          # run retention cleanup every N ingests
 SOURCE_MAX = 24
 REASON_MAX = 96
 MAX_HITS = 1000000
+# /api/public/bans: proxied (public) callers get at most PUBLIC_BANS_MAX rows
+# per request and page with offset/next_offset; direct loopback callers (the
+# PHP /bans page) may take the whole list in one go.
+PUBLIC_BANS_MAX = 5000
+INTERNAL_BANS_MAX = 20000
+PUBLIC_CACHE_SECONDS = 60
+WHITELIST_HITS_RETENTION_DAYS = 90
+
+KEY_PENDING = "pending"
+KEY_APPROVED = "approved"
+KEY_REVOKED = "revoked"
+KEY_STATUSES = (KEY_PENDING, KEY_APPROVED, KEY_REVOKED)
 
 # Admin endpoints (/api/admin/**) are NEVER proxied by nginx — they answer on
 # the loopback listener only. The key gates them against local misuse and is
-# compared in constant time. Key file is created by deploy-collector.sh
-# (0600/0640 root:adm); absent key = admin endpoints disabled outright.
-ADMIN_KEY_PATH = os.environ.get(
-    "TUXWALL_COLLECTOR_ADMIN_KEY") or "/etc/tuxwall-collector/admin.key"
+# compared in constant time. Key files are created by deploy-collector.sh;
+# the service reads them as systemd credentials (LoadCredential=), so the
+# key files themselves stay root-owned. Absent key = endpoints disabled.
+#   admin.key      full admin (keys, whitelist, bans) - root:adm 0640, CLI
+#   admin-api.key  scoped: ban listing/removal only - for the LAN Ban
+#                  Management page (php-fpm pool tuxwall-admin)
+_CRED_DIR = os.environ.get("CREDENTIALS_DIRECTORY") or ""
+
+
+def _key_path(env_name, cred_name, default):
+    if os.environ.get(env_name):
+        return os.environ[env_name]
+    if _CRED_DIR and os.path.exists(os.path.join(_CRED_DIR, cred_name)):
+        return os.path.join(_CRED_DIR, cred_name)
+    return default
+
+
+ADMIN_KEY_PATH = _key_path("TUXWALL_COLLECTOR_ADMIN_KEY", "admin.key",
+                           "/etc/tuxwall-collector/admin.key")
+BANS_KEY_PATH = _key_path("TUXWALL_COLLECTOR_BANS_KEY", "admin-api.key",
+                          "/etc/tuxwall-collector/admin-api.key")
 
 # Protected infrastructure ranges (keep in sync with api_server.py). Reports
 # naming these IPs are refused at ingest: community-auto bans every listed
@@ -165,16 +210,20 @@ SEVERITY_CRITICAL = "critical"
 SEVERITY_ORDER = [SEVERITY_LOW, SEVERITY_MEDIUM, SEVERITY_HIGH, SEVERITY_CRITICAL]
 
 
-TRUST_SECONDS = 7 * 86400  # a key's evidence counts as trusted after a week
+# Legacy (pre-approval) rule: a key was trusted after a week of history.
+# Only used once, by the migration that maps the old 'active' status onto
+# approved (already trusted under the old rule) / pending (not yet).
+TRUST_SECONDS = 7 * 86400
 
 
 def severity_for(hits, reporters, deception=False, trusted=0):
     """Severity driven by how much of the community has been hit and how hard.
 
-    trusted = distinct reporter keys with at least TRUST_SECONDS (a week) of
-    registration history. Reporter keys are free and auto-registered, and
-    `hits` and `source` are self-reported, so nothing a brand-new key sends
-    can be taken at face value:
+    trusted = distinct APPROVED reporter keys. Reporter keys are free and
+    self-registered, and `hits` and `source` are self-reported, so nothing a
+    pending (unapproved) key sends is taken at face value. Callers pass the
+    approved-only evidence: hits = hits reported by approved keys,
+    deception = canary/honeypot evidence from an approved key.
 
     - critical: 5+ trusted reporters
     - high:     2+ trusted reporters, or 1 trusted reporter with 500+ hits
@@ -183,12 +232,11 @@ def severity_for(hits, reporters, deception=False, trusted=0):
     - low:      everything else
 
     Installs in Automatic mode enforce medium and above, so an IP only
-    reaches them once a key with a week of history vouches for it. A burst
-    of fresh keys (each registered seconds ago, each claiming "canary" or a
-    large hit count) stays at low: listed and visible on report cards, but
-    never auto-enforced. Deception evidence from a trusted key is still a
-    single-report medium - a real canary catch from an established install
-    reaches every subscriber immediately.
+    reaches them once an approved key vouches for it. A burst of new keys
+    (each claiming "canary" or a large hit count) stays at low: listed and
+    visible on report cards, but never auto-enforced. Deception evidence
+    from an approved key is still a single-report medium - a real canary
+    catch from an approved install reaches every subscriber immediately.
     """
     if trusted >= 5:
         return SEVERITY_CRITICAL
@@ -218,6 +266,16 @@ def _deception_evidence(ip_expr):
     return ("EXISTS (SELECT 1 FROM report_events de"
             " WHERE de.ip = " + ip_expr +
             " AND de.source IN (" + _DECEPTION_IN + "))")
+
+
+def _severity_rank_sql(tr, th, td):
+    """SQL CASE returning severity_for()'s rank (0 low .. 3 critical) from
+    trusted reporters `tr`, trusted hits `th` and trusted deception `td`
+    (SQL expressions). Must stay in sync with severity_for()."""
+    return ("(CASE WHEN {tr} >= 5 THEN 3"
+            " WHEN {tr} >= 2 OR ({tr} >= 1 AND {th} >= 500) THEN 2"
+            " WHEN {tr} >= 1 AND ({td} OR {th} >= 50 OR {tr} >= 2) THEN 1"
+            " ELSE 0 END)").format(tr=tr, th=th, td=td)
 
 
 def has_deception_evidence(conn, ip):
@@ -389,16 +447,20 @@ CREATE TABLE IF NOT EXISTS whitelist_hits (
 );
 CREATE INDEX IF NOT EXISTS idx_whitelist_hits_ts ON whitelist_hits(ts);
 
--- Registered reporter keys. Every reporting key is auto-registered on its
--- first ingest (created = first sight), so long-standing installs are
--- grandfathered by the _init_db migration below. `status='revoked'` keys
--- are refused at ingest and never count toward trusted-reporter floors.
+-- Registered reporter keys (SHA-256 of the raw key). Unknown keys are
+-- registered on /register or their first ingest as 'pending'; only
+-- 'approved' keys (admin decision) count toward the trusted-reporter
+-- floors. 'revoked' keys are refused at ingest and never count.
 CREATE TABLE IF NOT EXISTS reporter_keys (
     key TEXT PRIMARY KEY,
     created REAL NOT NULL,
     last_seen REAL NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'active'
+    status TEXT NOT NULL DEFAULT 'pending',
+    approved_at REAL NOT NULL DEFAULT 0,
+    revoked_at REAL NOT NULL DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS idx_report_events_reporter ON report_events(reporter);
+CREATE INDEX IF NOT EXISTS idx_report_events_ts ON report_events(ts);
 """
 
 
@@ -422,30 +484,55 @@ class Store:
         self._conn = self._connect()
         with self.lock:
             self._conn.executescript(SCHEMA)
-            # Grandfather every key that has ever reported: registration
-            # date = its earliest report event, so long-standing installs
-            # are fully trusted from day one of the key system instead of
-            # restarting the 7-day clock.
-            try:
-                self._conn.execute(
-                    "INSERT OR IGNORE INTO reporter_keys (key, created, last_seen, status)"
-                    " SELECT rr.reporter,"
-                    "  COALESCE((SELECT MIN(e.ts) FROM report_events e"
-                    "            WHERE e.reporter = rr.reporter), rr.last_seen),"
-                    "  MAX(rr.last_seen), 'active'"
-                    " FROM report_reports rr GROUP BY rr.reporter")
-            except Exception:
-                pass  # fresh DB or migration race - harmless
+            self.migration_notes = self._migrate(time.time())
             self._conn.commit()
+
+    def _migrate(self, now):
+        """Idempotent schema/data migrations. Returns human-readable notes
+        (key hash prefixes only) for the service log."""
+        notes = []
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(reporter_keys)")}
+        for col in ("approved_at", "revoked_at"):
+            if col not in cols:
+                self._conn.execute(
+                    "ALTER TABLE reporter_keys ADD COLUMN %s REAL NOT NULL DEFAULT 0" % col)
+                notes.append("added reporter_keys.%s" % col)
+        # Any reporter that somehow has no key row is registered as pending.
+        try:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO reporter_keys (key, created, last_seen, status)"
+                " SELECT rr.reporter,"
+                "  COALESCE((SELECT MIN(e.ts) FROM report_events e"
+                "            WHERE e.reporter = rr.reporter), rr.last_seen),"
+                "  MAX(rr.last_seen), 'pending'"
+                " FROM report_reports rr GROUP BY rr.reporter")
+        except sqlite3.Error:
+            pass
+        # Pre-approval 'active' keys: those already trusted under the old
+        # 7-day rule keep their weight (approved), so the published
+        # severities do not change at migration; younger ones go pending.
+        for key, created in self._conn.execute(
+                "SELECT key, created FROM reporter_keys WHERE status='active'").fetchall():
+            if created <= now - TRUST_SECONDS:
+                self._conn.execute(
+                    "UPDATE reporter_keys SET status='approved', approved_at=? WHERE key=?",
+                    (now, key))
+                notes.append("key %s... active -> approved (trusted under the 7-day rule)" % key[:8])
+            else:
+                self._conn.execute(
+                    "UPDATE reporter_keys SET status='pending' WHERE key=?", (key,))
+                notes.append("key %s... active -> pending (needs admin approval)" % key[:8])
+        return notes
 
     def ingest(self, reporter, ip, hits, reason, source, category, now,
                suricata=None):
-        """Record a report. Returns "ok", "duplicate", "revoked" or "error".
+        """Record a report. Returns "ok", "duplicate", "revoked", "cap"
+        (daily new-key cap reached) or "error".
 
-        Key lifecycle: unknown keys are auto-registered here (created=now,
-        so the TRUST_SECONDS clock starts at first report - the dashboard's
-        "enable sharing" button pre-registers earlier so the clock starts
-        at install time instead). Revoked keys are refused outright.
+        Key lifecycle: unknown keys are auto-registered here as pending
+        (subject to the global NEW_KEYS_PER_DAY cap); their reports are
+        stored and published at low until an admin approves the key.
+        Revoked keys are refused outright.
 
         suricata: optional list of {sig, count, sid} — meaningful Suricata
         alerts the reporter observed from this IP. Upserted per signature;
@@ -455,12 +542,14 @@ class Store:
         with self.lock:
             row = self._conn.execute(
                 "SELECT status FROM reporter_keys WHERE key=?", (reporter,)).fetchone()
-            if row is not None and row[0] == "revoked":
+            if row is not None and row[0] == KEY_REVOKED:
                 return "revoked"
             if row is None:
+                if self._new_keys_today(now) >= NEW_KEYS_PER_DAY:
+                    return "cap"
                 self._conn.execute(
                     "INSERT OR IGNORE INTO reporter_keys (key, created, last_seen, status)"
-                    " VALUES (?,?,?,'active')", (reporter, now, now))
+                    " VALUES (?,?,?,'pending')", (reporter, now, now))
             else:
                 self._conn.execute(
                     "UPDATE reporter_keys SET last_seen=? WHERE key=?",
@@ -543,13 +632,32 @@ class Store:
         return "ok"
 
     def prune(self, now):
+        """Retention: reports/report_reports/suricata_evidence after
+        RETENTION_DAYS of silence; report_events of pruned IPs, and events
+        older than RETENTION_DAYS except each (ip, reporter)'s newest
+        canary/honeypot event (that one keeps a still-active IP listed with
+        the same severity - re-reports refresh last_seen without adding
+        events); whitelist_hits after WHITELIST_HITS_RETENTION_DAYS.
+        Returns deleted row counts."""
         cutoff = now - RETENTION_DAYS * 86400
+        out = {}
         with self.lock:
-            self._conn.execute("DELETE FROM reports WHERE last_seen < ?", (cutoff,))
-            self._conn.execute(
-                "DELETE FROM report_reports WHERE last_seen < ?", (cutoff,))
-            self._conn.execute(
-                "DELETE FROM suricata_evidence WHERE last_ts < ?", (cutoff,))
+            out["reports"] = self._conn.execute(
+                "DELETE FROM reports WHERE last_seen < ?", (cutoff,)).rowcount
+            out["report_reports"] = self._conn.execute(
+                "DELETE FROM report_reports WHERE last_seen < ?", (cutoff,)).rowcount
+            out["suricata_evidence"] = self._conn.execute(
+                "DELETE FROM suricata_evidence WHERE last_ts < ?", (cutoff,)).rowcount
+            orphans = self._conn.execute(
+                "DELETE FROM report_events WHERE ip NOT IN (SELECT ip FROM reports)").rowcount
+            old = self._conn.execute(
+                "DELETE FROM report_events WHERE ts < ? AND id NOT IN ("
+                " SELECT MAX(id) FROM report_events WHERE source IN (" + _DECEPTION_IN + ")"
+                " GROUP BY ip, reporter)", (cutoff,)).rowcount
+            out["report_events"] = orphans + old
+            out["whitelist_hits"] = self._conn.execute(
+                "DELETE FROM whitelist_hits WHERE ts < ?",
+                (now - WHITELIST_HITS_RETENTION_DAYS * 86400,)).rowcount
             self._conn.commit()
             # Long-running service: checkpoint the WAL so it never grows
             # unbounded between restarts.
@@ -557,45 +665,126 @@ class Store:
                 self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             except Exception:
                 pass
+        return out
+
+    def _new_keys_today(self, now):
+        """Keys registered in the last 24 h. Caller holds the lock."""
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM reporter_keys WHERE created > ?",
+            (now - 86400,)).fetchone()[0]
+
+    def new_keys_24h(self):
+        with self.lock:
+            return self._new_keys_today(time.time())
 
     def register_key(self, key, now):
-        """Insert a new reporter key (no-op if it exists)."""
+        """Insert a new pending reporter key. Returns "ok" (also when it
+        already exists) or "cap" (daily new-key cap reached)."""
         with self.lock:
+            if self._conn.execute("SELECT 1 FROM reporter_keys WHERE key=?",
+                                  (key,)).fetchone():
+                return "ok"
+            if self._new_keys_today(now) >= NEW_KEYS_PER_DAY:
+                return "cap"
             self._conn.execute(
                 "INSERT OR IGNORE INTO reporter_keys (key, created, last_seen, status)"
-                " VALUES (?,?,?,'active')", (key, now, now))
+                " VALUES (?,?,?,'pending')", (key, now, now))
             self._conn.commit()
+        return "ok"
 
     def key_status(self, key):
         """Registration state for one reporter key, or None if unknown."""
         with self.lock:
             row = self._conn.execute(
-                "SELECT key, created, last_seen, status FROM reporter_keys"
-                " WHERE key=?", (key,)).fetchone()
+                "SELECT key, created, last_seen, status, approved_at, revoked_at"
+                " FROM reporter_keys WHERE key=?", (key,)).fetchone()
         if row is None:
             return None
         return {"key": row[0], "created": row[1], "last_seen": row[2],
-                "status": row[3]}
+                "status": row[3], "approved_at": row[4], "revoked_at": row[5]}
 
-    def list_keys(self):
-        """All reporter keys with a derived report count (admin only)."""
+    def list_keys(self, status=None):
+        """Reporter keys with derived counts (admin only)."""
+        q = ("SELECT k.key, k.created, k.last_seen, k.status, k.approved_at,"
+             " k.revoked_at,"
+             " (SELECT COUNT(*) FROM report_reports rr WHERE rr.reporter=k.key),"
+             " (SELECT COUNT(*) FROM report_events e WHERE e.reporter=k.key"
+             "   AND e.ts > ?)"
+             " FROM reporter_keys k")
+        args = [time.time() - 86400]
+        if status:
+            q += " WHERE k.status=?"
+            args.append(status)
+        with self.lock:
+            rows = self._conn.execute(q + " ORDER BY k.created DESC", args).fetchall()
+        return [{"key": r[0], "created": r[1], "last_seen": r[2],
+                 "status": r[3], "approved_at": r[4], "revoked_at": r[5],
+                 "reported_ips": r[6], "events_24h": r[7]} for r in rows]
+
+    def resolve_key(self, ident):
+        """Full key hash for a hash or unique hash prefix (8+ hex chars).
+        Returns (key, None) or (None, "not found" | "ambiguous" | "invalid")."""
+        ident = (ident or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{8,64}", ident):
+            return None, "invalid"
         with self.lock:
             rows = self._conn.execute(
-                "SELECT k.key, k.created, k.last_seen, k.status,"
-                " (SELECT COUNT(*) FROM report_reports rr WHERE rr.reporter=k.key)"
-                " FROM reporter_keys k ORDER BY k.created DESC").fetchall()
-        return [{"key": r[0], "created": r[1], "last_seen": r[2],
-                 "status": r[3], "reported_ips": r[4]} for r in rows]
+                "SELECT key FROM reporter_keys WHERE substr(key, 1, ?) = ? LIMIT 2",
+                (len(ident), ident)).fetchall()
+        if not rows:
+            return None, "not found"
+        if len(rows) > 1:
+            return None, "ambiguous"
+        return rows[0][0], None
 
-    def revoke_key(self, key):
+    def approve_key(self, key, now):
+        """pending -> approved. Returns the new status dict, or None if the
+        key is unknown; revoked keys stay revoked (returns their state)."""
+        with self.lock:
+            self._conn.execute(
+                "UPDATE reporter_keys SET status='approved', approved_at=?"
+                " WHERE key=? AND status='pending'", (now, key))
+            self._conn.commit()
+        return self.key_status(key)
+
+    def revoke_key(self, key, now=None):
         """Mark a reporter key revoked: refused at ingest and never again
         counted toward trusted-reporter floors. Returns True if found."""
         with self.lock:
             cur = self._conn.execute(
-                "UPDATE reporter_keys SET status='revoked' WHERE key=?"
-                " AND status != 'revoked'", (key,))
+                "UPDATE reporter_keys SET status='revoked', revoked_at=? WHERE key=?"
+                " AND status != 'revoked'", (now or time.time(), key))
             self._conn.commit()
         return bool(cur.rowcount)
+
+    def transfer_evidence(self, old, new):
+        """Key rotation: re-attribute every report of `old` to `new` (same
+        install, new key) so revoking the old key does not drop the
+        install's history out of the trusted floors. Per-IP rows merge
+        (max hits / last_seen). One transaction. Returns moved row counts."""
+        moved = {}
+        with self.lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                self._conn.execute(
+                    "INSERT INTO report_reports (ip, reporter, hits, last_seen)"
+                    " SELECT ip, ?, hits, last_seen FROM report_reports WHERE reporter=?"
+                    " ON CONFLICT(ip, reporter) DO UPDATE SET"
+                    " hits = MAX(hits, excluded.hits),"
+                    " last_seen = MAX(last_seen, excluded.last_seen)", (new, old))
+                moved["report_reports"] = self._conn.execute(
+                    "DELETE FROM report_reports WHERE reporter=?", (old,)).rowcount
+                moved["report_events"] = self._conn.execute(
+                    "UPDATE report_events SET reporter=? WHERE reporter=?",
+                    (new, old)).rowcount
+                moved["whitelist_hits"] = self._conn.execute(
+                    "UPDATE whitelist_hits SET reporter=? WHERE reporter=?",
+                    (new, old)).rowcount
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        return moved
 
     def remove_ip(self, ip):
         """Admin removal: purge an IP from every table. Returns deleted row
@@ -620,58 +809,55 @@ class Store:
                       re-shows or skips rows when new bans arrive mid-browse.
         order:        "hits" (default) or "recent" (last_seen DESC, ip DESC).
         """
-        # Exact-tier filters, mirroring severity_for() for the published
-        # set (every published row has deception evidence, so severity
-        # depends only on trusted reporters and hits). Must stay in sync.
+        # Severity inputs from APPROVED keys only (pending keys never lift an
+        # IP above low): tr = approved reporters, th = their hits, td = an
+        # approved key has canary/honeypot evidence for the IP. The exact-
+        # tier filter is the same rule as SQL (_severity_rank_sql).
         tr = "COALESCE(t.trusted, 0)"
-        tier_constraints = {
-            SEVERITY_LOW: "%s = 0" % tr,
-            SEVERITY_MEDIUM: "(%s = 1 AND r.hits < 500)" % tr,
-            SEVERITY_HIGH: ("(%s BETWEEN 2 AND 4 OR (%s = 1 AND r.hits >= 500))"
-                            % (tr, tr)),
-            SEVERITY_CRITICAL: "%s >= 5" % tr,
-        }
+        th = "COALESCE(t.trusted_hits, 0)"
+        td = ("EXISTS (SELECT 1 FROM report_events te"
+              " JOIN reporter_keys tk ON tk.key = te.reporter"
+              " WHERE te.ip = r.ip AND tk.status='approved'"
+              " AND te.source IN (" + _DECEPTION_IN + "))")
+        sev_sql = _severity_rank_sql(tr, th, td)
         # Deception-evidence gate: only IPs with canary/honeypot evidence
         # can ever be published (see _deception_evidence). Manual/engine
         # reports stay in the DB for report cards but never reach any list.
         where = ["r.last_seen > ?", _deception_evidence("r.ip")]
         args = [time.time() - RETENTION_DAYS * 86400]
-        if tier in tier_constraints:
-            where.append(tier_constraints[tier])
+        if tier in SEVERITY_ORDER:
+            where.append("%s = %d" % (sev_sql, SEVERITY_ORDER.index(tier)))
         if before is not None:
             where.append("(r.last_seen, r.ip) < (?, ?)")
             args += [before[0], before[1]]
         with self.lock:
-            # trusted = distinct reporter keys with >= TRUST_SECONDS of
-            # registration history, gated to the published (deception-only)
-            # set. Feeds the severity floors in severity_for().
             cur = self._conn.execute(
                 "WITH counts AS (SELECT ip, COUNT(*) AS reporters"
                 "   FROM report_reports GROUP BY ip),"
-                " trusted AS (SELECT rr.ip, COUNT(DISTINCT rr.reporter) AS trusted"
+                " trusted AS (SELECT rr.ip, COUNT(DISTINCT rr.reporter) AS trusted,"
+                "   SUM(rr.hits) AS trusted_hits"
                 "   FROM report_reports rr JOIN reporter_keys k ON k.key = rr.reporter"
-                "   WHERE k.status='active' AND k.created <= ?"
+                "   WHERE k.status='approved'"
                 "   GROUP BY rr.ip)"
                 " SELECT r.ip, r.hits, r.first_seen, r.last_seen, r.country, r.iso,"
                 " r.city, r.isp, r.asn, r.last_source,"
                 " COALESCE(c.reporters, 0) AS reporters,"
-                " COALESCE(t.trusted, 0) AS trusted"
+                " " + tr + " AS trusted, " + th + " AS trusted_hits,"
+                " " + td + " AS trusted_deception"
                 " FROM reports r LEFT JOIN counts c ON c.ip = r.ip"
                 " LEFT JOIN trusted t ON t.ip = r.ip"
                 " WHERE " + " AND ".join(where)
                 + (" ORDER BY r.last_seen DESC, r.ip DESC LIMIT ?"
                    if order == "recent" else
-                   " ORDER BY r.hits DESC LIMIT ?"),
-                (time.time() - TRUST_SECONDS,) + tuple(args) + (limit,))
+                   " ORDER BY r.hits DESC, r.ip ASC LIMIT ?"),
+                tuple(args) + (limit,))
             rows = cur.fetchall()
         bans = []
         for (ip, hits, first_seen, last_seen, country, iso, city, isp, asn,
-             last_source, reporters, trusted) in rows:
-            sev = severity_for(hits, reporters, deception=True, trusted=trusted)
-            # deception=True: every row passing the WHERE gate above has
-            # canary/honeypot evidence, so the deception floor always
-            # applies. (Was: last_source in DECEPTION_SOURCES, which lost
-            # the floor whenever a later manual report overwrote it.)
+             last_source, reporters, trusted, trusted_hits,
+             trusted_deception) in rows:
+            sev = severity_for(trusted_hits, trusted,
+                               deception=bool(trusted_deception), trusted=trusted)
             if severity_rank(sev) < min_severity:
                 continue
             bans.append({
@@ -712,15 +898,26 @@ class Store:
                 " WHERE ip=? GROUP BY source ORDER BY COUNT(*) DESC",
                 (ip,)).fetchall()
             events = self._conn.execute(
-                "SELECT reporter, ts, category, source, hits FROM report_events"
-                " WHERE ip=? ORDER BY ts DESC LIMIT 50",
+                "SELECT e.reporter, e.ts, e.category, e.source, e.hits,"
+                " COALESCE(k.status, 'pending')"
+                " FROM report_events e LEFT JOIN reporter_keys k ON k.key = e.reporter"
+                " WHERE e.ip=? ORDER BY e.ts DESC LIMIT 50",
                 (ip,)).fetchall()
             listed = has_deception_evidence(self._conn, ip)
-            trusted = self._conn.execute(
-                "SELECT COUNT(DISTINCT rr.reporter) FROM report_reports rr"
+            trusted, trusted_hits = self._conn.execute(
+                "SELECT COUNT(DISTINCT rr.reporter), COALESCE(SUM(rr.hits), 0)"
+                " FROM report_reports rr"
                 " JOIN reporter_keys k ON k.key = rr.reporter"
-                " WHERE rr.ip=? AND k.status='active' AND k.created <= ?",
-                (ip, time.time() - TRUST_SECONDS)).fetchone()[0]
+                " WHERE rr.ip=? AND k.status='approved'", (ip,)).fetchone()
+            trusted_deception = bool(self._conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM report_events e"
+                " JOIN reporter_keys k ON k.key = e.reporter"
+                " WHERE e.ip=? AND k.status='approved'"
+                " AND e.source IN (" + _DECEPTION_IN + "))", (ip,)).fetchone()[0])
+            suricata = self._conn.execute(
+                "SELECT sig, count, last_ts FROM suricata_evidence"
+                " WHERE ip=? ORDER BY count DESC, last_ts DESC LIMIT 10",
+                (ip,)).fetchall()
         (ip, hits, first_seen, last_seen, country, iso, city, isp, asn,
          last_reason, last_source) = row
         return {
@@ -738,21 +935,18 @@ class Store:
             "last_source": last_source,
             "listed": listed,
             "trusted": trusted,
-            "severity": severity_for(
-                hits, reporters,
-                deception=any(s in DECEPTION_SOURCES for s, _ in srcs),
-                trusted=trusted),
+            "severity": severity_for(trusted_hits, trusted,
+                                     deception=trusted_deception,
+                                     trusted=trusted),
             "categories": {c: {"hits": h, "reports": n} for c, h, n in cats},
             "sources": {s: n for s, n in srcs},
-            "suricata": [
-                {"sig": sg, "count": c, "last_ts": t}
-                for sg, c, t in self._conn.execute(
-                    "SELECT sig, count, last_ts FROM suricata_evidence"
-                    " WHERE ip=? ORDER BY count DESC, last_ts DESC LIMIT 10",
-                    (ip,)).fetchall()],
+            "suricata": [{"sig": sg, "count": c, "last_ts": t}
+                         for sg, c, t in suricata],
+            # reporter (hash) is internal only - never rendered or published
             "events": [{
                 "reporter": r, "ts": t, "category": c, "source": s, "hits": h,
-            } for r, t, c, s, h in events],
+                "approved": st == KEY_APPROVED,
+            } for r, t, c, s, h, st in events],
         }
 
     # --- infrastructure whitelist (3.2.4) --------------------------------
@@ -889,7 +1083,72 @@ class RateLimiter:
             return True
 
 
-RATE = RateLimiter(RATE_LIMIT_PER_HOUR)
+RATE = RateLimiter(RATE_LIMIT_PER_HOUR)           # per reporter key (/report)
+REPORT_IP_RATE = RateLimiter(REPORT_IP_PER_HOUR)  # per client IP (/report)
+REGISTER_IP_RATE = RateLimiter(REGISTER_IP_PER_HOUR)
+STATUS_IP_RATE = RateLimiter(STATUS_IP_PER_HOUR)
+
+
+# --- Public response cache --------------------------------------------------
+class PublicCache:
+    """Short-lived cache for the public list endpoints. The full ban list
+    for a (severity, tier, order) view is computed at most once per
+    PUBLIC_CACHE_SECONDS and every page/format is sliced from it, so
+    /api/public/bans, /lists/ and /bans/more cost one DB pass per minute
+    instead of one per request. Serialized bodies are kept too (bounded).
+    Admin changes (approve/revoke/remove/whitelist) clear it."""
+
+    def __init__(self, ttl=PUBLIC_CACHE_SECONDS, max_bodies=64):
+        self.ttl = ttl
+        self.max_bodies = max_bodies
+        self._lock = threading.Lock()
+        self._views = {}    # (min_rank, tier, order) -> (ts, generated, bans)
+        self._bodies = {}   # arbitrary key -> (ts, bytes)
+        self._build_locks = defaultdict(threading.Lock)
+
+    def view(self, min_rank=0, tier=None, order="hits", now=None):
+        """-> (generated_iso, bans) for the whole published view."""
+        key = (min_rank, tier, order)
+        now = now or time.time()
+        with self._lock:
+            hit = self._views.get(key)
+            if hit and now - hit[0] < self.ttl:
+                return hit[1], hit[2]
+            build_lock = self._build_locks[key]
+        with build_lock:   # one builder per view; others wait for its result
+            with self._lock:
+                hit = self._views.get(key)
+                if hit and time.time() - hit[0] < self.ttl:
+                    return hit[1], hit[2]
+            bans = _store().top_bans(min_severity=min_rank, tier=tier,
+                                     limit=INTERNAL_BANS_MAX, order=order)
+            generated = datetime.now(timezone.utc).isoformat()
+            with self._lock:
+                self._views[key] = (time.time(), generated, bans)
+            return generated, bans
+
+    def body(self, key, build, now=None):
+        now = now or time.time()
+        with self._lock:
+            hit = self._bodies.get(key)
+            if hit and now - hit[0] < self.ttl:
+                return hit[1]
+        data = build()
+        with self._lock:
+            if len(self._bodies) >= self.max_bodies:
+                for k in sorted(self._bodies, key=lambda k: self._bodies[k][0])[
+                        :len(self._bodies) - self.max_bodies + 1]:
+                    del self._bodies[k]
+            self._bodies[key] = (time.time(), data)
+        return data
+
+    def clear(self):
+        with self._lock:
+            self._views.clear()
+            self._bodies.clear()
+
+
+PUBLIC_CACHE = PublicCache()
 
 
 # --- HTTP handler ----------------------------------------------------------
@@ -898,35 +1157,79 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "tuxwall-collector/1.0"
 
     def log_message(self, fmt, *args):
+        # Never log query strings: old clients send GET /register?key=<raw
+        # key>, and the default request line (log_request/log_error) carries
+        # the full URL. Path only, and any "?..." scrubbed from the message.
         sys_log = _log()
         try:
             sys_log.put(json.dumps({
                 "ts": time.time(),
                 "client": self.client_address[0] if self.client_address else "",
-                "path": self.path,
-                "msg": fmt % args,
+                "path": _strip_query(getattr(self, "path", "") or ""),
+                "msg": _QUERY_RE.sub("", fmt % args),
             }))
         except Exception:
             pass
 
-    def _json(self, code, payload):
-        body = json.dumps(payload).encode("utf-8")
+    def log_request(self, code="-", size="-"):
+        if isinstance(code, int) or hasattr(code, "value"):
+            code = int(getattr(code, "value", code))
+        self.log_message('"%s %s" %s %s', getattr(self, "command", "") or "-",
+                         _strip_query(getattr(self, "path", "") or ""),
+                         str(code), str(size))
+
+    def _json(self, code, payload, cache=None):
+        self._send_body(code, json.dumps(payload).encode("utf-8"),
+                        "application/json; charset=utf-8", cache, cors=True)
+
+    def _send_body(self, code, body, ctype, cache=None, cors=False):
+        """cache: None = no-store; int seconds = public, CDN-cacheable."""
         self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Type", ctype)
+        if cors:
+            self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", "public, max-age=%d" % cache
+                         if cache and code == 200 else "no-store")
         self.end_headers()
         self.wfile.write(body)
 
-    def _text(self, code, text, ctype="text/plain; charset=utf-8"):
-        body = text.encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+    def _text(self, code, text, ctype="text/plain; charset=utf-8", cache=None):
+        self._send_body(code, text.encode("utf-8"), ctype, cache)
+
+    def _proxied(self):
+        """True when the request came through nginx (public) - nginx always
+        sets X-Real-IP / X-Forwarded-For - or from a non-loopback peer."""
+        if self.headers.get("X-Real-IP") or self.headers.get("X-Forwarded-For"):
+            return True
+        peer = self.client_address[0] if self.client_address else ""
+        try:
+            return not ipaddress.ip_address(peer).is_loopback
+        except ValueError:
+            return True
+
+    def _read_json_body(self):
+        """-> dict, or None after answering 413 for an empty/huge body."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            length = 0
+        if length <= 0 or length > 65536:
+            self._json(413, {"ok": False, "error": "Payload too large or empty"})
+            return None
+        try:
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            body = {}
+        return body if isinstance(body, dict) else {}
+
+    def _admin_log(self, msg):
+        _log().put(json.dumps({
+            "ts": time.time(),
+            "client": self.client_address[0] if self.client_address else "",
+            "path": _strip_query(self.path),
+            "msg": msg,
+        }))
 
     def _ok_json(self, **kw):
         self._json(200, {"ok": True, **kw})
@@ -958,114 +1261,49 @@ class Handler(BaseHTTPRequestHandler):
         return peer
 
     # --- Admin auth (loopback-only endpoints, never proxied by nginx) ------
-    def _admin_key(self):
+    @staticmethod
+    def _read_key(path):
         try:
-            with open(ADMIN_KEY_PATH, "rb") as f:
+            with open(path, "rb") as f:
                 return f.read().strip()
         except OSError:
             return b""
 
-    def _admin_authorized(self):
+    def _admin_key(self):
+        return self._read_key(ADMIN_KEY_PATH)
+
+    def _admin_authorized(self, scope="full"):
+        """scope "full": the admin key only. scope "bans" (ban listing and
+        removal): the admin key or the scoped ban-admin key."""
         # Defense-in-depth: admin is loopback-only by design. nginx always
         # sets X-Real-IP / X-Forwarded-For when proxying, so any request
         # carrying them arrived via a proxy rather than from the local
         # host - refuse regardless of key, so no future nginx change can
         # ever expose the admin endpoints behind the key gate alone.
-        if (self.headers.get("X-Real-IP")
-                or self.headers.get("X-Forwarded-For")):
+        if self._proxied():
             return False
         supplied = (self.headers.get("X-Admin-Key") or "").strip().encode("utf-8")
-        return bool(supplied) and hmac.compare_digest(supplied, self._admin_key())
+        if not supplied:
+            return False
+        full = self._admin_key()
+        ok = bool(full) and hmac.compare_digest(supplied, full)
+        if not ok and scope == "bans":
+            scoped = self._read_key(BANS_KEY_PATH)
+            ok = bool(scoped) and scoped != full and hmac.compare_digest(supplied, scoped)
+        return ok
 
     def do_GET(self):
-        path = self.path.split("?")[0]
-        import urllib.parse
+        path = _strip_query(self.path)
         params = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
         if path == "/healthz":
             self._ok_json(service="tuxwall-collector",
                           stats=_store().stats())
             return
         if path == "/api/public/bans/more":
-            # Load-more fragment for the /bans table: keyset pagination.
-            # Public like the table it feeds; the /api/public/ nginx
-            # location's rate limit applies. Requires a valid cursor.
-            try:
-                before = float((params.get("before") or ["0"])[0])
-            except (TypeError, ValueError):
-                before = 0.0
-            cursor_ip = ((params.get("ip") or [""])[0] or "").strip()
-            try:
-                if cursor_ip and ipaddress.ip_address(cursor_ip).version not in (4, 6):
-                    cursor_ip = ""
-            except ValueError:
-                cursor_ip = ""
-            if not before or not cursor_ip:
-                self._json(400, {"ok": False,
-                                 "error": "Valid before+ip cursor required"})
-                return
-            try:
-                sev = (params.get("severity") or ["all"])[0] or "all"
-                if sev != "all":
-                    severity_rank(sev)
-            except Exception:
-                sev = "all"
-            rank = 0 if sev == "all" else max(0, severity_rank(sev))
-            tier = sev if sev != "all" else None
-            PAGE = 2000
-            bans = _store().top_bans(min_severity=rank, tier=tier, limit=PAGE + 1,
-                                     order="recent", before=(before, cursor_ip))
-            more = len(bans) > PAGE
-            bans = bans[:PAGE]
-            # hit-bar scaling: consistent with the page, use the global max
-            top1 = _store().top_bans(limit=1)
-            max_hits = (top1[0]["hits"] if top1 else 1) or 1
-            now = time.time()
-            rows = "".join(_bans_row_html(b, max_hits, now) for b in bans)
-            out = {"ok": True, "count": len(bans), "more": more,
-                   "rows": rows}
-            if more and bans:
-                # exact float repr - %.6f can round UP, which would make
-                # the cursor row itself compare as "older" and duplicate
-                out["next_before"] = str(bans[-1]["last_seen"] or 0)
-                out["next_ip"] = bans[-1]["ip"]
-            self._json(200, out)
+            self._public_bans_more(params)
             return
         if path == "/api/public/bans":
-            try:
-                min_sev = params.get("severity") or ["all"]
-                sev = min_sev[0] or "all"
-            except Exception:
-                sev = "all"
-            try:
-                rank = 0 if sev == "all" else max(0, severity_rank(sev))
-            except ValueError:
-                sev, rank = "all", 0
-            # Optional exact-tier filter (matches the page's filter badges)
-            # and newest-first ordering, used by the PHP /bans page to mirror
-            # render_bans_page's row ordering. Both default to the historic
-            # behaviour, so existing callers are unaffected.
-            tier = (params.get("tier") or [""])[0]
-            if tier not in SEVERITY_ORDER:
-                tier = None
-            order = (params.get("order") or ["hits"])[0]
-            order = "recent" if order == "recent" else "hits"
-            try:
-                # 20000 matches the plain-text list endpoint's ceiling, so the
-                # JSON API can serve the entire published list (the 5000 cap
-                # would eventually clip it once the community grows).
-                limit = max(1, min(20000, int((params.get("limit") or ["500"])[0])))
-            except (TypeError, ValueError):
-                limit = 500
-            bans = _store().top_bans(min_severity=rank, tier=tier,
-                                     limit=limit, order=order)
-            self._json(200, {
-                "ok": True,
-                "generated": datetime.now(timezone.utc).isoformat(),
-                "severity_filter": sev,
-                "total": len(bans),
-                "protected": [str(n) for n, _ in _effective_whitelist()],
-                "bans": bans,
-            })
+            self._public_bans(params)
             return
         if path == "/api/public/whitelist":
             # Effective protected-infrastructure list (built-in floor +
@@ -1075,11 +1313,14 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "generated": datetime.now(timezone.utc).isoformat(),
                 "ranges": [str(n) for n, _ in _effective_whitelist()],
-            })
+            }, cache=PUBLIC_CACHE_SECONDS)
             return
         if path == "/api/public/stats":
-            self._json(200, dict(_store().public_stats(), ok=True,
-                                 generated=datetime.now(timezone.utc).isoformat()))
+            body = PUBLIC_CACHE.body(("stats",), lambda: json.dumps(dict(
+                _store().public_stats(), ok=True,
+                generated=datetime.now(timezone.utc).isoformat())).encode("utf-8"))
+            self._send_body(200, body, "application/json; charset=utf-8",
+                            PUBLIC_CACHE_SECONDS, cors=True)
             return
         if path.startswith("/api/public/bans/"):
             # Per-IP lookup used by dashboard browsers and third-party tools.
@@ -1090,68 +1331,60 @@ class Handler(BaseHTTPRequestHandler):
                 return
             data = _store().get_ip_report(str(addr))
             if data is None:
-                self._json(200, {"ok": True, "ip": str(addr), "reported": False})
+                self._json(200, {"ok": True, "ip": str(addr), "reported": False},
+                           cache=PUBLIC_CACHE_SECONDS)
                 return
             data = dict(data)
             data.pop("events", None)
             self._json(200, {"ok": True, "ip": str(addr), "reported": True,
-                             "report": data})
+                             "report": data}, cache=PUBLIC_CACHE_SECONDS)
             return
         if path == "/bans":
-            try:
-                sev = (params.get("severity") or ["all"])[0] or "all"
-            except Exception:
-                sev = "all"
+            sev = (params.get("severity") or ["all"])[0] or "all"
             self._text(200, render_bans_page(sev), "text/html; charset=utf-8")
             return
         if path.startswith("/ip/"):
-            try:
-                addr = _plain_ip(ipaddress.ip_address(path[len("/ip/"):]))
-            except ValueError:
-                self._json(400, {"ok": False, "error": "Invalid IP"})
+            addr = _public_ip_or_none(path[len("/ip/"):])
+            if addr is None:
+                self._json(400, {"ok": False, "error": "Invalid IP (a global address is required)"})
                 return
             self._text(200, render_ip_page(str(addr)), "text/html; charset=utf-8")
             return
         if path == "/lists/community-bans.txt":
-            try:
-                sev = (params.get("severity") or ["all"])[0] or "all"
-            except Exception:
-                sev = "all"
-            rank = 0 if sev == "all" else max(0, severity_rank(sev))
-            bans = _store().top_bans(min_severity=rank, limit=20000)
-            lines = [b["ip"] for b in bans]
-            self._text(200, "\n".join(lines) + ("\n" if lines else ""))
+            sev = (params.get("severity") or ["all"])[0] or "all"
+            rank = _severity_param(sev)
+            generated, bans = PUBLIC_CACHE.view(min_rank=rank)
+            body = PUBLIC_CACHE.body(
+                ("list", rank, generated),
+                lambda: ("\n".join(b["ip"] for b in bans)
+                         + ("\n" if bans else "")).encode("utf-8"))
+            self._send_body(200, body, "text/plain; charset=utf-8", PUBLIC_CACHE_SECONDS)
             return
         if path == "/register":
-            # GET /register?key=<key> - status lookup for dashboards
-            # ("is my install registered / when does my key become
-            # fully trusted"). Returns only that key's own state.
+            # Legacy GET /register?key=<key> status lookup (old dashboards).
+            # Kept for compatibility; the query string is never logged
+            # (collector or nginx). New clients POST {key, action: status}.
             key = ((params.get("key") or [""])[0] or "").strip()
-            if len(key) < 16:
-                self._json(400, {"ok": False, "error": "Missing or invalid key"})
-                return
-            key_id = hashlib.sha256(key.encode("utf-8")).hexdigest()
-            row = _store().key_status(key_id)
-            if row is None:
-                self._json(200, {"ok": True, "found": False})
-                return
-            self._json(200, {
-                "ok": True, "found": True, "status": row["status"],
-                "created": row["created"],
-                "trusted_after": row["created"] + TRUST_SECONDS,
-            })
+            self._register_status(key)
             return
         if path == "/api/admin/keys":
             if not self._admin_authorized():
                 self._json(401, {"ok": False, "error": "Admin key required"})
                 return
-            self._json(200, {"ok": True, "keys": _store().list_keys()})
+            status = (params.get("status") or [""])[0]
+            if status and status not in KEY_STATUSES:
+                self._json(400, {"ok": False, "error": "status must be one of %s"
+                                 % ", ".join(KEY_STATUSES)})
+                return
+            self._json(200, {"ok": True, "keys": _store().list_keys(status or None),
+                             "new_keys_24h": _store().new_keys_24h(),
+                             "new_keys_cap": NEW_KEYS_PER_DAY})
             return
         if path == "/api/admin/bans":
-            if not self._admin_authorized():
+            if not self._admin_authorized("bans"):
                 self._json(401, {"ok": False, "error": "Admin key required"})
                 return
-            bans = _store().top_bans(min_severity=0, limit=20000)
+            bans = _store().top_bans(min_severity=0, limit=INTERNAL_BANS_MAX)
             self._json(200, {
                 "ok": True,
                 "generated": datetime.now(timezone.utc).isoformat(),
@@ -1176,13 +1409,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, dict(_store().whitelist_hits(), ok=True))
             return
         if path.startswith("/api/admin/bans/"):
-            if not self._admin_authorized():
+            if not self._admin_authorized("bans"):
                 self._json(401, {"ok": False, "error": "Admin key required"})
-                return
-            try:
-                addr = _plain_ip(ipaddress.ip_address(path[len("/api/admin/bans/"):]))
-            except ValueError:
-                self._json(400, {"ok": False, "error": "Invalid IP"})
                 return
             self._json(405, {
                 "ok": False,
@@ -1203,72 +1431,123 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(404, {"ok": False, "error": "Not found"})
 
+    # --- public list endpoints ----------------------------------------------
+    def _public_bans(self, params):
+        sev = (params.get("severity") or ["all"])[0] or "all"
+        rank = _severity_param(sev)
+        if sev not in SEVERITY_ORDER:
+            sev = "all"
+        # Optional exact-tier filter (matches the page's filter badges)
+        # and newest-first ordering, used by the PHP /bans page to mirror
+        # render_bans_page's row ordering. Both default to the historic
+        # behaviour, so existing callers are unaffected.
+        tier = (params.get("tier") or [""])[0]
+        if tier not in SEVERITY_ORDER:
+            tier = None
+        order = "recent" if (params.get("order") or ["hits"])[0] == "recent" else "hits"
+        # Public (proxied) callers page through the list: at most
+        # PUBLIC_BANS_MAX rows per request, next_offset until null. Direct
+        # loopback callers (the PHP /bans page) may take everything at once.
+        cap = PUBLIC_BANS_MAX if self._proxied() else INTERNAL_BANS_MAX
+        try:
+            limit = max(1, min(cap, int((params.get("limit") or ["500"])[0])))
+        except (TypeError, ValueError):
+            limit = 500
+        try:
+            offset = max(0, min(INTERNAL_BANS_MAX, int((params.get("offset") or ["0"])[0])))
+        except (TypeError, ValueError):
+            offset = 0
+        generated, bans = PUBLIC_CACHE.view(min_rank=rank, tier=tier, order=order)
+
+        def build():
+            page = bans[offset:offset + limit]
+            nxt = offset + len(page)
+            return json.dumps({
+                "ok": True,
+                "generated": generated,
+                "severity_filter": sev,
+                "total": len(page),
+                "total_available": len(bans),
+                "offset": offset,
+                "limit": limit,
+                "next_offset": nxt if nxt < len(bans) else None,
+                "protected": [str(n) for n, _ in _effective_whitelist()],
+                "bans": page,
+            }).encode("utf-8")
+
+        body = PUBLIC_CACHE.body(("bans", rank, tier, order, limit, offset, generated), build)
+        self._send_body(200, body, "application/json; charset=utf-8",
+                        PUBLIC_CACHE_SECONDS, cors=True)
+
+    def _public_bans_more(self, params):
+        # Load-more fragment for the /bans table: keyset pagination over
+        # the cached newest-first view (one cached list, no second query).
+        # Public like the table it feeds; the /api/public/ nginx location's
+        # rate limit applies. Requires a valid cursor.
+        try:
+            before = float((params.get("before") or ["0"])[0])
+        except (TypeError, ValueError):
+            before = 0.0
+        cursor_ip = ((params.get("ip") or [""])[0] or "").strip()
+        try:
+            cursor_ip = str(ipaddress.ip_address(cursor_ip)) if cursor_ip else ""
+        except ValueError:
+            cursor_ip = ""
+        if not before or not cursor_ip:
+            self._json(400, {"ok": False,
+                             "error": "Valid before+ip cursor required"})
+            return
+        sev = (params.get("severity") or ["all"])[0] or "all"
+        rank = _severity_param(sev)
+        tier = sev if rank or sev == SEVERITY_LOW else None
+        generated, recent = PUBLIC_CACHE.view(tier=tier, order="recent")
+        _, by_hits = PUBLIC_CACHE.view(order="hits")
+        PAGE = 2000
+        older = [b for b in recent if (b["last_seen"] or 0, b["ip"]) < (before, cursor_ip)]
+        bans = older[:PAGE]
+        more = len(older) > PAGE
+        # hit-bar scaling: consistent with the page, use the global max
+        max_hits = (by_hits[0]["hits"] if by_hits else 1) or 1
+        now = time.time()
+        rows = "".join(_bans_row_html(b, max_hits, now) for b in bans)
+        out = {"ok": True, "count": len(bans), "more": more, "rows": rows}
+        if more and bans:
+            # exact float repr - %.6f can round UP, which would make
+            # the cursor row itself compare as "older" and duplicate
+            out["next_before"] = str(bans[-1]["last_seen"] or 0)
+            out["next_ip"] = bans[-1]["ip"]
+        self._json(200, out, cache=PUBLIC_CACHE_SECONDS)
+
+    # --- key registration -----------------------------------------------------
+    def _register_status(self, key):
+        """Key status lookup: only that key's own state, never registers."""
+        if len(key) < 16:
+            self._json(400, {"ok": False, "error": "Missing or invalid key"})
+            return
+        if not STATUS_IP_RATE.allow(self._rate_client(), time.time()):
+            self._json(429, {"ok": False, "error": "Too many requests"})
+            return
+        row = _store().key_status(hashlib.sha256(key.encode("utf-8")).hexdigest())
+        if row is None:
+            self._json(200, {"ok": True, "found": False})
+            return
+        self._json(200, dict(_key_public_state(row), ok=True, found=True))
+
     def do_POST(self):
-        path = self.path.split("?")[0]
+        path = _strip_query(self.path)
         if path == "/register":
-            # Register (or look up) an install key. Registration starts the
-            # TRUST_SECONDS clock at install time instead of at the first
-            # catch, and is the hook the dashboard's "enable community
-            # sharing" button calls. Rate-limited per client IP so key
-            # farming stays boring.
-            try:
-                length = int(self.headers.get("Content-Length") or 0)
-            except (TypeError, ValueError):
-                length = 0
-            if length <= 0 or length > 65536:
-                self._json(413, {"ok": False, "error": "Payload too large or empty"})
-                return
-            try:
-                body = json.loads(self.rfile.read(length).decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                body = {}
-            if not isinstance(body, dict):
-                body = {}
-            key = str(body.get("key") or "").strip()
-            if len(key) < 16:
-                self._json(400, {"ok": False, "error": "Missing or invalid key"})
-                return
-            if not _reporter_version_ok(self.headers.get("X-Tuxwall-Version")):
-                self._json(426, {"ok": False, "error":
-                    "Tuxwall %s+ required for community reporting - upgrade to continue sharing" % MIN_REPORTER_VERSION})
-                return
-            client = self._rate_client()
-            if not RATE.allow(client, time.time()):
-                self._json(429, {"ok": False, "error": "Too many requests"})
-                return
-            # Keys are stored as SHA-256 hashes - same identity transform
-            # the /report ingest uses, and no raw key ever lands in the DB.
-            key_id = hashlib.sha256(key.encode("utf-8")).hexdigest()
-            row = _store().key_status(key_id)
-            if row is not None and row["status"] == "revoked":
-                self._json(403, {"ok": False, "error": "Key revoked"})
-                return
-            now = time.time()
-            if row is None:
-                _store().register_key(key_id, now)
-                row = _store().key_status(key_id)
-            self._json(200, {
-                "ok": True, "status": row["status"], "created": row["created"],
-                "trusted_after": row["created"] + TRUST_SECONDS,
-            })
+            self._post_register()
+            return
+        if path.startswith("/api/admin/keys/"):
+            self._post_admin_key(path[len("/api/admin/keys/"):])
             return
         if path == "/api/admin/whitelist":
             if not self._admin_authorized():
                 self._json(401, {"ok": False, "error": "Admin key required"})
                 return
-            try:
-                length = int(self.headers.get("Content-Length") or 0)
-            except (TypeError, ValueError):
-                length = 0
-            if length <= 0 or length > 65536:
-                self._json(413, {"ok": False, "error": "Payload too large or empty"})
+            body = self._read_json_body()
+            if body is None:
                 return
-            try:
-                body = json.loads(self.rfile.read(length).decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                body = {}
-            if not isinstance(body, dict):
-                body = {}
             range_raw = str(body.get("range") or "").strip()
             try:
                 net = ipaddress.ip_network(range_raw, strict=False)
@@ -1286,31 +1565,123 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"ok": True, "already": True})
                 return
             scrubbed = _store().scrub_range(net)
-            _log().put(json.dumps({
-                "ts": time.time(),
-                "client": self.client_address[0] if self.client_address else "",
-                "path": path,
-                "msg": "admin whitelist add: %s (%s) scrubbed=%s" % (net, note[:60], scrubbed),
-            }))
+            PUBLIC_CACHE.clear()
+            self._admin_log("admin whitelist add: %s (%s) scrubbed=%s" % (net, note[:60], scrubbed))
             self._json(200, {"ok": True, "id": wid, "range": str(net),
                              "scrubbed": scrubbed})
             return
         if path != "/report":
             self._json(404, {"ok": False, "error": "Not found"})
             return
+        self._post_report()
+
+    def _post_register(self):
+        """Register an install key (pending until an admin approves it), or
+        look one up with {"key": ..., "action": "status"}. Per-client-IP
+        rate limits (IPv6 per /64) and a global daily cap on new keys keep
+        key farming boring."""
+        body = self._read_json_body()
+        if body is None:
+            return
+        key = str(body.get("key") or "").strip()
+        if str(body.get("action") or "") == "status":
+            self._register_status(key)
+            return
+        if len(key) < 16:
+            self._json(400, {"ok": False, "error": "Missing or invalid key"})
+            return
+        if not _reporter_version_ok(self.headers.get("X-Tuxwall-Version")):
+            self._json(426, {"ok": False, "error":
+                "Tuxwall %s+ required for community reporting - upgrade to continue sharing" % MIN_REPORTER_VERSION})
+            return
+        if not REGISTER_IP_RATE.allow(self._rate_client(), time.time()):
+            self._json(429, {"ok": False, "error": "Too many requests"})
+            return
+        # Keys are stored as SHA-256 hashes - same identity transform
+        # the /report ingest uses, and no raw key ever lands in the DB.
+        key_id = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        row = _store().key_status(key_id)
+        if row is not None and row["status"] == KEY_REVOKED:
+            self._json(403, {"ok": False, "error": "Key revoked"})
+            return
+        if row is None:
+            if _store().register_key(key_id, time.time()) == "cap":
+                self._json(429, {"ok": False, "error":
+                                 "New key registrations are paused for today - retry later"})
+                return
+            row = _store().key_status(key_id)
+        self._json(200, dict(_key_public_state(row), ok=True))
+
+    def _post_admin_key(self, rest):
+        """POST /api/admin/keys/<id>/approve
+           POST /api/admin/keys/<id>/revoke   {"transfer_to": "<id>"}?
+        <id> = key hash or a unique 8+ hex prefix of it."""
+        if not self._admin_authorized():
+            self._json(401, {"ok": False, "error": "Admin key required"})
+            return
+        ident, _, action = rest.partition("/")
+        if action not in ("approve", "revoke"):
+            self._json(404, {"ok": False, "error": "Use /approve or /revoke"})
+            return
+        body = {}
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
             length = 0
-        if length <= 0 or length > 65536:
-            self._json(413, {"ok": False, "error": "Payload too large or empty"})
+        if length:
+            body = self._read_json_body()
+            if body is None:
+                return
+        key, err = _store().resolve_key(ident)
+        if key is None:
+            self._json(404 if err == "not found" else 400,
+                       {"ok": False, "error": "Key %s" % err})
             return
-        try:
-            body = json.loads(self.rfile.read(length).decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            body = {}
-        if not isinstance(body, dict):
-            body = {}
+        now = time.time()
+        if action == "approve":
+            row = _store().key_status(key)
+            if row["status"] == KEY_REVOKED:
+                self._json(409, {"ok": False, "error": "Key is revoked (revocation is final)"})
+                return
+            row = _store().approve_key(key, now)
+            PUBLIC_CACHE.clear()
+            self._admin_log("admin approve_key: %s..." % key[:8])
+            self._json(200, {"ok": True, "key": key, "status": row["status"],
+                             "approved_at": row["approved_at"]})
+            return
+        moved = None
+        target_raw = str(body.get("transfer_to") or "").strip()
+        if target_raw:
+            target, terr = _store().resolve_key(target_raw)
+            if target is None:
+                self._json(404 if terr == "not found" else 400,
+                           {"ok": False, "error": "transfer_to key %s" % terr})
+                return
+            if target == key:
+                self._json(400, {"ok": False, "error": "transfer_to is the same key"})
+                return
+            if _store().key_status(target)["status"] != KEY_APPROVED:
+                self._json(409, {"ok": False, "error":
+                                 "transfer_to key must be approved first"})
+                return
+        found = _store().revoke_key(key, now)
+        if target_raw:
+            moved = _store().transfer_evidence(key, target)
+        PUBLIC_CACHE.clear()
+        self._admin_log("admin revoke_key: %s...%s" % (
+            key[:8], (" evidence -> %s... %s" % (target[:8], moved)) if target_raw else ""))
+        self._json(200, {"ok": True, "key": key, "revoked": True,
+                         "already_revoked": not found, "transferred": moved})
+
+    def _post_report(self):
+        client = self._rate_client()
+        now = time.time()
+        if not REPORT_IP_RATE.allow(client, now):
+            self._json(429, {"ok": False, "error": "Rate limit exceeded"})
+            return
+        body = self._read_json_body()
+        if body is None:
+            return
 
         key = str(body.get("key") or "").strip()
         if len(key) < 16:
@@ -1376,7 +1747,6 @@ class Handler(BaseHTTPRequestHandler):
                 suricata.append({"sig": sig, "count": cnt, "sid": sid})
 
         reporter = hashlib.sha256(key.encode("utf-8")).hexdigest()
-        now = time.time()
         if not RATE.allow(reporter, now):
             self._json(429, {"ok": False, "error": "Rate limit exceeded"})
             return
@@ -1395,10 +1765,14 @@ class Handler(BaseHTTPRequestHandler):
         if result == "revoked":
             self._json(403, {"ok": False, "error": "Reporter key revoked"})
             return
+        if result == "cap":
+            self._json(429, {"ok": False, "error":
+                             "New key registrations are paused for today - retry later"})
+            return
         self._ok_json(accepted=(result == "ok"), duplicate=(result == "duplicate"))
 
     def do_DELETE(self):
-        path = self.path.split("?")[0]
+        path = _strip_query(self.path)
         if path.startswith("/api/admin/whitelist/"):
             if not self._admin_authorized():
                 self._json(401, {"ok": False, "error": "Admin key required"})
@@ -1409,35 +1783,33 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"ok": False, "error": "Invalid whitelist entry id"})
                 return
             if _store().remove_whitelist(wid):
+                PUBLIC_CACHE.clear()
                 self._json(200, {"ok": True, "removed": wid})
             else:
                 self._json(404, {"ok": False, "error": "No such whitelist entry"})
             return
         if path.startswith("/api/admin/keys/"):
-            # Revoke a reporter key (admin): refused at ingest, never again
-            # counted toward trusted floors.
+            # Legacy revoke (DELETE /api/admin/keys/<id>): same as POST
+            # /api/admin/keys/<id>/revoke without an evidence transfer.
             if not self._admin_authorized():
                 self._json(401, {"ok": False, "error": "Admin key required"})
                 return
-            key = path[len("/api/admin/keys/"):].strip()
-            if len(key) < 16:
-                self._json(400, {"ok": False, "error": "Missing or invalid key"})
+            key, err = _store().resolve_key(path[len("/api/admin/keys/"):])
+            if key is None:
+                self._json(404 if err == "not found" else 400,
+                           {"ok": False, "error": "Key %s" % err})
                 return
             if _store().revoke_key(key):
-                _log().put(json.dumps({
-                    "ts": time.time(),
-                    "client": self.client_address[0] if self.client_address else "",
-                    "path": path,
-                    "msg": "admin revoke_key: %s..." % key[:8],
-                }))
+                PUBLIC_CACHE.clear()
+                self._admin_log("admin revoke_key: %s..." % key[:8])
                 self._json(200, {"ok": True, "revoked": key})
             else:
-                self._json(404, {"ok": False, "error": "Key not found"})
+                self._json(404, {"ok": False, "error": "Key not found or already revoked"})
             return
         if not path.startswith("/api/admin/bans/"):
             self._json(404, {"ok": False, "error": "Not found"})
             return
-        if not self._admin_authorized():
+        if not self._admin_authorized("bans"):
             self._json(401, {"ok": False, "error": "Admin key required"})
             return
         try:
@@ -1450,16 +1822,54 @@ class Handler(BaseHTTPRequestHandler):
         if counts.get("reports", 0) == 0:
             self._json(404, {"ok": False, "error": "IP not found", "ip": ip})
             return
-        _log().put(json.dumps({
-            "ts": time.time(),
-            "client": self.client_address[0] if self.client_address else "",
-            "path": path,
-            "msg": "admin delete: removed %s (reports=%d report_reports=%d"
-                   " report_events=%d)" % (ip, counts.get("reports", 0),
-                                           counts.get("report_reports", 0),
-                                           counts.get("report_events", 0)),
-        }))
+        PUBLIC_CACHE.clear()
+        self._admin_log(
+            "admin delete: removed %s (reports=%d report_reports=%d"
+            " report_events=%d)" % (ip, counts.get("reports", 0),
+                                    counts.get("report_reports", 0),
+                                    counts.get("report_events", 0)))
         self._json(200, {"ok": True, "ip": ip, "removed": counts})
+
+
+_QUERY_RE = re.compile(r"\?[^\s'\"]*")
+
+
+def _strip_query(path):
+    return (path or "").split("?", 1)[0]
+
+
+def _severity_param(sev):
+    """Minimum-severity rank for a ?severity= value (unknown -> 0 = all)."""
+    try:
+        return max(0, severity_rank(sev)) if sev and sev != "all" else 0
+    except ValueError:
+        return 0
+
+
+def _public_ip_or_none(raw):
+    """Plain global address for /ip/ pages, else None (scoped, private,
+    reserved and malformed addresses never get a report card)."""
+    try:
+        addr = _plain_ip(ipaddress.ip_address(urllib.parse.unquote(raw or "")))
+    except ValueError:
+        return None
+    if getattr(addr, "scope_id", None) or not addr.is_global:
+        return None
+    return addr
+
+
+def _key_public_state(row):
+    """What a key owner may learn about their own key (/register)."""
+    approved = row["status"] == KEY_APPROVED
+    return {
+        "status": row["status"],
+        "approved": approved,
+        "created": row["created"],
+        "approved_at": row.get("approved_at") or None,
+        # legacy field read by older dashboards ("fully trusted after"):
+        # the approval time for approved keys, null while pending
+        "trusted_after": (row.get("approved_at") or row["created"]) if approved else None,
+    }
 
 
 def _store():
@@ -1724,8 +2134,8 @@ def render_ip_page(ip):
         rows.append(
             "<tr>"
             f"<td class='mono muted'>{_esc(when)}</td>"
-            f"<td class='mono'>{_esc(e['reporter'][:8])}</td>"
-            f"<td>{render_severity_badge(severity_for(e['hits'], 1, trusted=d.get('trusted') or 0))}</td>"
+            f"<td class='muted'>{'Approved install' if e.get('approved') else 'Pending install'}</td>"
+            f"<td>{render_severity_badge(severity_for(e['hits'], 1, trusted=1 if e.get('approved') else 0))}</td>"
             f"<td>{_esc(CATEGORY_LABELS.get(e['category'], e['category'].title()))}</td>"
             f"<td class='mono'>{fmt_num(e['hits'])}</td>"
             "</tr>")
@@ -1760,7 +2170,7 @@ def render_ip_page(ip):
         "<h3>Reporting sources</h3>__SOURCES__</div>"
         "__SURICATA__"
         "<div class='table-wrap'><table class='deps-table'>"
-        "<thead><tr><th>Time (UTC)</th><th>Install</th><th>Severity</th>"
+        "<thead><tr><th>Time (UTC)</th><th>Reporter</th><th>Severity</th>"
         "<th>Category</th><th>Hits</th></tr></thead>"
         "<tbody>__ROWS__</tbody></table></div>")
 
@@ -1789,8 +2199,9 @@ def render_ip_page(ip):
 
 
 def _esc(s):
-    return (s.replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace('"', "&quot;"))
+    """HTML-escape text and attribute values (both quote styles: several
+    attributes in the templates are single-quoted)."""
+    return html.escape("" if s is None else str(s), quote=True)
 
 
 def fmt_num(n):
@@ -2338,6 +2749,10 @@ def main():
     server.socket.settimeout(5.0)
     print("tuxwall-collector listening on {}:{} db={}".format(
         LISTEN_HOST, LISTEN_PORT, DB_PATH), flush=True)
+    for note in getattr(STORE, "migration_notes", []):
+        print("migration: " + note, flush=True)
+    if not os.access(ADMIN_KEY_PATH, os.R_OK):
+        print("admin key not readable - admin endpoints disabled", flush=True)
 
     def logger():
         while True:

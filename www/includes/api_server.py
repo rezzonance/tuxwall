@@ -2917,13 +2917,17 @@ def remove_custom_blocklist_entry(value):
 # Cached so browsing the tab doesn't re-download 500+ rows on every view;
 # the browser talks only to the local API. Deception-evidence only by
 # policy (enforced collector-side) - see the collector's top_bans().
-# ?limit=20000: the collector's JSON API ceiling (same as its plain-text
-# list endpoint), so the dashboard tab always sees the ENTIRE published
-# list - currently ~3000 IPs / ~850KB; even at the full 20000-row ceiling
-# it stays under the 4MB read guard below. Cached server-side 10 minutes.
-COMMUNITY_BANS_URL = "https://tuxwall.org/api/public/bans?limit=20000"
+# Paged: the collector serves at most 5000 rows per public request and
+# returns next_offset until the list is complete (all pages come from one
+# 60 s server-side snapshot, checked via "generated"), so the dashboard tab
+# and community-auto always see the ENTIRE published list (~12500 IPs in
+# 2026-11). Older collectors without paging answer with one page and
+# next_offset absent - that page is the whole list. Cached 10 minutes.
+COMMUNITY_BANS_URL = "https://tuxwall.org/api/public/bans"
+COMMUNITY_BANS_PAGE = 5000
+COMMUNITY_BANS_MAX_PAGES = 10
 COMMUNITY_BANS_TTL = 600  # seconds
-COMMUNITY_BANS_MAX_BYTES = 4 * 1024 * 1024
+COMMUNITY_BANS_MAX_BYTES = 4 * 1024 * 1024  # per page
 COMMUNITY_BANS_CACHE = {"ts": 0.0, "data": None}
 COMMUNITY_BANS_LOCK = threading.Lock()
 
@@ -2952,6 +2956,53 @@ def _community_reporters():
         return None
 
 
+def _fetch_community_bans_page(offset):
+    url = "%s?%s" % (COMMUNITY_BANS_URL, urllib.parse.urlencode(
+        {"limit": COMMUNITY_BANS_PAGE, "offset": offset}))
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "tuxwall-community-bans/1.0",
+    })
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        body = resp.read(COMMUNITY_BANS_MAX_BYTES + 1)
+    if len(body) > COMMUNITY_BANS_MAX_BYTES:
+        raise RuntimeError("community ban list page too large")
+    payload = json.loads(body.decode("utf-8", errors="replace"))
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        raise RuntimeError("bad payload from tuxwall.org")
+    if not isinstance(payload.get("bans"), list):
+        payload["bans"] = []
+    return payload
+
+
+def _fetch_community_bans_pages():
+    """-> (first page payload, every ban row). Follows next_offset; if the
+    collector's snapshot changes mid-way (new "generated"), starts over
+    once so rows are never skipped or doubled."""
+    for _attempt in range(2):
+        first = _fetch_community_bans_page(0)
+        bans = list(first["bans"])
+        nxt = first.get("next_offset")
+        pages = 1
+        consistent = True
+        while isinstance(nxt, int) and nxt > 0 and pages < COMMUNITY_BANS_MAX_PAGES:
+            page = _fetch_community_bans_page(nxt)
+            if page.get("generated") != first.get("generated"):
+                consistent = False
+                break
+            bans.extend(page["bans"])
+            nxt = page.get("next_offset")
+            pages += 1
+        if consistent:
+            seen, unique = set(), []
+            for b in bans:
+                ip = b.get("ip") if isinstance(b, dict) else None
+                if ip and ip not in seen:
+                    seen.add(ip)
+                    unique.append(b)
+            return first, unique
+    raise RuntimeError("community ban list changed while paging - retry later")
+
+
 def build_community_bans():
     now = time.time()
     with COMMUNITY_BANS_LOCK:
@@ -2962,23 +3013,11 @@ def build_community_bans():
             out["auto"] = _load_community_auto()
             return out
     try:
-        req = urllib.request.Request(COMMUNITY_BANS_URL, headers={
-            "User-Agent": "tuxwall-community-bans/1.0",
-        })
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body = resp.read(COMMUNITY_BANS_MAX_BYTES + 1)
-        if len(body) > COMMUNITY_BANS_MAX_BYTES:
-            raise RuntimeError("community ban list too large")
-        payload = json.loads(body.decode("utf-8", errors="replace"))
-        if not isinstance(payload, dict) or not payload.get("ok"):
-            raise RuntimeError("bad payload from tuxwall.org")
-        bans = payload.get("bans")
-        if not isinstance(bans, list):
-            bans = []
+        payload, bans = _fetch_community_bans_pages()
         data = {
             "ok": True,
             "generated": payload.get("generated") or "",
-            "total": payload.get("total", len(bans)),
+            "total": len(bans),
             "reporters": _community_reporters(),
             # Collector-published protected-infrastructure ranges (3.2.4):
             # consulted by CommunityAutoWorker so adding protection upstream
@@ -3032,46 +3071,53 @@ def _reporting_key():
     return conf["key"]
 
 
+def _register_post(body):
+    """POST to tuxwall.org /register with the key in the JSON body (never
+    in a URL - URLs end up in access logs). Goes through the reporting
+    path's single send function. -> (http status, parsed dict)."""
+    return _report_http_post(
+        _reporting_register_url(), json.dumps(body).encode("utf-8"),
+        {"Content-Type": "application/json", "User-Agent": "tuxwall-report/1.0",
+         "X-Tuxwall-Version": TUXWALL_VERSION},
+        REPORTING_TIMEOUT)
+
+
+def _registration_fields(data):
+    return {"status": data.get("status") or "unknown",
+            "approved": bool(data.get("approved")),
+            "created": data.get("created"),
+            "approved_at": data.get("approved_at"),
+            "trusted_after": data.get("trusted_after")}
+
+
 def community_reporting_status():
-    """Is this install's key registered, and when is its evidence fully
-    trusted? Pure lookup - no data is reported by this call."""
+    """Is this install's key registered, and approved by the tuxwall.org
+    admin (pending keys report at low weight)? Pure lookup - nothing is
+    reported or registered by this call."""
     key = _reporting_key()
-    out = {"ok": True, "registered": False, "status": "unknown"}
+    out = {"ok": True, "registered": False, "status": "unknown", "approved": False}
     try:
-        url = _reporting_register_url() + "?" + urllib.parse.urlencode({"key": key})
-        req = urllib.request.Request(url, headers={"User-Agent": "tuxwall-report/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8") or "{}")
+        code, data = _register_post({"key": key, "action": "status"})
+        if code != 200 or not data.get("ok"):
+            raise RuntimeError("HTTP %d: %s" % (code, data.get("error") or "lookup refused"))
         if data.get("found"):
             out["registered"] = True
-            out["status"] = data.get("status") or "active"
-            out["created"] = data.get("created")
-            out["trusted_after"] = data.get("trusted_after")
+            out.update(_registration_fields(data))
     except Exception as exc:
         out["warning"] = "tuxwall.org unreachable: %s" % exc
     return out
 
 
 def community_reporting_register():
-    """Register this install's key with tuxwall.org - starts the trust
-    clock at install time instead of at the first catch. Sends ONLY the
-    key."""
+    """Register this install's key with tuxwall.org (it stays pending -
+    low weight - until the tuxwall.org admin approves it). Sends ONLY the
+    key and the version."""
     key = _reporting_key()
     try:
-        req = urllib.request.Request(
-            _reporting_register_url(),
-            data=json.dumps({"key": key, "version": TUXWALL_VERSION}).encode("utf-8"),
-            headers={"Content-Type": "application/json",
-                     "User-Agent": "tuxwall-report/1.0",
-                     "X-Tuxwall-Version": TUXWALL_VERSION},
-            method="POST")
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8") or "{}")
+        code, data = _register_post({"key": key, "version": TUXWALL_VERSION})
         if not data.get("ok"):
-            return {"ok": False, "error": data.get("error") or "registration refused"}
-        return {"ok": True, "status": data.get("status"),
-                "created": data.get("created"),
-                "trusted_after": data.get("trusted_after")}
+            return {"ok": False, "error": data.get("error") or ("registration refused (HTTP %d)" % code)}
+        return dict(_registration_fields(data), ok=True)
     except Exception as exc:
         return {"ok": False, "error": "tuxwall.org unreachable: %s" % exc}
 
@@ -3831,6 +3877,11 @@ REPORT_QUEUE_MAX_AGE = 7 * 86400     # stale evidence is dropped, not sent late
 REPORT_RETRY_BASE = 30               # seconds; doubles per attempt
 REPORT_RETRY_MAX = 3600
 REPORT_BATCH = 25                    # sends per worker pass
+# Maintenance pause (key rotation): while this file exists - and is younger
+# than REPORT_PAUSE_MAX_AGE, so a forgotten file can't silence reporting
+# for good - the worker sends nothing; reports keep queueing.
+REPORT_PAUSE_FILE = os.path.join(BLOCKLIST_DIR, "report-queue.pause")
+REPORT_PAUSE_MAX_AGE = 1800
 _report_status_lock = threading.Lock()
 
 
@@ -4191,15 +4242,29 @@ def _report_backoff(attempts):
     return delay + secrets.randbelow(max(1, int(delay // 5) + 1))
 
 
+def _report_q_paused(now=None):
+    try:
+        age = (now or time.time()) - os.stat(REPORT_PAUSE_FILE).st_mtime
+    except OSError:
+        return False
+    return age < REPORT_PAUSE_MAX_AGE
+
+
 def _report_q_process(now=None, limit=REPORT_BATCH):
     """Send every due item once (oldest first). Returns {sent, retry,
-    refused, discarded, left}. Never raises."""
+    refused, discarded, left, paused}. Never raises."""
     now = now or time.time()
-    out = {"sent": 0, "retry": 0, "refused": 0, "discarded": 0, "left": 0}
+    out = {"sent": 0, "retry": 0, "refused": 0, "discarded": 0, "left": 0,
+           "paused": False}
     _report_q_load()
     conf = load_reporting_conf()
     if not conf["enabled"]:
         out["discarded"] = _report_q_discard_all("community reporting is switched off")
+        return out
+    if _report_q_paused(now):
+        out["paused"] = True
+        with REPORT_Q_LOCK:
+            out["left"] = len(REPORT_Q["items"])
         return out
     with REPORT_Q_LOCK:
         due = [dict(i) for i in REPORT_Q["items"]
@@ -4208,6 +4273,10 @@ def _report_q_process(now=None, limit=REPORT_BATCH):
         conf = ensure_reporting_key()
     for item in due:
         result, detail = _report_send_one(item, conf)
+        if result == "refused" and load_reporting_conf()["key"] != conf["key"]:
+            # the key was rotated while this pass ran (old key revoked):
+            # resend with the new key instead of dropping the report
+            result, detail = "retry", "reporting key rotated - resending with the new key"
         t = time.time()
         with REPORT_Q_LOCK:
             st = REPORT_Q["stats"]
@@ -4257,6 +4326,8 @@ def _report_worker_loop():
             print("[report] worker pass failed: %r" % (exc,), flush=True)
         nxt = _report_q_next_due()
         wait = 300.0 if nxt is None else max(1.0, min(300.0, nxt - time.time()))
+        if nxt is not None and _report_q_paused():
+            wait = 10.0
         REPORT_Q_WAKE.wait(wait)
         REPORT_Q_WAKE.clear()
 
@@ -4295,6 +4366,7 @@ def reporting_status():
         "sent_total": int(st.get("sent_total") or 0),
         "refused_total": int(st.get("refused_total") or 0),
         "dropped_total": int(st.get("dropped_total") or 0),
+        "paused": _report_q_paused(now),
         "queue_length": len(items),
         "queue_retrying": len([i for i in items if int(i.get("attempts") or 0) > 0]),
         "next_retry": nxt,

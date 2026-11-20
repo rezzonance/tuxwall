@@ -6,8 +6,10 @@
 #
 # Installs:
 #   - collector -> /opt/tuxwall-collector/  + tuxwall-collector.service
-#   - nginx: conf.d/tuxwall-limits.conf (new tuxwall_report zone) and the
+#   - nginx: conf.d/tuxwall-limits.conf (new tuxwall_report zone),
+#     conf.d/tuxwall-org-log.conf (key-safe access log format) and the
 #     tuxwall-org vhost with /report /bans /api/public and /lists proxying
+#   - tuxwall-collector-admin -> /usr/local/sbin (reporter key approval)
 #   - dashboard client changes (api_server.py, index.html, dashboard.js,
 #     geoip-setup.sh) into /var/www/html with a cache-bust bump
 #   - best-effort db-ip ASN database via geoip-setup.sh (ISP column)
@@ -19,33 +21,49 @@ SITE="${SITE:-/etc/nginx/sites-available/tuxwall-org}"
 [[ $EUID -eq 0 ]] || { echo "Run with sudo:" >&2; exit 1; }
 
 echo "[1/6] Installing collector service..."
-install -d -m 0755 /opt/tuxwall-collector /var/lib/tuxwall-collector
+# Dedicated unprivileged service user; the DB lives in the unit's
+# StateDirectory (/var/lib/tuxwall-collector, owned by that user, 0700).
+getent passwd tuxwall-collector >/dev/null || useradd --system --user-group \
+  --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin tuxwall-collector
+install -d -m 0755 /opt/tuxwall-collector
 install -m 0755 "$REPO_DIR/collector/tuxwall-collector.py" /opt/tuxwall-collector/tuxwall-collector.py
+install -m 0755 "$REPO_DIR/scripts/tuxwall-collector-admin" /usr/local/sbin/tuxwall-collector-admin
 
-# Admin key for the loopback-only /api/admin endpoints (ban removal).
-# Never proxied by nginx. Created once, never overwritten. Group "adm" can
-# read it so the local admin shell can drive deletions without sudo.
-# 0751: www-data (the LAN Ban Management page) must traverse the directory
-# to read its own admin-api.key; admin.key itself stays 0640 root:adm.
+# Admin keys for the loopback-only /api/admin endpoints. Never proxied by
+# nginx. Created once, never overwritten; the service gets private copies
+# through systemd LoadCredential=, so the files stay root-owned.
+#   admin.key      full admin (reporter keys, whitelist, bans): root:adm 0640,
+#                  used by tuxwall-collector-admin (run as root)
+#   admin-api.key  scoped ban listing/removal key for the LAN Ban Management
+#                  page: root:tuxwall-banadmin 0640 (php-fpm pool
+#                  tuxwall-admin) - never readable by www-data / public PHP
 install -d -m 0751 -g adm /etc/tuxwall-collector
-if [[ ! -s /etc/tuxwall-collector/admin.key ]]; then
-  ( umask 027; openssl rand -hex 32 > /etc/tuxwall-collector/admin.key )
-  chown root:adm /etc/tuxwall-collector/admin.key
-  chmod 0640 /etc/tuxwall-collector/admin.key
-  echo "   admin key created: /etc/tuxwall-collector/admin.key"
-else
-  echo "   admin key present: /etc/tuxwall-collector/admin.key"
-fi
+getent group tuxwall-banadmin >/dev/null || useradd --system --user-group \
+  --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin tuxwall-banadmin
+for kf in admin.key:adm admin-api.key:tuxwall-banadmin; do
+  f="/etc/tuxwall-collector/${kf%%:*}"; grp="${kf##*:}"
+  if [[ ! -s "$f" ]]; then
+    ( umask 077; openssl rand -hex 32 > "$f" )
+    echo "   created $f"
+  fi
+  chown "root:$grp" "$f"; chmod 0640 "$f"
+done
 
 install -m 0644 "$REPO_DIR/systemd/tuxwall-collector.service" /etc/systemd/system/tuxwall-collector.service
 systemctl daemon-reload
-systemctl enable --now tuxwall-collector
-systemctl restart tuxwall-collector
-sleep 1
+systemctl enable tuxwall-collector
+systemctl restart tuxwall-collector   # ExecStartPre fixes DB ownership
+sleep 2
 curl -fsS http://127.0.0.1:8009/healthz && echo
+echo "   pending reporter keys (approve with: tuxwall-collector-admin approve <id>):"
+/usr/local/sbin/tuxwall-collector-admin pending || true
 
 echo "[2/6] Installing nginx rate-limit zone..."
 install -m 0644 "$REPO_DIR/nginx/tuxwall-limits.conf" /etc/nginx/conf.d/tuxwall-limits.conf
+# access-log format that never records key-bearing query strings
+install -m 0644 "$REPO_DIR/nginx/tuxwall-org-log.conf" /etc/nginx/conf.d/tuxwall-org-log.conf
+# /bans page cache (bans.php) - private to the php-fpm user, not /tmp
+install -d -m 0700 -o www-data -g www-data /var/cache/tuxwall-org
 
 echo "[3/6] Installing tuxwall-org vhost ($SITE)..."
 install -m 0644 "$REPO_DIR/nginx/tuxwall-org.conf" "$SITE"
@@ -98,5 +116,6 @@ fi
 
 echo
 echo "Done. Collector:       curl http://127.0.0.1:8009/healthz"
+echo "      Reporter keys:   sudo tuxwall-collector-admin pending | approve <id> | revoke <id>"
 echo "      Public page:     https://tuxwall.org/bans"
 echo "      Ban list:        https://tuxwall.org/lists/community-bans.txt"
