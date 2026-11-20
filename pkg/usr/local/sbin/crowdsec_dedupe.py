@@ -29,6 +29,7 @@ import time
 
 DB = "/var/lib/crowdsec/data/crowdsec.db"
 ALERT_RETENTION_DAYS = 7
+CUSTOM_BLOCKLIST_SCENARIO = "custom/custom-blocklist"
 
 
 def main():
@@ -38,19 +39,23 @@ def main():
     try:
         c.execute("begin immediate")
 
+        # Custom-blocklist bans collapse across origins: the engine re-read
+        # (origin crowdsec, before Nov 2026), dashboard adds (cscli) and the
+        # API's sync/refresh (cscli-import) are the same permanent ban.
         c.execute(
             """
             delete from decisions where id in (
                 select id from (
                     select id,
                            row_number() over (
-                               partition by value, scenario, type, origin
+                               partition by value, scenario, type,
+                                   case when scenario = ? then '' else origin end
                                order by until desc, id desc
                            ) as rn
                     from decisions where until > ?
                 ) where rn > 1)
             """,
-            (now,),
+            (CUSTOM_BLOCKLIST_SCENARIO, now),
         )
         dupes = c.execute("select changes()").fetchone()[0]
 

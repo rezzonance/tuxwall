@@ -1,6 +1,0 @@
-filenames:
-  - /etc/tuxwall/custom-blocklist.txt
-labels:
-  type: custom-blocklist
-source: file
-mode: cat

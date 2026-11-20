@@ -2689,7 +2689,7 @@ def unban_crowdsec_ip(ip):
 # through CrowdSec. Each entry is tagged with a stable `--reason` so the UI
 # can tell these decisions apart from scenario-generated ones. The file lives
 # in /etc/tuxwall (ReadWritePaths in the unit) so the UI can edit it without
-# a reload; the CrowdSec trigger re-applies it on restarts.
+# a reload; sync_custom_blocklist() keeps the decisions in step with it.
 CUSTOM_BLOCKLIST_FILE = "/etc/tuxwall/custom-blocklist.txt"
 CUSTOM_BLOCKLIST_REASON = "custom/custom-blocklist"
 CUSTOM_BLOCKLIST_DURATION = "8760h"  # 1 year
@@ -2780,9 +2780,9 @@ def build_custom_blocklist():
     """Status view: the custom banlist.
 
     Two kinds of rows, one view:
-      - "permanent": file entries (1y bans refreshed by the CrowdSec
-        custom-blocklist parser chain), shown even if their decision has
-        lapsed ("not active" until re-applied).
+      - "permanent": file entries (1y bans kept applied and refreshed by
+        sync_custom_blocklist), shown even if their decision has lapsed
+        ("not active" until the next sync re-applies it).
       - "timed": custom/local-ban decisions made from Top Attackers or the
         community tab. They live only in the CrowdSec decision DB and
         expire on their own - once expired they are gone from this view.
@@ -2853,20 +2853,33 @@ def add_custom_blocklist_entry(value):
     """Add an entry to the list and create a matching long-lived CrowdSec ban.
 
     Idempotent: re-adding an entry already in the file re-applies the 1y
-    ban instead of dead-ending (the old "already on the blocklist" error
-    is what left stale "not active" rows with no way to revive them)."""
+    ban if it is not active instead of dead-ending (the old "already on
+    the blocklist" error is what left stale "not active" rows with no way
+    to revive them) - via the sync, so a live ban is never duplicated."""
     parsed, err = _parse_blocklist_entry(value)
     if err:
         return {"ok": False, "error": err}
     entry = parsed["value"]
+    with _CUSTOM_BLOCKLIST_SYNC_LOCK:
+        return _add_custom_blocklist_entry_locked(parsed, entry)
+
+
+def _add_custom_blocklist_entry_locked(parsed, entry):
     if entry in _read_custom_blocklist():
         # Already listed - make sure the ban is actually alive.
-        result = _apply_blocklist_decision(parsed)
-        if not result.get("ok"):
-            return {"ok": True, "warning": result.get("warning"),
+        result = sync_custom_blocklist()
+        if not result.get("ok") or result.get("failed"):
+            return {"ok": True, "warning": result.get("error") or "; ".join(result.get("failed") or []),
                     "message": "%s is already on the banlist; the 1y ban re-apply failed "
-                               "(the engine re-applies the file on crowdsec restarts)." % entry}
-        return {"ok": True, "message": "%s is already on the banlist - 1y ban re-applied." % entry}
+                               "(the background sync retries it)." % entry}
+        key = _custom_blocklist_key(entry)
+        if key in [_custom_blocklist_key(v) for v in result.get("protected", [])]:
+            return {"ok": True, "message": "%s is already on the banlist; it is inside a protected "
+                                           "CDN/infrastructure range, so it is not re-applied "
+                                           "automatically." % entry}
+        if key in [_custom_blocklist_key(v) for v in result.get("add", [])]:
+            return {"ok": True, "message": "%s is already on the banlist - 1y ban re-applied." % entry}
+        return {"ok": True, "message": "%s is already on the banlist - its 1y ban is active." % entry}
     if not _append_custom_blocklist_entry(entry):
         return {"ok": False, "error": "Could not write %s." % CUSTOM_BLOCKLIST_FILE}
     result = _apply_blocklist_decision(parsed)
@@ -2886,6 +2899,16 @@ def remove_custom_blocklist_entry(value):
     File entries follow the rewrite path; timed local bans (not in the
     file) fall back to plain decision deletion."""
     value = (value or "").strip()
+    with _CUSTOM_BLOCKLIST_SYNC_LOCK:
+        result = _remove_custom_blocklist_entry_locked(value)
+    # `decisions delete --ip` also lifts a listed range containing the IP;
+    # re-apply whatever is still on the list right away.
+    if result.get("ok"):
+        _custom_blocklist_sync_async()
+    return result
+
+
+def _remove_custom_blocklist_entry_locked(value):
     if value not in _read_custom_blocklist():
         # Not a file entry - a timed local ban. Lift the decision instead.
         data = unban_crowdsec_ip(value)
@@ -2910,6 +2933,295 @@ def remove_custom_blocklist_entry(value):
         return {"ok": True, "warning": (proc.stderr or proc.stdout or "").strip(),
                 "message": "Removed %s from the list, but the CrowdSec ban cleanup failed." % value}
     return {"ok": True, "message": "Removed %s from the blocklist." % value}
+
+
+# Idempotent apply (Nov 2026). The file used to be re-read by a CrowdSec
+# file acquisition (mode: cat) on every engine start/reload, which poured
+# ~320 new alerts + 1y decisions each time - duplicates for IPs that were
+# already banned, minutes of crowdsec CPU per boot and an ever-growing
+# store. The engine no longer reads the file; this reconciles it with the
+# live custom-blocklist decisions instead: only entries without an active
+# ban are added, bans getting old are re-issued, and custom-blocklist bans
+# whose entry left the file are lifted. Runs at API start, every
+# CUSTOM_BLOCKLIST_SYNC_INTERVAL, and after dashboard removals.
+CUSTOM_BLOCKLIST_DURATION_SECONDS = 8760 * 3600
+# The firewall bouncer caps ipset timeouts at ~24.8 days (2147483 s) and
+# only re-adds an IP when it sees a NEW decision, so every 1y ban is
+# re-issued once it is 20 days old (the engine re-read used to do this as a
+# side effect of restarts/reloads). crowdsec-dedupe collapses the
+# superseded decision.
+CUSTOM_BLOCKLIST_REFRESH_AGE = 20 * 86400
+CUSTOM_BLOCKLIST_SYNC_INTERVAL = 6 * 3600
+CUSTOM_BLOCKLIST_SYNC_RETRY = 600
+CUSTOM_BLOCKLIST_SYNC_START_DELAY = 90
+CUSTOM_BLOCKLIST_IMPORT_TIMEOUT = 120
+_CUSTOM_BLOCKLIST_SYNC_LOCK = threading.RLock()
+_CUSTOM_BLOCKLIST_SYNC_STATE = {"last": None, "running": False}
+
+
+def _custom_blocklist_key(value):
+    """Canonical form for comparing file entries with decision values."""
+    text = str(value or "").strip()
+    try:
+        if "/" in text:
+            return str(ipaddress.ip_network(text, strict=False))
+        return str(ipaddress.ip_address(text))
+    except ValueError:
+        return text
+
+
+def _custom_blocklist_file_entries():
+    """(entries, invalid, readable): parsed entries in file order (first
+    occurrence wins), lines that are not a valid global IP/CIDR (reported,
+    never applied), and whether the file could be read at all."""
+    try:
+        with open(CUSTOM_BLOCKLIST_FILE, "r", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return [], [], False
+    entries, invalid, seen = [], [], set()
+    for ln in lines:
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        parsed, err = _parse_blocklist_entry(ln)
+        if err:
+            invalid.append(ln)
+            continue
+        key = _custom_blocklist_key(parsed["value"])
+        if key not in seen:
+            seen.add(key)
+            entries.append(parsed)
+    return entries, invalid, True
+
+
+def _custom_blocklist_current_from(alerts):
+    """`cscli decisions list -s custom/custom-blocklist -o json` payload ->
+    {key: {"value", "scope", "id", "remaining"}}: the longest active
+    custom-blocklist ban per value."""
+    current = {}
+    for alert in alerts or []:
+        if not isinstance(alert, dict):
+            continue
+        for d in alert.get("decisions") or []:
+            if not isinstance(d, dict) or d.get("scenario") != CUSTOM_BLOCKLIST_REASON \
+                    or (d.get("type") or "ban") != "ban":
+                continue
+            duration = str(d.get("duration") or "").strip()
+            remaining = _go_duration_seconds(duration)
+            # a deleted/expired decision is listed with a negative duration
+            if remaining is None or remaining <= 0 or duration.startswith("-"):
+                continue
+            key = _custom_blocklist_key(d.get("value"))
+            prev = current.get(key)
+            if prev is None or remaining > prev["remaining"]:
+                current[key] = {"value": d.get("value") or "", "scope": d.get("scope") or "",
+                                "id": d.get("id"), "remaining": remaining}
+    return current
+
+
+def _custom_blocklist_current():
+    """Live custom-blocklist bans (see _custom_blocklist_current_from), or
+    None when cscli/CrowdSec is unavailable - never an empty guess."""
+    try:
+        proc = subprocess.run(
+            [CROWDSEC_BIN, "decisions", "list", "-s", CUSTOM_BLOCKLIST_REASON,
+             "-o", "json", "--limit", "0"],
+            capture_output=True, text=True, timeout=_CROWDSEC_LIST_TIMEOUT)
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        parsed = json.loads(proc.stdout.strip() or "null")
+    except ValueError:
+        return None
+    if parsed is not None and not isinstance(parsed, list):
+        return None
+    return _custom_blocklist_current_from(parsed)
+
+
+def _custom_blocklist_protected(parsed):
+    """Entry inside (or overlapping) PROTECTED_NETS - CDN/infrastructure
+    ranges the engine's cdn-whitelist always refused to ban from the file,
+    so the sync does not ban them either (an existing ban is left alone)."""
+    try:
+        net = ipaddress.ip_network(parsed["value"], strict=False)
+    except (KeyError, ValueError):
+        return False
+    if net.num_addresses == 1:
+        return _ip_in_protected(net.network_address)
+    return any(net.version == p.version and net.overlaps(p) for p in PROTECTED_NETS)
+
+
+def _custom_blocklist_plan(entries, current, refresh_age=CUSTOM_BLOCKLIST_REFRESH_AGE,
+                           protected=_custom_blocklist_protected):
+    """Pure diff. entries: parsed file entries; current: live bans by key.
+    add = listed but not banned; refresh = banned, but the longest ban is
+    older than refresh_age; remove = banned as custom-blocklist but no
+    longer listed; protected = listed but never auto-(re)applied."""
+    wanted = {}
+    for parsed in entries:
+        wanted.setdefault(_custom_blocklist_key(parsed["value"]), parsed)
+    threshold = CUSTOM_BLOCKLIST_DURATION_SECONDS - refresh_age
+    add, refresh, skipped = [], [], []
+    for key, parsed in wanted.items():
+        cur = current.get(key)
+        if protected(parsed):
+            skipped.append(parsed)
+        elif cur is None:
+            add.append(parsed)
+        elif cur["remaining"] < threshold:
+            refresh.append(parsed)
+    remove = [current[k] for k in sorted(current) if k not in wanted]
+    return {"add": add, "refresh": refresh, "remove": remove, "protected": skipped}
+
+
+def _custom_blocklist_removal_guard(n_remove, n_current, readable):
+    """None when removals may proceed, else the reason they are held back:
+    an unreadable file, or a diff that would lift most of the list at once
+    (a truncated/replaced file must never mass-unban)."""
+    if not readable:
+        return "blocklist file unreadable"
+    if n_remove > 10 and n_remove * 2 > n_current:
+        return "would lift %d of %d bans at once" % (n_remove, n_current)
+    return None
+
+
+def _custom_blocklist_import(parsed_list):
+    """Ban many entries with ONE `cscli decisions import` (one alert, not
+    one per entry). Returns an error string or None."""
+    payload = [{
+        "value": p["value"],
+        "scope": "Range" if p["type"] == "range" else "Ip",
+        "type": "ban",
+        "duration": CUSTOM_BLOCKLIST_DURATION,
+        "reason": CUSTOM_BLOCKLIST_REASON,
+    } for p in parsed_list]
+    try:
+        proc = subprocess.run(
+            [CROWDSEC_BIN, "decisions", "import", "-i", "-", "--format", "json"],
+            input=json.dumps(payload), capture_output=True, text=True,
+            timeout=CUSTOM_BLOCKLIST_IMPORT_TIMEOUT)
+    except Exception as exc:
+        return str(exc)
+    if proc.returncode != 0:
+        return (proc.stderr or proc.stdout or "cscli import failed").strip()
+    return None
+
+
+def _custom_blocklist_delete(cur):
+    """Lift exactly one listed value's custom-blocklist bans (exact value +
+    scenario: other scenarios' bans and containing ranges are untouched)."""
+    try:
+        proc = subprocess.run(
+            [CROWDSEC_BIN, "decisions", "delete", "-v", cur["value"],
+             "-s", CUSTOM_BLOCKLIST_REASON],
+            capture_output=True, text=True, timeout=CROWDSEC_TIMEOUT)
+    except Exception as exc:
+        return str(exc)
+    if proc.returncode != 0:
+        return (proc.stderr or proc.stdout or "cscli delete failed").strip()
+    return None
+
+
+def sync_custom_blocklist(dry_run=False):
+    """Make the live custom-blocklist bans match the file (idempotent).
+
+    dry_run only reports the diff. Adds and refreshes go through one
+    `cscli decisions import`; removals are per value and held back by
+    _custom_blocklist_removal_guard. After a refresh, crowdsec-dedupe is
+    started so the superseded decisions are collapsed right away."""
+    with _CUSTOM_BLOCKLIST_SYNC_LOCK:
+        current = _custom_blocklist_current()
+        if current is None:
+            return {"ok": False, "error": "CrowdSec unavailable (cscli decisions list failed)"}
+        entries, invalid, readable = _custom_blocklist_file_entries()
+        plan = _custom_blocklist_plan(entries, current)
+        held = _custom_blocklist_removal_guard(len(plan["remove"]), len(current), readable) \
+            if plan["remove"] else None
+        out = {
+            "ok": True,
+            "dry_run": bool(dry_run),
+            "entries": len(entries),
+            "active": len(current),
+            "invalid": invalid,
+            "add": [p["value"] for p in plan["add"]],
+            "refresh": [p["value"] for p in plan["refresh"]],
+            "remove": [c["value"] for c in plan["remove"]],
+            "protected": [p["value"] for p in plan["protected"]],
+            "remove_held": held,
+            "failed": [],
+        }
+        if dry_run:
+            return out
+        to_ban = plan["add"] + plan["refresh"]
+        if to_ban:
+            err = _custom_blocklist_import(to_ban)
+            if err:
+                out["failed"].append("import: %s" % err)
+        if plan["remove"] and not held:
+            for cur in plan["remove"]:
+                err = _custom_blocklist_delete(cur)
+                if err:
+                    out["failed"].append("delete %s: %s" % (cur["value"], err))
+        if to_ban or (plan["remove"] and not held):
+            _invalidate_crowdsec_decisions_cache()
+        if plan["refresh"] and not out["failed"]:
+            try:
+                subprocess.run(["systemctl", "start", "--no-block", "crowdsec-dedupe.service"],
+                               capture_output=True, text=True, timeout=10)
+            except Exception:
+                pass
+        out["at"] = time.time()
+        _CUSTOM_BLOCKLIST_SYNC_STATE["last"] = {k: (len(v) if isinstance(v, list) else v)
+                                                for k, v in out.items()}
+        return out
+
+
+def _custom_blocklist_sync_logged(origin):
+    try:
+        res = sync_custom_blocklist()
+    except Exception as exc:
+        print("[custom-blocklist] %s sync failed: %r" % (origin, exc), flush=True)
+        return False
+    if not res.get("ok"):
+        print("[custom-blocklist] %s sync skipped: %s" % (origin, res.get("error")), flush=True)
+        return False
+    if res["add"] or res["refresh"] or res["remove"] or res["failed"]:
+        print("[custom-blocklist] %s sync: %d entries, +%d added, %d refreshed, %d removed%s%s"
+              % (origin, res["entries"], len(res["add"]), len(res["refresh"]),
+                 0 if res["remove_held"] else len(res["remove"]),
+                 " (removals held: %s)" % res["remove_held"] if res["remove_held"] else "",
+                 "; failed: %s" % "; ".join(res["failed"]) if res["failed"] else ""),
+              flush=True)
+    return not res["failed"]
+
+
+def _custom_blocklist_sync_async():
+    def _run():
+        _custom_blocklist_sync_logged("post-change")
+    threading.Thread(target=_run, name="custom-blocklist-sync1", daemon=True).start()
+
+
+def _custom_blocklist_sync_loop():
+    time.sleep(CUSTOM_BLOCKLIST_SYNC_START_DELAY)
+    origin = "startup"
+    while True:
+        if not os.path.exists(CROWDSEC_BIN):
+            time.sleep(CUSTOM_BLOCKLIST_SYNC_INTERVAL)   # no CrowdSec on this install
+            continue
+        ok = _custom_blocklist_sync_logged(origin)
+        origin = "periodic"
+        time.sleep(CUSTOM_BLOCKLIST_SYNC_INTERVAL if ok else CUSTOM_BLOCKLIST_SYNC_RETRY)
+
+
+def start_custom_blocklist_sync():
+    if _CUSTOM_BLOCKLIST_SYNC_STATE["running"]:
+        return
+    _CUSTOM_BLOCKLIST_SYNC_STATE["running"] = True
+    threading.Thread(target=_custom_blocklist_sync_loop, name="custom-blocklist-sync",
+                     daemon=True).start()
 
 
 # --- Community bans (tuxwall.org) ------------------------------------------
@@ -19729,6 +20041,166 @@ def _plugin_incident_conditions():
     return out
 
 
+# systemd socket activation: until the first connection, ss attributes a
+# socket-activated listener (ssh.socket on Debian/Ubuntu) to systemd
+# (pid 1) alone. Such a listener belongs to the service behind the socket
+# unit, so it is attributed to that service's process name - never to
+# "systemd". Keys are service names without ".service"/"@" instance parts.
+SOCKET_SERVICE_COMMS = {"ssh": "sshd", "sshd": "sshd"}
+# Expected owners of claimed ports by process name. sshd legitimately
+# shares port 22 with the WAN-side canary SSH by design (real sshd: LAN/VPN
+# addresses only; canary: WAN only); _port_owner_incidents catches the
+# dangerous variant of that split.
+PORT_EXPECTED_COMMS = frozenset({"unbound", "kea-dhcp4", "kea-ctrl-agent", "nginx",
+                                 "twistd", "avahi-daemon", "chronyd", "dbus-daemon",
+                                 "sshd"})
+_SS_USER_RE = re.compile(r'\("((?:[^"\\]|\\.)*)",pid=(\d+)')
+_LIST_SOCKETS_RE = re.compile(
+    r"^\s*(\S+)\s+(Stream|Datagram|SequentialPacket)\s+(\S+\.socket)\s*(.*?)\s*$")
+
+
+def _listen_key_addr(addr):
+    """Comparable form of a listen address from ss or list-sockets:
+    interface suffixes dropped, ss's dual-stack "*" read as "[::]"."""
+    addr = (addr or "").split("%", 1)[0]
+    if addr in ("*", ""):
+        return "[::]"
+    return addr
+
+
+def _systemd_socket_listeners(text):
+    """`systemctl list-sockets --all --no-legend --show-types` ->
+    {(proto, addr, port): (socket_unit, comm)} for IP listeners, where comm
+    is the process name of the service the socket activates."""
+    out = {}
+    for line in (text or "").splitlines():
+        m = _LIST_SOCKETS_RE.match(line)
+        if not m:
+            continue
+        listen, stype, unit, activates = m.groups()
+        addr, _, port_s = listen.rpartition(":")
+        if not addr or not port_s.isdigit():
+            continue
+        service = (activates or "").split()[0].rstrip(",") if activates else ""
+        if not service or service == "-":
+            service = unit[:-len(".socket")]
+        base = service.split("@", 1)[0]
+        if base.endswith(".service"):
+            base = base[:-len(".service")]
+        comm = SOCKET_SERVICE_COMMS.get(base, base)
+        proto = "tcp" if stype == "Stream" else "udp"
+        out[(proto, _listen_key_addr(addr), int(port_s))] = (unit, comm)
+    return out
+
+
+def _proc_comm(pid):
+    try:
+        with open("/proc/%d/comm" % pid) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _parse_ss_listeners(proto, text, sockets, comm_of=_proc_comm):
+    """`ss -tlnp` / `ss -ulnp` output -> [(proto, addr, port, pid, comm,
+    socket_unit)]. A socket shared by several processes is attributed to
+    the first one that is not systemd; a socket held by systemd (pid 1)
+    alone is a socket-activated listener and is attributed to the service
+    behind its unit (`sockets`, from _systemd_socket_listeners), with
+    socket_unit set. pid 1 without a matching socket unit stays "systemd"
+    (a stranger to every check)."""
+    out = []
+    for line in (text or "").splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        addr, _, port_s = parts[3].rpartition(":")
+        if not port_s.isdigit():
+            continue
+        port = int(port_s)
+        users = [(name, int(pid)) for name, pid in _SS_USER_RE.findall(line)]
+        pid, comm, unit = 0, "", ""
+        real = [u for u in users if u[1] != 1]
+        if real:
+            name, pid = real[0]
+            comm = comm_of(pid) or name
+        elif users:
+            pid = 1
+            sock = sockets.get((proto, _listen_key_addr(addr), port))
+            if sock:
+                unit, comm = sock
+            else:
+                comm = comm_of(1) or users[0][0] or "systemd"
+        out.append((proto, addr, port, pid, comm, unit))
+    return out
+
+
+def _listener_who(pid, comm, unit):
+    if unit:
+        return "%s (via %s, systemd socket activation)" % (comm or "a service", unit)
+    return "%s (pid %d)" % (comm or "an unknown process", pid)
+
+
+def _port_owner_incidents(listeners, claimed, expected_pids, expected_comms, wan_ips):
+    """Port-ownership incidents from the attributed listeners: a stranger
+    on a port a Tuxwall service needs (portowner:<port>/<proto>), and real
+    sshd - running or socket-activated - on a wildcard or WAN address
+    (sshd:wan). Returns {key: (severity, title, detail)}."""
+    out = {}
+    holders = {}
+    for proto, addr, port, pid, comm, unit in listeners:
+        if (port, proto) in claimed and pid:
+            holders.setdefault((port, proto), []).append((pid, comm, unit))
+    for (port, proto), hl in holders.items():
+        strangers = [h for h in hl
+                     if h[0] not in expected_pids and h[1] not in expected_comms]
+        if not strangers:
+            continue
+        owner = claimed[(port, proto)]
+        expected_here = (len(hl) - len(strangers)) > 0
+        spid, scomm, sunit = strangers[0]
+        who = _listener_who(spid, scomm, sunit)
+        fix = sunit or scomm or "it"
+        if expected_here:
+            out["portowner:%d/%s" % (port, proto)] = (
+                "warning",
+                "Port %d/%s is contested by %s" % (port, proto, who),
+                "%s needs port %d/%s and is bound on one address, but %s "
+                "holds another address on the same port - a partial "
+                "conflict that will break one side. Stop or reconfigure "
+                "%s, or move the Tuxwall service."
+                % (owner, port, proto, who, fix))
+        else:
+            out["portowner:%d/%s" % (port, proto)] = (
+                "critical",
+                "Port %d/%s is held by %s" % (port, proto, who),
+                "%s needs port %d/%s, but %s is bound there instead - "
+                "the core service cannot use it. If %s is software you "
+                "installed, stop or reconfigure it, or move the Tuxwall "
+                "service." % (owner, port, proto, who, fix))
+
+    # sshd shares port 22 with the canary by design, but only on LAN/VPN
+    # addresses - the WAN address must belong to the canary alone. A
+    # socket-activated sshd counts as soon as its socket listens there.
+    for proto, addr, port, pid, comm, unit in listeners:
+        if comm == "sshd" and port == 22 and (
+                addr in ("0.0.0.0", "*", "[::]", "") or addr in wan_ips
+                or addr.strip("[]") in wan_ips):
+            if unit:
+                where = ("ListenStream= in %s (systemctl edit %s)" % (unit, unit))
+            else:
+                where = "ListenAddress in /etc/ssh/sshd_config"
+            out["sshd:wan"] = (
+                "critical",
+                "Real sshd is bound on the WAN address",
+                "%s is listening on %s port 22 - the WAN "
+                "should only expose the deception layer's fake SSH. "
+                "Restrict sshd to the LAN/WireGuard addresses "
+                "(%s)." % (_listener_who(pid, comm, unit), addr, where))
+            break
+    return out
+
+
 def _incident_conditions():
     now = time.time()
     desired = {}
@@ -20018,90 +20490,31 @@ def _incident_conditions():
                 expected_pids.add(pid)
         except Exception:
             pass
-    # sshd legitimately shares port 22 with the WAN-side canary SSH by
-    # design (real sshd: LAN/VPN addresses only; canary: WAN only). A
-    # dedicated check below catches the dangerous variant of that split.
-    expected_comms = {"unbound", "kea-dhcp4", "kea-ctrl-agent", "nginx",
-                      "twistd", "avahi-daemon", "chronyd", "dbus-daemon",
-                      "sshd"}
+    expected_comms = PORT_EXPECTED_COMMS
 
     # one ss pass with process attribution, shared by every check below
-    listeners = []            # (proto, addr, port, pid, comm)
+    listeners = []            # (proto, addr, port, pid, comm, socket_unit)
+    try:
+        sockets = _systemd_socket_listeners(subprocess.run(
+            ["systemctl", "list-sockets", "--all", "--no-legend", "--show-types"],
+            capture_output=True, text=True, timeout=10).stdout)
+    except Exception:
+        sockets = {}
     try:
         for proto, sscmd in (("tcp", ["ss", "-tlnp"]), ("udp", ["ss", "-ulnp"])):
             proc = subprocess.run(sscmd, capture_output=True, text=True,
                                   timeout=10)
-            for line in proc.stdout.splitlines()[1:]:
-                parts = line.split()
-                if len(parts) < 4:
-                    continue
-                local = parts[3]
-                addr, _, port_s = local.rpartition(":")
-                if not port_s.isdigit():
-                    continue
-                pid = 0
-                m = re.search(r"pid=(\d+)", line)
-                if m:
-                    pid = int(m.group(1))
-                comm = ""
-                if pid:
-                    try:
-                        with open("/proc/%d/comm" % pid) as f:
-                            comm = f.read().strip()
-                    except OSError:
-                        pass
-                listeners.append((proto, addr, int(port_s), pid, comm))
+            listeners.extend(_parse_ss_listeners(proto, proc.stdout, sockets))
     except Exception:
         pass
 
-    # Conflict 1: a stranger holds a port a Tuxwall service depends on
-    try:
-        holders = {}
-        for proto, addr, port, pid, comm in listeners:
-            if (port, proto) in claimed and pid:
-                holders.setdefault((port, proto), []).append((pid, comm))
-        for (port, proto), hl in holders.items():
-            strangers = [(pid, comm) for pid, comm in hl
-                         if pid not in expected_pids and comm not in expected_comms]
-            if not strangers:
-                continue
-            owner = claimed[(port, proto)]
-            expected_here = (len(hl) - len(strangers)) > 0
-            spid, scomm = strangers[0]
-            who = "%s (pid %d)" % (scomm or "an unknown process", spid)
-            if expected_here:
-                add("portowner:%d/%s" % (port, proto), "warning",
-                    "Port %d/%s is contested by %s" % (port, proto, who),
-                    "%s needs port %d/%s and is bound on one address, but %s "
-                    "holds another address on the same port - a partial "
-                    "conflict that will break one side. Stop or reconfigure "
-                    "%s, or move the Tuxwall service."
-                    % (owner, port, proto, who, scomm or "it"))
-            else:
-                add("portowner:%d/%s" % (port, proto), "critical",
-                    "Port %d/%s is held by %s" % (port, proto, who),
-                    "%s needs port %d/%s, but %s is bound there instead - "
-                    "the core service cannot use it. If %s is software you "
-                    "installed, stop or reconfigure it, or move the Tuxwall "
-                    "service." % (owner, port, proto, who, scomm or "it"))
-    except Exception:
-        pass
-
-    # sshd shares port 22 with the canary by design, but only on LAN/VPN
-    # addresses - the WAN address must belong to the canary alone.
+    # Conflict 1 (a stranger holds a port a Tuxwall service depends on) and
+    # the sshd/canary split on port 22
     try:
         wan_ips = {ip for ip in (_honey_wan_ip(),
                                  (HONEY_STATE.get("wan_ip6") or None)) if ip}
-        for proto, addr, port, pid, comm in listeners:
-            if comm == "sshd" and port == 22 and (
-                    addr in ("0.0.0.0", "*", "[::]", "") or addr in wan_ips):
-                add("sshd:wan", "critical",
-                    "Real sshd is bound on the WAN address",
-                    "sshd (pid %d) is listening on %s port 22 - the WAN "
-                    "should only expose the deception layer's fake SSH. "
-                    "Restrict sshd to the LAN/WireGuard addresses "
-                    "(ListenAddress in /etc/ssh/sshd_config)." % (pid, addr))
-                break
+        desired.update(_port_owner_incidents(listeners, claimed, expected_pids,
+                                             expected_comms, wan_ips))
     except Exception:
         pass
 
@@ -20157,7 +20570,7 @@ def _incident_conditions():
         wan_ips = {ip for ip in (_honey_wan_ip(),
                                  (HONEY_STATE.get("wan_ip6") or None)) if ip}
         flagged = {}
-        for proto, addr, port, pid, comm in listeners:
+        for proto, addr, port, pid, comm, _unit in listeners:
             if port in approved or addr.startswith("127.") or addr.startswith("[::1]"):
                 continue
             if (proto == "tcp" and addr in ("0.0.0.0", "*", "[::]", "")) \
@@ -20813,6 +21226,7 @@ def main():
     start_incident_monitor()
     start_backup_scheduler()      # scheduled system backups (+ optional USB copy)
     get_community_auto_worker()   # community auto-ban sync (no-op until enabled)
+    start_custom_blocklist_sync() # custom banlist file -> 1y bans, idempotent (90 s, then 6 h)
     start_fw_hits_sampler()       # read-only per-rule hit counters (5 min)
     start_agent_facts_writer()    # /var/lib/tuxwall/agent/facts.md for the AI agent (5 min)
     _ensure_agent_api_token()     # /etc/tuxwall/agent/api.token for the agent's read-only MCP tool

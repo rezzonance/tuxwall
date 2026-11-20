@@ -1,51 +1,59 @@
-# CrowdSec custom-blocklist chain
+# CrowdSec and the custom banlist
 
-These three files are the engine side of the dashboard's **Custom Banlist**
-(`/etc/tuxwall/custom-blocklist.txt`): they make the CrowdSec daemon itself
-re-apply every file entry as a 1-year ban on each restart/reload, so the
-permanent banlist survives anything without the API server's involvement.
+The dashboard's **Custom Banlist** (`/etc/tuxwall/custom-blocklist.txt`, one
+IP or CIDR per line) is applied to CrowdSec by the TuxWall API itself
+(`sync_custom_blocklist` in `api_server.py`). The CrowdSec engine does **not**
+read the file any more.
 
-| File (package path) | Installs to |
-|---|---|
-| `acquis.d/custom-blocklist.yaml` | `/etc/crowdsec/acquis.d/custom-blocklist.yaml` |
-| `parsers/s01-parse/custom-blocklist.yaml` | `/etc/crowdsec/parsers/s01-parse/custom-blocklist.yaml` |
-| `scenarios/custom-blocklist.yaml` | `/etc/crowdsec/scenarios/custom-blocklist.yaml` |
+## How bans are applied (since Nov 2026)
 
-**Historical bug fixed in 3.0.6:** the acquis previously pointed at
-`/etc/netdash/custom-blocklist.txt` — a path from before the rename — so the
-whole re-apply chain silently never ran and older dashboard entries showed
-"not active" forever. It now reads `/etc/tuxwall/custom-blocklist.txt`.
+- **Dashboard add**: the entry is appended to the file and banned at once
+  (`cscli decisions add --reason custom/custom-blocklist --duration 8760h`).
+- **Dashboard remove**: the entry is dropped from the file and its decisions
+  are deleted; a re-sync then re-applies anything still listed (for example a
+  listed range that contained the removed IP).
+- **Sync** (90 s after the API starts, then every 6 hours, retried every
+  10 minutes while CrowdSec is down): compares the file with the live
+  `custom/custom-blocklist` decisions and changes only the difference:
+  - listed but not banned -> banned (one `cscli decisions import` for all);
+  - newest ban older than 20 days -> re-issued: the firewall bouncer caps
+    ipset timeouts at ~24.8 days and only re-adds an IP when it sees a new
+    decision; `crowdsec-dedupe` then removes the superseded decision;
+  - banned as `custom/custom-blocklist` but no longer listed -> lifted
+    (exact value and scenario only). Held back if the file cannot be read or
+    the diff would lift most of the list at once (a truncated file must
+    never mass-unban);
+  - entries inside protected CDN/infrastructure ranges (Cloudflare,
+    api.anthropic.com - `PROTECTED_NETS`) are never banned automatically,
+    matching what the engine's `crowdsecurity/cdn-whitelist` did before.
 
-**Important:** the parser's pattern is anchored (`^IP-or-CIDR$`). Lines with
-inline comments or trailing text are silently skipped — one entry per line,
-nothing else. The dashboard only writes clean lines, but hand edits have
-broken this before.
+Hand edits to the file are picked up by the next sync; to apply sooner,
+reload the dashboard API (`sudo systemctl reload tuxwall`; the sync runs
+90 s later) or re-add the entry from the dashboard.
 
-## One manual step on fresh installs: the remediation profile
+Every listed entry has one active ban (briefly two after a refresh, until
+crowdsec-dedupe runs); restarting or reloading CrowdSec no longer touches
+them.
 
-CrowdSec has no `profiles.d`, so the profile that gives these alerts their
-1-year duration must be merged into `/etc/crowdsec/profiles.yaml` (prepended
-above the default profiles, so it wins via `on_success: break`):
+## Why the engine chain was removed
 
-```yaml
-name: custom_blocklist_remediation
-filters:
- - Alert.Remediation == true && Alert.GetScope() == "Ip" && Alert.Scenario == "custom/custom-blocklist"
-decisions:
- - type: ban
-   duration: 8760h
-on_success: break
-```
+Until 3.3.1 three files made the engine re-read the whole file on every
+start and reload: `acquis.d/custom-blocklist.yaml` (`mode: cat`),
+`parsers/s01-parse/custom-blocklist.yaml` and
+`scenarios/custom-blocklist.yaml`. Each pass poured ~320 new alerts and
+1-year decisions for IPs that were already banned - duplicates that grew
+the store (21 MB + 21 MB WAL, ~16k alerts on the reference install), cost
+crowdsec minutes of CPU at every boot, and needed `crowdsec-dedupe` to
+clean up after them. The package no longer ships those files; upgrades
+remove them.
 
-Then `sudo systemctl reload crowdsec`.
+The `custom_blocklist_remediation` profile in `/etc/crowdsec/profiles.yaml`
+(merged by hand on older installs) only matched the engine's own alerts for
+that scenario and is now inert; it can stay or be removed.
 
-## Idempotency (added 2026-11-03)
+## crowdsec-dedupe
 
-The re-apply design stacks duplicate decisions on every restart/reload
-(~330 per pass; on the reference install this grew the store to 21k rows /
-17k alerts and cost crowdsec a constant ~26% CPU). `crowdsec-dedupe.timer`
-now runs `/usr/local/sbin/crowdsec_dedupe.py` every 6 hours: it collapses
-duplicate active decisions (keeping the longest expiry per
-value+scenario+type+origin) and prunes decision-less alerts older than 7
-days. The re-apply behavior is unchanged - bans still survive restarts - it
-is just idempotent now.
+`crowdsec-dedupe.timer` runs `/usr/local/sbin/crowdsec_dedupe.py` every
+6 hours: it collapses duplicate active decisions (keeping the longest expiry
+per value + scenario + type + origin; custom-blocklist bans collapse across
+origins) and prunes decision-less alerts older than 7 days.

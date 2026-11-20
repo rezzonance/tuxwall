@@ -1,8 +1,9 @@
 # Custom blocklist
 # One IP or CIDR per line. Lines starting with '#' are comments.
 #
-# After editing this file, apply changes via the tuxwall dashboard
-# or by restarting the relevant service.
+# Managed from the dashboard (CrowdSec > Custom Banlist). Hand edits are
+# applied by the dashboard API within 6 hours (or at once with
+# `sudo systemctl reload tuxwall`); entries become 1-year CrowdSec bans.
 #
 # Examples:
 #   192.0.2.1

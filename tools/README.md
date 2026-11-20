@@ -128,3 +128,33 @@ retired SNMP/UDP evidence, the reporting switch + persistent retry queue
 the canary firewall plan (IPv4 only, grace before closing) and the cached
 tail read of `opencanary.log`. A loopback load test (127.0.0.2, never the
 WAN) proves one client cannot exceed the per-IP cap and fds stay bounded.
+
+## custom_blocklist_check.py — custom banlist sync (CI)
+
+```bash
+python3 tools/custom_blocklist_check.py
+```
+
+Imports `www/includes/api_server.py` with the banlist file in a temp dir and
+`subprocess.run` replaced by a fake CrowdSec (an in-memory decision table
+answering `cscli decisions list/import/delete/add`). Covers file parsing
+(comments, invalid/non-global lines, duplicates, unreadable file), reading
+the live bans (longest per value; expired, other-scenario and non-ban
+decisions ignored), the pure diff (add, refresh after 20 days, remove,
+protected CDN ranges, IPv6 notation), the mass-removal guard, dry-run (no
+writes), one import for all adds, exact-value deletes, a second sync being a
+no-op, re-adding an active entry not duplicating its ban, and the remove
+flow's re-sync.
+
+## port_owner_check.py — port-ownership incidents (CI)
+
+```bash
+python3 tools/port_owner_check.py
+```
+
+Synthetic `ss -tlnp`/`ss -ulnp` and `systemctl list-sockets` output through
+the listener attribution and the `portowner:*` / `sshd:wan` rules:
+socket-activated sshd on LAN/VPN addresses (held by systemd, pid 1, until
+the first connection) raises nothing; a socket on 0.0.0.0, `*` or the WAN
+address, a real stranger, pid 1 without a matching socket unit and a
+socket-activated stranger service all still alert.
