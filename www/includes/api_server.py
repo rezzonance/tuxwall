@@ -57,6 +57,11 @@ try:
 except Exception as _exc:
     print("tuxwall: firewall findings/edit/hits modules unavailable: %r" % _exc, flush=True)
     _fw_lint = _fw_edit = _fw_hits = None
+try:
+    import crowdsec_fw as _csfw
+except Exception as _exc:
+    print("tuxwall: crowdsec_fw module unavailable: %r" % _exc, flush=True)
+    _csfw = None
 
 
 def _topo(fn, default=""):
@@ -2579,6 +2584,7 @@ def build_crowdsec():
         "bans_count": len([d for d in active if d.get("type") == "ban"]),
         "bouncers": _cscli(["bouncers", "list", "-o", "json"], []) or [],
         "alerts": _cscli(["alerts", "list", "-o", "json"], []) or [],
+        "enforcement": crowdsec_enforcement(),
     }
     with _CROWDSEC_PANEL_LOCK:
         _CROWDSEC_PANEL_CACHE["crowdsec"] = out
@@ -2945,11 +2951,13 @@ def _remove_custom_blocklist_entry_locked(value):
 # whose entry left the file are lifted. Runs at API start, every
 # CUSTOM_BLOCKLIST_SYNC_INTERVAL, and after dashboard removals.
 CUSTOM_BLOCKLIST_DURATION_SECONDS = 8760 * 3600
-# The firewall bouncer caps ipset timeouts at ~24.8 days (2147483 s) and
-# only re-adds an IP when it sees a NEW decision, so every 1y ban is
-# re-issued once it is 20 days old (the engine re-read used to do this as a
-# side effect of restarts/reloads). crowdsec-dedupe collapses the
-# superseded decision.
+# In iptables mode the firewall bouncer caps ipset timeouts at ~24.8 days
+# (2147483 s) and only re-adds an IP when it sees a NEW decision, so every
+# 1y ban is re-issued once it is 20 days old (the engine re-read used to do
+# this as a side effect of restarts/reloads). crowdsec-dedupe collapses the
+# superseded decision. In nftables mode elements carry the full duration
+# and crowdsec_fw re-times elements a longer decision did not extend, so
+# the refresh is redundant there but harmless.
 CUSTOM_BLOCKLIST_REFRESH_AGE = 20 * 86400
 CUSTOM_BLOCKLIST_SYNC_INTERVAL = 6 * 3600
 CUSTOM_BLOCKLIST_SYNC_RETRY = 600
@@ -3167,6 +3175,7 @@ def sync_custom_blocklist(dry_run=False):
                     out["failed"].append("delete %s: %s" % (cur["value"], err))
         if to_ban or (plan["remove"] and not held):
             _invalidate_crowdsec_decisions_cache()
+            _crowdsec_fw_sync_async(delay=15)   # nftables mode: Range bans live in TuxWall's table
         if plan["refresh"] and not out["failed"]:
             try:
                 subprocess.run(["systemctl", "start", "--no-block", "crowdsec-dedupe.service"],
@@ -3222,6 +3231,89 @@ def start_custom_blocklist_sync():
     _CUSTOM_BLOCKLIST_SYNC_STATE["running"] = True
     threading.Thread(target=_custom_blocklist_sync_loop, name="custom-blocklist-sync",
                      daemon=True).start()
+
+
+# --- CrowdSec bouncer enforcement (nftables mode corrections) ---------------
+# The nftables bouncer skips IPs already in a set, so a later, longer ban
+# never extends the kernel element, and it truncates Range decisions to one
+# address. crowdsec_fw.reconcile() re-times such elements (atomic
+# delete+add, never resurrecting a lifted ban), re-adds elements that lapsed
+# while their ban is still active, and keeps Range bans in TuxWall's own
+# `inet tuxwall_crowdsec_ranges` table. In iptables mode it only removes
+# that table if one is left over. Every 15 min, and shortly after
+# custom-blocklist changes.
+CROWDSEC_FW_SYNC_INTERVAL = 900
+CROWDSEC_FW_SYNC_START_DELAY = 120
+_CROWDSEC_FW_LOCK = threading.Lock()
+_CROWDSEC_FW_STATE = {"running": False, "last": None, "mem": {}}
+
+
+def crowdsec_fw_reconcile(origin="periodic"):
+    if _csfw is None:
+        return None
+    try:
+        with _CROWDSEC_FW_LOCK:
+            res = _csfw.reconcile(_CROWDSEC_FW_STATE["mem"])
+    except Exception as exc:
+        print("[crowdsec-fw] %s pass failed: %r" % (origin, exc), flush=True)
+        return None
+    _CROWDSEC_FW_STATE["last"] = res
+    if (origin == "startup" or res.get("refreshed") or res.get("refresh_failed") or res.get("readded")
+            or res.get("errors") or res.get("range_table") not in ("ok", "absent")):
+        print("[crowdsec-fw] %s: mode %s, re-timed %d (failed %d), re-added %d, ranges %d (table %s)%s"
+              % (origin, res.get("mode") or "?", res.get("refreshed", 0), res.get("refresh_failed", 0),
+                 res.get("readded", 0), res.get("ranges", 0), res.get("range_table"),
+                 "; " + "; ".join(res["errors"]) if res.get("errors") else ""), flush=True)
+    return res
+
+
+def _crowdsec_fw_sync_async(delay=0):
+    if _csfw is None:
+        return
+    def _run():
+        if delay:
+            time.sleep(delay)
+        crowdsec_fw_reconcile("post-change")
+    threading.Thread(target=_run, name="crowdsec-fw-sync1", daemon=True).start()
+
+
+def _crowdsec_fw_loop():
+    time.sleep(CROWDSEC_FW_SYNC_START_DELAY)
+    origin = "startup"
+    while True:
+        crowdsec_fw_reconcile(origin)
+        origin = "periodic"
+        time.sleep(CROWDSEC_FW_SYNC_INTERVAL)
+
+
+def start_crowdsec_fw_sync():
+    if _csfw is None or _CROWDSEC_FW_STATE["running"]:
+        return
+    _CROWDSEC_FW_STATE["running"] = True
+    threading.Thread(target=_crowdsec_fw_loop, name="crowdsec-fw-sync", daemon=True).start()
+
+
+def crowdsec_enforcement():
+    """Compact enforcement summary for the CrowdSec page (last reconcile
+    pass; no firewall reads on the request path)."""
+    last = _CROWDSEC_FW_STATE.get("last") or {}
+    mode = last.get("mode")
+    if not mode and _csfw is not None:
+        mode = _csfw.read_bouncer_config().get("mode")
+    out = {"mode": mode or "", "at": last.get("at")}
+    if mode == "nftables":
+        fams = {}
+        for fam, st in (last.get("families") or {}).items():
+            fams[fam] = {"table": "%s %s" % (st.get("family"), st.get("table")),
+                         "present": bool(st.get("present")),
+                         "elements": sum((st.get("sets") or {}).values()),
+                         "sets": len(st.get("sets") or {}),
+                         "hooks": [h.get("hook") for h in st.get("hooks") or []],
+                         "dropped_packets": st.get("dropped", 0)}
+        out.update({"families": fams, "ranges": last.get("ranges", 0),
+                    "retimed": last.get("refreshed", 0), "readded": last.get("readded", 0),
+                    "missing": last.get("missing", 0), "bans": last.get("bans")})
+    return out
 
 
 # --- Community bans (tuxwall.org) ------------------------------------------
@@ -20945,10 +21037,18 @@ def _af_section_firewall():
         c = s.get("context") or {}
         hp = c.get("honeypot") or {}
         tw = c.get("tripwire") or {}
-        lines.append("- Deception: honeypot %s (WAN ports %s); canary %s; tripwire mode %s%s; CrowdSec bouncer chains: %s" % (
+        csx = c.get("crowdsec") or {}
+        if csx.get("mode") == "nftables":
+            cs_desc = "nftables mode, %s hook(s), priority %s" % (
+                ", ".join(csx.get("hooks") or []) or "input",
+                "/".join(str((f or {}).get("priority")) for f in (csx.get("families") or {}).values()) or "?")
+        else:
+            cs_desc = "%s mode, chains %s" % (csx.get("mode") or "iptables",
+                                               ", ".join(c.get("crowdsec_chains") or []) or "none")
+        lines.append("- Deception: honeypot %s (WAN ports %s); canary %s; tripwire mode %s%s; CrowdSec bouncer: %s" % (
             "enabled" if hp.get("enabled") else "DISABLED", ", ".join(str(x) for x in hp.get("ports") or []) or "none",
             "active" if c.get("canary_active") else "NOT active", tw.get("mode", "?"),
-            " (TRIPPED)" if tw.get("tripped") else "", ", ".join(c.get("crowdsec_chains") or []) or "none"))
+            " (TRIPPED)" if tw.get("tripped") else "", cs_desc))
     else:
         n = len([l for l in st.splitlines() if l[:1] == "["]) or len([l for l in st.splitlines() if " ALLOW" in l or " DENY" in l])
         lines.append("- Rules: %d (ufw status)" % n)
@@ -21227,6 +21327,7 @@ def main():
     start_backup_scheduler()      # scheduled system backups (+ optional USB copy)
     get_community_auto_worker()   # community auto-ban sync (no-op until enabled)
     start_custom_blocklist_sync() # custom banlist file -> 1y bans, idempotent (90 s, then 6 h)
+    start_crowdsec_fw_sync()      # nftables bouncer: re-time unextended bans, Range table (2 min, then 15 min)
     start_fw_hits_sampler()       # read-only per-rule hit counters (5 min)
     start_agent_facts_writer()    # /var/lib/tuxwall/agent/facts.md for the AI agent (5 min)
     _ensure_agent_api_token()     # /etc/tuxwall/agent/api.token for the agent's read-only MCP tool

@@ -166,7 +166,7 @@ sudo apt update && sudo apt upgrade tuxwall
 > **Optional packages:** CrowdSec, its firewall bouncer, GeoIP and the Ookla speedtest are shipped as `Suggests`, so a bare APT install does not pull them in. The installer offers them during setup; to add them by hand:
 >
 > ```bash
-> sudo apt install crowdsec crowdsec-firewall-bouncer-iptables python3-maxminddb
+> sudo apt install crowdsec crowdsec-firewall-bouncer-nftables python3-maxminddb
 > ```
 
 <details>

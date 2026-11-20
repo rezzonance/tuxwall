@@ -144,7 +144,29 @@ decisions ignored), the pure diff (add, refresh after 20 days, remove,
 protected CDN ranges, IPv6 notation), the mass-removal guard, dry-run (no
 writes), one import for all adds, exact-value deletes, a second sync being a
 no-op, re-adding an active entry not duplicating its ban, and the remove
-flow's re-sync.
+flow's re-sync. A sync that changes bans triggers one CrowdSec enforcement
+pass (stubbed here).
+
+## crowdsec_fw_check.py — CrowdSec bouncer enforcement (CI + root netns)
+
+```bash
+python3 tools/crowdsec_fw_check.py              # pure (CI)
+sudo python3 tools/crowdsec_fw_check.py --netns # + real nft in a scratch namespace
+```
+
+`www/includes/crowdsec_fw.py`: bouncer config parsing (PyYAML and the
+fallback parser, defaults, `.local` merge), synthetic `nft -j` tables (hook,
+priority before ufw, policy, sets, counters, terse listings), decisions from a
+temp SQLite store (longest ban per value, expired/simulated/non-ban skipped),
+the re-time plan (elements a longer ban did not extend), the lapsed-element
+plan, the Range-ban table (containment, overlaps, REJECT) and `reconcile()`
+with a fake runner (dry run, per-element retry when an element vanished,
+iptables mode removing a leftover range table, no DB = no writes). `--netns`
+loads a bouncer-like table into namespace `twcsfw`, reconciles against real
+nft (re-timed elements, atomic abort when an element vanished, Range table
+written then removed) and checks the host's tables are unchanged.
+firewall_safety_check.py covers the guard side (nft-mode invariants, nft
+table ownership).
 
 ## port_owner_check.py — port-ownership incidents (CI)
 

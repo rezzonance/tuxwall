@@ -26,6 +26,13 @@ except ImportError:  # pragma: no cover
         from . import canary_egress as _CE
     except ImportError:
         _CE = None
+try:
+    import crowdsec_fw as _CS
+except ImportError:  # pragma: no cover
+    try:
+        from . import crowdsec_fw as _CS
+    except ImportError:
+        _CS = None
 
 HONEYPOT_TAG = "tuxwall-honeypot"
 CANARY_PORTS = (22, 5900, 1433, 6379)   # TCP on the WAN IPv4 (SNMP 161/udp retired 2026-11-19)
@@ -48,6 +55,8 @@ OWNERS = {
     "policy": ("Interfaces → Policy matrix", "#interfaces/policy"),
     "mdns": ("mDNS reflector (Avahi)", ""),
     "management": ("Router access (installer rule)", ""),
+    "traffic": ("Traffic accounting (per-client counters)", ""),
+    "iptables-nft": ("ufw / iptables (iptables-nft tables)", "#firewall"),
     "user": ("", ""),
 }
 UNMANAGED = ("user", "management")
@@ -237,6 +246,53 @@ class Ctx:
             elif line.strip() and not line.lstrip().startswith("#"):
                 break
         return chains or ["INPUT"]
+
+    @property
+    def crowdsec(self):
+        """Effective bouncer settings (crowdsec_fw.bouncer_config)."""
+        if "crowdsec" not in self._cache:
+            p = "/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
+            if _CS is not None:
+                cfg = _CS.bouncer_config(self.read(p), self.read(p + ".local"))
+            else:
+                m = re.search(r"(?m)^mode:\s*(\S+)", self.read(p))
+                cfg = {"mode": m.group(1).lower() if m else "", "hooks": [], "nft": {}}
+            self._cache["crowdsec"] = cfg
+        return self._cache["crowdsec"]
+
+    @property
+    def crowdsec_nft(self):
+        """{fam: parsed bouncer table (terse) | None} in nftables mode."""
+        if "crowdsec_nft" not in self._cache:
+            out = {}
+            cs = self.crowdsec
+            if cs.get("mode") == "nftables" and _CS is not None:
+                for fam, f in cs["nft"].items():
+                    out[fam] = (_CS.list_table(self.run, f["family"], f["table"], terse=True)
+                                if f["enabled"] else None)
+            self._cache["crowdsec_nft"] = out
+        return self._cache["crowdsec_nft"]
+
+    @property
+    def bouncer_active(self):
+        if "bouncer_active" not in self._cache:
+            rc, out = self.run(["systemctl", "is-active", "crowdsec-firewall-bouncer"])
+            self._cache["bouncer_active"] = (out or "").strip() == "active"
+        return self._cache["bouncer_active"]
+
+    @property
+    def nft_tables(self):
+        """[(family, name)] of every nftables table (read only)."""
+        if "nft_tables" not in self._cache:
+            rc, out = self.run(["nft", "-j", "list", "tables"])
+            tabs = []
+            if rc == 0 and _CS is not None:
+                for o in _CS.nft_objects(out):
+                    t = o.get("table")
+                    if isinstance(t, dict):
+                        tabs.append((t.get("family"), t.get("name")))
+            self._cache["nft_tables"] = tabs
+        return self._cache["nft_tables"]
 
     @property
     def portforwards(self):
@@ -630,6 +686,46 @@ def classify_raw(item, ctx):
     return _mk("user", "Raw iptables rule outside ufw")
 
 
+XT_TABLES = ("filter", "nat", "mangle", "raw", "security")
+
+
+def classify_nft(ctx):
+    """Owner of every nftables table: [{family, table, owner, reason, ...}]."""
+    cs = ctx.crowdsec
+    bouncer = {(f["family"], f["table"]): fam for fam, f in (cs.get("nft") or {}).items()}
+    rng = getattr(_CS, "RANGE_TABLE", "tuxwall_crowdsec_ranges")
+    out = []
+    for family, name in ctx.nft_tables:
+        if (family, name) in bouncer:
+            if cs.get("mode") == "nftables":
+                c = _mk("crowdsec", "CrowdSec bouncer table (nftables mode, %s)" % bouncer[(family, name)])
+            else:
+                c = _mk("crowdsec", "CrowdSec bouncer table left from nftables mode (bouncer is in %s mode)"
+                        % (cs.get("mode") or "unknown"))
+        elif family == "inet" and name == rng:
+            c = _mk("crowdsec", "CrowdSec Range bans enforced by TuxWall (nftables mode)")
+        elif family == "inet" and name == "tuxwall_traffic":
+            c = _mk("traffic", "Per-client traffic counters (no verdicts)")
+        elif family in ("ip", "ip6") and name in XT_TABLES:
+            c = _mk("iptables-nft", "iptables-nft table (ufw chains + raw iptables rules)")
+        else:
+            c = _mk("user", "nftables table outside TuxWall")
+        c.update({"family": family, "table": name})
+        out.append(c)
+    return out
+
+
+def crowdsec_context(ctx):
+    cs = ctx.crowdsec
+    out = {"mode": cs.get("mode") or "", "chains": ctx.crowdsec_chains}
+    if cs.get("mode") == "nftables":
+        out["hooks"] = cs.get("hooks") or []
+        out["families"] = {fam: {"table": "%s %s" % (f["family"], f["table"]), "enabled": f["enabled"],
+                                 "priority": f["priority"]}
+                           for fam, f in (cs.get("nft") or {}).items()}
+    return out
+
+
 # ── invariants ───────────────────────────────────────────────────────────────
 
 def _v(vid, severity, title, detail="", repair=None, owner=""):
@@ -859,10 +955,26 @@ def invariants(rs, ctx, cur=None):
                         "re-applies it every 15 s)." % str(tw.get("trip_mode") or "medium").upper(),
                         {"kind": "run", "cmd": ["/usr/local/sbin/tuxwall-tripwire", "enforce"]},
                         "tripwire"))
-    # 5. CrowdSec hook first
+    # 5. CrowdSec enforcement. nftables mode: the bouncer's own tables and
+    # input hook (priority before ufw, policy accept); iptables mode: the
+    # CROWDSEC_CHAIN jump first in each configured chain.
+    cs_mode = ctx.crowdsec.get("mode")
+    if cs_mode == "nftables" and _CS is not None:
+        down = "" if ctx.bouncer_active else " (crowdsec-firewall-bouncer is not active)"
+        for fam in ("v4", "v6"):
+            st = _CS.nft_family_state(ctx.crowdsec, fam, ctx.crowdsec_nft.get(fam))
+            for p in st["problems"]:
+                v.append(_v(p["id"], p["severity"], p["title"], p["detail"] + down,
+                            {"kind": "bouncer-restart"}, "crowdsec"))
+            if (raw.get(fam) or "") and ":CROWDSEC_CHAIN" in raw.get(fam, ""):
+                v.append(_v("crowdsec-stale-iptables:%s" % fam, "low",
+                            "Leftover iptables CROWDSEC_CHAIN (%s)" % fam,
+                            "The bouncer runs in nftables mode; the iptables chain/ipsets from "
+                            "iptables mode are no longer maintained (entries expire unrefreshed).",
+                            None, "crowdsec"))
     for fam in ("v4", "v6"):
         txt = raw.get(fam) or ""
-        if not txt or ":CROWDSEC_CHAIN" not in txt:
+        if cs_mode == "nftables" or not txt or ":CROWDSEC_CHAIN" not in txt:
             continue
         for chain in ctx.crowdsec_chains:
             first = next((l for l in txt.splitlines() if l.startswith("-A %s " % chain)), "")
@@ -1068,9 +1180,11 @@ def summary(rs, ctx):
         groups[c["group"]] += 1
         owners[c["owner"]] = owners.get(c["owner"], 0) + 1
     return {"ok": True, "rules": cl["ufw"], "raw": cl["raw"], "before": cl["before"],
+            "nft": classify_nft(ctx),
             "groups": groups, "owners": owners,
             "owner_labels": {k: v[0] for k, v in OWNERS.items()},
             "invariants": invariants(rs, ctx, rs),
             "context": {"wan": ctx.wan, "lan": ctx.lan, "honeypot": ctx.honeypot,
                         "wireguard": ctx.wg, "canary_active": ctx.canary_active,
-                        "tripwire": ctx.tripwire, "crowdsec_chains": ctx.crowdsec_chains}}
+                        "tripwire": ctx.tripwire, "crowdsec_chains": ctx.crowdsec_chains,
+                        "crowdsec": crowdsec_context(ctx)}}

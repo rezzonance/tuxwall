@@ -893,14 +893,77 @@ step_crowdsec() {
             info "CrowdSec repository key unavailable; trying the Ubuntu archive"
         fi
     fi
+    # nftables backend when the kernel/nft work: its set elements keep the
+    # full ban duration, while ipset caps timeouts at ~24.8 days (longer bans
+    # silently fall out of the kernel). iptables+ipset stays the fallback.
+    local bouncer=crowdsec-firewall-bouncer-iptables
+    bouncer_nft_usable && bouncer=crowdsec-firewall-bouncer-nftables
     if run_long "Installing CrowdSec + firewall bouncer" \
+           apt-get install "${APT_OPTS[@]}" crowdsec "$bouncer"; then
+        ok "CrowdSec installed (packagecloud, ${bouncer#crowdsec-firewall-bouncer-} bouncer)"
+    elif [[ $bouncer != crowdsec-firewall-bouncer-iptables ]] && run_long "Installing CrowdSec + iptables bouncer" \
            apt-get install "${APT_OPTS[@]}" crowdsec crowdsec-firewall-bouncer-iptables; then
-        ok "CrowdSec installed (packagecloud)"
+        ok "CrowdSec installed (packagecloud, iptables bouncer)"
     elif run_long "Installing CrowdSec from the Ubuntu archive" \
            apt-get install "${APT_OPTS[@]}" crowdsec crowdsec-firewall-bouncer; then
         ok "CrowdSec installed (Ubuntu archive)"
     else
         warn "CrowdSec could not be installed; the dashboard works without it."
+        return 0
+    fi
+    configure_bouncer
+}
+
+bouncer_nft_usable() {
+    command -v nft >/dev/null 2>&1 && nft list tables >/dev/null 2>&1
+}
+
+# TuxWall bouncer layout (fresh installs only - step_crowdsec returns early
+# when CrowdSec is already installed): nftables mode when available, hooked
+# on input only (the iptables mode equivalent of CROWDSEC_CHAIN first in
+# INPUT; forwarded traffic is not filtered, as before), priority -10 so
+# bans drop before ufw's iptables-nft chains (priority filter = 0), DROP.
+configure_bouncer() {
+    local cfg=/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml mode=iptables
+    [[ -f $cfg ]] || { info "Bouncer config not found; leaving the bouncer defaults"; return 0; }
+    bouncer_nft_usable && mode=nftables
+    cp -p "$cfg" "$cfg.tuxwall-orig" 2>/dev/null || true
+    if ! python3 - "$cfg" "$mode" >>"$LOG" 2>&1 <<'PY'
+import re
+import sys
+
+path, mode = sys.argv[1], sys.argv[2]
+s = open(path).read()
+s = re.sub(r"(?m)^mode:.*$", "mode: " + mode, s, count=1)
+s = re.sub(r"(?m)^deny_action:.*$", "deny_action: DROP", s, count=1)
+if re.search(r"(?m)^nftables_hooks:", s):
+    s = re.sub(r"(?m)^nftables_hooks:[ \t]*\n(?:[ \t]*(?:-.*)?\n)*", "nftables_hooks:\n  - input\n\n", s, count=1)
+else:
+    s = s.rstrip("\n") + "\n\nnftables_hooks:\n  - input\n"
+# priority -10 for both families (insert after `chain:` when absent)
+out, fam = [], None
+for line in s.splitlines():
+    m = re.match(r"^  (ipv4|ipv6):\s*$", line)
+    if m:
+        fam = m.group(1)
+    elif re.match(r"^\S", line):
+        fam = None
+    if fam and re.match(r"^    priority:", line):
+        continue
+    out.append(line)
+    if fam and re.match(r"^    chain:", line):
+        out.append("    priority: -10")
+s = "\n".join(out) + "\n"
+open(path, "w").write(s)
+PY
+    then
+        warn "Could not adjust the bouncer config (left as installed)"
+        return 0
+    fi
+    if systemctl restart crowdsec-firewall-bouncer >>"$LOG" 2>&1; then
+        ok "Firewall bouncer: $mode mode, input hook, priority -10"
+    else
+        warn "Firewall bouncer did not restart; check: journalctl -u crowdsec-firewall-bouncer"
     fi
 }
 

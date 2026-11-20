@@ -139,6 +139,10 @@ def install(fake):
     A.subprocess.run = fake.run
 
 
+FW_SYNCS = []
+A._crowdsec_fw_sync_async = lambda delay=0: FW_SYNCS.append(delay)
+
+
 try:
     # --- file parsing -------------------------------------------------------
     write_file("# comment", "", "  1.2.3.4  ", "1.2.3.4", "192.168.1.5", "not-an-ip",
@@ -204,10 +208,12 @@ try:
           and res["remove"] == ["3.3.3.3"] and res["protected"] == ["104.23.172.128"],
           "dry-run diff: %r" % res)
     check(fake.writes() == [], "dry-run makes no cscli writes: %r" % fake.writes())
+    check(FW_SYNCS == [], "dry-run does not trigger the nft reconcile")
 
     fake.calls.clear()
     res = A.sync_custom_blocklist()
     check(res["ok"] and not res["failed"], "sync ok: %r" % res)
+    check(len(FW_SYNCS) == 1, "a sync with changes triggers one nft reconcile (Range bans)")
     imports = [(c, i) for c, i in fake.calls if c[2:3] == ["import"]]
     check(len(imports) == 1, "one import for all adds + refreshes")
     payload = json.loads(imports[0][1]) if imports else []
@@ -227,6 +233,7 @@ try:
     check(res["add"] == [] and res["refresh"] == [] and res["remove"] == [],
           "second sync is a no-op: %r" % res)
     check(fake.writes() == [], "second sync makes no cscli writes")
+    check(len(FW_SYNCS) == 1, "a no-op sync does not trigger the nft reconcile")
     values = sorted(d["value"] for d in fake.active())
     check(values == ["1.1.1.10", "1.1.1.10", "2.2.2.2", "2.2.2.2", "4.4.4.4", "5.6.7.0/24",
                      "6.6.6.0/24"], "final custom bans (dupes left for crowdsec-dedupe): %r" % values)

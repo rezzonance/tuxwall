@@ -16,9 +16,16 @@ read the file any more.
   10 minutes while CrowdSec is down): compares the file with the live
   `custom/custom-blocklist` decisions and changes only the difference:
   - listed but not banned -> banned (one `cscli decisions import` for all);
-  - newest ban older than 20 days -> re-issued: the firewall bouncer caps
-    ipset timeouts at ~24.8 days and only re-adds an IP when it sees a new
-    decision; `crowdsec-dedupe` then removes the superseded decision;
+  - newest ban older than 20 days -> re-issued: in iptables mode the
+    firewall bouncer caps ipset timeouts at ~24.8 days and only re-adds an
+    IP when it sees a new decision; `crowdsec-dedupe` then removes the
+    superseded decision. In nftables mode (the default for new installs)
+    set elements keep the full year and the API's CrowdSec enforcement
+    pass (`crowdsec_fw.py`) re-times any element a newer, longer ban did
+    not extend, so the refresh is redundant there but harmless;
+  - listed ranges (CIDR): nftables mode keeps them in TuxWall's own
+    `inet tuxwall_crowdsec_ranges` table (the bouncer's nft sets hold single
+    addresses only); in iptables mode the bouncer's hash:net ipsets hold them;
   - banned as `custom/custom-blocklist` but no longer listed -> lifted
     (exact value and scenario only). Held back if the file cannot be read or
     the diff would lift most of the list at once (a truncated file must

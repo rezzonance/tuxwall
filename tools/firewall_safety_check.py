@@ -230,6 +230,13 @@ class Runner:
             return 0, "%s dev %s src 192.168.1.1 uid 0\n" % (ip, dev)
         if cmd[:2] == ["ufw", "reload"]:
             return self.reload_rc, "Firewall reloaded\n"
+        if cmd[:2] == ["nft", "-j"] and "list" in cmd and "-f" not in cmd:
+            nft = getattr(self, "nft", {}) or {}
+            if cmd[-1] == "tables":
+                return 0, json.dumps({"nftables": [{"metainfo": {}}] + [
+                    {"table": {"family": f, "name": n}} for f, n in nft]})
+            key = (cmd[-2], cmd[-1])
+            return (0, nft[key]) if key in nft else (1, "")
         if cmd[0] in ("ufw", "iptables", "ip6tables", "iptables-restore", "ip6tables-restore", "nft"):
             raise AssertionError("unexpected mutating command in test: %s" % c)
         return 1, ""
@@ -453,6 +460,105 @@ def t_invariants():
     shutil.rmtree(root)
 
 
+def _cs_table(family, table, chain, prio=-10, policy="accept", nsets=1):
+    sel = "ip" if family == "ip" else "ip6"
+    pre = "crowdsec-blacklists" if family == "ip" else "crowdsec6-blacklists"
+    objs = [{"metainfo": {}}, {"table": {"family": family, "name": table}},
+            {"chain": {"family": family, "table": table, "name": chain, "type": "filter", "hook": "input",
+                       "prio": prio, "policy": policy}}]
+    for i in range(nsets):
+        name = "%s-origin%d" % (pre, i)
+        objs.append({"set": {"family": family, "table": table, "name": name, "type": "%s_addr" % (
+            "ipv4" if family == "ip" else "ipv6"), "flags": ["timeout"]}})
+        objs.append({"rule": {"family": family, "table": table, "chain": chain, "expr": [
+            {"match": {"op": "==", "left": {"payload": {"protocol": sel, "field": "saddr"}}, "right": "@" + name}},
+            {"counter": name}, {"drop": None}]}})
+    return json.dumps({"nftables": objs})
+
+
+NFT_BOUNCER_YAML = ("mode: nftables\ndeny_action: DROP\niptables_chains:\n  - INPUT\nnftables:\n  ipv4:\n"
+                    "    enabled: true\n    table: crowdsec\n    chain: crowdsec-chain\n    priority: -10\n"
+                    "  ipv6:\n    enabled: true\n    table: crowdsec6\n    chain: crowdsec6-chain\n"
+                    "    priority: -10\nnftables_hooks:\n  - input\n")
+
+
+def t_crowdsec_nft():
+    """Bouncer in nftables mode: invariants read its tables, not CROWDSEC_CHAIN."""
+    root = make_root()
+    with open(root + "/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml", "w") as f:
+        f.write(NFT_BOUNCER_YAML)
+    nft_ok = {("ip", "crowdsec"): _cs_table("ip", "crowdsec", "crowdsec-chain-input"),
+              ("ip6", "crowdsec6"): _cs_table("ip6", "crowdsec6", "crowdsec6-chain-input"),
+              ("inet", "tuxwall_traffic"): "{}", ("ip", "filter"): "{}", ("inet", "tuxwall_crowdsec_ranges"): "{}",
+              ("inet", "mystuff"): "{}"}
+    no_cs = IPT_SAVE.replace(":CROWDSEC_CHAIN - [0:0]\n", "").replace("-A INPUT -j CROWDSEC_CHAIN\n", "").replace(
+        '-A CROWDSEC_CHAIN -m comment --comment "CrowdSec: cscli" -j DROP\n', "")
+
+    def ctx_with(nft, ipt=no_cs):
+        run = Runner(ipt=ipt)
+        run.nft = nft
+        return mkctx(root, run=run)[0]
+    ctx = ctx_with(nft_ok)
+    check(ctx.crowdsec["mode"] == "nftables" and ctx.crowdsec["hooks"] == ["input"], "nft mode detected")
+    rs = G.load_ruleset(ctx)
+    inv = G.invariants(rs, ctx, rs)
+    check(not [v for v in inv if v["owner"] == "crowdsec"], "healthy nft bouncer: no crowdsec violations %r" %
+          [v["id"] for v in inv if v["owner"] == "crowdsec"])
+    check(not [v for v in inv if v["severity"] in G.BLOCKING], "healthy nft fixture: nothing blocking")
+    # no CROWDSEC_CHAIN in iptables is fine in nft mode (no "not first"), a leftover one is low
+    ctx2 = ctx_with(nft_ok, ipt=IPT_SAVE.replace("-A INPUT -j CROWDSEC_CHAIN\n", ""))
+    rs2 = G.load_ruleset(ctx2)
+    inv2 = G.invariants(rs2, ctx2, rs2)
+    check("crowdsec-not-first" not in ids(inv2) and
+          [v["severity"] for v in inv2 if v["id"].startswith("crowdsec-stale-iptables")] == ["low"],
+          "nft mode: leftover CROWDSEC_CHAIN is low, no ordering check %r" % ids(inv2))
+    miss = dict(nft_ok)
+    del miss[("ip6", "crowdsec6")]
+    ctx3 = ctx_with(miss)
+    rs3 = G.load_ruleset(ctx3)
+    v3 = {v["id"]: v for v in G.invariants(rs3, ctx3, rs3)}
+    check(v3.get("crowdsec-nft-missing:v6", {}).get("severity") == "high"
+          and v3["crowdsec-nft-missing:v6"]["repair"] == {"kind": "bouncer-restart"}, "missing v6 table = high")
+    bad = dict(nft_ok)
+    bad[("ip", "crowdsec")] = _cs_table("ip", "crowdsec", "crowdsec-chain-input", prio=0)
+    ctx4 = ctx_with(bad)
+    rs4 = G.load_ruleset(ctx4)
+    check([v["severity"] for v in G.invariants(rs4, ctx4, rs4) if v["id"].startswith("crowdsec-nft-priority")]
+          == ["medium"], "priority not before ufw = medium")
+    hk = dict(nft_ok)
+    hk[("ip", "crowdsec")] = _cs_table("ip", "crowdsec", "crowdsec-chain-forward")
+    ctx5 = ctx_with(hk)
+    rs5 = G.load_ruleset(ctx5)
+    check("crowdsec-nft-hook-missing:v4:input" in {v["id"] for v in G.invariants(rs5, ctx5, rs5)},
+          "input hook missing = flagged")
+    # findings carry the bouncer-restart fix
+    fs = L.findings(rs3, ctx3)
+    f6 = [f for f in fs if f["id"] == "guard:crowdsec-nft-missing:v6"]
+    check(f6 and f6[0]["fix"]["kind"] == "manual" and "restart crowdsec-firewall-bouncer" in f6[0]["fix"]["steps"][0],
+          "finding with restart fix")
+    # nft table ownership
+    own = {(c["family"], c["table"]): c["owner"] for c in G.classify_nft(ctx)}
+    check(own == {("ip", "crowdsec"): "crowdsec", ("ip6", "crowdsec6"): "crowdsec",
+                  ("inet", "tuxwall_crowdsec_ranges"): "crowdsec", ("inet", "tuxwall_traffic"): "traffic",
+                  ("ip", "filter"): "iptables-nft", ("inet", "mystuff"): "user"}, "nft table owners %r" % own)
+    s = G.summary(rs, ctx)
+    check(s["context"]["crowdsec"]["mode"] == "nftables" and s["nft"] and
+          s["context"]["crowdsec"]["families"]["v4"]["priority"] == -10, "summary context")
+    # iptables mode: the bouncer table name is a leftover, ordering check still active
+    with open(root + "/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml", "w") as f:
+        f.write("mode: iptables\niptables_chains:\n  - INPUT\n")
+    ctx6 = ctx_with(nft_ok, ipt=IPT_SAVE)
+    own6 = {(c["family"], c["table"]): c for c in G.classify_nft(ctx6)}
+    check("left from nftables mode" in own6[("ip", "crowdsec")]["reason"], "iptables mode: leftover nft table")
+    bad6 = IPT_SAVE.replace("-A INPUT -j CROWDSEC_CHAIN\n-A INPUT -j ufw-before-input\n",
+                            "-A INPUT -i eth1 -j ACCEPT\n-A INPUT -j CROWDSEC_CHAIN\n")
+    rs6 = G.load_ruleset(ctx6, raw={"v4": bad6, "v6": ""})
+    i6 = ids(G.invariants(rs6, ctx6, rs6))
+    check("crowdsec-not-first" in i6 and "crowdsec-nft-missing" not in i6, "iptables mode keeps the ordering check")
+    check(not any(c[0] == "nft" for c in ctx6.run.calls if "table" in c), "iptables mode: bouncer tables not read")
+    shutil.rmtree(root)
+
+
 def _snap_files(root, sid):
     return S.load_files(G.Ctx(root=root, run=Runner()), sid)[1]
 
@@ -627,6 +733,8 @@ def t_live():
             if cmd[0] == "ip" and cmd[1:3] not in (["route", "show"], ["-o", "route"]):
                 raise AssertionError(cmd)
             return live_run(cmd, timeout)
+        if cmd[:2] == ["nft", "-j"] and "list" in cmd and "-f" not in cmd:
+            return live_run(cmd, timeout)
         raise AssertionError("not read-only: %s" % cmd)
     ctx = G.Ctx(root=root, run=ro, client_ip="192.168.1.50")
     rs = G.load_ruleset(ctx)
@@ -643,7 +751,12 @@ def t_live():
             check(c["owner"] == "canary", "live canary row")
     check(sum(1 for c in cl["ufw"] if c["owner"] == "honeypot") == 2 * len(hp["ports"]),
           "live: 2 x honeypot ports classified")
-    check(any(c["owner"] == "crowdsec" for c in cl["raw"]), "live crowdsec")
+    if ctx.crowdsec.get("mode") == "nftables":
+        own = {(c["family"], c["table"]): c["owner"] for c in G.classify_nft(ctx)}
+        check(all(own.get((f["family"], f["table"])) == "crowdsec"
+                  for f in ctx.crowdsec["nft"].values() if f["enabled"]), "live crowdsec (nft tables) %r" % own)
+    else:
+        check(any(c["owner"] == "crowdsec" for c in cl["raw"]), "live crowdsec")
     check(any(c["owner"] == "canary-egress" for c in cl["before"]), "live canary egress")
     inv = G.invariants(rs, ctx, rs)
     check(not [v for v in inv if v["severity"] == "critical"], "live: no critical violations %s" %
@@ -1217,8 +1330,9 @@ def main():
     t_classify()
     if HAVE_UFW:
         t_invariants()
+        t_crowdsec_nft()
     else:
-        print("SKIP t_invariants: python3 ufw module not installed")
+        print("SKIP t_invariants/t_crowdsec_nft: python3 ufw module not installed")
     t_snapshots()
     if "--live" in sys.argv:
         t_live()
