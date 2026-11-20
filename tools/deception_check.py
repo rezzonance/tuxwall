@@ -18,9 +18,11 @@ over capacity); accept() errors never kill a listener; the LAN guard
 never-ban guard on every ban/report path (honeypot catch, canary webhook,
 the cscli helper, _spawn_report) incl. own/recent WAN, Cloudflare/protected,
 collector-published ranges and infrastructure IPs; cscli return codes; the
-retired SNMP/UDP evidence; reporting "enabled" (absent = on) and the
-persistent queue (no key on disk, 0600 atomic writes, retry/backoff on
-network/429/5xx, refusal on 4xx, survives a restart); report categories
+retired SNMP/UDP evidence; reporting "enabled" (absent = on; off holds the
+queue, on resumes it) and the persistent queue (no key on disk, 0600 atomic
+writes, retry/backoff on network/429/5xx, refusal on 4xx, survives a
+restart); the community settings view/update (strict input, audit, cached
+key status, no-op re-saves) and the 24 h deception-ban count; report categories
 with port/service; the canary firewall plan (IPv4 only, grace before
 closing, leftovers removed) and the cached tail read of opencanary.log.
 The load test binds a sandboxed listener on 127.0.0.2 (never the WAN) and
@@ -65,11 +67,13 @@ A.RECENT_WAN_FILE = os.path.join(TMP, "lib", "recent-wan-ips.json")
 A.HONEY_CONF_FILE = os.path.join(TMP, "lib", "honeypot.json")
 A.CANARY_CONF = os.path.join(TMP, "opencanaryd", "opencanary.conf")
 A.CANARY_LOG = os.path.join(TMP, "opencanary", "opencanary.log")
+A.COMMUNITY_AUTO_STATE = os.path.join(TMP, "etc", "community-auto.json")
+A.COMMUNITY_AUDIT_LOG = os.path.join(TMP, "log", "community-settings-audit.log")
 for d in ("etc", "lib", "opencanaryd", "opencanary"):
     os.makedirs(os.path.join(TMP, d), exist_ok=True)
 for name in ("REPORTING_CONF_FILE", "REPORT_QUEUE_FILE", "REPORT_PAUSE_FILE", "RECENT_WAN_FILE",
              "HONEY_CONF_FILE",
-             "CANARY_CONF", "CANARY_LOG"):
+             "CANARY_CONF", "CANARY_LOG", "COMMUNITY_AUTO_STATE", "COMMUNITY_AUDIT_LOG"):
     assert getattr(A, name).startswith(TMP), name
 
 # ── fixtures: the router (documentation / private ranges) ───────────────────
@@ -529,18 +533,39 @@ def t_reporting():
     check(not r["ok"] and "off" in r["reason"] and not A.REPORT_Q["items"], "switched off: nothing queued")
     r = A._spawn_report(ATTACKER, "x", "honeypot", "scan")
     check(not A.REPORT_Q["items"], "switched off: _spawn_report queues nothing")
-    # turning it off discards what was queued
+    # turning it off HOLDS what was queued (not sent, not discarded) ...
     write_reporting({"enabled": True, "url": "https://collector.invalid/report", "key": "s3cr3tkey" * 4})
+    TRANSPORT["mode"] = "ok"
     A.report_ban_to_org(ATTACKER, 1, "a", "canary", "ssh")
     st = A.set_reporting_enabled(False)
-    check(st["enabled"] is False and st["queue_length"] == 0 and st["dropped_total"] == 1,
-          "set_reporting_enabled(False) discards the queue")
+    check(st["enabled"] is False and st["queue_length"] == 1 and st["dropped_total"] == 0
+          and st["held"] is True, "set_reporting_enabled(False) holds the queue")
+    out = A._report_q_process()
+    check(out["held"] and out["sent"] == 0 and out["left"] == 1 and not SENT,
+          "switched off: queued reports are not sent")
+    check(not A.report_ban_to_org(ATTACKER2, 1, "b", "honeypot", "scan")["ok"]
+          and len(A.REPORT_Q["items"]) == 1, "switched off: new catches stay local")
     mode = stat.S_IMODE(os.stat(A.REPORTING_CONF_FILE).st_mode)
     check(mode == 0o600, "reporting.json written 0600 (%o)" % mode)
     check(not [f for f in os.listdir(os.path.dirname(A.REPORTING_CONF_FILE)) if f.startswith(".")],
           "atomic write leaves no temp file")
-    A.set_reporting_enabled(True)
+    # ... and switching back on resumes it
+    st = A.set_reporting_enabled(True)
+    check(st["enabled"] and st["queue_length"] == 1 and not st["held"], "switched on: queue kept")
+    out = A._report_q_process()
+    check(out["sent"] == 1 and not A.REPORT_Q["items"] and SENT[-1]["body"]["ip"] == ATTACKER,
+          "switched on: the held report is delivered")
     check(A.load_reporting_conf()["key"] == "s3cr3tkey" * 4, "key preserved across settings writes")
+    # held reports still age out (stale evidence is never sent late)
+    reset_queue()
+    A.report_ban_to_org(ATTACKER, 1, "a", "canary", "ssh")
+    A.set_reporting_enabled(False)
+    A.REPORT_Q["items"][0]["created"] = time.time() - A.REPORT_QUEUE_MAX_AGE - 5
+    out = A._report_q_process()
+    check(out["discarded"] == 1 and not A.REPORT_Q["items"]
+          and A.reporting_status()["dropped_total"] == 1, "held reports expire after the max age")
+    A.set_reporting_enabled(True)
+    reset_queue()
     # queue: send ok
     reset_queue()
     TRANSPORT["mode"] = "ok"
@@ -646,6 +671,97 @@ def t_reporting():
           "register/status POST the key in the body (no query string)")
     TRANSPORT["mode"] = "ok"
     reset_queue()
+
+
+def t_community_settings():
+    reset_queue()
+    write_reporting({"enabled": True, "url": "https://collector.invalid/report", "key": ROTATE["new"]})
+    with open(A.COMMUNITY_AUTO_STATE, "w") as f:
+        json.dump({"enabled": False, "last_sync": 0, "added_total": 7}, f)
+    A.COMMUNITY_REG.update(data=None, fp=None, ts=0.0, ok=False, running=False, error=None)
+    SENT.clear()
+    TRANSPORT["mode"] = "register"
+    v = A.community_settings_view()
+    r, a = v["reporting"], v["auto_ban"]
+    check(v["ok"] and r["enabled"] is True and a["enabled"] is False and a["added_total"] == 7,
+          "settings view: both switches")
+    check(set(r["queue"]) >= {"pending", "sent", "failed"} and ROTATE["new"] not in json.dumps(v),
+          "settings view: queue counters, never the key")
+    check(r["status"] == "unknown" and r["status_checking"] is True, "first view: lookup started in the background")
+    for _ in range(100):
+        if not A.COMMUNITY_REG["running"]:
+            break
+        time.sleep(0.02)
+    r = A.community_settings_view()["reporting"]
+    check(r["registered"] and r["status"] == "pending" and r["approved"] is False
+          and r["status_checked_at"], "cached status: pending (from the collector reply)")
+    n = len(SENT)
+    A.community_settings_view()
+    check(len(SENT) == n, "cached: no second lookup within the TTL")
+    check(all(x["body"] == {"key": ROTATE["new"], "action": "status"} for x in SENT),
+          "status lookups only (nothing registered or reported)")
+    # key rotation drops the cached status
+    write_reporting({"enabled": True, "url": "https://collector.invalid/report", "key": ROTATE["old"]})
+    r = A.community_settings_view()["reporting"]
+    check(r["status"] == "unknown", "rotated key: old status forgotten")
+    for _ in range(100):
+        if not A.COMMUNITY_REG["running"]:
+            break
+        time.sleep(0.02)
+    # no key: no lookup at all
+    write_reporting({"enabled": True, "url": "https://collector.invalid/report"})
+    n = len(SENT)
+    r = A.community_settings_view()["reporting"]
+    check(r["key_present"] is False and r["status"] == "unknown" and len(SENT) == n,
+          "no key yet: nothing looked up")
+    write_reporting({"enabled": True, "url": "https://collector.invalid/report", "key": ROTATE["new"]})
+    TRANSPORT["mode"] = "ok"
+    # updates: strict input, audited with the user, unchanged values not rewritten
+    who = {"username": "tester", "role": "admin"}
+    for bad in ({}, {"reporting_enabled": "false"}, {"auto_ban": 1}, {"enabled": True}, None):
+        try:
+            A.community_settings_update(bad, who, "192.0.2.9")
+            check(False, "bad input refused: %r" % (bad,))
+        except ValueError:
+            check(True, "bad input refused")
+    before = os.stat(A.COMMUNITY_AUTO_STATE).st_mtime_ns
+    out = A.community_settings_update({"auto_ban": False}, who, "192.0.2.9")
+    check(out["ok"] and out["changed"] == [] and os.stat(A.COMMUNITY_AUTO_STATE).st_mtime_ns == before,
+          "re-saving the current auto-ban value is a no-op")
+    A.report_ban_to_org(ATTACKER, 1, "a", "canary", "ssh")
+    out = A.community_settings_update({"reporting_enabled": False}, who, "192.0.2.9")
+    check(out["changed"] == ["reporting_enabled"] and out["reporting"]["enabled"] is False
+          and out["reporting"]["queue"]["pending"] == 1 and out["reporting"]["queue"]["held"],
+          "reporting off via settings: queue held")
+    out = A.community_settings_update({"reporting_enabled": True, "auto_ban": True}, who, "192.0.2.9")
+    check(out["reporting"]["enabled"] and out["auto_ban"]["enabled"]
+          and sorted(out["changed"]) == ["auto_ban", "reporting_enabled"]
+          and out["reporting"]["queue"]["pending"] == 1, "both switched on; queue resumes")
+    check(A._load_community_auto()["enabled"] is True and A._load_community_auto()["added_total"] == 7,
+          "auto-ban state kept its counters")
+    lines = [json.loads(x) for x in _real_open(A.COMMUNITY_AUDIT_LOG).read().splitlines()]
+    check(len(lines) == 3 and all(x["user"] == "tester" and x["client"] == "192.0.2.9" for x in lines)
+          and lines[1]["changes"]["reporting_enabled"] == {"from": True, "to": False},
+          "every settings request audited with the dashboard user")
+    check(stat.S_IMODE(os.stat(A.COMMUNITY_AUDIT_LOG).st_mode) & 0o007 == 0, "audit log not world-readable")
+    check(any("/api/community/settings".startswith(p) for p in A.ADMIN_GET_PREFIXES),
+          "GET /api/community/settings is admin-only")
+    # deception bans in the last 24 h (cscli raw output)
+    raw = ("id,source,ip,reason,action,country,as,events_count,expiration,simulated,alert_id\n"
+           "1,cscli,Ip:45.95.147.10,honeypot/tuxwall,ban,,,1,8759h,false,1\n"
+           "2,cscli,Ip:185.220.101.77,canary/ssh-connection,ban,,\"AS1, Inc\",1,8759h,false,2\n"
+           "3,cscli,Ip:185.220.101.78,custom/local-ban,ban,,,1,89d,false,3\n"
+           "4,cscli,Ip:185.220.101.79,canary/vnc-connection,captcha,,,1,4h,false,4\n")
+    check(A._deception_bans_count(raw) == (1, 1), "bans 24 h: honeypot + canary bans counted")
+    A._DECEPTION_BANS.update(ts=0.0, data=None)
+    d = A.deception_bans_24h()
+    call = [c for c in RUN.calls if c[:3] == [A.CROWDSEC_BIN, "decisions", "list"]
+            or (os.path.basename(c[0]) == "cscli" and "--since" in c)][-1]
+    check(d["ok"] and "--since" in call and call[call.index("--since") + 1] == "24h"
+          and "add" not in call, "bans 24 h: one read-only cscli list --since 24h")
+    reset_queue()
+    with open(A.COMMUNITY_AUTO_STATE, "w") as f:
+        json.dump({"enabled": False}, f)
 
 
 def t_community_pages():
@@ -872,7 +988,7 @@ def _peer_alive(c):
 def main():
     try:
         for t in (t_ttl_map, t_slots, t_threshold, t_listener, t_lan_guard, t_guard_paths,
-                  t_categories, t_reporting, t_community_pages, t_canary_fw, t_canary_log, t_load):
+                  t_categories, t_reporting, t_community_settings, t_community_pages, t_canary_fw, t_canary_log, t_load):
             t()
         bad = [c for c in RUN.calls if os.path.basename(c[0]) == "cscli"
                and any(x in c for x in ("192.168.1.50", WAN4, WAN6, CF, NTP))]

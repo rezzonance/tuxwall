@@ -3105,6 +3105,7 @@ def community_reporting_status():
             out.update(_registration_fields(data))
     except Exception as exc:
         out["warning"] = "tuxwall.org unreachable: %s" % exc
+    _community_reg_store(out, key)
     return out
 
 
@@ -3117,6 +3118,7 @@ def community_reporting_register():
         code, data = _register_post({"key": key, "version": TUXWALL_VERSION})
         if not data.get("ok"):
             return {"ok": False, "error": data.get("error") or ("registration refused (HTTP %d)" % code)}
+        _community_reg_store(dict(_registration_fields(data), ok=True, registered=True), key)
         return dict(_registration_fields(data), ok=True)
     except Exception as exc:
         return {"ok": False, "error": "tuxwall.org unreachable: %s" % exc}
@@ -4039,13 +4041,21 @@ def ensure_reporting_key():
 
 
 def set_reporting_enabled(enabled):
-    """The real off switch (phase 3 wires it into the settings UI)."""
+    """The real off switch (dashboard: Deception / Community Bans settings).
+    Off: new catches are not queued and nothing is sent; reports already
+    queued are HELD (not sent, not discarded - they still age out after
+    REPORT_QUEUE_MAX_AGE). On again: the held queue resumes at once."""
     with _report_status_lock:
         conf = load_reporting_conf()
         conf["enabled"] = bool(enabled)
         _save_reporting_conf(conf)
-    if not enabled:
-        _report_q_discard_all("community reporting switched off")
+    if enabled:
+        _report_q_load()
+        with REPORT_Q_LOCK:
+            pending = bool(REPORT_Q["items"])
+        if pending:
+            _report_worker_ensure()
+            REPORT_Q_WAKE.set()
     return reporting_status()
 
 
@@ -4103,15 +4113,22 @@ def _report_q_save():
         print("[report] queue save failed: %r" % (exc,), flush=True)
 
 
-def _report_q_discard_all(why):
-    _report_q_load()
+def _report_q_prune_stale(now=None):
+    """Drop queued reports older than REPORT_QUEUE_MAX_AGE (stale evidence
+    is never sent late, e.g. after a long switch-off). -> count dropped."""
+    now = now or time.time()
+    cutoff = now - REPORT_QUEUE_MAX_AGE
     with REPORT_Q_LOCK:
-        n = len(REPORT_Q["items"])
+        items = REPORT_Q["items"]
+        keep = [i for i in items if float(i.get("created") or now) >= cutoff]
+        n = len(items) - len(keep)
         if n:
-            REPORT_Q["items"] = []
-            REPORT_Q["stats"]["dropped_total"] = int(REPORT_Q["stats"].get("dropped_total") or 0) + n
-            REPORT_Q["stats"]["last_error"] = "%d queued report(s) discarded: %s" % (n, why)
-            REPORT_Q["stats"]["last_error_at"] = time.time()
+            REPORT_Q["items"] = keep
+            st = REPORT_Q["stats"]
+            st["dropped_total"] = int(st.get("dropped_total") or 0) + n
+            st["last_error"] = "%d queued report(s) older than %d days dropped" % (
+                n, REPORT_QUEUE_MAX_AGE // 86400)
+            st["last_error_at"] = now
             _report_q_save()
     return n
 
@@ -4255,11 +4272,15 @@ def _report_q_process(now=None, limit=REPORT_BATCH):
     refused, discarded, left, paused}. Never raises."""
     now = now or time.time()
     out = {"sent": 0, "retry": 0, "refused": 0, "discarded": 0, "left": 0,
-           "paused": False}
+           "paused": False, "held": False}
     _report_q_load()
+    out["discarded"] = _report_q_prune_stale(now)
     conf = load_reporting_conf()
     if not conf["enabled"]:
-        out["discarded"] = _report_q_discard_all("community reporting is switched off")
+        # switched off: hold what is queued (sent when switched back on)
+        out["held"] = True
+        with REPORT_Q_LOCK:
+            out["left"] = len(REPORT_Q["items"])
         return out
     if _report_q_paused(now):
         out["paused"] = True
@@ -4328,6 +4349,8 @@ def _report_worker_loop():
         wait = 300.0 if nxt is None else max(1.0, min(300.0, nxt - time.time()))
         if nxt is not None and _report_q_paused():
             wait = 10.0
+        if nxt is not None and not load_reporting_conf()["enabled"]:
+            wait = 300.0      # held while switched off; switching on wakes us
         REPORT_Q_WAKE.wait(wait)
         REPORT_Q_WAKE.clear()
 
@@ -4367,6 +4390,7 @@ def reporting_status():
         "refused_total": int(st.get("refused_total") or 0),
         "dropped_total": int(st.get("dropped_total") or 0),
         "paused": _report_q_paused(now),
+        "held": bool(items) and not conf["enabled"],
         "queue_length": len(items),
         "queue_retrying": len([i for i in items if int(i.get("attempts") or 0) > 0]),
         "next_retry": nxt,
@@ -4384,6 +4408,230 @@ def report_ban_to_org(ip, hits=0, reason="", source="", category="",
         return _report_enqueue(_report_payload(ip, hits, reason, source, category, suricata))
     except Exception as exc:
         return {"ok": False, "reason": str(exc)}
+
+
+# --- Community settings (Security > Deception + CrowdSec > Community Bans) ----
+# One lightweight view of the two community switches, shared by both pages:
+#   reporting - this install's deception catches -> tuxwall.org (reporting.json)
+#   auto_ban  - the tuxwall.org list -> local CrowdSec bans (community-auto.json)
+# Built from local state only: never downloads the ban list. The key's
+# approval state (pending / approved / revoked) comes from a cached
+# POST /register {"action": "status"} lookup refreshed in the background.
+# Changes are audited with the dashboard user.
+COMMUNITY_AUDIT_LOG = "/var/log/tuxwall/community-settings-audit.log"
+COMMUNITY_REG_TTL = 600        # cached approval status after a good lookup (s)
+COMMUNITY_REG_RETRY = 120      # ... after a failed one
+COMMUNITY_REG_MIN_GAP = 20     # forced re-checks at most this often
+COMMUNITY_REG = {"data": None, "fp": None, "ts": 0.0, "ok": False, "running": False,
+                 "error": None}
+COMMUNITY_REG_LOCK = threading.Lock()
+COMMUNITY_SETTINGS_KEYS = ("reporting_enabled", "auto_ban")
+
+
+def _reporting_key_fp(key):
+    return hashlib.sha256((key or "").encode("utf-8")).hexdigest()[:16] if key else None
+
+
+def _community_reg_store(out, key):
+    """Remember a status lookup result (called by community_reporting_status)."""
+    with COMMUNITY_REG_LOCK:
+        if out.get("warning"):
+            COMMUNITY_REG.update(ts=time.time(), ok=False, error=str(out["warning"])[:200])
+        else:
+            COMMUNITY_REG.update(data=dict(out), fp=_reporting_key_fp(key), ts=time.time(),
+                                 ok=True, error=None)
+
+
+def _community_reg_refresh():
+    try:
+        community_reporting_status()
+    except Exception as exc:
+        with COMMUNITY_REG_LOCK:
+            COMMUNITY_REG.update(ts=time.time(), ok=False, error=str(exc)[:200])
+    finally:
+        with COMMUNITY_REG_LOCK:
+            COMMUNITY_REG["running"] = False
+
+
+def community_registration(force=False):
+    """Cached approval state of this install's reporting key. A stale cache
+    starts one background lookup and answers with what is known (checking
+    = True meanwhile). No key yet: nothing is looked up (the first report
+    creates and registers it)."""
+    key = load_reporting_conf()["key"]
+    if not key:
+        return {"registered": False, "status": "unknown", "approved": False,
+                "checked_at": None, "checking": False, "error": None, "key_present": False}
+    fp = _reporting_key_fp(key)
+    now = time.time()
+    with COMMUNITY_REG_LOCK:
+        if COMMUNITY_REG["fp"] not in (None, fp):        # key rotated: forget
+            COMMUNITY_REG.update(data=None, fp=None, ts=0.0, ok=False, error=None)
+        age = now - COMMUNITY_REG["ts"]
+        ttl = COMMUNITY_REG_TTL if COMMUNITY_REG["ok"] else COMMUNITY_REG_RETRY
+        stale = (COMMUNITY_REG["data"] is None and COMMUNITY_REG["ts"] == 0.0) or age >= ttl \
+            or (force and age >= COMMUNITY_REG_MIN_GAP)
+        start = stale and not COMMUNITY_REG["running"]
+        if start:
+            COMMUNITY_REG["running"] = True
+        data = dict(COMMUNITY_REG["data"] or {})
+        checked = COMMUNITY_REG["ts"] if COMMUNITY_REG["data"] is not None else None
+        error = COMMUNITY_REG["error"]
+        running = COMMUNITY_REG["running"]
+    if start:
+        try:
+            threading.Thread(target=_community_reg_refresh, name="community-reg",
+                             daemon=True).start()
+        except RuntimeError:
+            with COMMUNITY_REG_LOCK:
+                COMMUNITY_REG["running"] = False
+            running = False
+    status = str(data.get("status") or "unknown")
+    if status not in ("pending", "approved", "revoked"):
+        status = "unknown"
+    return {"registered": bool(data.get("registered")), "status": status,
+            "approved": bool(data.get("approved")) and status == "approved",
+            "approved_at": data.get("approved_at"), "created": data.get("created"),
+            "checked_at": checked, "checking": running, "error": error, "key_present": True}
+
+
+def community_settings_view(force_status=False):
+    """GET /api/community/settings (admin): both switches + reporting status."""
+    rs = reporting_status()
+    reg = community_registration(force_status)
+    auto = _load_community_auto()
+    return {
+        "ok": True,
+        "reporting": {
+            "enabled": bool(rs["enabled"]),
+            "registered": reg["registered"],
+            "status": reg["status"],
+            "approved": reg["approved"],
+            "approved_at": reg.get("approved_at"),
+            "key_present": reg["key_present"],
+            "status_checked_at": reg["checked_at"],
+            "status_checking": reg["checking"],
+            "status_error": reg["error"],
+            "last_report": rs["last_report"],
+            "last_error": rs["last_error"],
+            "last_error_at": rs["last_error_at"],
+            "reported_24h": rs["sent_24h"],
+            "queue": {
+                "pending": rs["queue_length"],
+                "retrying": rs["queue_retrying"],
+                "sent": rs["sent_total"],
+                "failed": rs["refused_total"],
+                "dropped": rs["dropped_total"],
+                "next_retry": rs["next_retry"],
+                "paused": rs["paused"],
+                "held": rs["held"],
+            },
+        },
+        "auto_ban": {
+            "enabled": bool(auto.get("enabled")),
+            "last_sync": auto.get("last_sync") or None,
+            "added_total": int(auto.get("added_total") or 0),
+            "last_pass_added": int(auto.get("last_pass_added") or 0),
+            "pending": int(auto.get("pending") or 0),
+        },
+    }
+
+
+def _community_audit(who, client, changes):
+    entry = {"ts": round(time.time(), 3), "user": who or "?", "client": client or "",
+             "changes": changes}
+    print("[community] settings by %s: %s" % (entry["user"], json.dumps(changes)), flush=True)
+    try:
+        os.makedirs(os.path.dirname(COMMUNITY_AUDIT_LOG), exist_ok=True)
+        fd = os.open(COMMUNITY_AUDIT_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o640)
+        with os.fdopen(fd, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError as exc:
+        print("[community] audit write failed: %r" % (exc,), flush=True)
+
+
+def community_settings_update(body, identity, client=""):
+    """POST /api/community/settings {reporting_enabled?, auto_ban?} (admin).
+    Strict booleans, at least one known key; every request is audited with
+    the dashboard user (old -> new per key, unchanged values included).
+    Raises ValueError on bad input."""
+    if not isinstance(body, dict) or not body:
+        raise ValueError("send reporting_enabled and/or auto_ban (true/false)")
+    unknown = sorted(k for k in body if k not in COMMUNITY_SETTINGS_KEYS)
+    if unknown:
+        raise ValueError("unknown setting: %s" % ", ".join(unknown)[:120])
+    for k in body:
+        if not isinstance(body[k], bool):
+            raise ValueError("%s must be true or false" % k)
+    changes = {}
+    if "reporting_enabled" in body:
+        old = bool(load_reporting_conf()["enabled"])
+        new = body["reporting_enabled"]
+        if new != old:
+            set_reporting_enabled(new)
+        changes["reporting_enabled"] = {"from": old, "to": new}
+    if "auto_ban" in body:
+        old = bool(_load_community_auto().get("enabled"))
+        new = body["auto_ban"]
+        if new != old:
+            res = set_community_auto(new)
+            if not res.get("ok"):
+                raise RuntimeError("community auto-ban could not be saved")
+        changes["auto_ban"] = {"from": old, "to": new}
+    _community_audit((identity or {}).get("username"), client, changes)
+    out = community_settings_view()
+    out["changed"] = sorted(k for k, v in changes.items() if v["from"] != v["to"])
+    return out
+
+
+# Deception bans of the last 24 h (Deception status cards): one cheap
+# `cscli decisions list --since 24h` (alerts of the last day only), cached.
+DECEPTION_BANS_TTL = 120
+DECEPTION_BANS_RETRY = 30
+_DECEPTION_BANS = {"ts": 0.0, "data": None}
+_DECEPTION_BANS_LOCK = threading.Lock()
+
+
+def _deception_bans_count(raw):
+    """Pure: (honeypot, canary) ban decisions in `cscli -o raw` output."""
+    honey = canary = 0
+    for line in (raw or "").splitlines()[1:]:
+        parts = line.strip().split(",")
+        if len(parts) < 5 or parts[4] != "ban":
+            continue
+        reason = parts[3]
+        if reason.startswith("honeypot/"):
+            honey += 1
+        elif reason.startswith("canary/"):
+            canary += 1
+    return honey, canary
+
+
+def deception_bans_24h():
+    now = time.time()
+    with _DECEPTION_BANS_LOCK:
+        d = _DECEPTION_BANS["data"]
+        if d is not None and now - _DECEPTION_BANS["ts"] < (
+                DECEPTION_BANS_TTL if d.get("ok") else DECEPTION_BANS_RETRY):
+            return dict(d)
+        prev = dict(d) if d else None
+    out = {"ok": False, "honeypot": 0, "canary": 0, "total": 0, "at": now}
+    try:
+        proc = subprocess.run([CROWDSEC_BIN, "decisions", "list", "-o", "raw",
+                               "--limit", "0", "--since", "24h"],
+                              capture_output=True, text=True, timeout=CROWDSEC_TIMEOUT)
+        if proc.returncode == 0:
+            honey, canary = _deception_bans_count(proc.stdout)
+            out.update(ok=True, honeypot=honey, canary=canary, total=honey + canary)
+        else:
+            out["error"] = (proc.stderr or "cscli failed").strip()[:160]
+    except Exception as exc:
+        out["error"] = str(exc)[:160]
+    if not out["ok"] and prev and prev.get("ok"):
+        out = dict(prev, stale=True, error=out.get("error"))   # last good numbers
+    with _DECEPTION_BANS_LOCK:
+        _DECEPTION_BANS.update(ts=time.time(), data=dict(out))
+    return out
 
 
 RECENT_WAN_FILE = os.path.join(BLOCKLIST_DIR, "recent-wan-ips.json")
@@ -5346,11 +5594,19 @@ def _build_canary():
 
     ban_count, last_ban_ip = _canary_ban_snapshot()
 
+    # WAN ports the watchdog last saw bound AND opened (every 60 s)
+    with CANARY_FW_LOCK:
+        fw_last = dict(CANARY_FW_STATE.get("last") or {})
+    listening = sorted(int(p) for p in (fw_last.get("open_ports") or []))
+
     return {
         "ok": True,
         "active": active,
         "service": CANARY_SERVICE,
         "modules": modules,
+        "listening_ports": (listening if fw_last.get("ok") and not fw_last.get("skipped")
+                            else None),
+        "listening_checked_at": fw_last.get("at"),
         "events_24h": total_24h,
         "sources_24h": sources_24h,
         "creds_24h": creds_24h,
@@ -6771,8 +7027,9 @@ def build_honeypot():
             key=lambda a: a["connected_at"], reverse=True,
         )[:50]
         traps = list(reversed(HONEY_STATE["traps"][-30:]))
+        hit_items = HONEY_STATE["hits"].items()     # sources seen in the last 24 h
         top = sorted(
-            ((ip, int(e.get("hits") or 0)) for ip, e in HONEY_STATE["hits"].items()),
+            ((ip, int(e.get("hits") or 0)) for ip, e in hit_items),
             key=lambda kv: -kv[1])[:15]
         state = {
             "listening": HONEY_STATE["listening"],
@@ -6788,8 +7045,19 @@ def build_honeypot():
             "active": active,
             "traps": traps,
             "top": [{"ip": ip, "hits": n} for ip, n in top],
+            "sources_24h": len(hit_items),
             "log": list(HONEY_STATE["log"][-20:]),
         }
+        lan_nets = _HONEY_LAN["nets"]
+    # LAN guard: the networks treated as ours (cached; refreshed on the
+    # tarpit's own schedule) and what the guards held back since start
+    state["lan_guard"] = {
+        "nets": [str(n) for n in (lan_nets or [])
+                 if not n.is_loopback][:24],
+        "closed": int(state["stats"].get("lan_guard") or 0),
+        "guarded": int(state["stats"].get("guarded") or 0),
+        "dropped": int(state["stats"].get("dropped") or 0),
+    }
     return {
         "ok": True,
         "conf": _honey_load_conf(),
@@ -10685,6 +10953,7 @@ ADMIN_GET_PREFIXES = (
     "/api/system/unbound-config",
     "/api/system/dhcp-form",
     "/api/system/unbound-form",
+    "/api/community",
 )
 
 
@@ -15641,6 +15910,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_aide())
         elif path == "/api/security/honeypot":
             self._send(200, build_honeypot())
+        elif path == "/api/security/deception":
+            self._send(200, {"ok": True, "bans_24h": deception_bans_24h()})
         elif path == "/api/security/canary":
             self._send(200, build_canary())
         elif path == "/api/security/tripwire":
@@ -15838,6 +16109,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_community_bans())
         elif path == "/api/crowdsec/reporting/status":
             self._send(200, community_reporting_status())
+        elif path == "/api/community/settings":
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            try:
+                self._send(200, community_settings_view(
+                    force_status=(qs.get("refresh") or [""])[0] == "1"))
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)[:200]})
         elif path == "/api/bandwidth":
             self._send(200, build_bandwidth())
         elif path == "/api/blocklists":
@@ -16573,6 +16851,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, ban_crowdsec_ip(body.get("ip"), body.get("duration")))
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
+        elif path == "/api/community/settings":
+            # same-origin was checked above when Origin/Referer is present;
+            # this switch also refuses a POST that carries neither
+            if not (self.headers.get("Origin") or self.headers.get("Referer")):
+                self._send(403, {"ok": False, "error": "Origin header required"})
+                return
+            try:
+                self._send(200, community_settings_update(body, identity, _client_key(self)))
+            except ValueError as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)[:200]})
         elif path == "/api/crowdsec/reporting/register":
             try:
                 self._send(200, community_reporting_register())

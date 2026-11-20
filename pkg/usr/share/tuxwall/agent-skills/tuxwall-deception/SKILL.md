@@ -22,7 +22,11 @@ Live state without shell: `tuxwall_crowdsec_decisions` (pass `ip` to check one a
   router's own or recent WAN addresses, protected infrastructure (Cloudflare, model APIs, collector-published ranges) or
   infrastructure the router depends on (DNS forwarders, NTP, gateways, resolvers, APT mirrors).
 - Community reporting: `/etc/tuxwall/reporting.json` (root 0600, holds the install key - never print it) `enabled` is the
-  off switch; reports go through the persistent retry queue `/var/lib/tuxwall/report-queue.json` (no key inside).
+  off switch; reports go through the persistent retry queue `/var/lib/tuxwall/report-queue.json` (no key inside); while
+  off, queued reports are held (not sent, aged out after 7 days) and resume when switched back on. The owner changes it -
+  and community auto-ban (`/etc/tuxwall/community-auto.json`) - in the dashboard (Security > Deception or CrowdSec >
+  Community Bans; `GET/POST /api/community/settings`, audited in `/var/log/tuxwall/community-settings-audit.log`).
+  Never toggle either switch yourself.
 - Canary egress containment: owner-match rules in `/etc/ufw/before.rules` and `/etc/ufw/before6.rules` (ufw-before-output) let the
   opencanary user reach only the dashboard webhook (127.0.0.1:8008) and local DNS; everything else is logged
   `[TUXWALL-CANARY-EGRESS]` and rejected. A similar block contains the forum user. Never delete or duplicate these blocks.

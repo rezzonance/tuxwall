@@ -6,10 +6,10 @@
   <title>TuxWall - Network Dashboard</title>
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
-  <link rel="stylesheet" href="/css/style.css?v=20261118202024">
-  <link rel="stylesheet" href="/css/polish.css?v=20261118212902">
+  <link rel="stylesheet" href="/css/style.css?v=20261119195143">
+  <link rel="stylesheet" href="/css/polish.css?v=20261119195143">
   <link rel="stylesheet" href="/css/firewall.css?v=202611120056">
-  <link rel="stylesheet" href="/css/bento.css?v=20261119085140">
+  <link rel="stylesheet" href="/css/bento.css?v=20261119195143">
   <link rel="stylesheet" href="/css/heroes.css?v=202611120056">
   <link rel="stylesheet" href="/css/sidebar.css?v=202611120056">
   <link rel="stylesheet" href="/css/action-icons.css?v=202611120056">
@@ -1992,110 +1992,122 @@
 
       </div>
 
-      <!-- Pane: Deception (tarpit + canary) -->
-      <div class="fw-pane" data-sec-pane="deception" hidden>
-
-      <div class="deception-notice">
-        <b>Trap catches feed the tuxwall.org community ban list.</b>
-        Every IP caught here attacked a decoy — a verified threat, zero false positives.
-        Only the attacker IP and deception evidence are shared; configurations, logs and
-        personal data never leave the box. Sharing follows the deception layer itself:
-        each install reports under an anonymous key, and the first catch auto-registers it,
-        starting a <b>7-day trust clock</b>. Register up front in
-        <b>CrowdSec ▸ Community Bans ▸ Community Sharing</b> to start that clock at setup
-        instead of at the first catch. The list is consumed separately — enable
-        <b>Automatic mode</b> there to block every community IP locally.
-        Manual and engine bans are never reported.
-        <span class="dec-legend">
-          <span>Anonymous install key</span>
-          <span>IP + evidence only</span>
-          <span>7-day trust window</span>
-          <span>365-day local bans</span>
-        </span>
-      </div>
-
-      <div class="dec-rail" id="dec-rail">
-        <div class="dec-rail-item" data-layer="tarpit">
-          <span class="dec-rail-dot" id="dec-rail-honey-dot" data-status="inactive"></span>
-          <div class="dec-rail-copy">
-            <span class="dec-rail-label">Port-garden Tarpit</span>
-            <span class="dec-rail-value" id="dec-rail-honey-value">Stopped</span>
-          </div>
-          <span class="dec-rail-tag" id="dec-rail-honey-tag">off</span>
+      <!-- Pane: Deception (tarpit + canary) - phase 4 layout: status cards,
+           community settings, honeypot, canary, sources + event log, About -->
+      <div class="fw-pane dec-pane" data-sec-pane="deception" hidden>
+      <div class="stats-row dec-stats" id="dec-stats" role="group" aria-label="Deception status">
+        <div class="stat-card stat-c stat-c-blue" id="dec-st-trapped-card">
+          <div class="stat-value" id="dec-st-trapped">&mdash;</div>
+          <div class="stat-label">Trapped now <span class="dec-st-sub" id="dec-st-trapped-sub"></span></div>
         </div>
-        <div class="dec-rail-item" data-layer="canary">
-          <span class="dec-rail-dot" id="dec-rail-canary-dot" data-status="inactive"></span>
-          <div class="dec-rail-copy">
-            <span class="dec-rail-label">OpenCanary Emulators</span>
-            <span class="dec-rail-value" id="dec-rail-canary-value">Stopped</span>
-          </div>
-          <span class="dec-rail-tag" id="dec-rail-canary-tag">off</span>
+        <div class="stat-card stat-c stat-c-red" id="dec-st-bans-card">
+          <div class="stat-value" id="dec-st-bans">&mdash;</div>
+          <div class="stat-label">Bans 24 h <span class="dec-st-sub" id="dec-st-bans-sub"></span></div>
         </div>
-        <div class="dec-rail-item" data-layer="policy">
-          <span class="dec-rail-dot" data-status="active"></span>
-          <div class="dec-rail-copy">
-            <span class="dec-rail-label">Ban policy</span>
-            <span class="dec-rail-value">Auto-ban · 365 days</span>
-          </div>
-          <span class="dec-rail-tag">CrowdSec</span>
+        <div class="stat-card stat-c stat-c-teal" id="dec-st-reported-card">
+          <div class="stat-value" id="dec-st-reported">&mdash;</div>
+          <div class="stat-label">Reported 24 h <span class="dec-st-sub" id="dec-st-reported-sub"></span></div>
+        </div>
+        <div class="stat-card stat-c stat-c-amber" id="dec-st-honey-card">
+          <div class="stat-value" id="dec-st-honey">&mdash;</div>
+          <div class="stat-label">Honeypot <span class="dec-st-sub" id="dec-st-honey-sub"></span></div>
+        </div>
+        <div class="stat-card stat-c stat-c-purple" id="dec-st-canary-card">
+          <div class="stat-value" id="dec-st-canary">&mdash;</div>
+          <div class="stat-label">Canary <span class="dec-st-sub" id="dec-st-canary-sub"></span></div>
+        </div>
+        <div class="stat-card stat-c stat-c-green" id="dec-st-community-card">
+          <div class="stat-value" id="dec-st-community">&mdash;</div>
+          <div class="stat-label">Community <span class="dec-st-sub" id="dec-st-community-sub"></span></div>
         </div>
       </div>
+      <p class="bk-sr" id="dec-live" role="status" aria-live="polite"></p>
 
-      <div class="card card-mt dec-card dec-honey">
-        <div class="card-head dec-head">
-          <span class="dec-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg></span>
-          <div class="dec-head-copy">
-            <h2>Honeypot <span class="status-dot" id="honey-status-dot" data-status="inactive"></span></h2>
-            <span class="muted dec-sub" id="sec-honey-hint"></span>
+      <div class="card dec-card dec-community" id="dec-community-card">
+        <div class="card-head card-head-ico">
+          <span class="card-head-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3Z"/></svg></span>
+          <div class="card-head-copy">
+            <h2>Community</h2>
+            <span class="muted">Share catches with tuxwall.org and use its ban list &mdash; the same switches as CrowdSec &rsaquo; Community Bans</span>
+          </div>
+        </div>
+        <div class="dec-cs-body" data-community-settings="dec-cs"></div>
+      </div>
+
+      <div class="card dec-card dec-honey" id="dec-honey-card">
+        <div class="card-head card-head-ico">
+          <span class="card-head-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg></span>
+          <div class="card-head-copy">
+            <h2>Honeypot tarpit <span class="status-dot" id="honey-status-dot" data-status="inactive"></span></h2>
+            <span class="muted" id="sec-honey-hint">Loading&hellip;</span>
           </div>
           <button id="sec-honey-toggle" class="btn btn-sm btn-act" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v10"/><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/></svg><span>Enable</span></button>
         </div>
-        <div class="card-toolbar bl-toolbar rpz-form dec-form">
-          <label class="dec-field dec-ports"><span>Ports</span><input type="text" id="sec-honey-ports" placeholder="23, 2323, 3389, 445, 8080, 5555" autocomplete="off" spellcheck="false"></label>
+        <div class="card-toolbar dec-form">
+          <label class="dec-field dec-ports"><span>Decoy ports</span><input type="text" id="sec-honey-ports" placeholder="23, 445, 2323, 3389, 5555" autocomplete="off" spellcheck="false" aria-describedby="sec-honey-ports-hint"></label>
           <div class="dec-field dec-toggle">
-            <label class="fw-switch" title="Auto-ban trapped IPs via CrowdSec (1y)">
-              <input type="checkbox" id="sec-honey-autoban">
+            <label class="fw-switch">
+              <input type="checkbox" id="sec-honey-autoban" aria-labelledby="sec-honey-autoban-l">
               <span class="fw-switch-slider"></span>
             </label>
-            <span>Auto-ban</span>
+            <span id="sec-honey-autoban-l">Auto-ban (1 year)</span>
           </div>
-          <label class="dec-field dec-threshold"><span>After</span><input type="number" id="sec-honey-threshold" min="1" max="10" title="Ban after this many connections"></label>
-          <span class="muted dec-unit">hits → ban</span>
+          <label class="dec-field dec-threshold"><span>Ban after</span><input type="number" id="sec-honey-threshold" min="1" max="10" inputmode="numeric"><span class="dec-unit">hits</span></label>
           <button id="sec-honey-apply" class="btn btn-primary" type="button">Save &amp; Apply</button>
         </div>
+        <p class="dec-hint" id="sec-honey-ports-hint">1&ndash;16 ports, bound on the WAN addresses only (IPv4 + IPv6). Keep the threshold at 1 &mdash; nothing legitimate connects here; raise it only for a port that could see innocent traffic (e.g. 80/443).</p>
         <div class="dec-chips" id="sec-honey-chips" hidden></div>
-        <div id="sec-honey-summary" class="trap-console"></div>
+        <div class="dec-meta" id="sec-honey-meta" hidden></div>
         <div class="table-wrap">
           <table id="sec-honey-table" data-tw-cap="10">
-            <thead><tr><th style="width:100px">Status</th><th>IP</th><th style="width:90px">Port</th><th>Held</th><th style="width:110px">First seen</th></tr></thead>
+            <thead><tr><th class="dec-col-status">Status</th><th>Source</th><th class="dec-col-port">Port</th><th>Held</th><th class="dec-col-time">Connected</th></tr></thead>
             <tbody id="sec-honey-body"></tbody>
           </table>
         </div>
-        <div class="dec-meta" id="sec-honey-meta" hidden></div>
-        <p class="muted bl-note">A <b>port-garden tarpit</b>: classic scan ports (telnet, RDP, SMB, adb…) are bound on the <b>WAN addresses only (IPv4 + IPv6)</b> — every connection is held open with a clamped TCP window while the scanner waits forever for data that never comes. Any connection here is hostile by definition, so sources are <b>auto-banned via CrowdSec (1 year)</b> — no manual banning, no AbuseIPDB cross-checking needed, and the catch is shared with the community list above. LAN/WireGuard sources are closed immediately and never counted. Overflow connections beyond the safety caps (256 total / 8 per IP) are dropped, not trapped, so a botnet flood can't exhaust the router. <b>Keep the threshold at 1</b>: nothing legitimate ever connects to these ports, so a single completed handshake is hostile by definition — only raise it (to 3–5) if you add a port that could plausibly see innocent traffic (e.g. 80/443).</p>
       </div>
 
-      <div class="card card-mt dec-card dec-canary">
-        <div class="card-head dec-head">
-          <span class="dec-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 8-3 8h18s-3-1-3-8"/><path d="M10 21h4"/></svg></span>
-          <div class="dec-head-copy">
-            <h2>Deception Canary <span class="status-dot" id="canary-status-dot" data-status="inactive"></span></h2>
-            <span class="muted dec-sub" id="sec-canary-hint"></span>
+      <div class="card dec-card dec-canary" id="dec-canary-card">
+        <div class="card-head card-head-ico">
+          <span class="card-head-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 8-3 8h18s-3-1-3-8"/><path d="M10 21h4"/></svg></span>
+          <div class="card-head-copy">
+            <h2>Canary emulators <span class="status-dot" id="canary-status-dot" data-status="inactive"></span></h2>
+            <span class="muted" id="sec-canary-hint">Loading&hellip;</span>
           </div>
           <button id="sec-canary-toggle" class="btn btn-sm btn-act" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v10"/><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/></svg><span>Enable</span></button>
         </div>
         <div class="dec-chips" id="sec-canary-chips" hidden></div>
-        <div id="sec-canary-summary" class="trap-console dec-funnel" role="group" aria-label="Canary activity over the last 24 hours"></div>
+        <div class="dec-meta" id="sec-canary-meta" hidden></div>
         <div class="table-wrap">
           <table id="sec-canary-table" data-tw-cap="10">
-            <thead><tr><th style="width:110px">Time</th><th>Source</th><th style="width:170px">Service</th><th style="width:70px">Port</th><th>Detail</th></tr></thead>
+            <thead><tr><th class="dec-col-time">Time</th><th>Source</th><th class="dec-col-svc">Service</th><th class="dec-col-port">Port</th><th>Detail</th></tr></thead>
             <tbody id="sec-canary-body"></tbody>
           </table>
         </div>
-        <div class="dec-meta" id="sec-canary-meta" hidden></div>
-        <p class="muted bl-note">The <b>OpenCanary</b> deception emulators — SSH, VNC, MSSQL, Redis — bound on the <b>WAN IPv4 address only</b>, running as a sandboxed service user. Any interaction is hostile by definition (nothing legitimate connects to services that do not exist), so sources are <b>auto-banned via CrowdSec (1 year)</b> and the catch is shared with the community list above. The SSH canary on port 22 <b>captures the credentials bruteforcers spray</b> — usernames and passwords appear in the Detail column; they are attacker-submitted guesses at your router, not real credentials. <b>Enable</b> starts the service and opens IPv4 WAN rules only for the ports it actually bound (closed again automatically if the canary stops); <b>Disable</b> stops it and closes exactly its ports. The full record lives at <code>/var/log/opencanary/opencanary.log</code>.</p>
+        <p class="dec-hint">The SSH canary records the usernames and passwords scanners spray (Detail column) &mdash; attacker guesses, not your credentials. Full record: <code>/var/log/opencanary/opencanary.log</code>.</p>
       </div>
 
+      <div class="card dec-card dec-activity" id="dec-activity-card">
+        <div class="card-head card-head-ico">
+          <span class="card-head-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12h4l2.5-6 5 12 2.5-6h4"/></svg></span>
+          <div class="card-head-copy">
+            <h2>Sources &amp; event log</h2>
+            <span class="muted">Busiest tarpit sources of the last 24 h, the deception event log and the LAN guard</span>
+          </div>
+        </div>
+        <div class="dec-activity-grid">
+          <section class="dec-panel" aria-labelledby="dec-top-h">
+            <h3 class="dec-panel-h" id="dec-top-h">Top tarpit sources &middot; 24 h</h3>
+            <ol class="dec-top" id="dec-top"></ol>
+          </section>
+          <section class="dec-panel" aria-labelledby="dec-log-h">
+            <h3 class="dec-panel-h" id="dec-log-h">Event log <span class="muted dec-panel-note">newest first &middot; since the last API start</span></h3>
+            <ul class="dec-log" id="dec-log"></ul>
+          </section>
+        </div>
+        <div class="dec-guard" id="dec-guard" hidden></div>
+      </div>
+
+      <p class="muted bl-note dec-about"><b>About the deception layer.</b> Decoys catch scanners: nothing legitimate connects to services that don't exist, so every source here is hostile by definition. The <b>honeypot</b> holds connections to classic scan ports open on the WAN addresses (IPv4 + IPv6) &mdash; at most 8 per source and 256 in total, 4 h each; extra connections are dropped, not trapped. The <b>canary</b> emulates SSH, VNC, MSSQL and Redis on the WAN IPv4; its firewall rules are open only while it actually listens. A catch is <b>banned locally</b> in CrowdSec for 1 year (honeypot: once the hit threshold is reached and auto-ban is on; canary: any TCP interaction) and, while reporting is on, <b>reported</b> to tuxwall.org with the attacker IP, port/service and evidence only &mdash; the honeypot reports even with its auto-ban off. <b>Never banned or reported:</b> LAN, VLAN and WireGuard addresses (incl. the delegated IPv6 prefix), the router's own and recent WAN addresses, protected infrastructure (Cloudflare, model APIs, collector-published ranges) and the DNS, NTP, gateway and mirror hosts the router depends on. To stop sharing, switch off <b>Report catches to the community</b> above (or on CrowdSec &rsaquo; Community Bans) &mdash; catches then stay on this router.</p>
       </div>
 
       <!-- Pane: Integrity (AIDE) -->
@@ -2430,28 +2442,7 @@
           <button class="btn btn-sm btn-primary" type="button" id="cban-ban-all">Ban all shown (90d)</button>
           <span class="muted cban-status" id="cban-status"></span>
         </div>
-        <div class="cban-controls">
-          <div class="cban-auto-panel">
-            <div class="cban-auto-copy">
-              <strong>Automatic mode</strong>
-              <span class="muted">Ban every community IP locally for 90 days — never reported back.</span>
-            </div>
-            <span class="cban-state-badge" id="cban-auto-badge" data-state="off" role="status" aria-live="polite">Inactive</span>
-            <label class="fw-switch cban-switch" title="Ban every listed community IP locally for 90 days">
-              <input type="checkbox" id="cban-auto">
-              <span class="fw-switch-slider"></span>
-            </label>
-            <span class="muted cban-auto-stats" id="cban-auto-stats">Auto: off — manual ban buttons</span>
-          </div>
-          <div class="cban-share-panel">
-            <span class="cban-state-badge" id="cban-share-badge" data-state="pending" role="status" aria-live="polite">Checking…</span>
-            <div class="cban-share-copy">
-              <strong>Community sharing</strong>
-              <span class="muted" id="cban-share-status">Sharing status…</span>
-            </div>
-            <button class="btn btn-sm" type="button" id="cban-share">Enable community sharing</button>
-          </div>
-        </div>
+        <div class="cban-controls" data-community-settings="cban-cs"></div>
         <div class="table-wrap cban-table-wrap">
           <table id="cban-table">
             <thead>
@@ -2470,9 +2461,8 @@
           </table>
         </div>
         <p class="muted bl-note">
-          <b>Automatic mode (recommended)</b> — enabling it bans <b>all IP addresses in the community ban list</b>: every entry is deception-verified (a canary/honeypot catch on a real TuxWall), so automatic blocking carries near-zero false-positive risk. Bans are local 90&#8209;day decisions that expire on their own, refresh while the IP stays listed, and are never reported back. With automatic mode active, the manual bulk-ban button is removed — every listed IP is already covered.&nbsp;
-          <b>Manual mode</b> — leave it off to pick and choose with the per&#8209;row ban buttons and severity filters.&nbsp;
-          <b>Community sharing</b> — the key register (the key alone, nothing else) makes your trap catches count toward community severity after a 7&#8209;day trust window. Judgment-based bans never leave this box.
+          <b>Use community bans</b> &mdash; bans every medium-or-higher IP on the tuxwall.org list locally (CrowdSec, 90&#8209;day decisions that refresh while the IP stays listed and are never reported back); the manual bulk-ban button is hidden while it is on. Leave it off to pick IPs with the per&#8209;row ban buttons and severity filters.&nbsp;
+          <b>Report catches to the community</b> &mdash; sends only the attacker IP and decoy evidence of this router's honeypot/canary catches under an anonymous install key; a new key counts at low weight until the tuxwall.org admin approves it. Manual and engine bans never leave this box. The same two switches are on Security &rsaquo; Deception.
         </p>
       </div>
       </div>
@@ -4149,7 +4139,8 @@
   </div>
 </div>
 <script src="/scripts/worldmap.js?v=202611120056"></script>
-<script src="/scripts/dashboard.js?v=20261119182133"></script>
+<script src="/scripts/community-settings.js?v=20261119195143"></script>
+<script src="/scripts/dashboard.js?v=20261119195143"></script>
 <script src="/scripts/enhance.js?v=20261118204958"></script>
 <script src="/scripts/netmap.js?v=20261119081229"></script>
 <script src="/scripts/insights.js?v=20261112182249"></script>

@@ -79,4 +79,6 @@ jobs:
           node-version: "22"
 
       - name: Syntax check
-        run: node --check www/scripts/dashboard.js
+        run: |
+          node --check www/scripts/dashboard.js
+          node --check www/scripts/community-settings.js

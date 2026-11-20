@@ -120,12 +120,6 @@
     cbanGenerated: document.getElementById("cban-generated"),
     cbanSub: document.getElementById("cban-sub"),
     cbanStatus: document.getElementById("cban-status"),
-    cbanShare: document.getElementById("cban-share"),
-    cbanShareStatus: document.getElementById("cban-share-status"),
-    cbanShareBadge: document.getElementById("cban-share-badge"),
-    cbanAuto: document.getElementById("cban-auto"),
-    cbanAutoBadge: document.getElementById("cban-auto-badge"),
-    cbanAutoStats: document.getElementById("cban-auto-stats"),
     cbanBanAll: document.getElementById("cban-ban-all"),
     csBanModal: document.getElementById("cs-ban-modal"),
     csBanTitle: document.getElementById("cs-ban-title"),
@@ -173,9 +167,6 @@
     secHoneyBody: document.getElementById("sec-honey-body"),
     secHoneyChips: document.getElementById("sec-honey-chips"),
     secHoneyMeta: document.getElementById("sec-honey-meta"),
-    decRailHoneyDot: document.getElementById("dec-rail-honey-dot"),
-    decRailHoneyValue: document.getElementById("dec-rail-honey-value"),
-    decRailHoneyTag: document.getElementById("dec-rail-honey-tag"),
     secTripCard: document.getElementById("sec-trip-card"),
     secTripHint: document.getElementById("sec-trip-hint"),
     secTripDot: document.getElementById("sec-trip-dot"),
@@ -219,9 +210,6 @@
     secCanaryBody: document.getElementById("sec-canary-body"),
     secCanaryChips: document.getElementById("sec-canary-chips"),
     secCanaryMeta: document.getElementById("sec-canary-meta"),
-    decRailCanaryDot: document.getElementById("dec-rail-canary-dot"),
-    decRailCanaryValue: document.getElementById("dec-rail-canary-value"),
-    decRailCanaryTag: document.getElementById("dec-rail-canary-tag"),
     secZeekDevBody: document.querySelector("#sec-zeek-dev-body"),
     secZeekDevHint: document.getElementById("sec-zeek-dev-hint"),
     secQuicBody: document.querySelector("#sec-quic-body"),
@@ -3929,9 +3917,11 @@
   // is on screen; it used to be polled on every Security sub-pane.
   function refreshDeceptionIfVisible() {
     const pane = document.querySelector('#view-security .fw-pane[data-sec-pane="deception"]');
-    if (!pane || pane.hidden) return;
+    if (!pane || pane.hidden || state.activeView !== "security") return;
     refreshHoneypot();
     refreshCanary();
+    refreshDecSummary();
+    if (window.twCommunitySettings) window.twCommunitySettings.refresh(10000);
   }
   document.querySelectorAll("#sec-subtabs .fw-subtab").forEach((btn) => {
     btn.addEventListener("click", () => setSecTab(btn.dataset.secPane));
@@ -3957,7 +3947,10 @@
     });
   }
 
-  // ---- Deception detail layer: port chips, top sources, coverage rail ----
+  // ---- Security ▸ Deception (phase 4, Nov 19) ---------------------------------
+  // Status cards, community settings (shared module, community-settings.js),
+  // honeypot + canary cards and the sources / event-log card. Everything is
+  // fetched only while the Deception pane is on screen.
   const DEC_PORT_SERVICES = {
     21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns", 80: "http",
     110: "pop3", 135: "msrpc", 139: "netbios", 143: "imap", 443: "https",
@@ -3966,180 +3959,363 @@
     5900: "vnc", 6379: "redis", 8080: "http-alt", 8443: "https-alt",
     9200: "elastic", 11211: "memcached", 27017: "mongodb",
   };
+  const DEC_TONES = ["blue", "green", "amber", "red", "purple", "teal"];
+  const dec = { honey: null, honeyErr: "", canary: null, canaryErr: "", summary: null, community: null, announced: "" };
+  let decFormDirty = false;
 
-  function decPortChips(ports, active) {
-    const list = (ports || [])
-      .map((p) => parseInt(p, 10))
-      .filter((p) => p > 0)
-      .slice(0, 16);
+  function decStat(key, value, sub, tone, title) {
+    const v = document.getElementById("dec-st-" + key);
+    const s = document.getElementById("dec-st-" + key + "-sub");
+    const card = document.getElementById("dec-st-" + key + "-card");
+    if (v) v.textContent = value;
+    if (s) s.textContent = sub || "";
+    if (card) {
+      if (tone) {
+        DEC_TONES.forEach((t) => card.classList.toggle("stat-c-" + t, t === tone));
+        card.dataset.tone = tone;
+      }
+      card.title = title || (sub ? value + " — " + sub : value);
+    }
+  }
+
+  function decAgo(ts) {
+    if (!ts) return "never";
+    const d = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+    if (d < 60) return "just now";
+    if (d < 3600) return `${Math.floor(d / 60)} min ago`;
+    if (d < 86400) return `${Math.floor(d / 3600)} h ago`;
+    return `${Math.floor(d / 86400)} d ago`;
+  }
+
+  function decPortChips(ports, live, label) {
+    const list = (ports || []).map((p) => parseInt(p, 10)).filter((p) => p > 0).slice(0, 16);
     if (!list.length) return "";
-    const label = active ? "Armed" : "Configured";
     const chips = list.map((p) => {
+      const on = live === true || (live instanceof Set && live.has(p));
       const svc = DEC_PORT_SERVICES[p] || "custom";
-      return `<span class="dec-chip${active ? "" : " is-off"}"><b>:${p}</b><span class="dec-chip-svc">${esc(svc)}</span></span>`;
+      return `<span class="dec-chip${on ? "" : " is-off"}" title="${on ? "listening" : "not listening"}"><b>${p}</b><span class="dec-chip-svc">${esc(svc)}</span></span>`;
     }).join("");
-    return `<span class="dec-chips-label">${label}</span>${chips}`;
+    return `<span class="dec-chips-label">${esc(label)}</span>${chips}`;
   }
 
   function decMetaHtml(items) {
     return items
       .filter(Boolean)
-      .map(([k, v]) => `<span class="dec-meta-item">${esc(k)} <b>${esc(String(v))}</b></span>`)
+      .map(([k, v, kind]) => `<span class="dec-meta-item"${kind ? ` data-kind="${esc(kind)}"` : ""}>${esc(k)} <b>${esc(String(v))}</b></span>`)
       .join("");
   }
 
-  function renderHoneyDetail(conf, st) {
-    const active = !!st.listening;
-    const ports = (st.ports && st.ports.length) ? st.ports : (conf.ports || []);
-
-    if (els.secHoneyChips) {
-      const html = decPortChips(ports, active);
-      els.secHoneyChips.innerHTML = html;
-      els.secHoneyChips.hidden = !html;
-    }
-
-    if (els.secHoneyMeta) {
-      const items = [
-        ["State", active
-          ? `WAN${st.wan_ip6 ? " v4 + v6" : " v4"}`
-          : (st.error ? "error" : "stopped")],
-      ];
-      if (active && st.started_at) items.push(["Listening since", formatTime(st.started_at)]);
-      items.push(["Ban term", "365 days"]);
-      items.push(["Cap", "256 total / 8 per IP"]);
-      els.secHoneyMeta.innerHTML = decMetaHtml(items);
-      els.secHoneyMeta.hidden = false;
-    }
-
-    if (els.decRailHoneyDot) {
-      els.decRailHoneyDot.dataset.status = active ? "active" : "inactive";
-    }
-    if (els.decRailHoneyValue) {
-      const n = (ports || []).length;
-      els.decRailHoneyValue.textContent = active
-        ? `${n} port${n === 1 ? "" : "s"} · ${st.wan_ip || "WAN"}`
-        : (st.error ? "error" : "stopped");
-    }
-    if (els.decRailHoneyTag) {
-      els.decRailHoneyTag.textContent = active ? "armed" : "off";
-      els.decRailHoneyTag.dataset.on = active ? "1" : "0";
-    }
+  // honeypot state in one word: "on" | "down" | "off" | "unknown"
+  function decHoneyState() {
+    const d = dec.honey;
+    if (!d) return "unknown";
+    const conf = d.conf || {};
+    const st = d.state || {};
+    if (st.listening) return "on";
+    return conf.enabled ? "down" : "off";
   }
 
-  function renderCanaryDetail(c) {
-    const active = !!c.active;
-    const mods = c.modules || [];
+  function decCanaryListening(c) {
+    const mods = (c && c.modules) || [];
+    if (!c || !c.active) return { n: 0, of: mods.length, set: new Set() };
+    if (!Array.isArray(c.listening_ports)) {
+      return { n: mods.length, of: mods.length, set: new Set(mods.map((m) => parseInt(m.port, 10))), unknown: true };
+    }
+    const set = new Set(c.listening_ports.map((p) => parseInt(p, 10)));
+    return { n: mods.filter((m) => set.has(parseInt(m.port, 10))).length, of: mods.length, set };
+  }
 
-    if (els.secCanaryChips) {
-      const html = mods.length
-        ? `<span class="dec-chips-label">${active ? "Emulating" : "Configured"}</span>` +
-          mods.map((m) =>
-            `<span class="dec-chip${active ? "" : " is-off"}"><b>:${esc(String(m.port))}</b>` +
-            `<span class="dec-chip-svc">${esc(m.name)}</span></span>`).join("")
-        : "";
-      els.secCanaryChips.innerHTML = html;
-      els.secCanaryChips.hidden = !html;
+  function renderDecStats() {
+    const h = dec.honey;
+    const st = (h && h.state) || {};
+    const conf = (h && h.conf) || {};
+    const c = dec.canary;
+    // 1. trapped now / 24 h catches
+    if (h) {
+      const hs = st.sources_24h || 0;
+      const cs = (c && c.sources_24h) || 0;
+      decStat("trapped", formatNumber(st.active_count || 0),
+        `${formatNumber(hs + cs)} sources caught · 24 h`, "blue",
+        `${st.active_count || 0} tarpit connection(s) held open now. Sources in the last 24 h: ${hs} honeypot (counted since the last API restart) + ${cs} canary.`);
+    } else {
+      decStat("trapped", "—", dec.honeyErr ? "honeypot status unavailable" : "", dec.honeyErr ? "amber" : "blue");
     }
+    // 2. bans 24 h
+    const b = dec.summary && dec.summary.bans_24h;
+    if (b && b.ok) {
+      decStat("bans", formatNumber(b.total), `${formatNumber(b.honeypot)} honeypot · ${formatNumber(b.canary)} canary`,
+        "red", `CrowdSec bans created in the last 24 h by the deception layer${b.stale ? " (last known numbers)" : ""}`);
+    } else if (dec.summary) {
+      decStat("bans", "—", "CrowdSec count unavailable", "amber");
+    }
+    // 3. reported 24 h
+    const cm = dec.community;
+    const r = cm && cm.reporting;
+    if (r) {
+      const q = (r.queue && r.queue.pending) || 0;
+      if (!r.enabled) {
+        decStat("reported", formatNumber(r.reported_24h || 0), q ? `reporting off · ${formatNumber(q)} held` : "reporting off", "amber",
+          "Community reporting is switched off — catches stay on this router");
+      } else {
+        decStat("reported", formatNumber(r.reported_24h || 0),
+          `last ${decAgo(r.last_report)}${q ? ` · ${formatNumber(q)} queued` : ""}`,
+          r.status === "revoked" ? "red" : "teal",
+          `Reports sent to tuxwall.org in the last 24 h; last report ${r.last_report ? formatDateTime(r.last_report) : "never"}`);
+      }
+    }
+    // 4. honeypot
+    const hstate = decHoneyState();
+    if (hstate === "unknown") {
+      decStat("honey", "Unknown", dec.honeyErr ? "status unavailable" : "loading…", "amber");
+    } else {
+      const n = (st.ports && st.ports.length) ? st.ports.length : (conf.ports || []).length;
+      const fam = st.wan_ip6 ? "v4 + v6" : "v4";
+      const ab = conf.auto_ban ? "auto-ban on" : "auto-ban off";
+      if (hstate === "on") decStat("honey", "Listening", `${n} port${n === 1 ? "" : "s"} · ${fam} · ${ab}`, "green");
+      else if (hstate === "down") decStat("honey", "Down", st.error ? "error — see the honeypot card" : "enabled but not listening", "red",
+        st.error ? `Honeypot not listening: ${st.error}` : "");
+      else decStat("honey", "Off", "no decoy ports open", "amber");
+    }
+    // 5. canary
+    if (c && c.ok) {
+      const l = decCanaryListening(c);
+      if (!c.active) decStat("canary", "Stopped", "no emulators listening", "amber", c.hint || "");
+      else if (l.of && l.n < l.of) decStat("canary", "Partial", `${l.n} of ${l.of} services listening`, "amber");
+      else decStat("canary", "Running", `${l.n} of ${l.of} services listening`, "green");
+    } else {
+      decStat("canary", "Unknown", dec.canaryErr ? "status unavailable" : "loading…", "amber");
+    }
+    // 6. community
+    const a = cm && cm.auto_ban;
+    if (r) {
+      const sub = `reporting ${r.enabled ? "on" : "off"} · auto-ban ${a && a.enabled ? "on" : "off"}`;
+      if (!r.enabled) decStat("community", "Local only", sub, "amber");
+      else if (r.status === "approved") decStat("community", "Approved", sub, "green");
+      else if (r.status === "pending") decStat("community", "Pending", sub, "amber", "This install's key is waiting for approval by the tuxwall.org admin");
+      else if (r.status === "revoked") decStat("community", "Revoked", sub, "red");
+      else decStat("community", r.status_checking ? "Checking" : "Unknown", sub, "blue");
+    }
+    // announce state changes (not every poll) for screen readers
+    const sig = [hstate, c ? (c.active ? "canary on" : "canary off") : "", r ? (r.enabled ? r.status : "local") : ""].join("|");
+    const live = document.getElementById("dec-live");
+    if (live && dec.announced && sig !== dec.announced) {
+      live.textContent = `Deception status: honeypot ${hstate === "on" ? "listening" : hstate}, ` +
+        `canary ${c && c.active ? "running" : "stopped"}, community ${r ? (r.enabled ? r.status : "reporting off") : "unknown"}.`;
+    }
+    if (h || c) dec.announced = sig;
+  }
 
-    if (els.secCanaryMeta) {
-      const items = [
-        ["Service", c.service || "opencanary.service"],
-        ["Emulators", `${mods.length} ${active ? "bound" : "configured"}`],
-        ["Window", "24 hours"],
-        ["Ban term", "365 days"],
-      ];
-      els.secCanaryMeta.innerHTML = decMetaHtml(items);
-      els.secCanaryMeta.hidden = false;
-    }
+  function decLogKind(msg) {
+    // failures first (a ban or a listener that did not work), then guard /
+    // watchdog notices, then plain bans
+    if (/error|failed|refused|could not|exhaust|errno|cscli exit|not banned locally|died|dead\b/i.test(msg)) return "bad";
+    if (/watchdog|guard|not banned\/reported|never banned|not reported|skipped|local-only|local only|dropped|over capacity|restart|spoofable/i.test(msg)) return "warn";
+    if (/banned/i.test(msg)) return "ban";
+    return "";
+  }
 
-    if (els.decRailCanaryDot) {
-      els.decRailCanaryDot.dataset.status = active ? "active" : "inactive";
+  function renderDecActivity() {
+    const st = (dec.honey && dec.honey.state) || {};
+    const topEl = document.getElementById("dec-top");
+    if (topEl) {
+      const top = (st.top || []).slice(0, 8);
+      const max = Math.max(1, ...top.map((t) => t.hits || 0));
+      topEl.innerHTML = top.length
+        ? top.map((t) => `<li><span class="mono dec-top-ip">${esc(t.ip)}</span><span class="dec-top-bar" aria-hidden="true"><i style="width:${Math.max(4, Math.round(((t.hits || 0) / max) * 100))}%"></i></span><b class="dec-top-n">${formatNumber(t.hits)}<span class="bk-sr"> connections</span></b></li>`).join("")
+        : `<li class="dec-empty">${dec.honey ? "No tarpit sources in the last 24 h." : "Loading…"}</li>`;
     }
-    if (els.decRailCanaryValue) {
-      const n = mods.length;
-      els.decRailCanaryValue.textContent = active
-        ? `${n} emulator${n === 1 ? "" : "s"} on WAN`
-        : "stopped";
+    const logEl = document.getElementById("dec-log");
+    if (logEl) {
+      const lines = (st.log || []).slice(-20).reverse();
+      logEl.innerHTML = lines.length
+        ? lines.map((line) => {
+          const m = /^\[(\d\d:\d\d:\d\d)\]\s*(.*)$/.exec(String(line));
+          const t = m ? m[1] : "";
+          const msg = m ? m[2] : String(line);
+          const kind = decLogKind(msg);
+          return `<li${kind ? ` data-kind="${kind}"` : ""}><span class="mono dec-log-t">${esc(t)}</span><span class="dec-log-m">${esc(msg)}</span></li>`;
+        }).join("")
+        : `<li class="dec-empty">${dec.honey ? "No events since the last API start." : "Loading…"}</li>`;
     }
-    if (els.decRailCanaryTag) {
-      els.decRailCanaryTag.textContent = active ? "armed" : "off";
-      els.decRailCanaryTag.dataset.on = active ? "1" : "0";
+    const g = document.getElementById("dec-guard");
+    const lg = st.lan_guard;
+    if (g) {
+      if (!lg) { g.hidden = true; return; }
+      const nets = (lg.nets || []).map((n) => `<span class="dec-net mono">${esc(n)}</span>`).join("");
+      g.innerHTML = `<div class="dec-guard-copy"><strong>LAN guard</strong>` +
+        `<span class="muted">Treated as yours — closed at once, never trapped, banned or reported${nets ? ":" : "."}</span></div>` +
+        (nets ? `<div class="dec-nets">${nets}</div>` : "") +
+        `<div class="dec-guard-counts">${decMetaHtml([
+          ["LAN connections closed", formatNumber(lg.closed || 0)],
+          ["never-ban skips", formatNumber(lg.guarded || 0)],
+          ["over-cap drops", formatNumber(lg.dropped || 0)],
+        ])}<span class="muted dec-guard-since">since the last API restart</span></div>`;
+      g.hidden = false;
     }
   }
 
   function renderHoneypot(d) {
-    if (!d.ok) {
-      showBanner(true, d.error || "Honeypot data unavailable");
+    if (!d || !d.ok) {
+      dec.honeyErr = (d && d.error) || "unavailable";
+      if (els.secHoneyHint) els.secHoneyHint.textContent = "Status unavailable — retrying";
+      renderDecStats();
       return;
     }
+    dec.honey = d;
+    dec.honeyErr = "";
     const conf = d.conf || {};
     const st = d.state || {};
     const stats = st.stats || {};
-    els.secHoneyPorts.value = (conf.ports || []).join(", ");
-    els.secHoneyAutoban.checked = !!conf.auto_ban;
-    els.secHoneyThreshold.value = conf.ban_threshold || 1;
-
-    if (st.listening) {
-      els.secHoneyHint.textContent = `active on ${st.wan_ip}${st.wan_ip6 ? " / " + st.wan_ip6 : ""}`;
-      setBtnIcon(els.secHoneyToggle, "disable", "Disable", true);
-      els.secHoneyToggle.className = "btn btn-sm btn-danger btn-act";
-    } else {
-      els.secHoneyHint.textContent = st.error ? `error: ${st.error}` : "disabled";
-      setBtnIcon(els.secHoneyToggle, "enable", "Enable", false);
-      els.secHoneyToggle.className = "btn btn-sm btn-primary btn-act";
+    const lim = st.limits || { total: 256, per_ip: 8, hold: 14400 };
+    const formBusy = decFormDirty || (document.activeElement && document.activeElement.closest
+      && document.activeElement.closest("#dec-honey-card .dec-form"));
+    if (!formBusy) {
+      els.secHoneyPorts.value = (conf.ports || []).join(", ");
+      els.secHoneyAutoban.checked = !!conf.auto_ban;
+      els.secHoneyThreshold.value = conf.ban_threshold || 1;
     }
-    const total = stats.total || 0;
-    const unique = stats.unique || 0;
-    const held = st.active_count || 0;   // API reports this on state, not stats
-    const avgHold = total > 0 ? (stats.wasted || 0) / total : 0;
-    const uniquePct = total > 0 ? Math.round((unique / total) * 100) : 0;
-    const heldPct = Math.min(100, Math.round((held / 256) * 100));
-    const wastedH = stats.wasted ? (stats.wasted / 3600).toFixed(1) : "0.0";
-    els.secHoneySummary.classList.toggle("is-empty", !total);
-    els.secHoneySummary.innerHTML = total
-      ? `<div class="trap-hero">
-           <span class="trap-kicker">Trapped · all time</span>
-           <div class="trap-big">${formatNumber(total)}</div>
-           <div class="trap-hero-sub">avg ${avgHold >= 1 ? formatDuration(avgHold) : "—"} held per session</div>
-           <div class="trap-ratio" title="${uniquePct}% of traps came from unique sources"><i style="width:${uniquePct}%"></i></div>
-           <div class="trap-ratio-cap"><b>${formatNumber(unique)}</b> unique sources · <b>${uniquePct}%</b> of traps</div>
-           <span class="trap-radar" aria-hidden="true"></span>
-         </div>
-         <div class="trap-grid">
-           <div class="trap-cell" data-tone="accent">
-             <span class="trap-cell-label">Held now</span>
-             <span class="trap-cell-sub">of 256 slots</span>
-             <span class="trap-cell-value">${held}</span>
-             <span class="trap-cell-meter"><i style="width:${heldPct}%"></i></span>
-           </div>
-           <div class="trap-cell" data-tone="teal">
-             <span class="trap-cell-label">Time wasted</span>
-             <span class="trap-cell-sub">${formatNumber(total)} sessions</span>
-             <span class="trap-cell-value">${wastedH}<em>h</em></span>
-           </div>
-           <div class="trap-cell" data-tone="red">
-             <span class="trap-cell-label">Auto-banned</span>
-             <span class="trap-cell-sub">365-day decisions</span>
-             <span class="trap-cell-value">${formatNumber(stats.banned || 0)}</span>
-           </div>
-         </div>`
-      : `<span class="muted">No scanners trapped yet.</span>`;
-    const honeyDot = document.getElementById("honey-status-dot");
-    if (honeyDot) honeyDot.dataset.status = st.listening ? "active" : "inactive";
+    const hstate = decHoneyState();
+    if (hstate === "on") {
+      els.secHoneyHint.textContent = `Listening on ${st.wan_ip}${st.wan_ip6 ? " and " + st.wan_ip6 : ""}`;
+    } else if (hstate === "down") {
+      els.secHoneyHint.textContent = st.error ? `Not listening — ${st.error}` : "Enabled but not listening (waiting for the WAN address)";
+    } else {
+      els.secHoneyHint.textContent = "Off — no decoy ports open";
+    }
+    const on = !!conf.enabled;
+    setBtnIcon(els.secHoneyToggle, on ? "disable" : "enable", on ? "Disable" : "Enable", on);
+    els.secHoneyToggle.className = "btn btn-sm btn-act " + (on ? "btn-danger" : "btn-primary");
+    els.secHoneyToggle.setAttribute("aria-label", on ? "Disable the honeypot" : "Enable the honeypot");
+    const dot = document.getElementById("honey-status-dot");
+    if (dot) dot.dataset.status = hstate === "on" ? "active" : "inactive";
 
-    const active = st.active || [];
-    const traps = st.traps || [];
-    const rows = [];
+    const ports = (st.ports && st.ports.length) ? st.ports : (conf.ports || []);
+    if (els.secHoneyChips) {
+      const html = decPortChips(ports, hstate === "on", hstate === "on" ? "Listening" : "Configured");
+      els.secHoneyChips.innerHTML = html;
+      els.secHoneyChips.hidden = !html;
+    }
+    if (els.secHoneyMeta) {
+      const total = stats.total || 0;
+      const items = [
+        hstate === "on" && st.started_at ? ["Listening since", formatDateTime(st.started_at)] : null,
+        ["Caught since restart", `${formatNumber(total)} connections · ${formatNumber(stats.unique || 0)} sources`],
+        ["Time wasted", `${((stats.wasted || 0) / 3600).toFixed(1)} h`],
+        ["Auto-ban", conf.auto_ban
+          ? `on · after ${conf.ban_threshold || 1} hit${(conf.ban_threshold || 1) === 1 ? "" : "s"} · 1 year`
+          : "off (catches are still reported)"],
+        ["Banned / reported", `${formatNumber(stats.banned || 0)} / ${formatNumber(stats.reported || 0)}`],
+        ["Caps", `${lim.per_ip} per source · ${lim.total} total · ${Math.round((lim.hold || 14400) / 3600)} h hold`],
+        stats.ban_failed ? ["Ban failures", formatNumber(stats.ban_failed), "bad"] : null,
+        (stats.accept_errors || stats.thread_errors)
+          ? ["Listener errors", formatNumber((stats.accept_errors || 0) + (stats.thread_errors || 0)), "bad"] : null,
+      ];
+      els.secHoneyMeta.innerHTML = decMetaHtml(items);
+      els.secHoneyMeta.hidden = false;
+    }
+
     const now = Date.now() / 1000;
-    active.slice(0, 25).forEach((a) => {
+    const rows = [];
+    (st.active || []).slice(0, 25).forEach((a) => {
       rows.push(`<tr><td><span class="badge sev-HIGH">trapping</span></td><td class="mono">${esc(a.ip)}</td><td class="mono">${esc(a.port)}</td><td class="mono">${formatDuration(now - a.connected_at)}</td><td class="muted">${formatTime(a.connected_at)}</td></tr>`);
     });
-    traps.slice(0, 15).forEach((t) => {
+    (st.traps || []).slice(0, 15).forEach((t) => {
       rows.push(`<tr><td><span class="badge sev-LOW">released</span></td><td class="mono">${esc(t.ip)}</td><td class="mono">${esc(t.port)}</td><td class="mono">${formatDuration(t.duration)}</td><td class="muted">${formatTime(t.connected_at)}</td></tr>`);
     });
     els.secHoneyBody.innerHTML = rows.join("")
-      || `<tr><td colspan="5" class="empty">Honeypot is ${st.listening ? "listening — no scanners yet" : "disabled"}.</td></tr>`;
-    renderHoneyDetail(conf, st);
+      || `<tr><td colspan="5" class="empty">${hstate === "on" ? "Listening — no scanners trapped since the last restart." : "The honeypot is not listening."}</td></tr>`;
+    renderDecStats();
+    renderDecActivity();
+  }
+
+  function renderCanary(c) {
+    if (!c || !c.ok) {
+      dec.canaryErr = (c && c.error) || "unavailable";
+      if (els.secCanaryHint) els.secCanaryHint.textContent = "Status unavailable — retrying";
+      if (els.secCanaryChips) els.secCanaryChips.hidden = true;
+      if (els.secCanaryMeta) els.secCanaryMeta.hidden = true;
+      renderDecStats();
+      return;
+    }
+    dec.canary = c;
+    dec.canaryErr = "";
+    const mods = c.modules || [];
+    const l = decCanaryListening(c);
+    els.secCanaryHint.textContent = c.active
+      ? `Running · ${l.n} of ${l.of} services listening on the WAN IPv4`
+      : (c.hint ? c.hint.replace(/ - /g, " — ") : "Stopped — no emulators listening");
+    const dot = document.getElementById("canary-status-dot");
+    if (dot) dot.dataset.status = c.active ? "active" : "inactive";
+    setBtnIcon(els.secCanaryToggle, c.active ? "disable" : "enable", c.active ? "Disable" : "Enable", !!c.active);
+    els.secCanaryToggle.className = "btn btn-sm btn-act " + (c.active ? "btn-danger" : "btn-primary");
+    els.secCanaryToggle.setAttribute("aria-label", c.active ? "Disable the canary" : "Enable the canary");
+    if (els.secCanaryChips) {
+      const html = mods.length
+        ? `<span class="dec-chips-label">${c.active ? "Services" : "Configured"}</span>` +
+          mods.map((m) => {
+            const on = c.active && l.set.has(parseInt(m.port, 10));
+            return `<span class="dec-chip${on ? "" : " is-off"}" title="${on ? "listening" : "not listening"}"><b>${esc(String(m.port))}</b>` +
+              `<span class="dec-chip-svc">${esc(m.name)}</span></span>`;
+          }).join("")
+        : "";
+      els.secCanaryChips.innerHTML = html;
+      els.secCanaryChips.hidden = !html;
+    }
+    if (els.secCanaryMeta) {
+      els.secCanaryMeta.innerHTML = decMetaHtml([
+        ["Events 24 h", formatNumber(c.events_24h || 0)],
+        ["Sources 24 h", formatNumber(c.sources_24h || 0)],
+        ["Credentials captured 24 h", formatNumber(c.creds_24h || 0)],
+        ["Active canary bans", formatNumber(c.bans_active || 0)],
+        c.last_ban_ip ? ["Last banned", c.last_ban_ip] : null,
+        ["Ban term", "1 year (TCP interactions)"],
+      ]);
+      els.secCanaryMeta.hidden = false;
+    }
+    const evs = c.events || [];
+    els.secCanaryBody.innerHTML = evs.map((e) => {
+      const cred = e.service === "ssh login attempt" ? " sev-MEDIUM" : "";
+      return `<tr><td class="muted">${formatTime(e.ts)}</td><td class="mono">${esc(e.src)}</td><td>${esc(e.service)}</td><td class="mono">${esc(e.dst_port)}</td><td class="mono${cred}">${esc(e.detail)}</td></tr>`;
+    }).join("")
+      || `<tr><td colspan="5" class="empty">No canary events yet.</td></tr>`;
+    renderDecStats();
+  }
+
+  async function refreshHoneypot() {
+    try {
+      renderHoneypot(await fetchJSON("/api/security/honeypot"));
+    } catch (err) {
+      renderHoneypot({ ok: false, error: err.message });
+    }
+  }
+
+  async function refreshCanary() {
+    try {
+      renderCanary(await fetchJSON("/api/security/canary"));
+    } catch (err) {
+      // A failed/slow status read must not leave the card silently stuck on
+      // its static "Enable"/off markup - that reads as "canary disabled".
+      renderCanary({ ok: false, error: err.message });
+    }
+  }
+
+  async function refreshDecSummary() {
+    try {
+      dec.summary = await fetchJSON("/api/security/deception");
+    } catch (err) {
+      dec.summary = { ok: false, bans_24h: { ok: false } };
+    }
+    renderDecStats();
+  }
+
+  document.addEventListener("tw:community-settings", (e) => {
+    dec.community = e.detail || null;
+    renderDecStats();
+  });
+
+  function decSay(msg) {
+    const live = document.getElementById("dec-live");
+    if (live) live.textContent = msg;
   }
 
   // --- Security ▸ Tripwire (phase 3 layout): status cards, status + settings,
@@ -5508,97 +5684,6 @@
     finally { recEnd.disabled = false; }
   });
 
-  async function refreshHoneypot() {
-    try {
-      const data = await fetchJSON("/api/security/honeypot");
-      renderHoneypot(data);
-    } catch (err) {
-      showBanner(true, "Honeypot error: " + err.message);
-    }
-  }
-
-  function renderCanary(c) {
-    if (!c.ok) {
-      els.secCanaryHint.textContent = "unavailable";
-      if (els.secCanaryChips) els.secCanaryChips.hidden = true;
-      if (els.secCanaryMeta) els.secCanaryMeta.hidden = true;
-      if (els.decRailCanaryDot) els.decRailCanaryDot.dataset.status = "inactive";
-      if (els.decRailCanaryValue) els.decRailCanaryValue.textContent = "unavailable";
-      if (els.decRailCanaryTag) {
-        els.decRailCanaryTag.textContent = "off";
-        els.decRailCanaryTag.dataset.on = "0";
-      }
-      return;
-    }
-    els.secCanaryHint.textContent = c.active
-      ? `active · ${(c.modules || []).length} emulators bound`
-      : (c.hint || "disabled");
-    const canaryDot = document.getElementById("canary-status-dot");
-    if (canaryDot) canaryDot.dataset.status = c.active ? "active" : "inactive";
-    setBtnIcon(els.secCanaryToggle, c.active ? "disable" : "enable", c.active ? "Disable" : "Enable", !!c.active);
-    els.secCanaryToggle.className = "btn btn-sm btn-act " + (c.active ? "btn-danger" : "btn-primary");
-    const ev = c.events_24h || 0;
-    const srcs = c.sources_24h || 0;
-    const creds = c.creds_24h || 0;
-    const bans = c.bans_active || 0;
-    const modCount = (c.modules || []).length;
-    const uniqPct = ev > 0 ? Math.min(100, Math.round((srcs / ev) * 100)) : 0;
-    const capPct = ev > 0 ? Math.min(100, Math.round((creds / ev) * 100)) : 0;
-    const lastBan = c.last_ban_ip || "";
-    els.secCanarySummary.classList.toggle("is-empty", !ev && !c.active);
-    els.secCanarySummary.innerHTML = (!ev && !c.active)
-      ? `<span class="muted">Canary stopped — no emulators bound.</span>`
-      : `<div class="trap-hero">
-           <span class="trap-kicker">Events · 24h</span>
-           <div class="trap-big">${formatNumber(ev)}</div>
-           <div class="trap-hero-sub">${modCount} emulator${modCount === 1 ? "" : "s"} bound · ${lastBan ? `last banned ${esc(lastBan)}` : (ev ? "no bans yet" : "no hits yet")}</div>
-           <div class="trap-ratio" title="${uniqPct}% of events came from unique sources"><i style="width:${uniqPct}%"></i></div>
-           <div class="trap-ratio-cap"><b>${uniqPct}%</b> of events from unique sources</div>
-           <span class="trap-radar" aria-hidden="true"></span>
-         </div>
-         <div class="trap-grid">
-           <div class="trap-cell" data-tone="purple">
-             <span class="trap-cell-label">Sources · 24h</span>
-             <span class="trap-cell-sub">unique attackers</span>
-             <span class="trap-cell-value">${formatNumber(srcs)}</span>
-           </div>
-           <div class="trap-cell" data-tone="teal">
-             <span class="trap-cell-label">Creds captured</span>
-             <span class="trap-cell-sub">${capPct}% of events</span>
-             <span class="trap-cell-value">${formatNumber(creds)}</span>
-             <span class="trap-cell-meter"><i style="width:${capPct}%"></i></span>
-           </div>
-           <div class="trap-cell" data-tone="red">
-             <span class="trap-cell-label">Canary bans</span>
-             <span class="trap-cell-sub">365-day decisions</span>
-             <span class="trap-cell-value">${formatNumber(bans)}</span>
-           </div>
-         </div>`;
-    const evs = c.events || [];
-    els.secCanaryBody.innerHTML = evs.map((e) => {
-      const cred = e.service === "ssh login attempt" ? " sev-MEDIUM" : "";
-      return `<tr><td class="muted">${formatTime(e.ts)}</td><td class="mono">${esc(e.src)}</td><td>${esc(e.service)}</td><td class="mono">${esc(e.dst_port)}</td><td class="mono${cred}">${esc(e.detail)}</td></tr>`;
-    }).join("")
-      || `<tr><td colspan="5" class="empty">No deception-service events yet.</td></tr>`;
-    renderCanaryDetail(c);
-  }
-
-  async function refreshCanary() {
-    try {
-      renderCanary(await fetchJSON("/api/security/canary"));
-    } catch (err) {
-      // A failed/slow status read must not leave the card silently stuck on
-      // its static "Enable"/off markup - that reads as "canary disabled".
-      if (els.secCanaryHint) {
-        els.secCanaryHint.textContent = "status unavailable — retrying";
-      }
-      if (els.decRailCanaryValue) {
-        els.decRailCanaryValue.textContent = "unavailable";
-      }
-      console.warn("canary status:", err);
-    }
-  }
-
   function bindCanaryActions() {
     els.secCanaryToggle.addEventListener("click", async () => {
       const enabling = els.secCanaryToggle.dataset.on !== "1";
@@ -5608,6 +5693,7 @@
       try {
         await postJSON("/api/security/canary/config", { enabled: enabling });
         await refreshCanary();
+        decSay(`Canary ${enabling ? "enabled" : "disabled"}.`);
       } catch (err) {
         showBanner(true, "Canary: " + err.message);
       } finally {
@@ -5624,6 +5710,7 @@
         showBanner(true, "Honeypot: enter at least one port");
         return;
       }
+      els.secHoneyApply.disabled = true;
       try {
         await postJSON("/api/security/honeypot/config", {
           ports,
@@ -5632,16 +5719,26 @@
           ...extra,
         });
         showBanner(false, "");
+        decFormDirty = false;
         await refreshHoneypot();
+        decSay("Honeypot settings saved and applied.");
       } catch (err) {
         showBanner(true, "Honeypot: " + err.message);
+      } finally {
+        els.secHoneyApply.disabled = false;
       }
     };
+    [els.secHoneyPorts, els.secHoneyAutoban, els.secHoneyThreshold].forEach((el) => {
+      el.addEventListener(el.type === "checkbox" ? "change" : "input", () => { decFormDirty = true; });
+    });
+    els.secHoneyPorts.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); applyConf(); }
+    });
     els.secHoneyApply.addEventListener("click", () => applyConf());
     els.secHoneyToggle.addEventListener("click", async () => {
       const enabling = els.secHoneyToggle.dataset.on !== "1";
-      if (enabling && !(await (window.twConfirm || window.confirm)("Enable the honeypot? This opens UFW allow rules for the listed ports on the WAN interface (auto-detected; see System - Deception), then traps and auto-bans anything that connects."))) return;
-      if (!enabling && !(await (window.twConfirm || window.confirm)("Disable the honeypot and close its UFW allow rules?"))) return;
+      if (enabling && !(await (window.twConfirm || window.confirm)("Enable the honeypot? It binds the listed decoy ports on the WAN addresses (IPv4 + IPv6, the WAN interface is detected automatically), opens WAN allow rules only for the ports it bound, and traps anything that connects. Catches are banned locally if auto-ban is on and reported to the community while reporting is on."))) return;
+      if (!enabling && !(await (window.twConfirm || window.confirm)("Disable the honeypot? Stops the tarpit and closes its WAN allow rules (the canary is unaffected)."))) return;
       await applyConf({ enabled: enabling });
     });
   }
@@ -6454,18 +6551,6 @@
   const CBAN_AUTO_KEY = "tuxwall-cban-auto";
   const communityBans = { data: null, filter: "all", shown: CBAN_PAGE, loadedAt: 0, auto: null };
 
-  function setCbanAutoBadge(enabled, label) {
-    if (!els.cbanAutoBadge) return;
-    els.cbanAutoBadge.dataset.state = enabled ? "active" : "inactive";
-    els.cbanAutoBadge.textContent = label || (enabled ? "Active" : "Inactive");
-  }
-
-  function setCbanShareBadge(state, label) {
-    if (!els.cbanShareBadge) return;
-    els.cbanShareBadge.dataset.state = state;
-    els.cbanShareBadge.textContent = label;
-  }
-
   function readCbanAutoCache() {
     try {
       const v = JSON.parse(localStorage.getItem(CBAN_AUTO_KEY) || "null");
@@ -6474,17 +6559,18 @@
     return null;
   }
 
-  function writeCbanAutoCache(state) {
-    try {
-      localStorage.setItem(CBAN_AUTO_KEY, JSON.stringify({
-        enabled: !!state.enabled,
-        last_sync: state.last_sync || 0,
-        added_total: state.added_total || 0,
-        pending: state.pending || 0,
-        ts: Date.now(),
-      }));
-    } catch (err) { /* ignore */ }
-  }
+  // The two community switches (report catches / use community bans) live
+  // in the shared module (community-settings.js), rendered here and on
+  // Security > Deception; it owns the tuxwall-cban-auto cache and tells us
+  // when the auto-ban state changes.
+  document.addEventListener("tw:community-settings", (e) => {
+    const d = e.detail;
+    if (!d || !d.auto_ban) return;
+    const was = communityBans.auto && communityBans.auto.enabled;
+    communityBans.auto = d.auto_ban;
+    if (communityBans.data && was !== d.auto_ban.enabled) renderCommunityBans();
+    else if (els.cbanBanAll) els.cbanBanAll.hidden = !!d.auto_ban.enabled;
+  });
 
   function cbanFilteredRows() {
     const d = communityBans.data;
@@ -6508,19 +6594,6 @@
     // listed IP is already covered by the background sync) and show its
     // stats instead.
     if (els.cbanBanAll) els.cbanBanAll.hidden = !!auto.enabled;
-    setCbanAutoBadge(!!auto.enabled);
-    if (els.cbanAuto) els.cbanAuto.checked = !!auto.enabled;
-    if (els.cbanAutoStats) {
-      if (auto.enabled) {
-        const synced = auto.last_sync ? formatRelative(auto.last_sync) : "never";
-        els.cbanAutoStats.textContent =
-          `Last sync ${synced}` +
-          (auto.pending ? ` · ${formatNumber(auto.pending)} pending` : "") +
-          (auto.added_total ? ` · ${formatNumber(auto.added_total)} ensured` : "");
-      } else {
-        els.cbanAutoStats.textContent = "Manual mode — per-row ban buttons";
-      }
-    }
     // Contributor count: the collector aggregates distinct installs over the
     // whole published list, so we surface it next to the IP count. A list fed
     // by a single install has no independent corroboration - say so plainly
@@ -6586,12 +6659,11 @@
       const data = await fetchJSON("/api/crowdsec/community-bans");
       if (!data.ok) throw new Error(data.error || "unavailable");
       communityBans.data = data;
-      // The cached community-bans response can omit `auto`; keep the last
-      // known server state (or the browser cache) instead of flipping the
-      // switch off on every refresh.
-      const serverAuto = data.auto || null;
-      communityBans.auto = serverAuto || communityBans.auto || readCbanAutoCache() || { enabled: false };
-      if (serverAuto) writeCbanAutoCache(serverAuto);
+      // The cached community-bans response can omit `auto`; prefer the
+      // shared settings module's state, then the server's, then the cache.
+      const shared = window.twCommunitySettings && window.twCommunitySettings.data;
+      communityBans.auto = (shared && shared.auto_ban) || data.auto || communityBans.auto
+        || readCbanAutoCache() || { enabled: false };
       communityBans.loadedAt = Date.now();
       renderCommunityBans();
       els.cbanStatus.textContent = "";
@@ -6600,89 +6672,9 @@
     }
   }
 
-  // ---- Community sharing (key registration) ----------------------------
-  // Sends ONLY this install's key to tuxwall.org: registration starts the
-  // 7-day trust clock at install time, after which this install's deception
-  // evidence counts fully toward community severity.
-
-  async function updateShareStatus() {
-    if (!els.cbanShare || !els.cbanShareStatus) return;
-    try {
-      const d = await fetchJSON("/api/crowdsec/reporting/status");
-      if (!d.ok) throw new Error(d.error || "status unavailable");
-      if (d.warning) {
-        els.cbanShareStatus.textContent = "Sharing status unavailable";
-        els.cbanShare.textContent = "Retry";
-        setCbanShareBadge("unknown", "Unknown");
-        return;
-      }
-      if (d.registered && d.status !== "revoked") {
-        const trustedAt = d.trusted_after || 0;
-        setCbanShareBadge("active", "Active");
-        if (trustedAt && trustedAt <= Date.now() / 1000) {
-          els.cbanShareStatus.textContent = "Community sharing active — evidence fully trusted";
-        } else {
-          const wait = trustedAt - Date.now() / 1000;
-          els.cbanShareStatus.textContent =
-            "Sharing active — full trust in " + formatDuration(wait);
-        }
-        els.cbanShare.textContent = "Registered";
-        els.cbanShare.disabled = true;
-      } else {
-        setCbanShareBadge("inactive", "Inactive");
-        els.cbanShareStatus.textContent = "Not registered — local only";
-        els.cbanShare.textContent = "Enable community sharing";
-        els.cbanShare.disabled = false;
-      }
-    } catch (err) {
-      els.cbanShareStatus.textContent = "Sharing status unavailable";
-      setCbanShareBadge("unknown", "Unknown");
-    }
-  }
-
   function bindCommunityBans() {
     // Guard: never let a missing element kill the boot chain.
     if (!els.cbanBody || !els.cbanBanAll) return;
-    if (els.cbanShare) {
-      els.cbanShare.addEventListener("click", async () => {
-        els.cbanShare.disabled = true;
-        setCbanShareBadge("pending", "Registering…");
-        els.cbanShareStatus.textContent = "Registering…";
-        try {
-          const d = await postJSON("/api/crowdsec/reporting/register", {});
-          if (!d.ok) throw new Error(d.error || "registration failed");
-          els.cbanShareStatus.textContent = "Registered — sharing active.";
-        } catch (err) {
-          els.cbanShareStatus.textContent = "Failed: " + err.message;
-          setCbanShareBadge("inactive", "Inactive");
-          els.cbanShare.disabled = false;
-          return;
-        }
-        await updateShareStatus();
-      });
-    }
-    if (els.cbanAuto) {
-      els.cbanAuto.addEventListener("change", async () => {
-        const enabled = els.cbanAuto.checked;
-        const previous = !enabled;
-        els.cbanAuto.disabled = true;
-        setCbanAutoBadge(enabled, "Updating…");
-        els.cbanAutoStats.textContent = enabled ? "Enabling… first sync within ~30s." : "Disabling…";
-        try {
-          const d = await postJSON("/api/crowdsec/community-bans/auto", { enabled });
-          if (!d.ok) throw new Error(d.error || "toggle failed");
-          communityBans.auto = d.auto || { enabled };
-          writeCbanAutoCache(communityBans.auto);
-          renderCommunityBans();
-        } catch (err) {
-          els.cbanAuto.checked = previous;
-          setCbanAutoBadge(previous);
-          els.cbanAutoStats.textContent = "Failed: " + err.message;
-        } finally {
-          els.cbanAuto.disabled = false;
-        }
-      });
-    }
     document.querySelectorAll("[data-cban-sev]").forEach((btn) => {
       btn.addEventListener("click", () => {
         communityBans.filter = btn.dataset.cbanSev;
@@ -6745,7 +6737,7 @@
     // banlist tab refetches so timed bans/expiry are fresh.
     if (pane === "community") {
       refreshCommunityBans();
-      updateShareStatus();
+      if (window.twCommunitySettings) window.twCommunitySettings.refresh(10000);
     }
     if (pane === "blocklist") refreshCustomBlocklist();
   }

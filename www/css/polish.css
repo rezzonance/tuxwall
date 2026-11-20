@@ -1180,14 +1180,6 @@ body.light-theme .topbar {
   #view-security .sec-unban::after { content: "Unban"; }
 }
 
-/* Honeypot settings row: give the port list and apply button their own line
-   on phones so the threshold controls aren't squeezed against the edge. */
-@media (max-width: 560px) {
-  #view-security #sec-honey-ports { flex: 1 1 100% !important; }
-  #view-security #sec-honey-apply { flex: 1 1 100%; }
-  #view-security .fw-pane[data-sec-pane="deception"] .rpz-form { gap: 8px 10px; }
-}
-
 /* ── CrowdSec: decisions / alerts / bouncers / blocklist as cards ────────── */
 @media (max-width: 900px) {
   #view-crowdsec .table-wrap { overflow: visible; }
