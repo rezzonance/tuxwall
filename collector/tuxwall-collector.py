@@ -17,6 +17,7 @@ SQLite, enriches them with geo/ASN data, and serves:
   DELETE /api/admin/bans/<ip>    - loopback-only admin removal (X-Admin-Key)
   GET  /api/admin/keys           - reporter keys (?status=pending|approved|revoked)
   POST /api/admin/keys/<id>/approve | /revoke {transfer_to?}
+                                   (admin scopes: full | bans | keys)
   GET  /bans                     - public HTML page
   GET  /ip/<addr>                - AbuseIPDB-style per-IP report card
   GET  /lists/community-bans.txt - plain-text IPs (severity-filterable)
@@ -85,8 +86,11 @@ KEY_STATUSES = (KEY_PENDING, KEY_APPROVED, KEY_REVOKED)
 # the service reads them as systemd credentials (LoadCredential=), so the
 # key files themselves stay root-owned. Absent key = endpoints disabled.
 #   admin.key      full admin (keys, whitelist, bans) - root:adm 0640, CLI
-#   admin-api.key  scoped: ban listing/removal only - for the LAN Ban
+#   admin-api.key  scope "bans": ban listing/removal only - for the LAN Ban
 #                  Management page (php-fpm pool tuxwall-admin)
+#   admin-keys.key scope "keys": reporter key listing/approve/revoke only
+#                  (same page and pool); answers carry hash-prefix ids,
+#                  never full key hashes
 _CRED_DIR = os.environ.get("CREDENTIALS_DIRECTORY") or ""
 
 
@@ -102,6 +106,9 @@ ADMIN_KEY_PATH = _key_path("TUXWALL_COLLECTOR_ADMIN_KEY", "admin.key",
                            "/etc/tuxwall-collector/admin.key")
 BANS_KEY_PATH = _key_path("TUXWALL_COLLECTOR_BANS_KEY", "admin-api.key",
                           "/etc/tuxwall-collector/admin-api.key")
+KEYS_KEY_PATH = _key_path("TUXWALL_COLLECTOR_KEYS_KEY", "admin-keys.key",
+                          "/etc/tuxwall-collector/admin-keys.key")
+KEY_ID_LEN = 16        # hash-prefix id shown by the CLI and the ban page
 
 # Protected infrastructure ranges (keep in sync with api_server.py). Reports
 # naming these IPs are refused at ingest: community-auto bans every listed
@@ -704,22 +711,42 @@ class Store:
                 "status": row[3], "approved_at": row[4], "revoked_at": row[5]}
 
     def list_keys(self, status=None):
-        """Reporter keys with derived counts (admin only)."""
-        q = ("SELECT k.key, k.created, k.last_seen, k.status, k.approved_at,"
-             " k.revoked_at,"
-             " (SELECT COUNT(*) FROM report_reports rr WHERE rr.reporter=k.key),"
-             " (SELECT COUNT(*) FROM report_events e WHERE e.reporter=k.key"
-             "   AND e.ts > ?)"
-             " FROM reporter_keys k")
-        args = [time.time() - 86400]
+        """Reporter keys with derived counts (admin only): reported IPs,
+        report events in the last 24 h / 7 d / retained total, and the
+        category mix of the retained events."""
+        now = time.time()
+        q = ("SELECT key, created, last_seen, status, approved_at, revoked_at"
+             " FROM reporter_keys")
+        args = []
         if status:
-            q += " WHERE k.status=?"
+            q += " WHERE status=?"
             args.append(status)
         with self.lock:
-            rows = self._conn.execute(q + " ORDER BY k.created DESC", args).fetchall()
-        return [{"key": r[0], "created": r[1], "last_seen": r[2],
-                 "status": r[3], "approved_at": r[4], "revoked_at": r[5],
-                 "reported_ips": r[6], "events_24h": r[7]} for r in rows]
+            rows = self._conn.execute(q + " ORDER BY created DESC", args).fetchall()
+            ips = dict(self._conn.execute(
+                "SELECT reporter, COUNT(*) FROM report_reports GROUP BY reporter"))
+            ev = self._conn.execute(
+                "SELECT reporter, category, COUNT(*), SUM(ts > ?), SUM(ts > ?)"
+                " FROM report_events GROUP BY reporter, category",
+                (now - 86400, now - 7 * 86400)).fetchall()
+        counts = {}
+        for rep, cat, total, d1, d7 in ev:
+            c = counts.setdefault(rep, {"events_24h": 0, "events_7d": 0,
+                                        "events_total": 0, "categories": {}})
+            c["events_24h"] += d1 or 0
+            c["events_7d"] += d7 or 0
+            c["events_total"] += total
+            c["categories"][cat] = total
+        out = []
+        for r in rows:
+            c = counts.get(r[0]) or {"events_24h": 0, "events_7d": 0,
+                                     "events_total": 0, "categories": {}}
+            c["categories"] = dict(sorted(c["categories"].items(),
+                                          key=lambda kv: -kv[1]))
+            out.append(dict(c, key=r[0], created=r[1], last_seen=r[2],
+                            status=r[3], approved_at=r[4], revoked_at=r[5],
+                            reported_ips=ips.get(r[0], 0)))
+        return out
 
     def resolve_key(self, ident):
         """Full key hash for a hash or unique hash prefix (8+ hex chars).
@@ -1272,25 +1299,56 @@ class Handler(BaseHTTPRequestHandler):
     def _admin_key(self):
         return self._read_key(ADMIN_KEY_PATH)
 
-    def _admin_authorized(self, scope="full"):
-        """scope "full": the admin key only. scope "bans" (ban listing and
-        removal): the admin key or the scoped ban-admin key."""
+    def _admin_scope(self):
+        """Scope granted by the supplied X-Admin-Key: "full" (admin.key),
+        "bans" (admin-api.key), "keys" (admin-keys.key) or None. A scoped
+        key that equals another configured key is ignored (ambiguous)."""
         # Defense-in-depth: admin is loopback-only by design. nginx always
         # sets X-Real-IP / X-Forwarded-For when proxying, so any request
         # carrying them arrived via a proxy rather than from the local
         # host - refuse regardless of key, so no future nginx change can
         # ever expose the admin endpoints behind the key gate alone.
         if self._proxied():
-            return False
+            return None
         supplied = (self.headers.get("X-Admin-Key") or "").strip().encode("utf-8")
         if not supplied:
-            return False
-        full = self._admin_key()
-        ok = bool(full) and hmac.compare_digest(supplied, full)
-        if not ok and scope == "bans":
-            scoped = self._read_key(BANS_KEY_PATH)
-            ok = bool(scoped) and scoped != full and hmac.compare_digest(supplied, scoped)
-        return ok
+            return None
+        keys = (("full", self._admin_key()),
+                ("bans", self._read_key(BANS_KEY_PATH)),
+                ("keys", self._read_key(KEYS_KEY_PATH)))
+        for scope, key in keys:
+            if not key:
+                continue
+            if scope != "full" and any(other == key for s, other in keys if s != scope):
+                continue
+            if hmac.compare_digest(supplied, key):
+                return scope
+        return None
+
+    def _admin_authorized(self, scope="full"):
+        """scope "full": the admin key only. "bans" (ban listing and
+        removal) / "keys" (reporter key listing, approve, revoke): the admin
+        key or that scope's own key - a scoped key never reaches another
+        scope. The granted scope is kept for the audit log."""
+        granted = self._admin_scope()
+        self._granted_scope = granted
+        return granted == "full" or (granted is not None and granted == scope)
+
+    def _admin_actor(self):
+        """Audit label: granted scope + the acting dashboard user that the
+        ban page passes in X-Admin-Actor (informational, sanitized)."""
+        actor = re.sub(r"[^A-Za-z0-9._@-]", "",
+                       self.headers.get("X-Admin-Actor") or "")[:64]
+        return "scope=%s actor=%s" % (getattr(self, "_granted_scope", None) or "-",
+                                      actor or "-")
+
+    def _key_view(self, key):
+        """Key identity in admin answers: the CLI's hash-prefix id; the full
+        hash only for the full admin key (CLI), never for scoped keys."""
+        out = {"id": key[:KEY_ID_LEN]}
+        if getattr(self, "_granted_scope", None) == "full":
+            out["key"] = key
+        return out
 
     def do_GET(self):
         path = _strip_query(self.path)
@@ -1368,7 +1426,7 @@ class Handler(BaseHTTPRequestHandler):
             self._register_status(key)
             return
         if path == "/api/admin/keys":
-            if not self._admin_authorized():
+            if not self._admin_authorized("keys"):
                 self._json(401, {"ok": False, "error": "Admin key required"})
                 return
             status = (params.get("status") or [""])[0]
@@ -1376,7 +1434,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"ok": False, "error": "status must be one of %s"
                                  % ", ".join(KEY_STATUSES)})
                 return
-            self._json(200, {"ok": True, "keys": _store().list_keys(status or None),
+            keys = []
+            for k in _store().list_keys(status or None):
+                k.update(self._key_view(k.pop("key")))
+                keys.append(k)
+            self._json(200, {"ok": True, "keys": keys,
                              "new_keys_24h": _store().new_keys_24h(),
                              "new_keys_cap": NEW_KEYS_PER_DAY})
             return
@@ -1616,7 +1678,7 @@ class Handler(BaseHTTPRequestHandler):
         """POST /api/admin/keys/<id>/approve
            POST /api/admin/keys/<id>/revoke   {"transfer_to": "<id>"}?
         <id> = key hash or a unique 8+ hex prefix of it."""
-        if not self._admin_authorized():
+        if not self._admin_authorized("keys"):
             self._json(401, {"ok": False, "error": "Admin key required"})
             return
         ident, _, action = rest.partition("/")
@@ -1645,9 +1707,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             row = _store().approve_key(key, now)
             PUBLIC_CACHE.clear()
-            self._admin_log("admin approve_key: %s..." % key[:8])
-            self._json(200, {"ok": True, "key": key, "status": row["status"],
-                             "approved_at": row["approved_at"]})
+            self._admin_log("admin approve_key: %s... %s" % (key[:8], self._admin_actor()))
+            self._json(200, dict(self._key_view(key), ok=True, status=row["status"],
+                                 approved_at=row["approved_at"]))
             return
         moved = None
         target_raw = str(body.get("transfer_to") or "").strip()
@@ -1668,10 +1730,12 @@ class Handler(BaseHTTPRequestHandler):
         if target_raw:
             moved = _store().transfer_evidence(key, target)
         PUBLIC_CACHE.clear()
-        self._admin_log("admin revoke_key: %s...%s" % (
-            key[:8], (" evidence -> %s... %s" % (target[:8], moved)) if target_raw else ""))
-        self._json(200, {"ok": True, "key": key, "revoked": True,
-                         "already_revoked": not found, "transferred": moved})
+        self._admin_log("admin revoke_key: %s...%s %s" % (
+            key[:8], (" evidence -> %s... %s" % (target[:8], moved)) if target_raw else "",
+            self._admin_actor()))
+        self._json(200, dict(self._key_view(key), ok=True, revoked=True,
+                             already_revoked=not found, transferred=moved,
+                             transfer_to=target[:KEY_ID_LEN] if target_raw else None))
 
     def _post_report(self):
         client = self._rate_client()
@@ -1791,7 +1855,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/admin/keys/"):
             # Legacy revoke (DELETE /api/admin/keys/<id>): same as POST
             # /api/admin/keys/<id>/revoke without an evidence transfer.
-            if not self._admin_authorized():
+            if not self._admin_authorized("keys"):
                 self._json(401, {"ok": False, "error": "Admin key required"})
                 return
             key, err = _store().resolve_key(path[len("/api/admin/keys/"):])
@@ -1801,8 +1865,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if _store().revoke_key(key):
                 PUBLIC_CACHE.clear()
-                self._admin_log("admin revoke_key: %s..." % key[:8])
-                self._json(200, {"ok": True, "revoked": key})
+                self._admin_log("admin revoke_key: %s... %s" % (key[:8], self._admin_actor()))
+                self._json(200, {"ok": True, "revoked": self._key_view(key).get("key")
+                                 or key[:KEY_ID_LEN]})
             else:
                 self._json(404, {"ok": False, "error": "Key not found or already revoked"})
             return
@@ -1825,9 +1890,10 @@ class Handler(BaseHTTPRequestHandler):
         PUBLIC_CACHE.clear()
         self._admin_log(
             "admin delete: removed %s (reports=%d report_reports=%d"
-            " report_events=%d)" % (ip, counts.get("reports", 0),
-                                    counts.get("report_reports", 0),
-                                    counts.get("report_events", 0)))
+            " report_events=%d) %s" % (ip, counts.get("reports", 0),
+                                       counts.get("report_reports", 0),
+                                       counts.get("report_events", 0),
+                                       self._admin_actor()))
         self._json(200, {"ok": True, "ip": ip, "removed": counts})
 
 

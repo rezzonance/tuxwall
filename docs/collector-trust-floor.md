@@ -1,6 +1,6 @@
 # Collector trust model: admin approval
 
-Status: **deployed 2026-11-19 (deception phase 2).** Replaces the 7-day
+Status: **deployed 2026-11-19 (deception phase 2; key scope "keys" for the ban page added the same day).** Replaces the 7-day
 "trusted after a week of history" floor (2026-11-12, kept below as history).
 
 ## Why
@@ -72,8 +72,40 @@ history keeps its weight. A plain revoke drops the key's evidence to low.
 
 Endpoints: `GET /api/admin/keys[?status=]`, `POST /api/admin/keys/<id>/approve`,
 `POST /api/admin/keys/<id>/revoke` (`{"transfer_to": "<id>"}`), legacy
-`DELETE /api/admin/keys/<id>`. The scoped ban-admin key
-(`/etc/tuxwall-collector/admin-api.key`) only reaches `/api/admin/bans*`.
+`DELETE /api/admin/keys/<id>`.
+
+### Admin key scopes
+
+| Key file (root-owned, via `LoadCredential=`) | Scope | Reaches |
+|---|---|---|
+| `/etc/tuxwall-collector/admin.key` (root:adm 0640) | `full` | everything (CLI) |
+| `/etc/tuxwall-collector/admin-api.key` (root:tuxwall-banadmin 0640) | `bans` | `/api/admin/bans*` only |
+| `/etc/tuxwall-collector/admin-keys.key` (root:tuxwall-banadmin 0640) | `keys` | `/api/admin/keys*` only (list, approve, revoke, revoke + transfer) |
+
+The two scoped keys belong to the LAN Ban Management page (php-fpm pool
+`tuxwall-admin`, user tuxwall-banadmin); neither reaches the other scope or
+the whitelist. A scoped key that equals another configured key is ignored
+(fail closed). Answers to the `keys` scope identify keys by `id` (the
+16-hex hash prefix the CLI shows) and never carry the full hash; only the
+`full` key also gets `key`. `GET /api/admin/keys` lists per key: status,
+created, last_seen, approved_at, revoked_at, `reported_ips`, `events_24h`,
+`events_7d`, `events_total` (retained report events, 90 days) and
+`categories` (category -> retained events).
+
+Audit: approve / revoke (incl. the transfer target and moved row counts) and
+ban removals are logged to the collector journal with the target's 8-hex
+prefix, `scope=` and `actor=` - the dashboard user the page sends in
+`X-Admin-Actor` (sanitized, informational). No key material is logged.
+
+The page itself: listing for every signed-in dashboard user (read-only for
+viewers); approve / revoke / revoke + transfer need the dashboard admin role
+(checked server-side), a POST and a CSRF token bound to the dashboard
+session (HMAC of the session cookie under a page-private secret). Revoking
+this router's own key - identified by matching the dashboard's community
+settings approval time against the key list - needs a second explicit
+confirmation (also enforced server-side; required for every revoke while the
+router's key cannot be identified). History transfer is offered only from an
+approved key to another approved key.
 
 ## Abuse limits
 

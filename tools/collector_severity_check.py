@@ -24,7 +24,10 @@ asserts the rules installs rely on (Automatic mode enforces medium+):
   never the live collector): POST/GET /register, query strings never
   logged, /ip/ global-only, report cards without reporter hashes, quote
   escaping, cached + paginated /api/public/bans (public cap vs loopback),
-  CDN cache headers, /bans/more, admin key scopes, admin approve/revoke.
+  CDN cache headers, /bans/more, admin key scopes (full / bans / keys:
+  a scoped key never reaches another scope, scoped answers carry hash-prefix
+  ids only), admin approve/revoke (+ transfer) with the scope + acting user
+  in the audit log.
 
 With a database path, the tier-consistency audit runs against a copy of
 real data (pass a copy, never the live file) and prints the severity
@@ -301,11 +304,14 @@ print("HTTP endpoints (in-process server, ephemeral loopback port, scratch DB)")
 http_dir = tempfile.mkdtemp(prefix="tw-collector-http-")
 admin_file = os.path.join(http_dir, "admin.key")
 bans_file = os.path.join(http_dir, "admin-api.key")
+keys_file = os.path.join(http_dir, "admin-keys.key")
 with open(admin_file, "w") as f:
     f.write("A" * 64 + "\n")
 with open(bans_file, "w") as f:
     f.write("B" * 64 + "\n")
-col.ADMIN_KEY_PATH, col.BANS_KEY_PATH = admin_file, bans_file
+with open(keys_file, "w") as f:
+    f.write("K" * 64 + "\n")
+col.ADMIN_KEY_PATH, col.BANS_KEY_PATH, col.KEYS_KEY_PATH = admin_file, bans_file, keys_file
 col.STORE = col.Store(os.path.join(http_dir, "reports.db"))
 col.LOG = __import__("queue").Queue(maxsize=5000)
 col._ingest_count = 0
@@ -366,15 +372,46 @@ st, h, d = req("GET", "/api/public/bans/45.83.64.99")
 check(d["report"]["severity"] == LOW, "pending key's report published at low")
 
 # admin scopes
-st, _, d = req("GET", "/api/admin/keys", None, {"X-Admin-Key": "B" * 64})
+BK, KK = {"X-Admin-Key": "B" * 64}, {"X-Admin-Key": "K" * 64, "X-Admin-Actor": "alice"}
+st, _, d = req("GET", "/api/admin/keys", None, BK)
 check(st == 401, "scoped ban-admin key cannot manage reporter keys")
-st, _, d = req("GET", "/api/admin/bans", None, {"X-Admin-Key": "B" * 64})
+for method, path in (("POST", "/api/admin/keys/%s/approve" % KID[:12]),
+                     ("POST", "/api/admin/keys/%s/revoke" % KID[:12]),
+                     ("DELETE", "/api/admin/keys/%s" % KID[:12])):
+    st, _, d = req(method, path, None, BK)
+    check(st == 401, "ban-admin key refused: %s %s" % (method, path.rsplit("/", 1)[-1]))
+st, _, d = req("GET", "/api/admin/bans", None, BK)
 check(st == 200 and d.get("ok"), "scoped ban-admin key can list bans")
+st, _, d = req("GET", "/api/admin/bans", None, KK)
+check(st == 401, "keys-scoped key cannot list bans")
+st, _, d = req("DELETE", "/api/admin/bans/45.83.64.99", None, KK)
+check(st == 401, "keys-scoped key cannot remove bans")
+st, _, d = req("GET", "/api/admin/whitelist", None, KK)
+check(st == 401, "keys-scoped key cannot read the whitelist")
+st, _, d = req("POST", "/api/admin/whitelist", {"range": "203.0.113.0/24"}, KK)
+check(st == 401, "keys-scoped key cannot change the whitelist")
+st, _, d = req("GET", "/api/admin/keys", None, {"X-Admin-Key": "K" * 64, "X-Real-IP": "127.0.0.1"})
+check(st == 401, "keys-scoped key refused when proxy headers are present")
+st, _, d = req("GET", "/api/admin/keys?status=pending", None, KK)
+ks = d.get("keys") or []
+check(st == 200 and [k.get("id") for k in ks] == [KID[:16]]
+      and all("key" not in k for k in ks) and KID not in json.dumps(d),
+      "keys-scoped key lists keys by hash-prefix id only (no full hash)")
+check(ks and ks[0]["events_24h"] == ks[0]["events_7d"] == ks[0]["events_total"] == 1
+      and ks[0]["categories"] == {"ssh": 1} and ks[0]["reported_ips"] == 1,
+      "key listing: 24h / 7d / total report counts + category mix")
+with open(keys_file, "w") as f:
+    f.write("B" * 64 + "\n")
+st, _, d = req("GET", "/api/admin/keys", None, BK)
+st2, _, _d = req("GET", "/api/admin/bans", None, BK)
+check(st == 401 and st2 == 401, "keys key equal to the bans key: both refused (fail closed)")
+with open(keys_file, "w") as f:
+    f.write("K" * 64 + "\n")
 st, _, d = req("GET", "/api/admin/keys", None, {"X-Admin-Key": "A" * 64, "X-Real-IP": "127.0.0.1"})
 check(st == 401, "admin refused when proxy headers are present")
 st, _, d = req("GET", "/api/admin/keys?status=pending", None, {"X-Admin-Key": "A" * 64})
-check(st == 200 and [k["key"] for k in d["keys"]] == [KID] and d.get("new_keys_cap"),
-      "admin lists pending keys")
+check(st == 200 and [k["key"] for k in d["keys"]] == [KID] and d.get("new_keys_cap")
+      and d["keys"][0]["id"] == KID[:16], "admin lists pending keys (full hash + id)")
 st, _, d = req("POST", "/api/admin/keys/%s/approve" % KID[:10], None, {"X-Admin-Key": "A" * 64})
 check(st == 200 and d.get("status") == "approved", "admin approves by hash prefix")
 col.PUBLIC_CACHE.clear()
@@ -474,13 +511,31 @@ finally:
 RAW2 = "raw-secret-key-new-fedcba9876543210"
 KID2 = hashlib.sha256(RAW2.encode()).hexdigest()
 req("POST", "/register", {"key": RAW2}, dict(VER, **{"X-Real-IP": "198.51.100.201"}))
-st, _, d = req("POST", "/api/admin/keys/%s/revoke" % KID[:12], {"transfer_to": KID2[:12]},
-               {"X-Admin-Key": "A" * 64})
+logs()
+st, _, d = req("POST", "/api/admin/keys/%s/revoke" % KID[:12], {"transfer_to": KID2[:12]}, KK)
 check(st == 409, "transfer to a pending key refused")
-req("POST", "/api/admin/keys/%s/approve" % KID2[:12], None, {"X-Admin-Key": "A" * 64})
-st, _, d = req("POST", "/api/admin/keys/%s/revoke" % KID[:12], {"transfer_to": KID2[:12]},
-               {"X-Admin-Key": "A" * 64})
-check(st == 200 and d["transferred"]["report_reports"] >= 31, "revoke + transfer via the admin API")
+st, _, d = req("POST", "/api/admin/keys/%s/approve" % KID2[:12], None, KK)
+check(st == 200 and d.get("status") == "approved" and d.get("id") == KID2[:16]
+      and "key" not in d, "keys-scoped key approves (answer: id only)")
+st, _, d = req("POST", "/api/admin/keys/%s/revoke" % KID[:12], {"transfer_to": KID2[:12]}, KK)
+check(st == 200 and d["transferred"]["report_reports"] >= 31 and "key" not in d
+      and d.get("id") == KID[:16] and d.get("transfer_to") == KID2[:16],
+      "keys-scoped key: revoke + transfer via the admin API")
+RAW3 = "raw-secret-key-third-00112233445566"
+KID3 = hashlib.sha256(RAW3.encode()).hexdigest()
+req("POST", "/register", {"key": RAW3}, dict(VER, **{"X-Real-IP": "198.51.100.202"}))
+st, _, d = req("POST", "/api/admin/keys/%s/revoke" % KID3[:12], None, KK)
+check(st == 200 and d.get("revoked") and not d.get("already_revoked") and d.get("transferred") is None,
+      "keys-scoped key: plain revoke")
+st, _, d = req("POST", "/api/admin/keys/%s/approve" % KID3[:12], None, KK)
+check(st == 409, "revoked key cannot be re-approved")
+st, _, d = req("GET", "/api/admin/keys?status=revoked", None, KK)
+check(st == 200 and {k["id"] for k in d["keys"]} == {KID[:16], KID3[:16]},
+      "status filter: revoked")
+lg = logs()
+check(lg.count("scope=keys actor=alice") == 3 and "admin approve_key: %s" % KID2[:8] in lg
+      and "evidence -> %s" % KID2[:8] in lg and "K" * 64 not in lg and KID not in lg,
+      "audit: scope + action + target id + acting user, no secrets / full hashes")
 st, _, d = req("GET", "/api/public/bans/45.83.64.99")
 check(d["report"]["severity"] == MED, "rotated install keeps medium")
 st, _, d = req("POST", "/report", {"key": RAW, "ip": "45.83.64.130", "source": "canary"},

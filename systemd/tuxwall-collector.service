@@ -20,10 +20,13 @@ UMask=0077
 ExecStartPre=+/bin/chown -R tuxwall-collector:tuxwall-collector /var/lib/tuxwall-collector
 
 # Admin keys stay root-owned in /etc/tuxwall-collector; systemd hands the
-# service private copies ($CREDENTIALS_DIRECTORY). admin-api.key is the
-# scoped ban-admin key (optional). Rotating a key needs a restart.
+# service private copies ($CREDENTIALS_DIRECTORY). admin-api.key (scope
+# "bans") and admin-keys.key (scope "keys", reporter key approval) are the
+# scoped keys of the LAN Ban Management page. Every listed file must exist
+# (deploy-collector.sh creates them). Rotating a key needs a restart.
 LoadCredential=admin.key:/etc/tuxwall-collector/admin.key
 LoadCredential=admin-api.key:/etc/tuxwall-collector/admin-api.key
+LoadCredential=admin-keys.key:/etc/tuxwall-collector/admin-keys.key
 
 # Only the two DB-IP databases are visible from /var/lib/tuxwall.
 TemporaryFileSystem=/var/lib/tuxwall:ro

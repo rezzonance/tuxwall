@@ -37,10 +37,12 @@ install -m 0755 "$REPO_DIR/scripts/tuxwall-collector-admin" /usr/local/sbin/tuxw
 #   admin-api.key  scoped ban listing/removal key for the LAN Ban Management
 #                  page: root:tuxwall-banadmin 0640 (php-fpm pool
 #                  tuxwall-admin) - never readable by www-data / public PHP
+#   admin-keys.key scoped reporter-key approval key (list/approve/revoke) for
+#                  the same page/pool: root:tuxwall-banadmin 0640
 install -d -m 0751 -g adm /etc/tuxwall-collector
 getent group tuxwall-banadmin >/dev/null || useradd --system --user-group \
   --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin tuxwall-banadmin
-for kf in admin.key:adm admin-api.key:tuxwall-banadmin; do
+for kf in admin.key:adm admin-api.key:tuxwall-banadmin admin-keys.key:tuxwall-banadmin; do
   f="/etc/tuxwall-collector/${kf%%:*}"; grp="${kf##*:}"
   if [[ ! -s "$f" ]]; then
     ( umask 077; openssl rand -hex 32 > "$f" )
