@@ -20726,6 +20726,57 @@ def _self_restart(signum, frame):
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
+def _inherited_children():
+    """PIDs that are already children of this process at startup. The
+    SIGUSR1 re-exec keeps the PID, so commands the previous image still
+    had in flight (latency ping, systemctl, cscli, ss, unbound-control...)
+    stay our children, but nothing in this image will ever wait() on them
+    and they linger as zombies until the service is fully restarted."""
+    me = os.getpid()
+    pids = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open("/proc/%s/stat" % name, "rb") as f:
+                stat = f.read()
+        except OSError:
+            continue
+        fields = stat[stat.rfind(b")") + 2:].split()
+        if len(fields) > 1 and fields[1] == str(me).encode():
+            pids.append(int(name))
+    return pids
+
+
+def _reap_inherited(pids):
+    pending = set(pids)
+    while pending:
+        for pid in list(pending):
+            try:
+                done, _status = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                done = pid
+            if done:
+                pending.discard(pid)
+        if pending:
+            time.sleep(2)
+
+
+def _start_inherited_reaper():
+    """Reap (only) the children inherited across the re-exec. Must run
+    before this image spawns anything, so every PID found belongs to the
+    previous image; waiting on specific PIDs never touches subprocess's own
+    children, unlike SIGCHLD=SIG_IGN or waitpid(-1)."""
+    try:
+        pids = _inherited_children()
+    except OSError as exc:
+        print("[startup] inherited child scan failed: %r" % (exc,), flush=True)
+        return
+    if pids:
+        print("[startup] reaping %d child process(es) left by the previous image" % len(pids), flush=True)
+        threading.Thread(target=_reap_inherited, args=(pids,), name="exec-reaper", daemon=True).start()
+
+
 NOFILE_SOFT_TARGET = 8192
 
 
@@ -20745,6 +20796,7 @@ def _raise_nofile_limit():
 
 
 def main():
+    _start_inherited_reaper()
     signal.signal(signal.SIGUSR1, _self_restart)
     _raise_nofile_limit()
     _ensure_service_reload()
