@@ -227,6 +227,34 @@ marker; the bouncer migration runs on upgrades only and never fails the
 postinst; `prerm remove` forgets the marker only when it disables an enabled
 unit. Also `bash -n` on postinst/prerm/postrm and STEP_TOTAL vs the steps.
 
+## unit_paths_check.py — tuxwall.service writable paths (CI + root sandbox)
+
+```bash
+python3 tools/unit_paths_check.py                 # static (CI)
+sudo python3 tools/unit_paths_check.py --sandbox  # + real systemd sandboxes
+```
+
+The API runs under `ProtectSystem=full` (`/etc`, `/usr`, `/boot` read-only
+for it and for every command it runs, ufw included) and may write only the
+`ReadWritePaths` of `tuxwall.service` and its drop-ins
+(`tuxwall.service.d/20-writable-paths.conf`). The VM test found the firewall
+snapshot rollback failing with EROFS on `/etc/default/ufw.tuxwall-tmp`.
+Static: the effective list (systemd semantics: unit + drop-ins) covers the
+write-site audit `WRITES` (partly read from the modules' own constants:
+`fw_snap.UFW_FILES`, `canary_egress.FILES`, topology, kea_conf, fw_edit,
+backups incl. every catalog item, api_server constants via `ast`). Writes are
+temp + rename, so the target's *directory* must be covered; single-file
+entries (`/etc/hosts` ...) do not count. Every `/etc`, `/usr`, `/boot` string
+literal in includes/, plugins and the tripwire CLI must be covered,
+`READ_ONLY` or a documented `KNOWN_GAPS` entry (no stale ones); new entries
+are `-` optional; `systemd/` mirrors `pkg/`; drop-ins are conffiles; the
+backup restore turns EROFS/EBUSY into a clear 409 "sandbox" refusal.
+`--sandbox` (root): replays the snapshot restore + rollback, `ufw default`'s
+in-place write, a backup restore and interface-assignment writes inside
+`systemd-run` (`RootDirectory=` a scratch tree, `ProtectSystem=full`) with the
+unit's own list (must fail exactly like the VM) and with the drop-ins (must
+pass), and checks `/etc`, `/etc/rsyslog.d`, `/boot`, `/usr/bin` stay read-only.
+
 ## port_owner_check.py — port-ownership incidents (CI)
 
 ```bash

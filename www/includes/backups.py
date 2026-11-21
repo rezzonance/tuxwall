@@ -21,6 +21,7 @@ logged or returned).
 """
 import datetime
 import difflib
+import errno
 import fnmatch
 import gzip
 import hashlib
@@ -1587,7 +1588,25 @@ def restore_apply(root, archive_path, archive_name, member, who="", client="", c
             "restart_required": service_for(name)}
 
 
+SANDBOX_MSG = ("/%s cannot be written by the dashboard: tuxwall.service runs sandboxed (ProtectSystem=full) "
+               "and can only replace files inside the directories listed in its ReadWritePaths (a file "
+               "directly in /etc is never one of them). Restore it from a root shell instead: "
+               "tar -xzf <archive> -C / %s")
+
+
 def _atomic_write(root, name, data, mode, uid, gid):
+    """_atomic_write_at, with a clear refusal instead of a bare EROFS/EBUSY
+    when the target is outside the service's writable paths (temp file in a
+    read-only directory, or rename onto a single-file bind mount)."""
+    try:
+        _atomic_write_at(root, name, data, mode, uid, gid)
+    except OSError as exc:
+        if exc.errno in (errno.EROFS, errno.EBUSY):
+            raise Refused(409, {"ok": False, "sandbox": True, "error": SANDBOX_MSG % (name, name)})
+        raise
+
+
+def _atomic_write_at(root, name, data, mode, uid, gid):
     """temp + fsync + rename next to /<name>, parent opened without
     following symlinks (missing directories are created)."""
     dfd, base, _missing = _walk_parent(root, name, create=True)

@@ -3,6 +3,7 @@
 /etc/nginx/conf.d/tuxwall-limits.conf
 /etc/tuxwall/opencode.json
 /etc/systemd/system/tuxwall.service
+/etc/systemd/system/tuxwall.service.d/20-writable-paths.conf
 /etc/systemd/system/tuxwall-agent.service
 /etc/systemd/system/tuxwall-blocklist-update.service
 /etc/systemd/system/tuxwall-blocklist-update.timer
