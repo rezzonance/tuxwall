@@ -15,7 +15,9 @@ a fake `systemctl` (first in PATH, records its calls) and a temp marker:
   (previous version set), never fails the postinst.
 - prerm remove: forgets the marker when it disables an enabled unit, keeps
   it when the owner had disabled the unit.
-- radvd_migration: /etc/radvd.conf -> /etc/tuxwall/radvd.conf + drop-in.
+- radvd_migration: /etc/radvd.conf -> /etc/tuxwall/radvd.conf + drop-in;
+  local scripts writing /etc/radvd.conf block it, path-aware ones (drop-in
+  -> /etc/tuxwall/radvd.conf) and backup copies do not.
 - kea_hook_migration (finding 8.2): adds the lease_cmds hook to an
   installer-written Kea config (header kept, kea-dhcp4 -t first, restart,
   rollback), idempotent; skips foreign configs / missing library.
@@ -299,6 +301,31 @@ def t_radvd():
         check("now reads" in out, "radvd: system-backup.sh / tuxwall-* do not block the migration (%s)" % out)
     finally:
         shutil.rmtree(d)
+    # a path-aware script (picks the file via the drop-in) and backup copies do not block; partial awareness does
+    for name, files, want in (
+            ("path-aware script + backups", {
+                "sync-ipv6-pd.sh": 'RADVD_DROPIN="/etc/systemd/system/radvd.service.d/10-tuxwall.conf"\n'
+                                   'if [ -e "$RADVD_DROPIN" ]; then RADVD_CONF="/etc/tuxwall/radvd.conf"; '
+                                   'else RADVD_CONF="/etc/radvd.conf"; fi\n',
+                "sync-ipv6-pd.sh.bak": 'RADVD_CONF="/etc/radvd.conf"\n',
+                "x.bak.20261016": "/etc/radvd.conf\n", "x.orig": "/etc/radvd.conf\n",
+                "x.pre-radvdlive": "/etc/radvd.conf\n", "x~": "/etc/radvd.conf\n"}, "now reads"),
+            ("drop-in path only", {"other.sh": "/etc/radvd.conf\n"
+                                   "/etc/systemd/system/radvd.service.d/10-tuxwall.conf\n"},
+             "written by /usr/local/sbin/other.sh"),
+            ("new path only", {"other.sh": "/etc/radvd.conf /etc/tuxwall/radvd.conf\n"},
+             "written by /usr/local/sbin/other.sh")):
+        d = box()
+        try:
+            for n, text in files.items():
+                with open(d + "/root/usr/local/sbin/" + n, "w") as f:
+                    f.write(text)
+            rc, calls, out = go(d)
+            check(rc == 0 and want in out, "radvd foreign writers (%s): %s" % (name, out))
+            if want != "now reads":
+                check(state(d)["dropin"] is None, "radvd foreign writers (%s): not migrated" % name)
+        finally:
+            shutil.rmtree(d)
     # 3. radvd does not come up with the new path: everything put back
     d = box()
     try:

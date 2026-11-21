@@ -70,7 +70,10 @@ bouncer_migration() {     # bouncer_migration PREV_VERSION [HELPER]
 # copy, install the drop-in, restart a running radvd and put everything back
 # if it does not come up. Skipped (logged) when a local script still writes
 # /etc/radvd.conf - radvd would stop seeing its changes - or with the opt-out
-# /etc/tuxwall/no-radvd-migration. tools/pkg_scripts_check.py runs these.
+# /etc/tuxwall/no-radvd-migration. A path-aware script (names the drop-in and
+# /etc/tuxwall/radvd.conf, i.e. picks the file radvd reads) and backup copies
+# (*.bak, *.orig, *.pre-*, *~, *.dpkg-*) do not block it.
+# tools/pkg_scripts_check.py runs these.
 RADVD_NEW=/etc/tuxwall/radvd.conf
 RADVD_OLD=/etc/radvd.conf
 RADVD_DROPIN=/etc/systemd/system/radvd.service.d/10-tuxwall.conf
@@ -80,8 +83,10 @@ radvd_foreign_writers() {   # radvd_foreign_writers [ROOT] -> files naming /etc/
   for f in "$r"/usr/local/sbin/* "$r"/usr/local/bin/* "$r"/etc/systemd/system/*.service \
            "$r"/etc/cron.d/* "$r"/etc/networkd-dispatcher/*/*; do
     [[ -f $f ]] || continue
-    case "${f##*/}" in tuxwall*|system-backup.sh) continue ;; esac
-    grep -qsF "$RADVD_OLD" "$f" && printf '%s\n' "${f#"$r"}"
+    case "${f##*/}" in tuxwall*|system-backup.sh|*.bak|*.bak.*|*.orig|*.pre-*|*~|*.dpkg-*) continue ;; esac
+    grep -qsF "$RADVD_OLD" "$f" || continue
+    grep -qsF "$RADVD_DROPIN" "$f" && grep -qsF "$RADVD_NEW" "$f" && continue
+    printf '%s\n' "${f#"$r"}"
   done
   return 0
 }
