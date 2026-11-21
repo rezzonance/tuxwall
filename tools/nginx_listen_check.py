@@ -5,7 +5,8 @@
 
 - pkg/etc/nginx/sites-available/tuxwall carries no host addresses and
   includes /etc/nginx/snippets/tuxwall-listen[.]conf (a glob: no error
-  while the file does not exist).
+  while the file does not exist), and keeps the 101m body limit on
+  /api/backups/system/upload (backup uploads, like nginx/tuxwall.conf).
 - pkg/usr/local/sbin/tuxwall-nginx-listen renders default_server listen
   lines from interfaces.json roles (or detection) and `ip -j addr` fixtures:
   LAN IPv4 + VPN IPv4 + LAN ULA IPv6, only addresses that exist, never the
@@ -88,6 +89,8 @@ def t_site_neutral():
     check("include /etc/nginx/snippets/tuxwall-listen[.]conf;" in text, "packaged site includes the listen file")
     check(re.search(r"(?m)^\s*listen 80 default_server;", text) and
           re.search(r"(?m)^\s*listen \[::\]:80 default_server;", text), "wildcard listeners kept")
+    check(re.search(r"location = /api/backups/system/upload \{[^}]*client_max_body_size 101m;", text),
+          "packaged site lifts the body limit for backup uploads (101m)")
     conffiles = open(os.path.join(ROOT, "pkg", "DEBIAN", "conffiles")).read().split()
     check("/etc/nginx/snippets/tuxwall-listen.conf" not in conffiles, "generated include is not a conffile")
     check(not os.path.exists(os.path.join(ROOT, "pkg", "etc", "nginx", "snippets")), "include not shipped in pkg/")

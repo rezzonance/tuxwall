@@ -80,6 +80,15 @@ server {
         allow fd00::/8;
         deny all;
 
+        # System backup uploads: the API accepts up to 100 MB here (and caps
+        # every other endpoint itself); nginx's 1 MB default stays elsewhere.
+        location = /api/backups/system/upload {
+            client_max_body_size 101m;
+            proxy_pass http://127.0.0.1:8008;
+            proxy_http_version 1.1;
+            proxy_read_timeout 300s;
+        }
+
         proxy_pass http://127.0.0.1:8008;
         proxy_http_version 1.1;
         proxy_set_header Host $host;

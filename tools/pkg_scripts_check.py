@@ -29,6 +29,9 @@ a fake `systemctl` (first in PATH, records its calls) and a temp marker:
   LAN is known; upgrades and installer runs add nothing.
 - nginx_listen_render: listen include rendered before nginx -t / reload,
   never fails the postinst.
+- plugins_dir_perms (3.3.3): /etc/tuxwall/plugins 0755 (no group write),
+  plugin dirs 0755, files 0644, settings/pin/secret data 0600; hidden
+  entries and symlinks untouched, a missing dir is not created.
 - tuxwall-nat-ensure: idempotent (-C first), a failed -A exits 1 with the
   reason on stderr (stubbed iptables).
 """
@@ -820,6 +823,53 @@ def t_nginx_listen_render():
         shutil.rmtree(d)
 
 
+def t_plugins_dir_perms():
+    fn = func("plugins_dir_perms")
+    check("plugins_dir_perms()" in fn and 'PLUGINS_DIR=/etc/tuxwall/plugins' in SRC,
+          "postinst defines plugins_dir_perms for /etc/tuxwall/plugins")
+    body = SRC.split('case "$1" in\n  configure)', 1)[1]
+    check("plugins_dir_perms" in body and body.index("plugins_dir_perms") < body.index("systemctl restart tuxwall.service"),
+          "configure fixes the plugins dir before the API restarts")
+    d = tempfile.mkdtemp(prefix="pkg-plugins-")
+    try:
+        me = "%d:%d" % (os.getuid(), os.getgid())
+        p = d + "/plugins"
+        tree = {"demo/main.py": 0o664, "demo/plugin.json": 0o666, "demo/config.json": 0o644,
+                "demo/.provenance.json": 0o644, "demo/api_secret.txt": 0o644, "demo/Secret_helper.py": 0o600,
+                "demo/web/plugin.js": 0o664, "demo/web/.config.json.ab12.tmp": 0o644, "demo/run.sh": 0o755}
+        for rel, mode in tree.items():
+            os.makedirs(os.path.dirname(os.path.join(p, rel)), exist_ok=True)
+            with open(os.path.join(p, rel), "w") as f:
+                f.write("x\n")
+            os.chmod(os.path.join(p, rel), mode)
+        os.makedirs(p + "/.staging-x")
+        os.chmod(p + "/.staging-x", 0o700)
+        os.chmod(p + "/demo/web", 0o775)
+        os.chmod(p + "/demo", 0o777)
+        os.chmod(p, 0o775)
+        os.symlink(p + "/demo/main.py", p + "/demo/link.py")
+        rc, calls, out, err = bash_run(d, fn + 'plugins_dir_perms "%s" "%s"\n' % (p, me))
+        mode = lambda rel: os.lstat(os.path.join(p, rel) if rel else p).st_mode & 0o7777
+        check(rc == 0 and "was 775" in out and mode("") == 0o755, "top dir 0755, previous mode reported (%s)" % out.strip())
+        check(mode("demo") == 0o755 and mode("demo/web") == 0o755, "plugin directories 0755")
+        want = {"demo/main.py": 0o644, "demo/plugin.json": 0o644, "demo/config.json": 0o600,
+                "demo/.provenance.json": 0o600, "demo/api_secret.txt": 0o600, "demo/Secret_helper.py": 0o644,
+                "demo/web/plugin.js": 0o644, "demo/web/.config.json.ab12.tmp": 0o600, "demo/run.sh": 0o644}
+        got = {rel: mode(rel) for rel in want}
+        check(got == want, "files 0644, settings/pin/secret data 0600 (%s)"
+              % {k: oct(v) for k, v in got.items() if v != want[k]})
+        check(mode(".staging-x") == 0o700 and os.path.islink(p + "/demo/link.py"), "hidden top-level entries and symlinks untouched")
+        rc, calls, out, err = bash_run(d, fn + 'plugins_dir_perms "%s/none" "%s"\n' % (d, me))
+        check(rc == 0 and "does not exist" in out and not os.path.exists(d + "/none"), "missing dir -> nothing created")
+        os.symlink(p, d + "/plink")
+        rc, calls, out, err = bash_run(d, fn + 'plugins_dir_perms "%s/plink" "%s"\n' % (d, me))
+        check(rc == 0 and "symlink" in out, "symlinked dir -> left alone")
+        rc, calls, out, err = bash_run(d, fn + 'plugins_dir_perms "%s" "nosuchuser:nosuchgroup"\n' % p)
+        check(rc == 0 and "could not set" in out, "chown failure -> message, no failure (%s)" % out.strip())
+    finally:
+        shutil.rmtree(d)
+
+
 def t_nat_ensure():
     src = open(os.path.join(ROOT_DIR, "pkg", "usr", "local", "sbin", "tuxwall-nat-ensure")).read()
     check("export PATH=/usr/sbin:/usr/bin:/sbin:/bin" in src, "nat-ensure pins PATH")
@@ -870,6 +920,7 @@ def main():
     t_unbound_apply()
     t_firewall_fresh()
     t_nginx_listen_render()
+    t_plugins_dir_perms()
     t_nat_ensure()
     print("pkg_scripts_check: %d passed, %d failed" % (PASS, FAIL))
     sys.exit(1 if FAIL else 0)

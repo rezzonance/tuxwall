@@ -366,6 +366,38 @@ nginx_listen_render() {     # nginx_listen_render [RENDERER] -> one status line,
   fi
 }
 
+# Plugin code belongs to root (3.3.3): /etc/tuxwall/plugins is set to
+# root:root 0755 - it used to be group-writable by tuxwall-agent, so the agent
+# could add, rename or swap plugin directories. Inside each plugin the API's
+# rules (_plugin_write_perms): directories 0755, files 0644, settings / pin /
+# *secret* data 0600. Ownership inside a plugin is left alone (a plugin not
+# owned by root stays refused until it is reviewed and pinned again); hidden
+# top-level entries (staging leftovers) and symlinks are not touched. Skipped
+# when the directory does not exist. Never fails the postinst.
+# tools/pkg_scripts_check.py runs it.
+PLUGINS_DIR=/etc/tuxwall/plugins
+plugins_dir_perms() {       # plugins_dir_perms [DIR] [OWNER] -> one status line, never fails
+  local dir=${1:-$PLUGINS_DIR} owner=${2:-root:root} was
+  if [[ -L $dir ]]; then echo "plugins: $dir is a symlink - left alone"; return 0; fi
+  [[ -d $dir ]] || { echo "plugins: $dir does not exist yet, nothing to do"; return 0; }
+  was="$(stat -c '%a %U:%G' "$dir" 2>/dev/null || echo '?')"
+  if ! chown "$owner" "$dir" 2>/dev/null || ! chmod 0755 "$dir" 2>/dev/null; then
+    echo "plugins: could not set $dir to $owner 0755 (was $was)"; return 0
+  fi
+  find "$dir" -mindepth 1 -path "$dir/.*" -prune -o -type d -exec chmod 0755 {} + 2>/dev/null || true
+  find "$dir" -mindepth 1 -path "$dir/.*" -prune -o -type f \
+    \( -iname config.json -o -iname .provenance.json -o -iname '.config.json.*' -o -iname '.provenance.json.*' \
+       -o \( -iname '*secret*' ! -iname '*.py' ! -iname '*.js' ! -iname '*.mjs' ! -iname '*.css' \
+             ! -iname '*.html' ! -iname '*.htm' ! -iname '*.md' ! -iname '*.svg' \) \) \
+    -exec chmod 0600 {} + 2>/dev/null || true
+  find "$dir" -mindepth 1 -path "$dir/.*" -prune -o -type f \
+    ! \( -iname config.json -o -iname .provenance.json -o -iname '.config.json.*' -o -iname '.provenance.json.*' \
+         -o \( -iname '*secret*' ! -iname '*.py' ! -iname '*.js' ! -iname '*.mjs' ! -iname '*.css' \
+               ! -iname '*.html' ! -iname '*.htm' ! -iname '*.md' ! -iname '*.svg' \) \) \
+    -exec chmod 0644 {} + 2>/dev/null || true
+  echo "plugins: $dir $owner 0755 (was $was); plugin dirs 0755, files 0644, settings/pin/secrets 0600"
+}
+
 case "$1" in
   configure)
 
@@ -868,6 +900,8 @@ PY
         systemctl enable tuxwall-kea-mirror.timer >/dev/null 2>&1 || true
         systemctl start tuxwall-kea-mirror.service >/dev/null 2>&1 || true
     fi
+    # plugin code root-only before the API (re)starts and verifies the pins
+    echo "   $(plugins_dir_perms)"
     systemctl restart tuxwall.service || true
 
     # Tripwire engine. Fresh installs start with every check Off (no
