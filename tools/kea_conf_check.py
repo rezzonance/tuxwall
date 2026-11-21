@@ -14,7 +14,9 @@ api_server _read_kea/_write_kea + the reservation add/edit/delete flow
 topology._read_kea, assign_plan's Kea render, fw_lint's reservation scan,
 and the installer's kea_is_replaceable decision; finding 8.2: the lease
 manager health check (result 0/3 healthy, 1/2/timeouts not) and the
-installer's lease_cmds hook. Nothing touches /etc.
+installer's lease_cmds hook; the config-reload result (accepted -> kept,
+rejected -> Kea's text as an error + previous file restored and reloaded,
+socket failure -> systemctl fallback as before). Nothing touches /etc.
 """
 import importlib.util
 import json
@@ -241,6 +243,68 @@ try:
         A.subprocess.run = real_run
     check(err is None and sent == ["config-reload", "lease4-get-all"] and not runs,
           "_reload_kea: empty lease DB is healthy, no restart (%r %r %r)" % (err, sent, runs))
+    # config-reload result checked; write + reload transactional (_write_reload_kea)
+    def kea_fake(reload_results):
+        sent = []
+
+        def fake(cmd, arguments=None):
+            sent.append(cmd)
+            if cmd == "config-reload":
+                r = reload_results.pop(0)
+                if isinstance(r, BaseException):
+                    raise r
+                return r
+            return [{"result": 0, "arguments": {"leases": []}}]
+        A.kea_command = fake
+        return sent
+
+    def tx(data, reload_results):
+        sent, runs = kea_fake(reload_results), []
+        A.subprocess.run = lambda *a, **kw: runs.append(a[0])
+        try:
+            return raises(lambda: A._write_reload_kea(data)), sent, runs
+        finally:
+            A.subprocess.run = real_run
+    os.chmod(path, 0o640)
+    before = open(path).read()
+    newdata = K.read(path)
+    newdata["Dhcp4"]["valid-lifetime"] = 1234
+    err, sent, runs = tx(newdata, [[{"result": 0, "text": "Configuration successful."}]])
+    check(err is None and sent == ["config-reload", "lease4-get-all"] and not runs
+          and K.read(path)["Dhcp4"]["valid-lifetime"] == 1234,
+          "kea reload accepted: new config kept, no restart (%r %r %r)" % (err, sent, runs))
+    with open(path, "w") as f:
+        f.write(before)
+    os.chmod(path, 0o640)
+    err, sent, runs = tx(newdata, [{"result": 1, "text": "subnet4: bogus parameter"}, [{"result": 0}]])
+    check(isinstance(err, A.KeaConfigRejected) and isinstance(err, ValueError)
+          and "subnet4: bogus parameter" in str(err) and "previous config restored" in str(err),
+          "kea reload rejected: error with Kea's text (%r)" % err)
+    check(open(path).read() == before and stat.S_IMODE(os.stat(path).st_mode) == 0o640,
+          "kea reload rejected: previous file restored byte for byte, mode kept")
+    check(sent == ["config-reload", "config-reload", "lease4-get-all"] and not runs,
+          "kea reload rejected: restored config reloaded, no restart (%r %r)" % (sent, runs))
+    check(sorted(os.listdir(TMP)) == ["kea-dhcp4.conf"], "kea restore leaves no temp file: %s" % os.listdir(TMP))
+    err, sent, runs = tx(newdata, [[{"result": 1, "text": "bad"}], [{"result": 1, "text": "old bad too"}]])
+    check(isinstance(err, A.KeaConfigRejected) and "old bad too" in str(err) and open(path).read() == before,
+          "kea reload rejected twice: restored, both reasons reported (%r)" % err)
+    for resp, name in (([], "empty answer"), ([{"text": "?"}], "no result"), ([{"result": 2, "text": "nope"}], "result 2")):
+        err, sent, runs = tx(newdata, [resp, [{"result": 0}]])
+        check(isinstance(err, A.KeaConfigRejected) and open(path).read() == before,
+              "kea reload %s: treated as rejected, restored (%r)" % (name, err))
+    err, sent, runs = tx(newdata, [ConnectionRefusedError(111, "refused")])
+    check(err is None and runs == [["systemctl", "reload-or-restart", "kea-dhcp4-server"]]
+          and sent == ["config-reload", "lease4-get-all"] and K.read(path)["Dhcp4"]["valid-lifetime"] == 1234,
+          "kea socket failure: systemctl fallback + health check as before, new config kept (%r %r %r)"
+          % (err, sent, runs))
+    with open(path, "w") as f:
+        f.write(before)
+    os.chmod(path, 0o644)
+    # a rejected reservation change: 400-class error, reservations unchanged
+    kea_fake([[{"result": 1, "text": "duplicate reservation"}], [{"result": 0}]])
+    err = raises(lambda: A.add_reservation({"ip": "192.168.100.60", "mac": "aa:bb:cc:dd:ee:60"}))
+    check(isinstance(err, ValueError) and "duplicate reservation" in str(err) and open(path).read() == before,
+          "add_reservation rejected by Kea: ValueError, file unchanged (%r)" % err)
     A.kea_command = real_kea_command
     reloads = []
     A._reload_kea = lambda: reloads.append(1)

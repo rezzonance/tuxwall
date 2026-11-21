@@ -339,6 +339,11 @@ def _kea_leases_healthy():
         return False
 
 
+class KeaConfigRejected(ValueError):
+    """Kea answered config-reload with a non-zero result: it keeps running
+    the previous config, so the change did not take effect."""
+
+
 def _reload_kea():
     """Reload Kea's config via the control socket, then verify the lease
     manager survived; fall back to a full restart if it did not.
@@ -346,15 +351,24 @@ def _reload_kea():
     A plain in-process reload can drop the lease manager (see
     _kea_leases_healthy). A restart re-reads the config and re-opens the
     lease file, and is the only reliable recovery - so it is used as the
-    fallback whenever the post-reload health check fails."""
+    fallback whenever the post-reload health check fails.
+
+    Raises KeaConfigRejected (Kea's text) when Kea refuses the new config."""
     try:
-        kea_command("config-reload")
+        resp = kea_command("config-reload")
     except Exception:
         # Fallback: systemctl reload
         subprocess.run(
             ["systemctl", "reload-or-restart", "kea-dhcp4-server"],
             capture_output=True, text=True, timeout=15
         )
+    else:
+        result = (resp[0] if resp else {}) if isinstance(resp, list) else (resp or {})
+        if not isinstance(result, dict) or result.get("result") != 0:
+            code = result.get("result") if isinstance(result, dict) else None
+            text = (result.get("text") if isinstance(result, dict) else "") or "no reason given"
+            raise KeaConfigRejected(
+                "Kea rejected the new config (result %s): %s" % (code, text))
     if _kea_leases_healthy():
         return
     # Lease manager dropped (or reload never landed) - full restart
@@ -370,6 +384,50 @@ def _reload_kea():
         _time.sleep(1)
     raise RuntimeError(
         "Kea reload left the lease manager broken (restart did not recover)")
+
+
+def _restore_kea_text(text):
+    """Put previous kea-dhcp4.conf content back (atomic, owner/mode kept)."""
+    st = os.stat(KEA_CONF)
+    fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(KEA_CONF) + ".", suffix=".tmp",
+                               dir=os.path.dirname(KEA_CONF))
+    try:
+        os.fchmod(fd, st.st_mode & 0o7777)
+        if (st.st_uid, st.st_gid) != (os.geteuid(), os.getegid()):
+            os.fchown(fd, st.st_uid, st.st_gid)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, KEA_CONF)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _write_reload_kea(data):
+    """_write_kea + _reload_kea as one step: when Kea rejects the new config
+    the previous file is restored and reloaded, and KeaConfigRejected
+    (a ValueError carrying Kea's text) reaches the caller."""
+    try:
+        with open(KEA_CONF) as f:
+            previous = f.read()
+    except OSError:
+        previous = None
+    _write_kea(data)
+    try:
+        _reload_kea()
+    except KeaConfigRejected as exc:
+        if previous is None:
+            raise
+        _restore_kea_text(previous)
+        try:
+            _reload_kea()
+        except Exception as again:
+            raise KeaConfigRejected(
+                "%s - previous config restored, but its reload failed: %s" % (exc, again))
+        raise KeaConfigRejected("%s - previous config restored, nothing changed" % exc)
 
 
 def _validate_reservation(ip, mac, hostname, existing_id=None):
@@ -458,8 +516,7 @@ def add_reservation(body):
             entry["hostname"] = hostname
 
         target.setdefault("reservations", []).append(entry)
-        _write_kea(kea)
-        _reload_kea()
+        _write_reload_kea(kea)
 
     return build_reservations()
 
@@ -505,8 +562,7 @@ def edit_reservation(body):
         if not found:
             raise ValueError(f"Reservation for {ip} not found")
 
-        _write_kea(kea)
-        _reload_kea()
+        _write_reload_kea(kea)
 
     return build_reservations()
 
@@ -539,8 +595,7 @@ def delete_reservation(body):
         if not found:
             raise ValueError(f"Reservation for {ip} not found")
 
-        _write_kea(kea)
-        _reload_kea()
+        _write_reload_kea(kea)
 
     return build_reservations()
 
