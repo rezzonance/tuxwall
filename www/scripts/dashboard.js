@@ -13501,6 +13501,17 @@
       </div>`).join("");
   }
 
+  function pluginUpdateSummary(d) {
+    const cur = d.current || {}, nu = d.new || {}, ch = d.changes || {}, n = ch.counts || {};
+    const short = (x) => (x ? String(x).slice(0, 12) : "none");
+    const list = (label, arr, count) => (count ? `\n${label} (${count}): ${(arr || []).slice(0, 8).join(", ")}${count > 8 ? ", …" : ""}` : "");
+    return `Update ${(d.plugin && d.plugin.name) || "plugin"} ${cur.version || "?"} → ${nu.version || "?"}?\n\n`
+      + `Commit: ${short(cur.commit)} → ${short(nu.commit)}${nu.branch ? " (" + nu.branch + ")" : ""}\n`
+      + `Content hash: ${short(cur.content_sha256)} → ${short(nu.content_sha256)}`
+      + list("Changed", ch.changed, n.changed || 0) + list("Added", ch.added, n.added || 0) + list("Removed", ch.removed, n.removed || 0)
+      + `\n\nThe new code is pinned to this commit and hash; settings are kept.`;
+  }
+
   function bindPluginCatalogInstalls() {
     const listEl = document.getElementById("plugins-available-list");
     if (!listEl) return;
@@ -13509,17 +13520,30 @@
       if (!btn) return;
       const url = btn.dataset.pluginUrl;
       if (!url) return;
+      const label = btn.textContent;
       btn.disabled = true;
       btn.textContent = "Installing…";
       try {
-        const d = await postJSON("/api/plugins/install", { url });
+        let d = await postJSON("/api/plugins/install", { url });
         if (!d.ok) throw new Error(d.error || "Install failed");
+        if (d.confirm_required) {
+          // Update of an installed plugin: show what would change (exact
+          // commit + content hash) and install only that content.
+          if (!(await (window.twConfirm || window.confirm)(pluginUpdateSummary(d)))) {
+            btn.disabled = false;
+            btn.textContent = label;
+            return;
+          }
+          btn.textContent = "Updating…";
+          d = await postJSON("/api/plugins/install", { url, commit: d.new.commit, confirm_sha256: d.new.content_sha256 });
+          if (!d.ok) throw new Error(d.error || "Update failed");
+        }
         await loadPluginsView();
         await loadAvailablePlugins();
         await loadPluginHost();
       } catch (err) {
         btn.disabled = false;
-        btn.textContent = "Install";
+        btn.textContent = label;
         const row = btn.closest(".plugin-item");
         if (row) {
           let errEl = row.querySelector(".plugin-install-err");
@@ -13550,9 +13574,10 @@
         <div class="plugin-item-main">
           <div class="plugin-item-title">${esc(p.name || p.id)} <span class="plugin-version">${esc(p.version || "")}</span></div>
           <div class="plugin-item-desc">${esc(p.error || p.description || "No description.")}</div>
-          <div class="plugin-item-meta"><code>${esc(p.id)}</code> · ${p.enabled ? "enabled" : "disabled"}${p.web ? " · web view" : ""}</div>
+          <div class="plugin-item-meta"><code>${esc(p.id)}</code> · ${p.enabled ? "enabled" : "disabled"}${p.web ? " · web view" : ""}${p.pin && p.pin.content_sha256 ? ` · pinned <code title="${esc(p.pin.content_sha256)}">${esc(p.pin.content_sha256.slice(0, 12))}</code>${p.pin.commit ? ` @ <code>${esc(p.pin.commit.slice(0, 10))}</code>` : ""}` : ""}</div>
         </div>
         <div class="plugin-item-actions">
+          ${p.pin && ["unpinned", "mismatch", "invalid"].includes(p.pin.state) ? `<button class="btn btn-sm" data-plugin-repin="${esc(p.id)}" type="button" title="Review the files on disk, then pin them">Pin files</button>` : ""}
           ${(p.settings || []).length ? `<button class="icon-btn" data-plugin-settings="${esc(p.id)}" type="button" title="Settings" aria-label="Settings for ${esc(p.name || p.id)}">${pluginActionIcon("config")}</button>` : ""}
           <button class="icon-btn icon-btn-danger" data-plugin-uninstall="${esc(p.id)}" type="button" title="Uninstall plugin" aria-label="Uninstall ${esc(p.name || p.id)}">${pluginActionIcon("trash")}</button>
           <button class="icon-btn plugin-power${p.enabled ? " is-on" : " is-off"}" data-plugin-toggle="${esc(p.id)}" data-enabled="${p.enabled ? "1" : "0"}" type="button" title="${p.enabled ? "Disable" : "Enable"} plugin" aria-label="${p.enabled ? "Disable" : "Enable"} ${esc(p.name || p.id)}"${p.error ? " disabled" : ""}>${pluginActionIcon("power")}</button>
@@ -13569,6 +13594,27 @@
           await loadPluginHost();
         } catch (err) {
           btn.disabled = false;
+        }
+      });
+    });
+    listEl.querySelectorAll("[data-plugin-repin]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const pid = btn.dataset.pluginRepin;
+        btn.disabled = true;
+        try {
+          const q = await postJSON("/api/plugins/" + encodeURIComponent(pid) + "/pin", {});
+          if (!q.ok) throw new Error(q.error || "Pin failed");
+          const msg = `Pin the files of ${pid} as they are on disk now?\n\n`
+            + `Content hash now: ${q.content_sha256.slice(0, 16)}\nPinned before: ${(q.pinned_sha256 || "none").slice(0, 16)}\n\n`
+            + "Only do this after reviewing /etc/tuxwall/plugins/" + pid + " - pinned code runs on this router and in your browser session.";
+          if (!(await (window.twConfirm || window.confirm)(msg))) { btn.disabled = false; return; }
+          const d = await postJSON("/api/plugins/" + encodeURIComponent(pid) + "/pin", { confirm_sha256: q.content_sha256 });
+          if (!d.ok) throw new Error(d.error || "Pin failed");
+          await loadPluginsView();
+          await loadPluginHost();
+        } catch (err) {
+          btn.disabled = false;
+          alert("Pin failed: " + err.message);
         }
       });
     });

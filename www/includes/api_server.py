@@ -17398,7 +17398,7 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/api/plugins/install":
             try:
-                self._send(200, install_plugin_from_github(body))
+                self._send(200, install_plugin_from_github(body, identity.get("username", "")))
             except ValueError as exc:
                 self._send(400, {"ok": False, "error": str(exc)})
             except Exception as exc:
@@ -17429,7 +17429,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, {"ok": False, "error": str(exc)})
 
         elif path.startswith("/api/plugins/"):
-            m = re.match(r"^/api/plugins/([a-z][a-z0-9-]{1,31})/(enable|config|action|uninstall)$", path)
+            m = re.match(r"^/api/plugins/([a-z][a-z0-9-]{1,31})/(enable|config|action|uninstall|pin)$", path)
             if not m:
                 self._send(404, {"ok": False, "error": "plugin route not found"})
                 return
@@ -17441,6 +17441,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, _plugin_save_config(pid, body))
                 elif action == "uninstall":
                     self._send(200, uninstall_plugin(pid))
+                elif action == "pin":
+                    self._send(200, plugin_repin(pid, body, identity.get("username", "")))
                 else:
                     result = plugin_action(pid, body.get("action") or "", body.get("payload") or {})
                     self._send(200, result)
@@ -19426,6 +19428,11 @@ import sys, json, os, importlib.util
 pdir = sys.argv[1]
 sys.path.insert(0, pdir)
 try:
+    import resource
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))   # no core dumps of config/credentials
+except Exception:
+    pass
+try:
     spec = importlib.util.spec_from_file_location("tuxwall_plugin_main", os.path.join(pdir, "main.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -19486,166 +19493,583 @@ def _plugin_safe_extract(zip_file, dest):
             shutil.copyfileobj(src, out)
 
 
-def _plugin_content_hash(root):
-    """SHA-256 over every code file (main.py, web/, plugin.json) — the
-    content pin. Config and credentials are excluded: only the code that
-    runs with admin rights in the browser get hashed."""
+# Plugin files: settings/credentials (config.json) and the pin
+# (.provenance.json) are 0600 root - the demoted worker never reads them, it
+# gets its config from the root parent over stdin (plugin_action). Code and
+# web assets are 0644, directories 0755 (3.3.3: every file used to be 0644,
+# so plugin secrets such as the OpenWrt SSH key were world-readable).
+PLUGIN_CONFIG_FILE = "config.json"
+PLUGIN_PIN_FILE = ".provenance.json"
+PLUGIN_HASH_V = 2
+# Written once the first API start with pinning has pinned the plugins that
+# were installed before pins existed (trust on first use). After that, an
+# unpinned plugin is refused until it is reinstalled or re-pinned by an admin.
+PLUGIN_TOFU_MARKER = "/etc/tuxwall/plugin-pins-tofu.done"
+_PLUGIN_CODE_EXTS = (".py", ".js", ".mjs", ".css", ".html", ".htm", ".md", ".svg")
+_PLUGIN_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_PLUGIN_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+_PLUGIN_PIN_CACHE = {}
+_PLUGIN_PIN_LOCK = threading.Lock()
+_PLUGIN_PIN_LOGGED = set()
+
+
+def _plugin_secret_name(name):
+    """Files kept 0600 root: settings/credentials, the pin, *secret* data."""
+    low = name.lower()
+    if low in (PLUGIN_CONFIG_FILE, PLUGIN_PIN_FILE):
+        return True
+    if low.startswith(("." + PLUGIN_CONFIG_FILE + ".", "." + PLUGIN_PIN_FILE + ".")):
+        return True     # atomic-write temp files
+    return "secret" in low and not low.endswith(_PLUGIN_CODE_EXTS)
+
+
+def _plugin_hash_skip(rel, version):
+    parts = rel.split("/")
+    name = parts[-1]
+    if name.endswith(".pyc") or "__pycache__" in parts:
+        return True
+    if version == 1:
+        return name in (PLUGIN_CONFIG_FILE, PLUGIN_PIN_FILE)
+    if len(parts) == 1:
+        if name in (PLUGIN_CONFIG_FILE, PLUGIN_PIN_FILE):
+            return True
+        if name.startswith(("." + PLUGIN_CONFIG_FILE + ".", "." + PLUGIN_PIN_FILE + ".")) and name.endswith(".tmp"):
+            return True
+    return False
+
+
+def _plugin_content_hash(root, version=PLUGIN_HASH_V):
+    """SHA-256 over every code file (main.py, web/, plugin.json, ...) - the
+    content pin. The plugin's own config.json and pin file are excluded.
+    v2 (3.3.3) frames each path and content with its length (v1 simply
+    concatenated them, so bytes could move between a name and a file);
+    v1 is kept to verify pins written by 3.3.0-3.3.2 installs."""
     h = hashlib.sha256()
     for dirpath, dirs, files in os.walk(root):
-        dirs[:] = sorted(d for d in dirs if d not in ("__pycache__",))
+        dirs[:] = sorted(d for d in dirs if d != "__pycache__")
         for fn in sorted(files):
-            if fn in ("config.json", ".provenance.json") or fn.endswith(".pyc"):
-                continue
             fp = os.path.join(dirpath, fn)
-            rel = os.path.relpath(fp, root)
-            h.update(rel.encode())
+            rel = os.path.relpath(fp, root).replace(os.sep, "/")
+            if _plugin_hash_skip(rel, version):
+                continue
             try:
                 with open(fp, "rb") as f:
-                    h.update(f.read())
+                    data = f.read()
             except OSError:
-                pass
+                data = None
+            if version == 1:
+                h.update(rel.encode())
+                if data is not None:
+                    h.update(data)
+                continue
+            rb = rel.encode("utf-8", "surrogateescape")
+            h.update(b"F" + len(rb).to_bytes(4, "big") + rb)
+            if data is None:
+                h.update(b"E")
+            else:
+                h.update(b"D" + len(data).to_bytes(8, "big") + data)
     return h.hexdigest()
 
 
-def _plugin_write_perms(root):
-    for base, dirs, files in os.walk(root):
-        os.chmod(base, 0o755)
-        for name in files:
+def _plugin_tree_files(root):
+    """rel path -> sha256 of every hashed file (update previews)."""
+    out = {}
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+        for fn in files:
+            fp = os.path.join(dirpath, fn)
+            rel = os.path.relpath(fp, root).replace(os.sep, "/")
+            if _plugin_hash_skip(rel, PLUGIN_HASH_V):
+                continue
             try:
-                os.chmod(os.path.join(base, name), 0o644)
+                with open(fp, "rb") as f:
+                    out[rel] = hashlib.sha256(f.read()).hexdigest()
+            except OSError:
+                out[rel] = ""
+    return out
+
+
+def _plugin_write_perms(root):
+    """Directories 0755, code/assets 0644, secret files 0600. Symlinks are
+    left alone (installs never create them; the pin check refuses them)."""
+    for base, dirs, files in os.walk(root):
+        try:
+            os.chmod(base, 0o755)
+        except OSError:
+            pass
+        for name in files:
+            fp = os.path.join(base, name)
+            if os.path.islink(fp):
+                continue
+            try:
+                os.chmod(fp, 0o600 if _plugin_secret_name(name) else 0o644)
             except OSError:
                 pass
 
 
-def install_plugin_from_github(body):
-    url = (body.get("url") or "").strip()
-    owner, repo, branch, subpath = _plugin_github_parts(url)
-    with _PLUGIN_INSTALL_LOCK:
-        import urllib.request
-        if not branch:
-            api = "https://api.github.com/repos/%s/%s" % (
-                urllib.parse.quote(owner), urllib.parse.quote(repo))
-            req = urllib.request.Request(api, headers={
-                "User-Agent": "tuxwall-plugin-installer/1.0",
-                "Accept": "application/vnd.github+json",
-            })
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                info = json.loads(resp.read().decode("utf-8", "replace"))
-            branch = info.get("default_branch") or "main"
-        archive_url = "https://codeload.github.com/%s/%s/zip/refs/heads/%s" % (
-            urllib.parse.quote(owner), urllib.parse.quote(repo),
-            urllib.parse.quote(branch, safe="/"))
-        req = urllib.request.Request(archive_url, headers={
-            "User-Agent": "tuxwall-plugin-installer/1.0",
-        })
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = resp.read(PLUGIN_MAX_BYTES + 1)
-        if len(data) > PLUGIN_MAX_BYTES:
-            raise ValueError("Plugin archive is larger than 50 MB")
+def _plugin_write_private(path, data):
+    """Atomic 0600 write (temp file in the same directory + rename)."""
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    d, base = os.path.split(path)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix="." + base + ".", suffix=".tmp")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
-        with tempfile.TemporaryDirectory(prefix="tuxwall-plugin-") as tmp:
-            try:
-                with zipfile.ZipFile(io.BytesIO(data)) as z:
-                    _plugin_safe_extract(z, tmp)
-            except zipfile.BadZipFile:
-                raise ValueError("GitHub returned an invalid archive")
-            candidates = []
-            wanted = subpath.strip("/")
-            for base, dirs, files in os.walk(tmp):
-                if "plugin.json" not in files:
-                    continue
-                rel = os.path.relpath(base, tmp).replace("\\", "/")
-                if wanted:
-                    if rel == wanted or rel.endswith("/" + wanted):
-                        candidates.append(base)
-                else:
+
+def _plugin_read_pin(pdir):
+    try:
+        with open(os.path.join(pdir, PLUGIN_PIN_FILE), "r") as f:
+            pin = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return {"_invalid": True}
+    return pin if isinstance(pin, dict) else {"_invalid": True}
+
+
+def _plugin_write_pin(pdir, pin):
+    _plugin_write_private(os.path.join(pdir, PLUGIN_PIN_FILE),
+                          json.dumps({k: v for k, v in pin.items() if not k.startswith("_")}, indent=2) + "\n")
+
+
+def _plugin_tree_problems(pdir):
+    """(problem, signature): every entry must be owned by the API's uid
+    (root), not group/world-writable and not a symlink - otherwise a pin
+    next to the code proves nothing. The signature (lstat of every entry)
+    keys the verification cache."""
+    import stat as _stat
+    me = os.geteuid()
+    sig = []
+    problem = ""
+
+    def look(path):
+        st = os.lstat(path)
+        rel = os.path.relpath(path, pdir).replace(os.sep, "/")
+        sig.append((rel, st.st_mode, st.st_uid, st.st_size, st.st_mtime_ns, st.st_ino))
+        if _stat.S_ISLNK(st.st_mode):
+            return "%s is a symlink" % rel
+        if st.st_uid != me:
+            return "%s is not owned by %s" % (rel, "root" if me == 0 else "uid %d" % me)
+        if st.st_mode & 0o022:
+            return "%s is writable by group/others" % rel
+        return ""
+
+    for base, dirs, files in os.walk(pdir):
+        dirs.sort()
+        problem = problem or look(base)
+        for name in sorted(files):
+            problem = problem or look(os.path.join(base, name))
+        for name in dirs:
+            if os.path.islink(os.path.join(base, name)):
+                problem = problem or look(os.path.join(base, name))
+    if not sig:
+        raise FileNotFoundError(pdir)
+    return problem, tuple(sig)
+
+
+def _plugin_pin_status(pid):
+    """Integrity of an installed plugin against its pin. state: ok |
+    unpinned | mismatch | unsafe | invalid. Cached per file signature."""
+    pdir = os.path.join(PLUGINS_DIR, pid)
+    problem, sig = _plugin_tree_problems(pdir)
+    with _PLUGIN_PIN_LOCK:
+        cached = _PLUGIN_PIN_CACHE.get(pid)
+        if cached and cached[0] == sig:
+            return dict(cached[1])
+    pin = _plugin_read_pin(pdir)
+    info = {"commit": "", "pinned_sha256": "", "pinned_by": "", "actual_sha256": ""}
+    if isinstance(pin, dict) and not pin.get("_invalid"):
+        info.update(commit=str(pin.get("commit") or ""), pinned_sha256=str(pin.get("content_sha256") or ""),
+                    pinned_by=str(pin.get("pinned_by") or ("install" if pin.get("content_sha256") else "")))
+    fix = "chown -R root:root %s && chmod -R go-w %s" % (pdir, pdir)
+    if problem:
+        res = dict(info, state="unsafe", error="Plugin %s refused: %s. Fix it (%s), review the files, then "
+                   "pin them again on System > Plugins." % (pid, problem, fix))
+    elif pin is None or (not pin.get("_invalid") and not pin.get("content_sha256")):
+        res = dict(info, state="unpinned", error="Plugin %s refused: it has no integrity pin. Reinstall it, "
+                   "or review its files and pin them on System > Plugins." % pid)
+    elif pin.get("_invalid"):
+        res = dict(info, state="invalid", error="Plugin %s refused: its pin file %s is unreadable. Reinstall it, "
+                   "or review its files and pin them again on System > Plugins." % (pid, PLUGIN_PIN_FILE))
+    else:
+        try:
+            version = int(pin.get("hash_v") or 1)
+        except (TypeError, ValueError):
+            version = 0
+        actual = _plugin_content_hash(pdir, version) if version in (1, 2) else ""
+        res = dict(info, actual_sha256=actual)
+        if actual and hmac.compare_digest(actual, str(pin.get("content_sha256"))):
+            res.update(state="ok", error="")
+        else:
+            res.update(state="mismatch", error="Plugin %s refused: its code changed since it was pinned "
+                       "(pinned %s, now %s). Update or reinstall it, or review the change and pin it again on "
+                       "System > Plugins." % (pid, str(pin.get("content_sha256"))[:12], (actual or "?")[:12]))
+    with _PLUGIN_PIN_LOCK:
+        _PLUGIN_PIN_CACHE[pid] = (sig, dict(res))
+    return res
+
+
+def _plugin_pin_forget(pid):
+    with _PLUGIN_PIN_LOCK:
+        _PLUGIN_PIN_CACHE.pop(pid, None)
+    # no _PLUGIN_INCIDENTS_LOCK: the incident monitor holds it while plugin
+    # workers run (up to 20 s each); a single dict pop is atomic
+    _PLUGIN_INCIDENTS_CACHE.pop(pid, None)
+
+
+def _plugin_pin_log(pid, status):
+    """Journal line, once per plugin/state/content (the incident monitor
+    raises plugin:<id>:integrity from the same status)."""
+    key = (pid, status.get("state"), status.get("actual_sha256"))
+    with _PLUGIN_PIN_LOCK:
+        if key in _PLUGIN_PIN_LOGGED:
+            return
+        _PLUGIN_PIN_LOGGED.add(key)
+    print("[plugins] INTEGRITY %s: %s" % (pid, status.get("error") or status.get("state")), flush=True)
+
+
+def _plugin_integrity_error(pid):
+    """"" when the plugin may run, else the refusal message (logged)."""
+    try:
+        status = _plugin_pin_status(pid)
+    except FileNotFoundError:
+        return "plugin %s is not installed" % pid
+    except OSError as exc:
+        status = {"state": "unsafe", "error": "Plugin %s refused: cannot check its files (%s)" % (pid, exc)}
+    if status.get("state") == "ok":
+        return ""
+    _plugin_pin_log(pid, status)
+    return status.get("error") or "Plugin %s refused: integrity check failed" % pid
+
+
+def _plugin_http_get(url, accept=None, limit=PLUGIN_MAX_BYTES, timeout=30):
+    headers = {"User-Agent": "tuxwall-plugin-installer/1.1"}
+    if accept:
+        headers["Accept"] = accept
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read(limit + 1)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise ValueError("GitHub: repository, branch or commit not found")
+        if exc.code in (403, 429):
+            raise ValueError("GitHub refused the request (HTTP %s, rate limit?) - try again later" % exc.code)
+        raise
+    if len(data) > limit:
+        raise ValueError("GitHub response is larger than %d MB" % (limit // (1024 * 1024)))
+    return data
+
+
+def _plugin_resolve_commit(owner, repo, branch):
+    """Branch (default branch when empty) -> (branch, 40-hex commit SHA):
+    installs download that exact commit, never a moving branch head."""
+    base = "https://api.github.com/repos/%s/%s" % (urllib.parse.quote(owner, safe=""),
+                                                   urllib.parse.quote(repo, safe=""))
+    if not branch:
+        info = json.loads(_plugin_http_get(base, "application/vnd.github+json", 1 << 20, 15)
+                          .decode("utf-8", "replace"))
+        branch = info.get("default_branch") or "main"
+    sha = _plugin_http_get(base + "/commits/" + urllib.parse.quote(branch, safe="/"),
+                           "application/vnd.github.sha", 4096, 15).decode("ascii", "replace").strip().lower()
+    if not _PLUGIN_SHA_RE.match(sha):
+        raise ValueError("GitHub did not resolve %r to a commit" % branch)
+    return branch, sha
+
+
+def _plugin_fetch_stage(url, commit=None):
+    """Download the plugin at one exact commit and stage it (perms set,
+    content hash computed) in a hidden directory under PLUGINS_DIR - same
+    filesystem, so going live is a rename. The caller removes info["stage"]
+    unless it renamed it into place."""
+    owner, repo, branch, subpath = _plugin_github_parts(url)
+    if commit:
+        commit = str(commit).strip().lower()
+        if not _PLUGIN_SHA_RE.match(commit):
+            raise ValueError("commit must be a 40-character commit SHA")
+    else:
+        branch, commit = _plugin_resolve_commit(owner, repo, branch)
+    archive_url = "https://codeload.github.com/%s/%s/zip/%s" % (
+        urllib.parse.quote(owner, safe=""), urllib.parse.quote(repo, safe=""), commit)
+    data = _plugin_http_get(archive_url, None, PLUGIN_MAX_BYTES, 30)
+    with tempfile.TemporaryDirectory(prefix="tuxwall-plugin-") as tmp:
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                _plugin_safe_extract(z, tmp)
+        except zipfile.BadZipFile:
+            raise ValueError("GitHub returned an invalid archive")
+        candidates = []
+        wanted = subpath.strip("/")
+        for base, dirs, files in os.walk(tmp):
+            if "plugin.json" not in files:
+                continue
+            rel = os.path.relpath(base, tmp).replace("\\", "/")
+            if wanted:
+                if rel == wanted or rel.endswith("/" + wanted):
                     candidates.append(base)
-            if not candidates:
-                raise ValueError("No plugin.json found at that GitHub folder")
-            if len(candidates) > 1:
-                raise ValueError("Multiple plugin.json files found; use a more specific folder URL")
-            src = candidates[0]
-            with open(os.path.join(src, "plugin.json"), "r") as f:
-                manifest = json.load(f)
-            pid = str(manifest.get("id") or "").strip()
-            if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", pid):
-                raise ValueError("plugin.json has an invalid id")
-            if manifest.get("api") != PLUGIN_API:
-                raise ValueError("Plugin API %r is not supported" % manifest.get("api"))
-            if not os.path.isfile(os.path.join(src, "main.py")):
-                raise ValueError("Plugin package is missing main.py")
+            else:
+                candidates.append(base)
+        if not candidates:
+            raise ValueError("No plugin.json found at that GitHub folder")
+        if len(candidates) > 1:
+            raise ValueError("Multiple plugin.json files found; use a more specific folder URL")
+        src = candidates[0]
+        with open(os.path.join(src, "plugin.json"), "r") as f:
+            manifest = json.load(f)
+        if not isinstance(manifest, dict):
+            raise ValueError("plugin.json must be an object")
+        pid = str(manifest.get("id") or "").strip()
+        if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", pid):
+            raise ValueError("plugin.json has an invalid id")
+        if manifest.get("api") != PLUGIN_API:
+            raise ValueError("Plugin API %r is not supported" % manifest.get("api"))
+        if not os.path.isfile(os.path.join(src, "main.py")):
+            raise ValueError("Plugin package is missing main.py")
+        rel_path = os.path.relpath(src, tmp).replace("\\", "/").split("/", 1)
+        os.makedirs(PLUGINS_DIR, exist_ok=True)
+        stage = tempfile.mkdtemp(prefix=".staging-", dir=PLUGINS_DIR)
+        try:
+            shutil.copytree(src, stage, dirs_exist_ok=True, ignore=shutil.ignore_patterns(
+                ".git", "__pycache__", "*.pyc", PLUGIN_CONFIG_FILE, PLUGIN_PIN_FILE))
+            _plugin_write_perms(stage)
+            return {
+                "stage": stage, "pid": pid, "manifest": manifest,
+                "repo": "%s/%s" % (owner, repo), "branch": branch, "commit": commit,
+                "path": wanted or (rel_path[1] if len(rel_path) > 1 else ""),
+                "content_sha256": _plugin_content_hash(stage),
+                "files": _plugin_tree_files(stage),
+            }
+        except BaseException:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise
+
+
+def install_plugin_from_github(body, who=""):
+    """Install or update a plugin from a GitHub folder URL, pinned.
+
+    The branch is resolved to a commit SHA and that commit is downloaded;
+    .provenance.json records repo, path, commit and the content hash, and
+    every run of the plugin is checked against it (_plugin_integrity_error).
+    Updating an installed plugin is two calls: without confirm_sha256 the
+    answer is a preview (current vs new commit/hash, changed files) and
+    nothing changes; repeating the call with the previewed "commit" and
+    "confirm_sha256" installs exactly that content (refused if it differs)."""
+    url = (body.get("url") or "").strip()
+    _plugin_github_parts(url)
+    with _PLUGIN_INSTALL_LOCK:
+        info = _plugin_fetch_stage(url, body.get("commit") or None)
+        stage = info["stage"]
+        try:
+            pid = info["pid"]
+            manifest = info["manifest"]
             dest = os.path.join(PLUGINS_DIR, pid)
-            # Update path: when the plugin is already installed, back up
-            # its config.json (credentials/settings), remove the old
-            # directory, and install the new version in place. This is how
-            # the "Update" button in the Available Plugins card works.
-            if os.path.exists(dest):
-                saved_config = None
-                try:
-                    with open(os.path.join(dest, "config.json"), "r") as f:
-                        saved_config = f.read()
-                except (OSError, ValueError):
-                    pass
-                shutil.rmtree(dest)
-                shutil.copytree(src, dest, ignore=shutil.ignore_patterns(
-                    ".git", "__pycache__", "*.pyc", "config.json"))
-                if saved_config is not None:
+            updating = os.path.exists(dest)
+            old_pin = (_plugin_read_pin(dest) or {}) if updating else {}
+            if updating:
+                confirm = str(body.get("confirm_sha256") or "").strip().lower()
+                if not confirm:
                     try:
-                        with open(os.path.join(dest, "config.json"), "w") as f:
-                            f.write(saved_config)
-                    except OSError:
-                        pass
-                _plugin_write_perms(dest)
-                provenance = {
-                    "installed_at": time.time(),
-                    "source_url": url,
-                    "source_branch": branch,
-                    "version": manifest.get("version") or "",
-                    # content hash of the code files: THE PIN. Any future
-                    # integrity check compares against this (2026-11-09
-                    # audit #5: installs were unpinned and unsigned — a
-                    # changed upstream silently replaced installed code).
-                    "content_sha256": _plugin_content_hash(dest),
-                }
+                        old_version = _plugin_load_manifest(pid).get("version") or ""
+                    except Exception:
+                        old_version = ""
+                    old_files = _plugin_tree_files(dest)
+                    new_files = info["files"]
+                    added = sorted(set(new_files) - set(old_files))
+                    removed = sorted(set(old_files) - set(new_files))
+                    changed = sorted(f for f in set(new_files) & set(old_files) if new_files[f] != old_files[f])
+                    return {
+                        "ok": True, "confirm_required": True,
+                        "plugin": {"id": pid, "name": manifest.get("name") or pid},
+                        "current": {"version": old_version, "commit": str(old_pin.get("commit") or ""),
+                                    "content_sha256": str(old_pin.get("content_sha256") or ""),
+                                    "pinned_by": str(old_pin.get("pinned_by") or "")},
+                        "new": {"version": manifest.get("version") or "", "commit": info["commit"],
+                                "branch": info["branch"], "content_sha256": info["content_sha256"]},
+                        "changes": {"added": added[:50], "removed": removed[:50], "changed": changed[:50],
+                                    "counts": {"added": len(added), "removed": len(removed),
+                                               "changed": len(changed)}},
+                    }
+                if not _PLUGIN_HEX64_RE.match(confirm) or not hmac.compare_digest(confirm, info["content_sha256"]):
+                    raise ValueError("The downloaded update (content %s) is not the one you confirmed (%s); "
+                                     "nothing was changed - review the update again"
+                                     % (info["content_sha256"][:12], confirm[:12]))
                 try:
-                    with open(os.path.join(dest, ".provenance.json"), "w") as f:
-                        json.dump(provenance, f, indent=2)
-                except OSError:
-                    pass
-                return {"ok": True, "updated": True, "plugin": {
-                    "id": pid,
-                    "name": manifest.get("name") or pid,
-                    "version": manifest.get("version") or "",
-                    "pinned_sha": provenance["content_sha256"][:16],
-                }}
-            os.makedirs(PLUGINS_DIR, exist_ok=True)
-            _pin = {
+                    with open(os.path.join(dest, PLUGIN_CONFIG_FILE), "rb") as f:
+                        saved = f.read()
+                except FileNotFoundError:
+                    saved = None
+                if saved is not None:
+                    _plugin_write_private(os.path.join(stage, PLUGIN_CONFIG_FILE), saved)
+            pin = {
                 "installed_at": time.time(),
                 "source_url": url,
-                "source_branch": branch,
+                "repo": info["repo"],
+                "path": info["path"],
+                "source_branch": info["branch"],
+                "commit": info["commit"],
                 "version": manifest.get("version") or "",
-                "content_sha256": None,  # filled after copy below
+                # THE PIN: checked before every run of the plugin and before
+                # its web assets are served (2026-11-09 audit #5 / 3.3.3).
+                "content_sha256": info["content_sha256"],
+                "hash_v": PLUGIN_HASH_V,
+                "pinned_by": "update" if updating else "install",
+                "pinned_at": time.time(),
+                "by": who or "",
             }
-            shutil.copytree(src, dest, ignore=shutil.ignore_patterns(
-                ".git", "__pycache__", "*.pyc", "config.json"))
-            _plugin_write_perms(dest)
-            _pin["content_sha256"] = _plugin_content_hash(dest)
-            try:
-                with open(os.path.join(dest, ".provenance.json"), "w") as f:
-                    json.dump(_pin, f, indent=2)
-            except OSError:
-                pass
-            return {"ok": True, "plugin": {
+            if updating and old_pin.get("content_sha256"):
+                pin["previous_content_sha256"] = str(old_pin.get("content_sha256"))
+                pin["previous_commit"] = str(old_pin.get("commit") or "")
+            _plugin_write_pin(stage, pin)
+            os.chmod(stage, 0o755)
+            if updating:
+                old = tempfile.mkdtemp(prefix=".old-", dir=PLUGINS_DIR)
+                os.rmdir(old)
+                os.rename(dest, old)
+                try:
+                    os.rename(stage, dest)
+                except BaseException:
+                    os.rename(old, dest)
+                    raise
+                stage = None
+                shutil.rmtree(old, ignore_errors=True)
+            else:
+                os.rename(stage, dest)
+                stage = None
+            _plugin_pin_forget(pid)
+            print("[plugins] %s %s: %s@%s path=%s content_sha256=%s%s" % (
+                "updated" if updating else "installed", pid, info["repo"], info["commit"], info["path"] or "/",
+                info["content_sha256"], (" by " + who) if who else ""), flush=True)
+            out = {"ok": True, "plugin": {
                 "id": pid,
                 "name": manifest.get("name") or pid,
                 "version": manifest.get("version") or "",
+                "commit": info["commit"],
+                "content_sha256": info["content_sha256"],
+                "pinned_sha": info["content_sha256"][:16],
             }}
+            if updating:
+                out["updated"] = True
+            return out
+        finally:
+            if stage:
+                shutil.rmtree(stage, ignore_errors=True)
+
+
+def plugin_repin(pid, body, who=""):
+    """Admin re-pin of the files on disk (local edits, or a plugin that
+    predates pinning after the first-start TOFU). Without confirm_sha256 it
+    only reports the current content hash; with it, the files must still
+    hash to exactly that value. Never pins files owned by another user."""
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", pid or ""):
+        raise ValueError("invalid plugin id")
+    pdir = os.path.join(PLUGINS_DIR, pid)
+    if not os.path.isdir(pdir):
+        raise ValueError("plugin %s is not installed" % pid)
+    with _PLUGIN_INSTALL_LOCK:
+        problem, _sig = _plugin_tree_problems(pdir)
+        if problem:
+            raise ValueError("Cannot pin %s: %s (fix: chown -R root:root %s && chmod -R go-w %s)"
+                             % (pid, problem, pdir, pdir))
+        current = _plugin_content_hash(pdir)
+        old = _plugin_read_pin(pdir) or {}
+        if old.get("_invalid"):
+            old = {}
+        confirm = str(body.get("confirm_sha256") or "").strip().lower()
+        if not confirm:
+            return {"ok": True, "confirm_required": True, "plugin": pid, "content_sha256": current,
+                    "pinned_sha256": str(old.get("content_sha256") or ""),
+                    "commit": str(old.get("commit") or "")}
+        if not hmac.compare_digest(confirm, current):
+            raise ValueError("The files of %s changed while you were reviewing them (now %s); nothing was "
+                             "pinned - review again" % (pid, current[:12]))
+        pin = dict(old)
+        if old.get("content_sha256") and old.get("content_sha256") != current:
+            pin["previous_content_sha256"] = str(old.get("content_sha256"))
+            pin["local_changes"] = True
+        try:
+            pin.setdefault("version", _plugin_load_manifest(pid).get("version") or "")
+        except Exception:
+            pass
+        pin.update(content_sha256=current, hash_v=PLUGIN_HASH_V, pinned_by="admin", pinned_at=time.time(),
+                   by=who or "")
+        _plugin_write_pin(pdir, pin)
+        _plugin_pin_forget(pid)
+    print("[plugins] re-pinned %s: content_sha256=%s%s" % (pid, current, (" by " + who) if who else ""), flush=True)
+    return {"ok": True, "plugin": pid, "content_sha256": current}
+
+
+def _plugin_pins_startup():
+    """At API start: secret files back to 0600 (3.3.2 and older wrote them
+    0644), v1 pins re-recorded in the v2 framing when they still match, and
+    - on the first start with pinning only - trust-on-first-use pins for
+    plugins installed before pins existed (logged with their hash)."""
+    tofu = not os.path.exists(PLUGIN_TOFU_MARKER)
+    pinned = []
+    for pid in _plugin_ids():
+        pdir = os.path.join(PLUGINS_DIR, pid)
+        try:
+            for name in os.listdir(pdir):
+                fp = os.path.join(pdir, name)
+                if _plugin_secret_name(name) and os.path.isfile(fp) and not os.path.islink(fp):
+                    if os.stat(fp).st_mode & 0o077:
+                        os.chmod(fp, 0o600)
+                        print("[plugins] %s: %s was readable by others - now 0600" % (pid, name), flush=True)
+            problem, _sig = _plugin_tree_problems(pdir)
+            if problem:
+                print("[plugins] %s: not pinned/verified at start: %s" % (pid, problem), flush=True)
+                continue
+            pin = _plugin_read_pin(pdir)
+            if pin is None and tofu:
+                digest = _plugin_content_hash(pdir)
+                try:
+                    version = _plugin_load_manifest(pid).get("version") or ""
+                except Exception:
+                    version = ""
+                _plugin_write_pin(pdir, {"content_sha256": digest, "hash_v": PLUGIN_HASH_V, "version": version,
+                                         "pinned_by": "tofu", "pinned_at": time.time(), "commit": ""})
+                pinned.append(pid)
+                print("[plugins] %s: no pin found - trusted the files on disk at first start (TOFU), "
+                      "content_sha256=%s" % (pid, digest), flush=True)
+            elif (isinstance(pin, dict) and not pin.get("_invalid") and pin.get("content_sha256")
+                  and str(pin.get("hash_v") or "1") == "1"):
+                if hmac.compare_digest(_plugin_content_hash(pdir, 1), str(pin["content_sha256"])):
+                    pin["content_sha256_v1"] = pin["content_sha256"]
+                    pin["content_sha256"] = _plugin_content_hash(pdir)
+                    pin["hash_v"] = PLUGIN_HASH_V
+                    _plugin_write_pin(pdir, pin)
+                    print("[plugins] %s: pin re-recorded in hash v2, content_sha256=%s"
+                          % (pid, pin["content_sha256"]), flush=True)
+            _plugin_pin_forget(pid)
+            status = _plugin_pin_status(pid)
+            if status.get("state") != "ok":
+                _plugin_pin_log(pid, status)
+        except Exception as exc:
+            print("[plugins] %s: pin check at start failed: %r" % (pid, exc), flush=True)
+    if tofu:
+        try:
+            os.makedirs(os.path.dirname(PLUGIN_TOFU_MARKER), exist_ok=True)
+            with open(PLUGIN_TOFU_MARKER, "w") as f:
+                f.write("%s TOFU pins: %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), " ".join(pinned) or "(none)"))
+        except OSError as exc:
+            print("[plugins] cannot write %s: %r" % (PLUGIN_TOFU_MARKER, exc), flush=True)
 
 
 def _plugin_ids():
     try:
         return sorted(d for d in os.listdir(PLUGINS_DIR)
-                      if os.path.isdir(os.path.join(PLUGINS_DIR, d)))
+                      if not d.startswith(".") and os.path.isdir(os.path.join(PLUGINS_DIR, d)))
     except OSError:
         return []
 
@@ -19726,14 +20150,10 @@ def _plugin_save_config(pid, body):
     if "enabled" in incoming:
         cfg["enabled"] = bool(incoming.get("enabled"))
     os.makedirs(os.path.dirname(_plugin_config_path(pid)), exist_ok=True)
-    tmp = _plugin_config_path(pid) + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(cfg, f, indent=2)
-    os.replace(tmp, _plugin_config_path(pid))
-    try:
-        os.chmod(_plugin_config_path(pid), 0o640)
-    except OSError:
-        pass
+    # 0600 root, atomically: credentials never sit world-readable, not even
+    # for the instant between write and chmod
+    _plugin_write_private(_plugin_config_path(pid), json.dumps(cfg, indent=2))
+    _plugin_pin_forget(pid)
     return {"ok": True, "config": _plugin_config_public(pid, manifest)["config"]}
 
 
@@ -19795,6 +20215,10 @@ def list_plugins(include_config=False):
         try:
             manifest = _plugin_load_manifest(pid)
             cfg = _plugin_load_config(pid, manifest)
+            try:
+                pin = _plugin_pin_status(pid)
+            except OSError as exc:
+                pin = {"state": "unsafe", "error": "Plugin %s refused: cannot check its files (%s)" % (pid, exc)}
             entry = {
                 "id": pid,
                 "name": manifest.get("name") or pid,
@@ -19806,7 +20230,15 @@ def list_plugins(include_config=False):
                 "enabled": bool(cfg.get("enabled", True)),
                 "web": os.path.isdir(os.path.join(PLUGINS_DIR, pid, "web")),
                 "error": "",
+                "pin": {"state": pin.get("state"), "commit": pin.get("commit") or "",
+                        "content_sha256": pin.get("pinned_sha256") or "",
+                        "pinned_by": pin.get("pinned_by") or ""},
             }
+            if pin.get("state") != "ok":
+                # refused to run: no nav entry, no assets, toggle disabled
+                _plugin_pin_log(pid, pin)
+                entry["error"] = pin.get("error") or "integrity check failed"
+                entry["enabled"] = False
             if include_config:
                 entry["config"] = _plugin_config_public(pid, manifest)
             out.append(entry)
@@ -19855,6 +20287,9 @@ def plugin_action(pid, action, payload):
     if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", pid or ""):
         raise ValueError("invalid plugin id")
     pdir = os.path.join(PLUGINS_DIR, pid)
+    refused = _plugin_integrity_error(pid)
+    if refused:
+        return {"ok": False, "error": refused, "integrity": "refused"}
     req = {
         "action": action or "",
         "payload": payload if isinstance(payload, dict) else {},
@@ -19864,17 +20299,20 @@ def plugin_action(pid, action, payload):
         # worker cannot query Kea itself; see _plugin_lease_names)
         "leases": _plugin_lease_names() if manifest.get("uses-leases") else None,
     }
-    uid, gid = _plugin_worker_identity()
-    def demote():
-        os.setgroups([])
-        os.setgid(gid)
-        os.setuid(uid)
+    # Demotion by subprocess itself (no preexec_fn: Python code between
+    # fork and exec is unsafe in this threaded server). A non-root parent
+    # (tests) cannot drop privileges and runs the worker as itself.
+    drop = {}
+    if os.geteuid() == 0:
+        uid, gid = _plugin_worker_identity()
+        drop = {"user": uid, "group": gid, "extra_groups": []}
     try:
         proc = subprocess.run(
             [sys.executable, "-c", PLUGIN_WORKER_CODE, pdir],
             input=json.dumps(req), capture_output=True, text=True,
-            timeout=20, cwd=pdir, preexec_fn=demote,
+            timeout=20, cwd=pdir, umask=0o077,
             env={"PATH": "/usr/bin:/bin", "HOME": "/tmp", "PYTHONDONTWRITEBYTECODE": "1"},
+            **drop,
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "plugin action timed out"}
@@ -19905,11 +20343,16 @@ def uninstall_plugin(pid):
         raise ValueError("plugin %s is not installed" % pid)
     with _PLUGIN_INSTALL_LOCK:
         shutil.rmtree(pdir)
+    _plugin_pin_forget(pid)
     return {"ok": True, "removed": pid}
 
 
 def plugin_asset_path(pid, rel):
     manifest = _plugin_load_manifest(pid)
+    refused = _plugin_integrity_error(pid)
+    if refused:
+        # plugin web code runs with the admin's session: same pin as main.py
+        raise ValueError(refused)
     web = os.path.realpath(os.path.join(PLUGINS_DIR, pid, "web"))
     target = os.path.realpath(os.path.join(web, rel))
     if target != web and not target.startswith(web + os.sep):
@@ -20203,6 +20646,17 @@ def _plugin_incident_conditions():
     out = {}
     with _PLUGIN_INCIDENTS_LOCK:
         for pid in _plugin_ids():
+            try:
+                pin = _plugin_pin_status(pid)
+                if pin.get("state") != "ok":
+                    _plugin_pin_log(pid, pin)
+                    out["plugin:%s:integrity" % pid] = (
+                        "warning" if pin.get("state") == "unpinned" else "critical",
+                        "Plugin %s blocked: integrity check failed" % pid,
+                        str(pin.get("error") or "")[:600])
+                    continue
+            except Exception:
+                pass
             try:
                 manifest = _plugin_load_manifest(pid)
                 if not manifest.get("alerts"):
@@ -21441,6 +21895,7 @@ def main():
     start_fw_hits_sampler()       # read-only per-rule hit counters (5 min)
     start_agent_facts_writer()    # /var/lib/tuxwall/agent/facts.md for the AI agent (5 min)
     _ensure_agent_api_token()     # /etc/tuxwall/agent/api.token for the agent's read-only MCP tool
+    _plugin_pins_startup()        # plugin secrets 0600, pins (TOFU once for pre-3.3.3 installs)
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     server.daemon_threads = True
     print(f"tuxwall API listening on http://{LISTEN_HOST}:{LISTEN_PORT}", flush=True)
