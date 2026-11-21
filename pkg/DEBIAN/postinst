@@ -11,7 +11,7 @@ STATE_DIR=/var/lib/tuxwall
 # Pure block characters, no ANSI cursor tricks - renders identically on a
 # terminal, in apt/dpkg logs, and under unattended-upgrades. Built with bash
 # string appends (not tr) because tr is byte-oriented and mangles UTF-8.
-STEP_TOTAL=13
+STEP_TOTAL=14
 STEP_NOW=0
 step() {
   local label="$1" text="$2" width=24 i
@@ -116,6 +116,98 @@ radvd_migration() {         # radvd_migration [ROOT] -> one status line, never f
     fi
   fi
   echo "radvd: now reads $RADVD_NEW ($RADVD_OLD left in place, unused)"
+}
+
+# Kea lease_cmds hook for installer-written configs (VM finding 8.2): the
+# installer's kea_json() used to omit hooks-libraries, so lease4-get-all
+# answered "command not supported" (empty leases view, reservation API
+# health check failing). Adds the hook to a TuxWall-managed file (installer
+# header) that lacks it, when the library exists. JSON via kea_conf.py; the
+# header is kept verbatim (no edit mark: an untouched installer file stays
+# replaceable by the installer). The candidate must pass `kea-dhcp4 -t`
+# before it replaces the file; a running Kea is then restarted - its unit
+# has no ExecReload, and a restart is what the dashboard falls back to when
+# an in-process config-reload drops the lease manager. Kea not active after
+# the restart -> old file put back. Idempotent; never fails the postinst.
+# tools/pkg_scripts_check.py runs it.
+KEA_CONF=/etc/kea/kea-dhcp4.conf
+KEA_LEASE_CMDS_LIB=/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_lease_cmds.so
+KEA_CONF_PY=/var/www/html/includes/kea_conf.py
+KEA_BACKUP_DIR=/var/backups/tuxwall
+kea_hook_migration() {      # kea_hook_migration [ROOT] -> one status line, never fails
+  local r=${1:-} conf tmp bak user="" rc=0 out active=no
+  conf=$r$KEA_CONF
+  [[ -s $conf ]] || { echo "kea: no config, nothing to do"; return 0; }
+  [[ -f $r$KEA_LEASE_CMDS_LIB ]] || { echo "kea: $KEA_LEASE_CMDS_LIB not installed, config left as it was"; return 0; }
+  [[ -f $r$KEA_CONF_PY ]] || { echo "kea: kea_conf.py missing, config left as it was"; return 0; }
+  command -v kea-dhcp4 >/dev/null 2>&1 || { echo "kea: kea-dhcp4 not installed, config left as it was"; return 0; }
+  # Kea's AppArmor profile blocks /tmp: the candidate lives next to the config
+  tmp="$(mktemp -p "${conf%/*}" .tuxwall-kea-hook.XXXXXX 2>/dev/null)" || { echo "kea: cannot create a temp file, config left as it was"; return 0; }
+  out="$(PYTHONDONTWRITEBYTECODE=1 python3 - "$r$KEA_CONF_PY" "$conf" "$tmp" "$KEA_LEASE_CMDS_LIB" 2>&1 <<'PY'
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("kea_conf", sys.argv[1])
+K = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(K)
+conf, tmp, lib = sys.argv[2:5]
+text = open(conf).read()
+head = K.split_header(text)[0]
+if K.INSTALLER_MARK not in head:
+    sys.exit(4)
+data = K.loads(text)
+d4 = data.get("Dhcp4") if isinstance(data, dict) else None
+hooks = d4.get("hooks-libraries", []) if isinstance(d4, dict) else None
+if not isinstance(hooks, list):
+    sys.exit("no Dhcp4 object / hooks-libraries is not a list")
+if any(isinstance(h, dict) and os.path.basename(str(h.get("library", ""))) == os.path.basename(lib) for h in hooks):
+    sys.exit(3)
+if K.body_has_comments(text):
+    sys.exit(5)
+d4["hooks-libraries"] = hooks + [{"library": lib}]
+if head and not head.endswith("\n"):
+    head += "\n"
+new = head + json.dumps(data, indent=4) + "\n"
+if K.loads(new) != data:
+    sys.exit("round trip mismatch")
+with open(tmp, "w") as f:
+    f.write(new)
+PY
+)" || rc=$?
+  case $rc in
+    0) ;;
+    3) rm -f "$tmp"; echo "kea: lease_cmds hook already loaded"; return 0 ;;
+    4) rm -f "$tmp"; echo "kea: config not written by the TuxWall installer, left as it was"; return 0 ;;
+    5) rm -f "$tmp"; echo "kea: config has comments inside the JSON, left as it was (add the lease_cmds hook by hand)"; return 0 ;;
+    *) rm -f "$tmp"; echo "kea: config not readable as Kea JSON, left as it was (${out##*$'\n'})"; return 0 ;;
+  esac
+  chmod --reference="$conf" "$tmp" 2>/dev/null || true
+  chown --reference="$conf" "$tmp" 2>/dev/null || true
+  getent passwd _kea >/dev/null 2>&1 && user=_kea
+  getent passwd kea  >/dev/null 2>&1 && user=${user:-kea}
+  # As _kea, like the installer: AppArmor denies root DAC override in /etc/kea
+  if [[ -n $user ]] && command -v runuser >/dev/null 2>&1; then
+    runuser -u "$user" -- kea-dhcp4 -t "$tmp" >/dev/null 2>&1 || rc=$?
+  else
+    kea-dhcp4 -t "$tmp" >/dev/null 2>&1 || rc=$?
+  fi
+  if (( rc )); then
+    rm -f "$tmp"; echo "kea: config with the lease_cmds hook failed kea-dhcp4 -t, left as it was"; return 0
+  fi
+  bak=$r$KEA_BACKUP_DIR/kea-dhcp4.conf.pre-lease-cmds.$(date +%Y%m%d-%H%M%S)
+  if ! mkdir -p "${bak%/*}" || ! cp -p "$conf" "$bak"; then
+    rm -f "$tmp"; echo "kea: backup failed, config left as it was"; return 0
+  fi
+  systemctl is-active --quiet kea-dhcp4-server 2>/dev/null && active=yes
+  mv -f "$tmp" "$conf"
+  if [[ $active == yes ]]; then
+    systemctl restart kea-dhcp4-server >/dev/null 2>&1 || true
+    sleep 2
+    if ! systemctl is-active --quiet kea-dhcp4-server 2>/dev/null; then
+      cp -p "$bak" "$conf"
+      systemctl restart kea-dhcp4-server >/dev/null 2>&1 || true
+      echo "kea: did not come back with the lease_cmds hook - old config restored (backup $bak)"; return 0
+    fi
+  fi
+  echo "kea: lease_cmds hook added (backup $bak)"
 }
 
 case "$1" in
@@ -254,7 +346,7 @@ EOF
       }
     ],
     "hooks-libraries": [
-      { "library": "/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_lease_cmds.so" }
+      { "library": "$KEA_LEASE_CMDS_LIB" }
     ],
     "loggers": [
       { "name": "kea-dhcp4", "output_options": [ { "output": "syslog" } ], "severity": "INFO" }
@@ -553,6 +645,12 @@ PY
 
     step 6e "CrowdSec bouncer: nftables migration (upgrades; skipped when not applicable)..."
     bouncer_migration "${2:-}"
+
+    step 6f "Kea DHCP: lease_cmds hook for installer-written configs (skipped when not applicable)..."
+    _kea_msg="$(kea_hook_migration)"
+    echo "   $_kea_msg"
+    mkdir -p /var/log/tuxwall
+    printf '%s %s\n' "$(date '+%F %T')" "$_kea_msg" >> /var/log/tuxwall/kea-hook-migration.log 2>/dev/null || true
 
     step 7 "Enabling dashboard service and daily blocklist updates..."
     # tuxwall.service's sandbox ReadWritePaths includes optional

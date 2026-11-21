@@ -12,7 +12,9 @@ split/preservation and the one-time dashboard edit mark, the atomic write
 api_server _read_kea/_write_kea + the reservation add/edit/delete flow
 (Kea reload stubbed), router_static/kea_reservations/build_reservations,
 topology._read_kea, assign_plan's Kea render, fw_lint's reservation scan,
-and the installer's kea_is_replaceable decision. Nothing touches /etc.
+and the installer's kea_is_replaceable decision; finding 8.2: the lease
+manager health check (result 0/3 healthy, 1/2/timeouts not) and the
+installer's lease_cmds hook. Nothing touches /etc.
 """
 import importlib.util
 import json
@@ -145,6 +147,29 @@ try:
     gd = K.loads(gen)
     check(gd["Dhcp4"]["subnet4"][0]["subnet"] == "192.168.100.0/24", "installer output parses tolerantly")
 
+    # lease_cmds hook (finding 8.2): only when the library exists, same path as the postinst
+    lib = re.search(r'^KEA_LEASE_CMDS_LIB=(\S+)', src, re.M).group(1)
+    post = open(os.path.join(ROOT_DIR, "pkg", "DEBIAN", "postinst")).read()
+    check(re.search(r'^KEA_LEASE_CMDS_LIB=(\S+)', post, re.M).group(1) == lib
+          and lib.endswith("/libdhcp_lease_cmds.so"), "installer lease_cmds path == postinst path")
+    check("hooks-libraries" not in gd["Dhcp4"], "kea_json: no hook when the library is missing")
+    fake_lib = os.path.join(TMP, "libdhcp_lease_cmds.so")
+    open(fake_lib, "w").close()
+
+    def kea_json_with(libpath):
+        return subprocess.run(
+            ["bash", "-c", fn + 'INSTALLER_MARK="%s"; KEA_LEASE_CMDS_LIB="%s"; LAN=eth1; NET_CIDR=192.168.100.0/24;'
+             ' NET_POOL_LO=192.168.100.100; NET_POOL_HI=192.168.100.200; NET_GW=192.168.100.1; DOMAIN=home.arpa;'
+             ' kea_json socket-name' % (mark, libpath)], capture_output=True, text=True, timeout=10).stdout
+    genh = kea_json_with(fake_lib)
+    os.unlink(fake_lib)
+    hd = K.loads(genh)
+    check(hd["Dhcp4"].get("hooks-libraries") == [{"library": fake_lib}], "kea_json: hook present when the library exists")
+    check(json.loads(K.split_header(genh)[1]) == hd, "kea_json with the hook: body is valid strict JSON")
+    del hd["Dhcp4"]["hooks-libraries"]
+    check(hd == gd, "kea_json: the hook is the only difference")
+    check("hooks-libraries" not in K.loads(kea_json_with(lib + ".missing"))["Dhcp4"], "kea_json: missing library -> no hook")
+
     # ------------------------------------------------------- atomic write
     path = os.path.join(TMP, "kea-dhcp4.conf")
     with open(path, "w") as f:
@@ -180,6 +205,43 @@ try:
     with open(path, "w") as f:
         f.write(COMMENTED)
     A.KEA_CONF = path
+
+    # lease manager health check (finding 8.2): result 3 = empty lease DB (fresh install)
+    import socket
+
+    def kea_answers(resp):
+        def fake(cmd, arguments=None):
+            if isinstance(resp, BaseException):
+                raise resp
+            return resp
+        A.kea_command = fake
+        return A._kea_leases_healthy()
+    real_kea_command = A.kea_command
+    for resp, want, name in (
+            ([{"result": 0, "text": "2 IPv4 lease(s) found.", "arguments": {"leases": [{}, {}]}}], True, "0 leases listed"),
+            ([{"result": 3, "text": "0 IPv4 lease(s) found.", "arguments": {"leases": []}}], True, "3 empty lease DB"),
+            ({"result": 3, "text": "0 IPv4 lease(s) found."}, True, "3 as a bare object"),
+            ([{"result": 1, "text": "no current lease manager is available"}], False, "1 error"),
+            ([{"result": 2, "text": "'lease4-get-all' command not supported."}], False, "2 unsupported (no hook)"),
+            (socket.timeout("timed out"), False, "socket timeout"),
+            (ConnectionRefusedError(111, "refused"), False, "socket refused"),
+            (FileNotFoundError(2, "no socket"), False, "socket missing"),
+            (RuntimeError("Empty response from Kea control socket"), False, "empty response"),
+            ([], False, "empty list"), ([{}], False, "no result field"), (["x"], False, "non-dict entry"),
+            (None, False, "None")):
+        check(kea_answers(resp) is want, "_kea_leases_healthy %s -> %s" % (name, want))
+    # _reload_kea on an empty lease DB: config-reload, healthy, no restart, no error
+    sent, runs = [], []
+    A.kea_command = lambda cmd, arguments=None: (sent.append(cmd), [{"result": 3 if cmd == "lease4-get-all" else 0}])[1]
+    real_run = A.subprocess.run
+    A.subprocess.run = lambda *a, **kw: runs.append(a)
+    try:
+        err = raises(A._reload_kea)
+    finally:
+        A.subprocess.run = real_run
+    check(err is None and sent == ["config-reload", "lease4-get-all"] and not runs,
+          "_reload_kea: empty lease DB is healthy, no restart (%r %r %r)" % (err, sent, runs))
+    A.kea_command = real_kea_command
     reloads = []
     A._reload_kea = lambda: reloads.append(1)
     A.arp_online = lambda ip: False

@@ -326,11 +326,15 @@ def _kea_leases_healthy():
     with 'no current lease manager is available' - every DHCPDISCOVER then
     fails while the service still shows active. lease4-get-all is the same
     probe the dashboard leases view uses, so a broken lease manager is
-    detected immediately instead of after clients start timing out."""
+    detected immediately instead of after clients start timing out.
+
+    Healthy = result 0 (leases listed) or 3 (empty lease DB - every fresh
+    install). 1 is an error, 2 'command not supported' (lease_cmds hook not
+    loaded); a timeout or socket error means Kea did not answer at all."""
     try:
         resp = kea_command("lease4-get-all")
-        result = resp[0] if isinstance(resp, list) else (resp or {})
-        return bool(result.get("result") == 0)
+        result = (resp[0] if resp else {}) if isinstance(resp, list) else (resp or {})
+        return isinstance(result, dict) and result.get("result") in (0, 3)
     except Exception:
         return False
 
