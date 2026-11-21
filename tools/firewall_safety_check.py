@@ -423,11 +423,50 @@ def t_invariants():
         "-A FORWARD -m comment --comment TUXWALL-TRIPWIRE -j DROP",
         "-A INPUT -i eth0 -p udp --sport 67 --dport 68 -m comment --comment TUXWALL-TRIPWIRE-ALLOW -j ACCEPT"), "v6": ""})
     check("tripwire-hook-missing" in ids(G.invariants(rsa, ctx, rsa)), "tripwire allow-only is not a lockdown")
-    rok = G.load_ruleset(ctx, raw={"v4": IPT_SAVE, "v6": ""})
+    rok = G.load_ruleset(ctx, raw={"v4": IPT_SAVE.replace(
+        "-A INPUT -j ufw-before-input\n", "-A INPUT -j ufw-before-input\n"
+        "-A INPUT -i eth0 -m comment --comment TUXWALL-TRIPWIRE -j DROP\n"), "v6": ""})
     check("tripwire-hook-missing" not in ids(G.invariants(rok, ctx, rok)), "tripwire hook present")
     with open(root + "/etc/tuxwall/tripwire-state.json", "w") as f:
         json.dump({"tripped": False, "mode": "high"}, f)
     check("tripwire-hook-missing" not in ids(G.invariants(rst, ctx, rst)), "not tripped: no hook needed")
+    # trip shapes: medium = FORWARD -i/-o WAN (internet only), high = all forwarding + WAN
+    # INPUT; both restrict the router's own WAN egress (OUTPUT ... EGRESS REJECT)
+    plain = "-A FORWARD -m comment --comment TUXWALL-TRIPWIRE -j DROP\n"
+    io = ("-A FORWARD -i eth0 -m comment --comment TUXWALL-TRIPWIRE -j DROP\n"
+          "-A FORWARD -o eth0 -m comment --comment TUXWALL-TRIPWIRE -j DROP\n")
+    egress = ("-A OUTPUT -o eth0 -m owner ! --uid-owner 995 -m comment --comment "
+              "TUXWALL-TRIPWIRE-EGRESS -j REJECT --reject-with icmp-port-unreachable\n")
+    inp = "-A INPUT -i eth0 -m comment --comment TUXWALL-TRIPWIRE -j DROP\n"
+    out_hook = "-A OUTPUT -j ufw-before-output\n"
+
+    def tw_ids(mode, v4, v6=""):
+        with open(root + "/etc/tuxwall/tripwire-state.json", "w") as f:
+            json.dump({"tripped": True, "mode": mode}, f)
+        r = G.load_ruleset(ctx, raw={"v4": v4, "v6": v6})
+        return {i for i in ids(G.invariants(r, ctx, r)) if i.startswith("tripwire-")}
+    med = IPT_SAVE.replace(plain, io).replace(out_hook, egress + out_hook)
+    check(tw_ids("medium", med) == set(), "medium shape (-i/-o WAN + egress) is complete")
+    check(tw_ids("medium", med.replace(egress, "")) == {"tripwire-egress-missing"},
+          "medium without the egress REJECT")
+    check(tw_ids("medium", med.replace(io.splitlines(True)[1], "")) == {"tripwire-hook-missing"},
+          "medium with only -i WAN is not complete")
+    check(tw_ids("medium", IPT_SAVE.replace(out_hook, egress + out_hook)) == set(),
+          "medium accepts the stricter plain FORWARD drop")
+    check("tripwire-hook-missing" in tw_ids("high", med), "high needs the plain FORWARD drop")
+    hi = IPT_SAVE.replace(out_hook, egress + out_hook).replace(
+        "-A INPUT -j ufw-before-input\n", "-A INPUT -j ufw-before-input\n" + inp)
+    check(tw_ids("high", hi) == set(), "high shape (all forwarding + WAN input + egress) is complete")
+    check(tw_ids("high", hi.replace(inp, "")) == {"tripwire-hook-missing"},
+          "high without the WAN INPUT drop")
+    v6 = "*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n" + plain + \
+        inp + "COMMIT\n"
+    check(tw_ids("high", hi, v6) == {"tripwire-egress-missing"}, "IPv6 egress REJECT checked too")
+    check(tw_ids("high", hi, v6.replace(plain, "")) == {"tripwire-hook-missing",
+                                                        "tripwire-egress-missing"},
+          "IPv6 lockdown checked too")
+    with open(root + "/etc/tuxwall/tripwire-state.json", "w") as f:
+        json.dump({"tripped": False, "mode": "high"}, f)
     # schema v2 (per-check actions) without the derived legacy "mode" field
     for conf, want in (({"version": 2, "enabled": True, "strength": "high",
                          "checks": {"canary.egress": {"action": "block"}}}, "high"),

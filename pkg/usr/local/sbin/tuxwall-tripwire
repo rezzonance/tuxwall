@@ -5,13 +5,31 @@ Configuration (/etc/tuxwall/tripwire.json, schema version 2, root 0600):
   enabled   master switch; off = no detection threads run and nothing can
             cut the network (a trip already in force holds until resolved)
   strength  block strength used by every check whose action is Block:
-    medium  trip -> all forwarding cut (FORWARD drop, v4 + v6); the
-            router's own listeners (WireGuard 51820 included) stay up
-    high    trip -> forwarding cut + new WAN INPUT closed; the router is
+    medium  trip -> internet access cut: forwarding to and from the WAN
+            interface(s) dropped (FORWARD -i/-o <wan>, v4 + v6); VPN->LAN,
+            LAN<->VLAN and other internal forwarding keep working (normal
+            ufw policy), the router's own listeners (WireGuard 51820
+            included) stay up
+    high    trip -> ALL forwarding cut + new WAN INPUT closed; the router is
             reachable from the LAN only. WAN DHCP (v4 67/68, v6 546/547),
             IPv6 neighbour discovery and replies to connections the
             router itself opened stay allowed, so the WAN lease survives
             and pushes/recovery keep working
+            Both strengths also restrict the router's OWN egress on the
+            WAN while tripped (OUTPUT -o <wan>, comments
+            TUXWALL-TRIPWIRE-EGRESS[-ALLOW], REJECT last): replies to
+            sessions opened from outside, ICMP errors, WAN DHCP/DHCPv6 +
+            v6 ND/MLD, DNS only from the resolver's uid, NTP (udp 123 +
+            NTS-KE tcp 4460) only from the time daemon's uid, HTTPS (tcp
+            port of the URL) to the push targets in alerts.json (ipsets
+            tw-egress4/6, refreshed every 5 min). The canary uid never
+            gets the HTTPS allowlists and is left to its own containment
+            (ufw-before-output logs + rejects it, which the canary check
+            watches) when that is loaded, else it is rejected here too. unbound keeps answering every name
+            while tripped (LAN + router; nothing can connect anyway) -
+            only recovery narrows DNS. The WAN interface(s) come from
+            /etc/tuxwall/interfaces.json (wan role), else the default
+            route(s).
   notify    {"on_log": push log-only events, "window_minutes": at most one
             push per check per window (later events are summarised)}
   checks    per check: action off | log | block, threshold {count, minutes}
@@ -57,12 +75,14 @@ Recovery mode (Tripped -> Recovery -> Restored): while tripped an admin may
 start a time-boxed investigation window (default 60 min, extendable to at
 most 240 min left, persisted; expiry or `recovery-end` returns to the full
 trip, a new blocking event ends it too). The trip's rules stay; the
-router's own traffic out of the WAN is narrowed to an allowlist (HTTPS to
-the AI providers configured in opencode, opencode inference and the push
-targets; ipsets tw-recovery4/6 refreshed every 5 min), DNS leaves only from
-the resolver's uid and unbound answers only the allowlisted names (runtime
-local-zones, re-applied after an unbound restart). LAN/loopback model
-servers are reported as local models (reachable = no internet needed).
+tripped egress policy is widened by one rule per WAN and family
+(TUXWALL-TRIPWIRE-RECOVERY-ALLOW above the egress REJECT): HTTPS to the
+AI providers configured in opencode, opencode inference and the push
+targets (ipsets tw-recovery4/6 refreshed every 5 min), and unbound answers
+only the allowlisted names (runtime local-zones, re-applied after an
+unbound restart). Ending/expiring recovery returns to the tripped egress
+policy. LAN/loopback model servers are reported as local models
+(reachable = no internet needed).
 `restore` is the dashboard's resolve: checklist + note, audited.
 
 State survives reboot: tripwire-state.json + the daemon re-enforces the
@@ -76,7 +96,9 @@ and raises an incident when a watcher is dead or stale).
 Testing: TUXWALL_TRIPWIRE_ROOT=<dir> remaps every path under <dir> and
 stubs enforcement (rules are recorded in <dir>/enforce.log) and the unbound
 restart; adding TUXWALL_TRIPWIRE_NETNS=<ns> applies the real rules inside
-that network namespace instead. TUXWALL_TRIPWIRE_PUSH_FILE=<file> records
+that network namespace instead. TUXWALL_TRIPWIRE_WAN (comma list) names
+the WAN interface(s); _CANARY_USER / _NTP_USERS (comma list) replace the
+canary / time-daemon user names. TUXWALL_TRIPWIRE_PUSH_FILE=<file> records
 pushes instead of sending them. TUXWALL_TRIPWIRE_OWN_IPS / _LAN_NETS
 (comma lists) replace the router's addresses / internal networks that are
 otherwise read from `ip -o addr`; _WAN_IPS lists the WAN addresses (decoy
@@ -139,7 +161,14 @@ MAX_LIST = 200                 # exclusion entries per list
 MAX_COUNT, MAX_MINUTES = 100, 1440
 MARK = "TUXWALL-TRIPWIRE"
 MARK_ALLOW = "TUXWALL-TRIPWIRE-ALLOW"
+MARK_EGRESS = "TUXWALL-TRIPWIRE-EGRESS"
+MARK_EGRESS_ALLOW = "TUXWALL-TRIPWIRE-EGRESS-ALLOW"
+EGRESS_SETS = {"iptables": "tw-egress4", "ip6tables": "tw-egress6"}
 CANARY_PREFIX = "[TUXWALL-CANARY-EGRESS]"
+INTERFACES_CONF = _p("/etc/tuxwall/interfaces.json")
+CANARY_USER = ENV("TUXWALL_TRIPWIRE_CANARY_USER") or "opencanary"
+NTP_USERS = tuple(x for x in re.split(r"[\s,]+", ENV("TUXWALL_TRIPWIRE_NTP_USERS") or
+                                      "_chrony,chrony,systemd-timesync,ntp,ntpsec") if x)
 
 TICK_S = float(ENV("TUXWALL_TRIPWIRE_TICK") or 5)          # health/supervision
 ENFORCE_EVERY_S = float(ENV("TUXWALL_TRIPWIRE_ENFORCE_S") or 15)
@@ -541,15 +570,41 @@ def _wrap(argv):
     return (["ip", "netns", "exec", NETNS] + argv) if NETNS else argv
 
 
+_IFNAME_RE = re.compile(r"^[A-Za-z0-9_.@:-]{1,15}$")
+
+
+def wan_ifaces():
+    """The WAN interface(s): the environment (tests), the wan role in
+    interfaces.json, else the device(s) of the v4/v6 default routes."""
+    out = []
+
+    def add(name):
+        name = str(name or "").split("@")[0]
+        if name and name != "lo" and _IFNAME_RE.match(name) and name not in out:
+            out.append(name)
+    env = ENV("TUXWALL_TRIPWIRE_WAN")
+    if env:
+        for x in re.split(r"[\s,]+", env):
+            add(x)
+        return out
+    role = read_json(INTERFACES_CONF, {}).get("wan")
+    add(role.get("device") if isinstance(role, dict) else "")
+    if out:
+        return out
+    for fam in ("-4", "-6"):
+        try:
+            txt = subprocess.run(_wrap(["ip", fam, "route", "show", "default"]),
+                                 capture_output=True, text=True, timeout=5).stdout
+        except Exception:
+            txt = ""
+        for m in re.finditer(r"\bdev (\S+)", txt):
+            add(m.group(1))
+    return out
+
+
 def wan_iface():
-    if ENV("TUXWALL_TRIPWIRE_WAN"):
-        return ENV("TUXWALL_TRIPWIRE_WAN")
-    try:
-        out = subprocess.run(_wrap(["ip", "route", "show", "default"]),
-                             capture_output=True, text=True, timeout=5).stdout
-        return (out.split(" dev ")[1].split()[0] if " dev " in out else "")
-    except Exception:
-        return ""
+    w = wan_ifaces()
+    return w[0] if w else ""
 
 
 _NETS = {"ts": 0.0, "val": None}
@@ -573,7 +628,8 @@ def local_networks(refresh=False):
     now = time.time()
     if not refresh and _NETS["val"] and now - _NETS["ts"] < NETS_TTL_S:
         return _NETS["val"]
-    wan = wan_iface()
+    wans = wan_ifaces()
+    wan = wans[0] if wans else ""
     wan_addrs = []
     if ENV("TUXWALL_TRIPWIRE_OWN_IPS") is not None or ENV("TUXWALL_TRIPWIRE_LAN_NETS") is not None:
         own = [i.ip for i in _addr_list(ENV("TUXWALL_TRIPWIRE_OWN_IPS"))]
@@ -596,11 +652,11 @@ def local_networks(refresh=False):
             except ValueError:
                 continue
             own.append(itf.ip)
-            if ifname not in (wan, "lo") and not itf.ip.is_link_local:
+            if ifname not in wans and ifname != "lo" and not itf.ip.is_link_local:
                 lan.append(itf.network)
-            if wan and ifname == wan and not itf.ip.is_link_local:
+            if ifname in wans and not itf.ip.is_link_local:
                 wan_addrs.append(itf.ip)
-    val = {"own": own, "lan": lan, "wan": wan, "wan_addrs": wan_addrs}
+    val = {"own": own, "lan": lan, "wan": wan, "wans": wans, "wan_addrs": wan_addrs}
     if own or lan:
         _NETS.update(ts=now, val=val)
     return val
@@ -750,45 +806,170 @@ def audit_tail(n=20):
 
 
 # ── lockdown engine ──────────────────────────────────────────────────────────
+# Every tripwire rule carries a comment that starts with MARK. Per chain the
+# plan lists the ALLOWs (comment ending in -ALLOW) first, then the DROP /
+# REJECTs. A chain is in order when our rules are exactly its first
+# len(plan) rules, every planned rule is present and every ALLOW sits above
+# the first DROP/REJECT. Anything else is rebuilt in ONE
+# `iptables-restore --noflush` transaction (delete all of ours by their -S
+# line, insert the plan at the top): atomic, so the chain is never open or
+# doubled, and a concurrent ufw reload can't shift rule numbers under us.
+
+LOCK_CHAINS = ("FORWARD", "INPUT", "OUTPUT")
+
 
 def _c(mark):
     return ["-m", "comment", "--comment", mark]
 
 
-def lockdown_rules(mode, wan):
-    """[(ipt, chain, [spec, ...])] - specs top to bottom; the last spec of
-    each chain is the DROP and every ALLOW must sit above it."""
+def _wans(wan):
+    if isinstance(wan, (list, tuple)):
+        return [w for w in wan if w]
+    return [wan] if wan else []
+
+
+def _uid_of(name):
+    import pwd
+    try:
+        return pwd.getpwnam(name).pw_uid
+    except (KeyError, TypeError):
+        return None
+
+
+def _canary_contained(ipt, uid):
+    """True when the canary's own containment is loaded (owner-match
+    catch-all REJECT in ufw-before-output): its WAN attempts are then
+    logged [TUXWALL-CANARY-EGRESS] + rejected there, so the egress policy
+    leaves that uid to it and the canary check keeps seeing them."""
+    if uid is None:
+        return False
+    chain = "ufw-before-output" if ipt == "iptables" else "ufw6-before-output"
+    for ln in _chain_lines(ipt, chain):
+        f = ln.split()
+        if "--uid-owner" not in f or "-j" not in f:
+            continue
+        i = f.index("--uid-owner")
+        if (i + 1 < len(f) and f[i + 1] == str(uid) and f[i - 1] != "!"
+                and f[f.index("-j") + 1:f.index("-j") + 2] == ["REJECT"]
+                and not any(x in f for x in ("-d", "-p", "--dport", "--dports", "-o"))):
+            return True
+    return False
+
+
+def egress_ctx():
+    """The uids the egress policy names: resolver (DNS), time daemon(s)
+    (NTP), the canary (never gets the HTTPS allowlists) and, per family,
+    the canary again when its own containment is loaded (then the REJECT
+    leaves it to that containment, which logs for the canary check)."""
+    canary = _uid_of(CANARY_USER)
+    ntp = sorted({u for u in (_uid_of(n) for n in NTP_USERS) if u is not None})
+    return {"resolver": resolver_uid(), "ntp": ntp, "canary_uid": canary,
+            "canary": {ipt: (canary if _canary_contained(ipt, canary) else None)
+                       for ipt in ("iptables", "ip6tables")}}
+
+
+def egress_rules(ipt, wans, ctx, recovery=False):
+    """OUTPUT -o <wan> specs for one family: ALLOWs, then one REJECT per
+    WAN. Recovery adds one ACCEPT per WAN for the recovery allowlist set."""
+    v4 = ipt == "iptables"
+    contained = (ctx.get("canary") or {}).get(ipt)
+    canary = ctx.get("canary_uid", contained)
+    not_canary = ["-m", "owner", "!", "--uid-owner", str(canary)] if canary is not None else []
+    leave_canary = (["-m", "owner", "!", "--uid-owner", str(contained)]
+                    if contained is not None else [])
+    allow, reject = [], []
+    for w in wans:
+        o = ["-o", w]
+        # replies to sessions opened from outside (WireGuard, decoys, ...);
+        # --ctdir REPLY never matches a session the router opened
+        a = [o + ["-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "--ctdir", "REPLY"]]
+        if v4:
+            a.append(o + ["-p", "icmp", "-m", "conntrack", "--ctstate", "RELATED"])
+            a.append(o + ["-p", "udp", "--sport", "68", "--dport", "67"])
+        else:
+            a.append(o + ["-p", "ipv6-icmp", "-m", "conntrack", "--ctstate", "RELATED"])
+            a.append(o + ["-p", "udp", "--sport", "546", "--dport", "547"])
+            for t in ("133", "135", "136", "143"):     # RS, NS, NA, MLDv2 report
+                a.append(o + ["-p", "ipv6-icmp", "--icmpv6-type", t])
+        uid = ctx.get("resolver")
+        if uid is not None:
+            for proto, port in (("udp", "53"), ("tcp", "53"), ("tcp", "853")):
+                a.append(o + ["-p", proto, "--dport", port, "-m", "owner", "--uid-owner", str(uid)])
+        ntp = ctx.get("ntp") or []
+        for uid in ntp:
+            a.append(o + ["-p", "udp", "--dport", "123", "-m", "owner", "--uid-owner", str(uid)])
+            a.append(o + ["-p", "tcp", "--dport", "4460", "-m", "owner", "--uid-owner", str(uid)])
+        if not ntp:
+            a.append(o + ["-p", "udp", "--dport", "123"])
+        a.append(o + ["-p", "tcp", "-m", "set", "--match-set", EGRESS_SETS[ipt], "dst,dst"]
+                 + not_canary)
+        allow += [x + _c(MARK_EGRESS_ALLOW) + ["-j", "ACCEPT"] for x in a]
+        if recovery:
+            allow.append(o + ["-p", "tcp", "-m", "set", "--match-set", REC_SETS[ipt], "dst,dst"]
+                         + not_canary + _c(MARK_REC_ALLOW) + ["-j", "ACCEPT"])
+        reject.append(o + leave_canary + _c(MARK_EGRESS) + ["-j", "REJECT"])
+    return allow + reject
+
+
+def lockdown_rules(mode, wan, recovery=False, ctx=None):
+    """[(ipt, chain, [spec, ...])] - per chain ALLOWs first, then the
+    DROP/REJECTs, in the order they take at the top of the chain.
+      FORWARD  medium: -i <wan> / -o <wan> DROP (internet only; no WAN
+               known -> everything, fail closed); high: everything
+      INPUT    high only: WAN DHCP, v6 ND, replies, then -i <wan> DROP
+      OUTPUT   both: the router's own WAN egress (egress_rules)"""
+    wans = _wans(wan)
+    ctx = egress_ctx() if ctx is None else ctx
     plan = []
     for ipt in ("iptables", "ip6tables"):
-        plan.append((ipt, "FORWARD", [_c(MARK) + ["-j", "DROP"]]))
-    if mode == "high" and wan:
-        for ipt in ("iptables", "ip6tables"):
-            allow = []
-            if ipt == "iptables":
-                allow.append(["-i", wan, "-p", "udp", "--sport", "67", "--dport", "68"]
-                             + _c(MARK_ALLOW) + ["-j", "ACCEPT"])
-            else:
-                allow.append(["-i", wan, "-p", "udp", "--sport", "547", "--dport", "546"]
-                             + _c(MARK_ALLOW) + ["-j", "ACCEPT"])
-                for t in ("134", "135", "136"):   # RA, NS, NA: v6 WAN needs ND
-                    allow.append(["-i", wan, "-p", "ipv6-icmp", "--icmpv6-type", t]
+        if mode == "high" or not wans:
+            fwd = [_c(MARK) + ["-j", "DROP"]]
+        else:
+            fwd = []
+            for w in wans:
+                fwd += [["-i", w] + _c(MARK) + ["-j", "DROP"],
+                        ["-o", w] + _c(MARK) + ["-j", "DROP"]]
+        plan.append((ipt, "FORWARD", fwd))
+        if not wans:
+            continue
+        if mode == "high":
+            allow, drop = [], []
+            for w in wans:
+                if ipt == "iptables":
+                    allow.append(["-i", w, "-p", "udp", "--sport", "67", "--dport", "68"]
                                  + _c(MARK_ALLOW) + ["-j", "ACCEPT"])
-            # replies to connections the ROUTER opened (push, DNS upstream,
-            # NTP, later recovery); --ctdir REPLY never matches a session an
-            # outside host opened towards the router
-            allow.append(["-i", wan, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
-                          "--ctdir", "REPLY"] + _c(MARK_ALLOW) + ["-j", "ACCEPT"])
-            plan.append((ipt, "INPUT", allow + [["-i", wan] + _c(MARK) + ["-j", "DROP"]]))
+                else:
+                    allow.append(["-i", w, "-p", "udp", "--sport", "547", "--dport", "546"]
+                                 + _c(MARK_ALLOW) + ["-j", "ACCEPT"])
+                    for t in ("134", "135", "136"):   # RA, NS, NA: v6 WAN needs ND
+                        allow.append(["-i", w, "-p", "ipv6-icmp", "--icmpv6-type", t]
+                                     + _c(MARK_ALLOW) + ["-j", "ACCEPT"])
+                # replies to connections the ROUTER opened (push, DNS upstream,
+                # NTP, recovery); --ctdir REPLY never matches a session an
+                # outside host opened towards the router
+                allow.append(["-i", w, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
+                              "--ctdir", "REPLY"] + _c(MARK_ALLOW) + ["-j", "ACCEPT"])
+                drop.append(["-i", w] + _c(MARK) + ["-j", "DROP"])
+            plan.append((ipt, "INPUT", allow + drop))
+        plan.append((ipt, "OUTPUT", egress_rules(ipt, wans, ctx, recovery)))
     return plan
+
+
+def _ours(line):
+    return MARK in line
+
+
+def _is_allow(line):
+    m = re.search(r'--comment "?(%s[A-Z-]*)"?' % MARK, line)
+    return bool(m) and m.group(1).endswith("-ALLOW")
 
 
 def _ipt(argv):
     if STUB_FIREWALL:
         with open(ENFORCE_LOG, "a") as f:
             f.write(" ".join(argv) + "\n")
-        # stub: -C never matches before an -I was recorded for the same spec
         if argv[1] == "-C":
-            return _stub_present(argv)
+            return 0 if " ".join(argv[3:]) in _stub_chain(argv[0], argv[2]) else 1
         return 0
     try:
         return subprocess.run(_wrap(argv), capture_output=True, timeout=20).returncode
@@ -796,27 +977,36 @@ def _ipt(argv):
         return 1
 
 
-def _stub_present(argv):
-    key = " ".join([argv[0], argv[2]] + argv[3:])
+def _stub_chain(ipt, chain):
+    """The sandbox's chain, replayed from the stub log (-I n / -A / -D)."""
+    rules = []
     try:
         with open(ENFORCE_LOG) as f:
             lines = f.read().splitlines()
     except OSError:
-        return 1
-    n = 0
+        return rules
     for ln in lines:
         p = ln.split(" ")
-        if len(p) < 3:
+        if len(p) < 4 or p[0] != ipt or p[2] != chain:
             continue
-        spec = " ".join([p[0], p[2]] + p[3 + (1 if p[1] == "-I" else 0):])
-        if spec == key:
-            n += {"-I": 1, "-D": -1}.get(p[1], 0)
-    return 0 if n > 0 else 1
+        if p[1] == "-I":
+            if p[3].isdigit():
+                pos, spec = int(p[3]), " ".join(p[4:])
+            else:
+                pos, spec = 1, " ".join(p[3:])
+            rules.insert(min(max(pos, 1), len(rules) + 1) - 1, spec)
+        elif p[1] == "-A":
+            rules.append(" ".join(p[3:]))
+        elif p[1] == "-D":
+            spec = " ".join(p[3:])
+            if spec in rules:
+                rules.remove(spec)
+    return rules
 
 
 def _chain_lines(ipt, chain):
     if STUB_FIREWALL:
-        return []
+        return ["-A %s %s" % (chain, s) for s in _stub_chain(ipt, chain)]
     try:
         out = subprocess.run(_wrap([ipt, "-S", chain]), capture_output=True,
                              text=True, timeout=20).stdout
@@ -825,90 +1015,137 @@ def _chain_lines(ipt, chain):
     return [ln for ln in out.splitlines() if ln.startswith("-A ")]
 
 
-def _delete_marked(ipt, chain, which):
-    """Delete our rules (which: 'allow' | 'drop' | 'all') by their -S line."""
-    removed = 0
-    for _ in range(64):
-        hit = None
-        for ln in _chain_lines(ipt, chain):
-            allow = MARK_ALLOW in ln
-            drop = (not allow) and re.search(r"--comment \"?%s\"? " % MARK, ln)
-            if (which in ("allow", "all") and allow) or (which in ("drop", "all") and drop):
-                hit = ln
-                break
-        if not hit:
-            break
-        argv = shlex.split(hit)
-        argv[0] = "-D"
-        if _ipt([ipt] + argv) != 0:
-            break
-        removed += 1
-    return removed
+def _restore(ipt, lines):
+    """Apply -D/-I lines to the filter table in one transaction."""
+    if not lines:
+        return True
+    if STUB_FIREWALL:
+        with open(ENFORCE_LOG, "a") as f:
+            for ln in lines:
+                f.write("%s %s\n" % (ipt, ln))
+        return True
+    data = "*filter\n%s\nCOMMIT\n" % "\n".join(lines)
+    try:
+        p = subprocess.run(_wrap([ipt + "-restore", "--noflush"]), input=data,
+                           capture_output=True, text=True, timeout=30)
+    except Exception as exc:
+        log("ENFORCE-FAIL %s-restore: %s" % (ipt, exc))
+        return False
+    if p.returncode != 0:
+        log("ENFORCE-FAIL %s-restore: %s" % (ipt, (p.stderr or p.stdout or "").strip()[-300:]))
+        return False
+    return True
+
+
+def _rebuild(ipt, chain, specs, which=_ours):
+    """Delete our rules (or those `which` selects) and put `specs` on top."""
+    lines = ["-D " + ln[3:] for ln in _chain_lines(ipt, chain) if which(ln)]
+    lines += ["-I %s 1 %s" % (chain, " ".join(s)) for s in reversed(specs)]
+    return _restore(ipt, lines)
 
 
 def _chain_ok(ipt, chain, specs):
     if any(_ipt([ipt, "-C", chain] + s) != 0 for s in specs):
         return False
-    if len(specs) == 1 or STUB_FIREWALL:
-        return True
     lines = _chain_lines(ipt, chain)
-    drop_idx = [i for i, ln in enumerate(lines)
-                if MARK_ALLOW not in ln and MARK in ln and "-j DROP" in ln]
-    allow_idx = [i for i, ln in enumerate(lines) if MARK_ALLOW in ln]
-    return bool(drop_idx) and all(i < drop_idx[0] for i in allow_idx)
+    n = len(specs)
+    head, rest = lines[:n], lines[n:]
+    if len(head) < n or not all(_ours(ln) for ln in head) or any(_ours(ln) for ln in rest):
+        return False
+    kinds = [_is_allow(ln) for ln in head]
+    return kinds == sorted(kinds, reverse=True)       # every ALLOW above the DROPs
 
 
-def enforce(mode=None, wan=None):
-    """Idempotently apply the lockdown rules (DROP first, so the chain is
-    never open while ALLOWs are re-ordered). True if anything changed."""
-    mode = mode or (load_state().get("mode") or "medium")
-    wan = wan or wan_iface()
+def _fallback(ipt, chain, specs):
+    """The transaction failed: at least get every DROP/REJECT, then every
+    ALLOW, in (fail closed), one command at a time."""
+    drops = [s for s in specs if not _is_allow(" ".join(s))]
+    allows = [s for s in specs if _is_allow(" ".join(s))]
+    for s in list(reversed(drops)) + list(reversed(allows)):
+        if _ipt([ipt, "-C", chain] + s) != 0 and _ipt([ipt, "-I", chain, "1"] + s) != 0:
+            log("ENFORCE-FAIL %s -I %s 1 %s" % (ipt, chain, " ".join(s)))
+
+
+def _delete_slow(ipt, chain, which=_ours):
+    for _ in range(128):
+        hit = next((ln for ln in _chain_lines(ipt, chain) if which(ln)), None)
+        if not hit:
+            return
+        argv = shlex.split(hit)
+        argv[0] = "-D"
+        if _ipt([ipt] + argv) != 0:
+            return
+
+
+def enforce(mode=None, wan=None, recovery=None):
+    """Idempotently put the lockdown in place for the trip's mode (+ the
+    recovery widening when a recovery is active). True if anything
+    changed. Chains that hold tripwire rules the plan doesn't want any more
+    (a WAN change, an older engine) are cleaned too."""
+    st = load_state()
+    mode = mode or st.get("mode") or "medium"
+    wans = _wans(wan) or wan_ifaces()
+    if recovery is None:
+        recovery = bool((st.get("recovery") or {}).get("active"))
+    if not wans:
+        log("ENFORCE no WAN interface found - all forwarding dropped, egress not restricted")
+    else:
+        _ensure_sets(EGRESS_SETS)
+        if recovery:
+            _ensure_sets(REC_SETS)
+    plan = lockdown_rules(mode, wans, recovery, egress_ctx())
     changed = False
-    for ipt, chain, specs in lockdown_rules(mode, wan):
-        if _chain_ok(ipt, chain, specs):
-            continue
-        changed = True
-        drop = specs[-1]
-        if _ipt([ipt, "-C", chain] + drop) != 0:
-            if _ipt([ipt, "-I", chain, "1"] + drop) != 0:
-                log("ENFORCE-FAIL %s -I %s 1 %s" % (ipt, chain, " ".join(drop)))
-        if len(specs) > 1:
-            _delete_marked(ipt, chain, "allow")
-            for spec in reversed(specs[:-1]):
-                if _ipt([ipt, "-I", chain, "1"] + spec) != 0:
-                    log("ENFORCE-FAIL %s -I %s 1 %s" % (ipt, chain, " ".join(spec)))
+    for ipt in ("iptables", "ip6tables"):
+        want = {chain: specs for i, chain, specs in plan if i == ipt}
+        for chain in LOCK_CHAINS:
+            specs = want.get(chain, [])
+            if specs:
+                if _chain_ok(ipt, chain, specs):
+                    continue
+            elif not any(_ours(ln) for ln in _chain_lines(ipt, chain)):
+                continue
+            changed = True
+            if not _rebuild(ipt, chain, specs):
+                _fallback(ipt, chain, specs)
     return changed
 
 
 def lift():
-    """Remove every tripwire rule from INPUT and FORWARD, whatever the
-    mode or WAN interface was at trip time."""
-    if STUB_FIREWALL:
-        st = load_state()
-        for ipt, chain, specs in lockdown_rules(st.get("mode") or "high", wan_iface()):
-            for s in specs:
-                while _ipt([ipt, "-C", chain] + s) == 0:
-                    _ipt([ipt, "-D", chain] + s)
-        return
+    """Remove every tripwire rule (FORWARD, INPUT, OUTPUT; whatever the mode
+    or WAN interface was) and the egress/recovery sets."""
     for ipt in ("iptables", "ip6tables"):
-        for chain in ("FORWARD", "INPUT"):
-            _delete_marked(ipt, chain, "all")
-        # recovery allowlist rules (OUTPUT) never outlive a resolve
-        _rec_delete(ipt, "OUTPUT")
-    _destroy_sets()
+        for chain in LOCK_CHAINS:
+            if any(_ours(ln) for ln in _chain_lines(ipt, chain)):
+                if not _rebuild(ipt, chain, []):
+                    _delete_slow(ipt, chain)
+    _destroy_sets(REC_SETS)
+    _destroy_sets(EGRESS_SETS)
 
 
 def lockdown_active(mode=None):
-    mode = mode or (load_state().get("mode") or "medium")
+    st = load_state()
+    mode = mode or st.get("mode") or "medium"
+    rec = bool((st.get("recovery") or {}).get("active"))
     return all(_chain_ok(ipt, chain, specs)
-               for ipt, chain, specs in lockdown_rules(mode, wan_iface()))
+               for ipt, chain, specs in lockdown_rules(mode, wan_ifaces(), rec))
 
 
 def any_rules_present():
-    if STUB_FIREWALL:
-        return lockdown_active()
-    return any(MARK in ln for ipt in ("iptables", "ip6tables")
-               for chain in ("FORWARD", "INPUT") for ln in _chain_lines(ipt, chain))
+    return any(_ours(ln) for ipt in ("iptables", "ip6tables")
+               for chain in LOCK_CHAINS for ln in _chain_lines(ipt, chain))
+
+
+def rules_summary():
+    """Which parts of the lockdown are in the kernel (v4 AND v6)."""
+    def has(chain, rx):
+        return all(any(re.search(rx, ln) for ln in _chain_lines(ipt, chain))
+                   for ipt in ("iptables", "ip6tables"))
+    return {"forward": has("FORWARD", r'--comment "?%s"? -j DROP' % MARK),
+            "forward_all": has("FORWARD", r'^-A FORWARD -m comment --comment "?%s"? -j DROP$'
+                               % MARK),
+            "input": has("INPUT", r'--comment "?%s"? -j DROP' % MARK),
+            "egress": has("OUTPUT", r'--comment "?%s"? -j REJECT' % MARK_EGRESS),
+            "recovery": has("OUTPUT", MARK_REC_ALLOW)}
 
 
 # ── notification (dedupe + rate limit) ───────────────────────────────────────
@@ -1112,7 +1349,7 @@ def wan_sourced(src, iface, nets):
         return False
     if ip.is_global:
         return True
-    return bool(iface) and iface == nets.get("wan")
+    return bool(iface) and (iface == nets.get("wan") or iface in (nets.get("wans") or ()))
 
 
 def _ip_match(entries, *addrs):
@@ -1627,6 +1864,12 @@ def trip(reason, cls="manual", sig="", src="", dst="", mode=None, check="manual"
         # next retransmission then classifies as NEW and false-trips the
         # canary-egress trigger again (observed 2026-11-08). Never flush.
         enforce(mode=mode)
+        # then the push targets' addresses for the egress allowlist (DNS
+        # from the resolver is allowed; containment is already in force)
+        try:
+            egress_refresh()
+        except Exception as exc:
+            log("EGRESS-ERROR %s: %s" % (type(exc).__name__, exc))
     log("TRIP mode=%s class=%s src=%s -> %s reason=%s action=lockdown"
         % (mode, cls, src, dst, reason))
     return True
@@ -1645,6 +1888,7 @@ def resolve(by="admin", via="cli", client="", checklist=None, note=None):
         lift()
         now = time.time()
         st.update({"tripped": False, "resolved_at": now, "resolved_by": by})
+        st.pop("egress", None)
         write_json(STATE, st)
     minutes = (now - float(st.get("since") or now)) / 60
     # A long WAN blackout predictably wedged unbound's upstream state (a
@@ -1769,19 +2013,19 @@ def set_mode(mode, by="admin", via="cli", client=""):
 
 # ── recovery mode (Tripped -> Recovery -> Restored) ─────────────────────────
 # While tripped, an admin may open a time-boxed investigation window. The
-# trip's FORWARD block stays exactly as it is; on top of it the router's own
-# traffic out of the WAN is narrowed to an allowlist: HTTPS to the AI
-# provider / opencode inference / push endpoints (ipset hash:ip,port,
-# refreshed on a timer because CDNs rotate), DNS only from the resolver's
-# uid, and DNS answers only for the allowlisted names (unbound runtime
-# local-zones: "." refuse + transparent zones, gone with an unbound restart
-# and re-applied by the watchdog). Replies to sessions others opened to the
-# router, WAN DHCP and v6 ND stay allowed. Everything else leaving the WAN
-# is rejected. In high strength the trip's WAN INPUT drop is untouched: it
-# only accepts replies to connections the router opened, which recovery
-# limits to the allowlist. The window expires (default 60 min, extendable,
-# persisted - a restart re-applies or expires it) back to the full trip;
-# restoring the network is the normal resolve (password + checklist).
+# trip's FORWARD/INPUT rules stay exactly as they are; the tripped egress
+# policy (OUTPUT -o <wan>: DNS from the resolver's uid, NTP, DHCP/ND,
+# replies, the push targets) is widened by one ACCEPT per WAN and family:
+# HTTPS to the AI provider / opencode inference / push endpoints (ipset
+# hash:ip,port, refreshed on a timer because CDNs rotate), and DNS answers
+# only for the allowlisted names (unbound runtime local-zones: "." refuse +
+# transparent zones, gone with an unbound restart and re-applied by the
+# watchdog). Everything else leaving the WAN stays rejected. In high
+# strength the trip's WAN INPUT drop is untouched: it only accepts replies
+# to connections the router opened. The window expires (default 60 min,
+# extendable, persisted - a restart re-applies or expires it) back to the
+# tripped egress policy; restoring the network is the normal resolve
+# (password + checklist).
 MARK_REC = "TUXWALL-TRIPWIRE-RECOVERY"
 MARK_REC_ALLOW = "TUXWALL-TRIPWIRE-RECOVERY-ALLOW"
 REC_SETS = {"iptables": "tw-recovery4", "ip6tables": "tw-recovery6"}
@@ -1871,12 +2115,13 @@ def _catalog_api(pids):
     return out
 
 
-def recovery_allowlist(providers=None, local_only=False, check_local=True):
+def recovery_allowlist(providers=None, local_only=False, check_local=True, notify_only=False):
     """What recovery lets the router reach, derived from the opencode config
     (custom providers' baseURLs, the default/small model's provider), the
     providers the dashboard reports as signed in, opencode inference, and
     the push targets in alerts.json. LAN/loopback endpoints are listed as
-    local models (never firewall entries: recovery only narrows the WAN)."""
+    local models (never firewall entries: recovery only narrows the WAN).
+    notify_only: just the push targets (the tripped egress allowlist)."""
     conf = read_json(OPENCODE_CONF, {})
     hosts, local, skipped = [], [], []
     seen_local = set()
@@ -1917,44 +2162,45 @@ def recovery_allowlist(providers=None, local_only=False, check_local=True):
             return
         add(host, port, why, kind)
 
-    custom = {}
-    for block, legacy in (("providers", False), ("provider", True)):
-        for pid, p in (conf.get(block) or {}).items() if isinstance(conf.get(block), dict) else ():
-            if not isinstance(p, dict) or not _PID_RE.match(str(pid)):
+    if not notify_only:
+        custom = {}
+        for block, legacy in (("providers", False), ("provider", True)):
+            for pid, p in (conf.get(block) or {}).items() if isinstance(conf.get(block), dict) else ():
+                if not isinstance(p, dict) or not _PID_RE.match(str(pid)):
+                    continue
+                st = p.get("options" if legacy else "settings")
+                st = st if isinstance(st, dict) else {}
+                custom[pid] = (str(st.get("baseURL") or ""), str(p.get("name") or pid),
+                               list((p.get("models") or {}).keys()) if isinstance(p.get("models"), dict)
+                               else [])
+        wanted = []
+        for key in ("model", "small_model"):
+            m = conf.get(key)
+            pid = (m.split("/", 1)[0] if isinstance(m, str) else
+                   (m.get("providerID") if isinstance(m, dict) else "")) or ""
+            if pid and _PID_RE.match(pid) and pid not in wanted:
+                wanted.append(pid)
+        for pid in providers or []:
+            pid = str(pid)
+            if _PID_RE.match(pid) and pid not in wanted:
+                wanted.append(pid)
+        catalog = _catalog_api([p for p in wanted + ["opencode"] if p not in custom])
+        for pid, (base, name, models) in custom.items():
+            if base:
+                consider(base, "AI provider %s (opencode config)" % pid, "ai", pid, name,
+                         ["%s/%s" % (pid, m) for m in models])
+            elif pid not in wanted:
+                wanted.append(pid)
+        for pid in wanted:
+            if pid in custom and custom[pid][0]:
                 continue
-            st = p.get("options" if legacy else "settings")
-            st = st if isinstance(st, dict) else {}
-            custom[pid] = (str(st.get("baseURL") or ""), str(p.get("name") or pid),
-                           list((p.get("models") or {}).keys()) if isinstance(p.get("models"), dict)
-                           else [])
-    wanted = []
-    for key in ("model", "small_model"):
-        m = conf.get(key)
-        pid = (m.split("/", 1)[0] if isinstance(m, str) else
-               (m.get("providerID") if isinstance(m, dict) else "")) or ""
-        if pid and _PID_RE.match(pid) and pid not in wanted:
-            wanted.append(pid)
-    for pid in providers or []:
-        pid = str(pid)
-        if _PID_RE.match(pid) and pid not in wanted:
-            wanted.append(pid)
-    catalog = _catalog_api([p for p in wanted + ["opencode"] if p not in custom])
-    for pid, (base, name, models) in custom.items():
-        if base:
-            consider(base, "AI provider %s (opencode config)" % pid, "ai", pid, name,
-                     ["%s/%s" % (pid, m) for m in models])
-        elif pid not in wanted:
-            wanted.append(pid)
-    for pid in wanted:
-        if pid in custom and custom[pid][0]:
-            continue
-        url = catalog.get(pid) or PROVIDER_HOSTS.get(pid) or LOCAL_PROVIDERS.get(pid)
-        if url:
-            consider(url, "AI provider %s" % pid, "ai", pid)
-        else:
-            skipped.append({"what": "AI provider %s" % pid, "why": "endpoint unknown"})
-    consider(catalog.get("opencode") or "https://%s/zen/v1" % OPENCODE_INFERENCE,
-             "opencode inference", "ai", "opencode")
+            url = catalog.get(pid) or PROVIDER_HOSTS.get(pid) or LOCAL_PROVIDERS.get(pid)
+            if url:
+                consider(url, "AI provider %s" % pid, "ai", pid)
+            else:
+                skipped.append({"what": "AI provider %s" % pid, "why": "endpoint unknown"})
+        consider(catalog.get("opencode") or "https://%s/zen/v1" % OPENCODE_INFERENCE,
+                 "opencode inference", "ai", "opencode")
     alerts = read_json(ALERTS_CONF, {})
     if alerts.get("enabled"):
         for key, label in (("ntfy_url", "push notifications (ntfy)"),
@@ -2101,140 +2347,60 @@ def _ipset(args, data=None):
         return 1
 
 
-def _ensure_sets():
-    for ipt, name in REC_SETS.items():
+def _ensure_sets(sets=None):
+    for ipt, name in (sets or REC_SETS).items():
         _ipset(["create", name, "hash:ip,port", "family",
                 "inet" if ipt == "iptables" else "inet6", "timeout", str(REC_SET_TIMEOUT),
                 "-exist"])
 
 
-def _fill_sets(hosts, resolved):
+def _fill_sets(hosts, resolved, sets=None):
+    sets = sets or REC_SETS
     lines = []
     for h in hosts:
         r = resolved.get(h["host"]) or {}
         for key, ipt in (("v4", "iptables"), ("v6", "ip6tables")):
             for ip in r.get(key) or []:
-                lines.append("add %s %s,tcp:%d timeout %d" % (REC_SETS[ipt], ip, int(h["port"]),
+                lines.append("add %s %s,tcp:%d timeout %d" % (sets[ipt], ip, int(h["port"]),
                                                               REC_SET_TIMEOUT))
     if lines:
         if _ipset(["restore", "-exist"], "\n".join(lines) + "\n") != 0:
-            log("RECOVERY-SET-FAIL could not load %d allowlist entries" % len(lines))
+            log("SET-FAIL could not load %d allowlist entries into %s"
+                % (len(lines), "/".join(sets.values())))
     return len(lines)
 
 
-def _destroy_sets():
-    for name in REC_SETS.values():
+def _destroy_sets(sets=None):
+    for name in (sets or REC_SETS).values():
         _ipset(["destroy", name])
 
 
 def resolver_uid():
-    import pwd
-    try:
-        return pwd.getpwnam(RESOLVER_USER).pw_uid
-    except (KeyError, TypeError):
-        return None
-
-
-def recovery_rules(wan, uid):
-    """[(ipt, "OUTPUT", [spec, ...])] - allows first, the REJECT last."""
-    plan = []
-    for ipt in ("iptables", "ip6tables"):
-        o = ["-o", wan]
-        allow = [o + ["-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "--ctdir", "REPLY"]]
-        if ipt == "iptables":
-            allow.append(o + ["-p", "icmp", "-m", "conntrack", "--ctstate", "RELATED"])
-            allow.append(o + ["-p", "udp", "--sport", "68", "--dport", "67"])
-        else:
-            allow.append(o + ["-p", "ipv6-icmp", "-m", "conntrack", "--ctstate", "RELATED"])
-            allow.append(o + ["-p", "udp", "--sport", "546", "--dport", "547"])
-            for t in ("133", "135", "136", "143"):     # RS, NS, NA, MLDv2 report
-                allow.append(o + ["-p", "ipv6-icmp", "--icmpv6-type", t])
-        if uid is not None:
-            for proto in ("udp", "tcp"):
-                allow.append(o + ["-p", proto, "--dport", "53", "-m", "owner",
-                                  "--uid-owner", str(uid)])
-        allow.append(o + ["-p", "tcp", "-m", "set", "--match-set", REC_SETS[ipt], "dst,dst"])
-        specs = [a + _c(MARK_REC_ALLOW) + ["-j", "ACCEPT"] for a in allow]
-        specs.append(o + _c(MARK_REC) + ["-j", "REJECT"])
-        plan.append((ipt, "OUTPUT", specs))
-    return plan
-
-
-def _rec_ok(ipt, chain, specs):
-    if any(_ipt([ipt, "-C", chain] + s) != 0 for s in specs):
-        return False
-    if STUB_FIREWALL:
-        return True
-    lines = _chain_lines(ipt, chain)
-    rec = [i for i, ln in enumerate(lines) if MARK_REC in ln]
-    rej = [i for i in rec if MARK_REC_ALLOW not in lines[i]]
-    return len(rec) == len(specs) and len(rej) == 1 and all(i < rej[0] for i in rec
-                                                            if i != rej[0])
-
-
-def _rec_delete(ipt, chain="OUTPUT", keep_first=False):
-    """Delete recovery rules by their -S line (keep_first: all but the
-    first one, which the caller just inserted at position 1)."""
-    removed = 0
-    for _ in range(128):
-        lines = [ln for ln in _chain_lines(ipt, chain) if MARK_REC in ln]
-        if keep_first:
-            lines = lines[1:]
-        if not lines:
-            break
-        argv = shlex.split(lines[0])
-        argv[0] = "-D"
-        if _ipt([ipt] + argv) != 0:
-            break
-        removed += 1
-    return removed
+    return _uid_of(RESOLVER_USER)
 
 
 def recovery_enforce_rules(wan=None):
-    """Idempotently apply the recovery OUTPUT rules (REJECT first, so the
-    WAN is never open while the allows are rebuilt). True if changed."""
-    wan = wan or wan_iface()
-    if not wan:
+    """The recovery widening is part of the lockdown plan (one ACCEPT per
+    WAN above the egress REJECT): re-apply the whole plan. True if changed."""
+    if not wan_ifaces():
         log("RECOVERY-FAIL no WAN interface - recovery rules not applied")
         return False
-    _ensure_sets()
-    changed = False
-    for ipt, chain, specs in recovery_rules(wan, resolver_uid()):
-        if _rec_ok(ipt, chain, specs):
-            continue
-        changed = True
-        if _ipt([ipt, "-I", chain, "1"] + specs[-1]) != 0:
-            log("RECOVERY-FAIL %s -I %s 1 %s" % (ipt, chain, " ".join(specs[-1])))
-        if STUB_FIREWALL:
-            for s in specs[:-1]:
-                while _ipt([ipt, "-C", chain] + s) == 0:
-                    _ipt([ipt, "-D", chain] + s)
-        else:
-            _rec_delete(ipt, chain, keep_first=True)
-        for spec in reversed(specs[:-1]):
-            if _ipt([ipt, "-I", chain, "1"] + spec) != 0:
-                log("RECOVERY-FAIL %s -I %s 1 %s" % (ipt, chain, " ".join(spec)))
-    return changed
+    return enforce(recovery=True)
 
 
 def recovery_rules_present():
-    if STUB_FIREWALL:
-        return any(_ipt([ipt, "-C", "OUTPUT"] + specs[-1]) == 0
-                   for ipt, _ch, specs in recovery_rules(wan_iface() or "wan", resolver_uid()))
     return any(MARK_REC in ln for ipt in ("iptables", "ip6tables")
                for ln in _chain_lines(ipt, "OUTPUT"))
 
 
 def recovery_remove_rules():
-    if STUB_FIREWALL:
-        for ipt, chain, specs in recovery_rules(wan_iface() or "wan", resolver_uid()):
-            for s in specs:
-                while _ipt([ipt, "-C", chain] + s) == 0:
-                    _ipt([ipt, "-D", chain] + s)
-    else:
-        for ipt in ("iptables", "ip6tables"):
-            _rec_delete(ipt, "OUTPUT")
-    _destroy_sets()
+    """Drop the recovery ACCEPTs (only narrows: the egress REJECT stays) and
+    the recovery sets."""
+    for ipt in ("iptables", "ip6tables"):
+        if any(MARK_REC in ln for ln in _chain_lines(ipt, "OUTPUT")):
+            if not _rebuild(ipt, "OUTPUT", [], which=lambda ln: MARK_REC in ln):
+                _delete_slow(ipt, "OUTPUT", which=lambda ln: MARK_REC in ln)
+    _destroy_sets(REC_SETS)
 
 
 # -- DNS restriction (unbound runtime local-zones) -------------------------------
@@ -2324,6 +2490,69 @@ def dns_check():
     return rcode == 0 and any(a == DNS_SENTINEL_IP for _t, a in ans)
 
 
+# -- tripped egress (the router's own WAN traffic while tripped) -----------------
+
+def egress_allowlist():
+    """The push targets (alerts.json ntfy/webhook) the router keeps
+    reaching over HTTPS while tripped (same URL rules as recovery)."""
+    return recovery_allowlist(notify_only=True, check_local=False)
+
+
+def egress_refresh():
+    """Resolve the push targets and (re)load tw-egress4/6 (entries time out
+    after REC_SET_TIMEOUT, so rotated CDN addresses age out). Recorded in
+    state["egress"]; only while tripped. Returns the entries loaded."""
+    if not load_state().get("tripped"):
+        return None
+    allow = egress_allowlist()
+    resolved = _resolve_all(allow["hosts"])
+    _ensure_sets(EGRESS_SETS)
+    n = _fill_sets(allow["hosts"], resolved, EGRESS_SETS)
+
+    def put(s):
+        if s.get("tripped"):
+            s["egress"] = {"hosts": allow["hosts"], "skipped": allow["skipped"],
+                           "resolved": resolved, "entries": n,
+                           "refreshed": round(time.time(), 1)}
+    update_state(put)
+    return n
+
+
+def egress_public(st=None):
+    st = load_state() if st is None else st
+    eg = st.get("egress") or {}
+    res = eg.get("resolved") or {}
+    hosts = []
+    for h in eg.get("hosts") or []:
+        r = res.get(h["host"]) or {}
+        hosts.append({"host": h["host"], "port": h["port"], "why": h.get("why") or [],
+                      "v4": len(r.get("v4") or []), "v6": len(r.get("v6") or []),
+                      "error": r.get("error") or ""})
+    return {"active": bool(st.get("tripped")), "hosts": hosts,
+            "skipped": eg.get("skipped") or [], "refreshed": eg.get("refreshed"),
+            "dns": ("restricted" if (st.get("recovery") or {}).get("active") else "open")
+            if st.get("tripped") else "normal"}
+
+
+def _egress_step(force=False):
+    """Daemon upkeep while tripped: refresh the push targets' addresses
+    every REC_REFRESH_S (every 30 s while the last refresh loaded nothing,
+    e.g. at boot before unbound answered); never kills the loop."""
+    try:
+        st = load_state()
+        if not st.get("tripped"):
+            return None
+        eg = st.get("egress") or {}
+        last = float(eg.get("refreshed") or 0)
+        every = REC_REFRESH_S if (eg.get("entries") or not eg.get("hosts")) else min(
+            30.0, REC_REFRESH_S)
+        if force or time.time() - last >= every:
+            return egress_refresh()
+    except Exception as exc:
+        log("EGRESS-ERROR %s: %s" % (type(exc).__name__, exc))
+    return None
+
+
 # -- state machine ---------------------------------------------------------------
 
 def _rec_public(rec, now=None):
@@ -2375,7 +2604,7 @@ def recovery_start(minutes=REC_DEFAULT_MIN, by="admin", via="cli", client="", pr
         raise ValueError("Recovery mode is only available while the tripwire is tripped.")
     if (st.get("recovery") or {}).get("active"):
         raise ValueError("Recovery mode is already active.")
-    wan = wan_iface()
+    wan = ", ".join(wan_ifaces())
     if not wan:
         raise ValueError("No WAN interface found - recovery can't restrict the router's traffic.")
     allow = recovery_allowlist(providers, bool(local_only))
@@ -2397,7 +2626,7 @@ def recovery_start(minutes=REC_DEFAULT_MIN, by="admin", via="cli", client="", pr
             raise ValueError("The trip state changed - reload and try again.")
         _ensure_sets()
         n = _fill_sets(allow["hosts"], resolved)
-        recovery_enforce_rules(wan)
+        recovery_enforce_rules()
         dns = dns_restrict(allow["hosts"])
         update_state(lambda s: (s.get("recovery") or {}).__setitem__("dns", dns))
     names = [h["host"] for h in allow["hosts"]]
@@ -2407,8 +2636,9 @@ def recovery_start(minutes=REC_DEFAULT_MIN, by="admin", via="cli", client="", pr
           local_only=bool(local_only), hosts=names, dns=dns["state"],
           local=[e["url"] for e in allow["local"] if e.get("reachable")] or None)
     notify("Tripwire recovery started",
-           "%s started a %d-minute recovery window. The LAN stays cut off; only the router "
-           "may reach: %s. Back to full block at %s unless extended."
+           "%s started a %d-minute recovery window. The LAN stays cut off from the internet; "
+           "the router may now also reach: %s. Back to the tripped policy at %s unless "
+           "extended."
            % (by, minutes, ", ".join(names) or "nothing on the internet",
               time.strftime("%H:%M", time.localtime(rec["expires"]))), priority="high")
     return recovery_status()
@@ -2440,8 +2670,9 @@ def recovery_extend(minutes, by="admin", via="cli", client=""):
 
 
 def recovery_end(how="ended", by="admin", via="cli", client="", notify_user=True):
-    """Leave recovery: allowlist rules, sets and the DNS restriction go;
-    the trip itself (FORWARD block, high-mode INPUT) stays."""
+    """Leave recovery: the allowlist ACCEPTs, sets and the DNS restriction
+    go; the trip itself (FORWARD/INPUT block + the tripped egress policy)
+    stays."""
     with state_lock():
         st = load_state()
         rec = st.get("recovery") or {}
@@ -2467,8 +2698,9 @@ def recovery_end(how="ended", by="admin", via="cli", client="", notify_user=True
                  "ended": "%s ended recovery" % by,
                  "new-event": "A new blocking event arrived during recovery",
                  "cleanup": "Recovery was cleaned up (the trip is no longer active)"}
-        notify("Tripwire recovery over", "%s. Back to full block: the router's internet "
-               "allowlist is closed again; the LAN stays contained until resolved."
+        notify("Tripwire recovery over", "%s. Back to the tripped policy: the router may "
+               "only reach DNS, time and the push server again; the LAN stays contained "
+               "until resolved."
                % words.get(how, how), priority="high")
     return True
 
@@ -2587,13 +2819,21 @@ def recovery_brief():
     lines = [
         "Tripwire incident - investigation brief",
         "",
-        "The TuxWall tripwire TRIPPED and the network is contained (%s strength): the LAN "
-        "is cut off from the internet." % str(st.get("mode") or "medium").upper(),
+        "The TuxWall tripwire TRIPPED and the network is contained (%s strength): %s The "
+        "router itself may only reach DNS (its resolver), time (NTP), WAN DHCP and the "
+        "push server on the internet." % (
+            str(st.get("mode") or "medium").upper(),
+            "ALL forwarding is dropped (internet, VPN and between internal networks) and new "
+            "connections from the internet to the router are closed."
+            if st.get("mode") == "high" else
+            "forwarding to and from the internet is dropped; VPN and internal networks still "
+            "reach each other."),
     ]
     if rec.get("active"):
-        lines.append("Recovery mode is active until %s: only this router may reach the "
-                     "allowlisted AI / notification endpoints; everything else is still "
-                     "blocked." % _fmt_ts(rec.get("expires")))
+        lines.append("Recovery mode is active until %s: this router may additionally reach "
+                     "the allowlisted AI / notification endpoints over HTTPS, and DNS answers "
+                     "only those names; everything else is still blocked."
+                     % _fmt_ts(rec.get("expires")))
     lines += [
         "",
         "Trip details:",
@@ -2912,6 +3152,7 @@ def run_daemon():
         with _ACTION_LOCK:
             enforce(mode=st.get("mode"))
         log("RE-ENFORCE at start (state was tripped)")
+        _egress_step(force=True)
         notify("Tripwire still active after restart",
                "The tripwire service restarted while tripped; WAN containment "
                "(%s) has been re-applied." % st.get("mode"), priority="high")
@@ -2972,6 +3213,7 @@ def run_daemon():
                            "containment has been re-applied.", key="reenforce",
                            priority="high")
             _recovery_step()
+            _egress_step()
             flush_notify()
         if now - last_prune >= 3600:
             last_prune = now
@@ -3065,7 +3307,8 @@ def ui_config():
             "limits": {"count": MAX_COUNT, "minutes": MAX_MINUTES, "list": MAX_LIST},
             "history": {"bytes": hsize, "max_bytes": HISTORY_MAX_BYTES, "days": HISTORY_DAYS,
                         "imported": load_state().get("history_imported")},
-            "wanted": watchers_wanted(cfg), "recovery": recovery_status()}
+            "wanted": watchers_wanted(cfg), "recovery": recovery_status(),
+            "egress": egress_public(), "rules": rules_summary(), "wan": wan_ifaces()}
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -3123,6 +3366,9 @@ def status():
         "dst": st.get("dst") or "", "src_ip": st.get("src_ip"),
         "trips": st.get("trips"), "resolved_at": st.get("resolved_at"),
         "rules_present": any_rules_present(),
+        "rules": rules_summary(),
+        "wan": wan_ifaces(),
+        "egress": egress_public(st),
         "health": read_json(HEALTH, {}),
         "phase": phase_of(st),
         "recovery": _rec_public(st["recovery"]) if (st.get("recovery") or {}).get("active")
@@ -3202,7 +3448,8 @@ def main(argv=None):
         if st.get("tripped"):
             with state_lock():
                 enforce(mode=st.get("mode"))
-            print("re-enforced")
+            n = _egress_step(force=True)
+            print("re-enforced (push allowlist: %s entries)" % ("?" if n is None else n))
         else:
             print("not tripped - nothing to enforce")
         if (st.get("recovery") or {}).get("active"):

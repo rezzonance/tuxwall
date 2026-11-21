@@ -5685,15 +5685,25 @@ def tripwire_status():
     if ui and isinstance(ui.get("config"), dict):
         conf = ui["config"]
     mode = str(conf.get("mode") or "disabled")
-    rules = False
-    try:
-        for ipt in ("iptables", "ip6tables"):
-            if subprocess.run([ipt, "-C", "FORWARD", "-m", "comment",
-                               "--comment", "TUXWALL-TRIPWIRE", "-j", "DROP"],
-                              capture_output=True).returncode == 0:
-                rules = True
-    except Exception:
-        pass
+    # which parts of the lockdown are in the kernel: the engine reports it
+    # (medium = FORWARD -i/-o <wan>, high = all forwarding + WAN input, both
+    # + the router's egress REJECT); fall back to scanning the chains
+    parts = (ui or {}).get("rules") if isinstance((ui or {}).get("rules"), dict) else None
+    if parts is None:
+        parts = {}
+        try:
+            for key, chain, rx in (("forward", "FORWARD", r'--comment "?TUXWALL-TRIPWIRE"? -j DROP'),
+                                   ("input", "INPUT", r'--comment "?TUXWALL-TRIPWIRE"? -j DROP'),
+                                   ("egress", "OUTPUT",
+                                    r'--comment "?TUXWALL-TRIPWIRE-EGRESS"? -j REJECT')):
+                parts[key] = all(re.search(rx, subprocess.run(
+                    [ipt, "-S", chain], capture_output=True, text=True, timeout=10).stdout or "")
+                    for ipt in ("iptables", "ip6tables"))
+        except Exception:
+            pass
+    rules = bool(parts.get("forward"))
+    if st.get("tripped") and st.get("mode") == "high":
+        rules = rules and bool(parts.get("input"))
 
     def rec(v):
         return v if isinstance(v, dict) else None
@@ -5712,6 +5722,10 @@ def tripwire_status():
             "absorbed_events": int(st.get("absorbed_events") or 0),
             "last_absorbed": rec(st.get("last_absorbed")),
             "rules_present": rules,
+            "rules": {k: bool(parts.get(k)) for k in ("forward", "forward_all", "input", "egress",
+                                                      "recovery")},
+            "wan": [str(w) for w in ((ui or {}).get("wan") or [])][:4],
+            "egress": (ui or {}).get("egress") or {},
             "engine": tripwire_health(mode, bool(st.get("tripped"))),
             "audit": _tripwire_audit_tail(10),
             "enabled": bool(conf.get("enabled", mode != "disabled")),

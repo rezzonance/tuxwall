@@ -4332,10 +4332,11 @@
     "canary-egress": "The honeypot process attempted an outbound connection — presumed deception-layer compromise",
   };
   const TRIP_STRENGTH_DESC = {
-    medium: "Checks set to Block cut all forwarding (LAN↔WAN, VPN→LAN, between VLANs). The router itself stays reachable, including over WireGuard.",
-    high: "Checks set to Block also close new connections from the internet to the router — reachable from the LAN only. WAN DHCP and replies to the router's own connections keep working.",
+    medium: "Checks set to Block cut internet access: traffic to and from the WAN is dropped (IPv4 + IPv6). VPN→LAN, LAN↔VLAN and other internal traffic keep working, and the router stays reachable (WireGuard too).",
+    high: "Checks set to Block cut all forwarding (internet, VPN→LAN, between VLANs) and close new connections from the internet to the router — reachable from the LAN only. WAN DHCP keeps working.",
   };
-  const TRIP_STRENGTH_SHORT = { medium: "Cuts all forwarding", high: "Forwarding + internet → router" };
+  const TRIP_EGRESS_NOTE = "While tripped the router itself may only reach DNS (its resolver), time (NTP), WAN DHCP and your push server; everything else it sends to the internet is refused until you resolve.";
+  const TRIP_STRENGTH_SHORT = { medium: "Cuts internet access", high: "All forwarding + internet → router" };
   const TRIP_ACTION_LABEL = { off: "Off", log: "Log only", block: "Block" };
   const TRIP_RESULT_LABEL = {
     block: "Blocked", log: "Logged", counted: "Below threshold", excluded: "Excluded",
@@ -4450,7 +4451,17 @@
 
   function tripStrengthText() {
     const d = tripLast || {};
-    return (d.strength === "high" ? "HIGH" : "MEDIUM") + ": " + TRIP_STRENGTH_DESC[d.strength === "high" ? "high" : "medium"];
+    return (d.strength === "high" ? "HIGH" : "MEDIUM") + ": " + TRIP_STRENGTH_DESC[d.strength === "high" ? "high" : "medium"] + " " + TRIP_EGRESS_NOTE;
+  }
+
+  function tripEgressText(d) {
+    const eg = d.egress || {};
+    const rules = d.rules || {};
+    const push = (eg.hosts || []).map((h) => h.host + (h.port && h.port !== 443 ? ":" + h.port : ""));
+    if (rules.egress === false) return "Restriction not present (re-applied by the watchdog)";
+    const base = "DNS, NTP, WAN DHCP" + (push.length ? " + push (" + push.join(", ") + ")" : " (no push server configured)");
+    if (d.phase === "recovery") return base + " + the recovery allowlist · DNS limited to it";
+    return base + " · everything else refused · DNS answers all names";
   }
 
   // ---- Status cards -------------------------------------------------------
@@ -4480,7 +4491,7 @@
     const rx = d.phase === "recovery" ? ((d.recovery || {}).recovery || null) : null;
     if (state === "tripped" && rx) {
       tripStat("state", "Recovery", `${tripMode} · ${formatDuration(rx.remaining || 0)} left`, "amber",
-        "Recovery mode: the network is still contained; only the router may reach the allowlist until the timer runs out.");
+        "Recovery mode: the network is still contained; the router may also reach the AI allowlist until the timer runs out.");
     } else if (state === "tripped") {
       const age = Math.max(1, Date.now() / 1000 - (d.since || Date.now() / 1000));
       tripStat("state", "Tripped", `${tripMode} · contained ${formatDuration(age)}`, "red");
@@ -4586,7 +4597,8 @@
         tripKv("Class", d.class || "—"),
         tripKv("Source", tripSrc(d.src_ip)),
         tripKv("Destination", d.dst || "—"),
-        tripKv("Containment", d.rules_present ? (tripMode === "high" ? "Forward + internet → router dropped" : "All forwarding dropped") : "Rules not present (re-applied by the watchdog)"),
+        tripKv("Containment", d.rules_present ? (tripMode === "high" ? "All forwarding + internet → router dropped" : "Internet access dropped (WAN in + out) · internal traffic flows") : "Rules not present (re-applied by the watchdog)"),
+        tripKv("Router egress", tripEgressText(d), true),
         tripKv("Tripped at", d.since ? formatDateTime(d.since) : "—"),
         tripKv("Recovery mode", d.phase === "recovery" && (d.recovery || {}).recovery
           ? "Active until " + formatTime(Date.now() / 1000 + ((d.recovery.recovery || {}).remaining || 0))
@@ -4737,7 +4749,7 @@
         els.tripBanner.hidden = false;
         els.tripBanner.dataset.phase = "recovery";
         els.tripBanner.textContent = "TRIPWIRE RECOVERY MODE: the network is still contained (" +
-          String(d.trip_mode || "?").toUpperCase() + "); only the router may reach " +
+          String(d.trip_mode || "?").toUpperCase() + "); the router may also reach " +
           ((rx.hosts || []).length ? (rx.hosts || []).length + " allowlisted service" + ((rx.hosts || []).length === 1 ? "" : "s") : "no internet service") +
           " until " + formatTime(Date.now() / 1000 + (rx.remaining || 0)) +
           ", then the full block returns. Security > Tripwire.";
@@ -4837,7 +4849,8 @@
     if (els.secTripStrengthNote) {
       const nb = tripBlockingChecks(d).length;
       els.secTripStrengthNote.textContent = (d.tripped ? "Locked while tripped. " : "") +
-        TRIP_STRENGTH_DESC[strength] + (nb ? "" : " No check is on Block, so nothing is cut today.");
+        TRIP_STRENGTH_DESC[strength] + " Both limit the router's own internet traffic to DNS, time and push." +
+        (nb ? "" : " No check is on Block, so nothing is cut today.");
     }
     const n = d.notify || {};
     const busy = els.secTripNotifySave && els.secTripNotifySave.dataset.busy;
@@ -5205,7 +5218,7 @@
     const d = tripLast || {};
     if (d.tripped) { showTripNotice("Resolve the trip before changing the block strength."); return; }
     const blocking = tripBlockingChecks(d);
-    let text = `Change the block strength to ${strength.toUpperCase()}?\n\n${TRIP_STRENGTH_DESC[strength]}`;
+    let text = `Change the block strength to ${strength.toUpperCase()}?\n\n${TRIP_STRENGTH_DESC[strength]}\n\n${TRIP_EGRESS_NOTE}`;
     text += blocking.length
       ? `\n\nApplies to the ${blocking.length} check(s) set to Block: ${blocking.map((c) => c.label).join(", ")}.`
       : "\n\nNo check is set to Block right now; this applies once one is.";
@@ -5493,7 +5506,7 @@
   function tripRecHosts(list, el, live) {
     if (!el) return;
     if (!list) { el.innerHTML = `<li class="muted">Loading …</li>`; return; }
-    if (!list.length) { el.innerHTML = `<li class="muted">Nothing on the internet — the router stays offline.</li>`; return; }
+    if (!list.length) { el.innerHTML = `<li class="muted">Nothing on the internet — the router keeps only DNS, time and WAN DHCP.</li>`; return; }
     el.innerHTML = list.map((h) => {
       const why = (h.why || []).join(" · ");
       let state = "";
@@ -5643,7 +5656,7 @@
     const minutes = parseInt(recEl("min").value, 10) || 60;
     const localOnly = !!(recEl("lo") && recEl("lo").checked && !recEl("lo-wrap").hidden);
     const hosts = ((tripRec.preview || {}).hosts || []).filter((h) => !localOnly || h.kind === "notify").map((h) => h.host);
-    if (!(await (window.twConfirm || window.confirm)(`Start a ${minutes}-minute recovery window?\n\nThe LAN stays cut off. Only the router may reach: ${hosts.join(", ") || "nothing on the internet"}.\nWhen the timer runs out the full block returns on its own.`))) return;
+    if (!(await (window.twConfirm || window.confirm)(`Start a ${minutes}-minute recovery window?\n\nThe LAN stays cut off from the internet. The router may additionally reach (HTTPS): ${hosts.join(", ") || "nothing on the internet"}; DNS answers only these names.\nWhen the timer runs out it returns to the tripped policy (DNS, time and push only) on its own.`))) return;
     recStart.disabled = true;
     tripRecMsg("Starting recovery …");
     try {
@@ -5674,7 +5687,7 @@
   }));
   const recEnd = recEl("end");
   if (recEnd) recEnd.addEventListener("click", async () => {
-    if (!(await (window.twConfirm || window.confirm)("End recovery now?\n\nThe router's internet allowlist closes and the full block returns. The LAN stays cut off until you resolve the trip."))) return;
+    if (!(await (window.twConfirm || window.confirm)("End recovery now?\n\nThe router's AI allowlist closes and the full block returns: the router may only reach DNS, time and your push server again. The LAN stays cut off from the internet until you resolve the trip."))) return;
     recEnd.disabled = true;
     try {
       await postJSON("/api/security/tripwire/recovery/end", {});

@@ -946,15 +946,52 @@ def invariants(rs, ctx, cur=None):
     tw = ctx.tripwire
     raw = rs.get("raw") or {}
     # keyed on the TRIP (its own mode), not the configured mode: switching
-    # to logonly/disabled while tripped leaves the lockdown in force
+    # to logonly/disabled while tripped leaves the lockdown in force.
+    # medium = FORWARD -i/-o <wan> DROP (a plain FORWARD DROP is stricter
+    # and also fine), high = plain FORWARD DROP + INPUT -i <wan> DROP; both
+    # restrict the router's own egress (OUTPUT -o <wan> ... -j REJECT).
     if tw["tripped"] and raw.get("v4"):
-        if not re.search(r'--comment "?TUXWALL-TRIPWIRE"? -j DROP', raw.get("v4", "")):
+        mode = "high" if tw.get("trip_mode") == "high" else "medium"
+        wan = re.escape(ctx.wan or "")
+        mk = r'-m comment --comment "?TUXWALL-TRIPWIRE"? -j DROP'
+        hook_bad, egress_bad = [], []
+        for fam in ("v4", "v6"):
+            txt = raw.get(fam) or ""
+            if not txt:
+                continue
+            plain = re.search(r"^-A FORWARD %s\s*$" % mk, txt, re.M)
+            if mode == "high" or not wan:
+                ok = bool(plain)
+            else:
+                ok = bool(plain) or bool(
+                    re.search(r"^-A FORWARD -i %s %s\s*$" % (wan, mk), txt, re.M)
+                    and re.search(r"^-A FORWARD -o %s %s\s*$" % (wan, mk), txt, re.M))
+            if ok and mode == "high" and wan:
+                ok = bool(re.search(r"^-A INPUT -i %s %s\s*$" % (wan, mk), txt, re.M))
+            if not ok:
+                hook_bad.append(fam)
+            if wan and not re.search(r'^-A OUTPUT -o %s .*--comment "?TUXWALL-TRIPWIRE-EGRESS"? '
+                                     r"-j REJECT" % wan, txt, re.M):
+                egress_bad.append(fam)
+        fix = {"kind": "run", "cmd": ["/usr/local/sbin/tuxwall-tripwire", "enforce"]}
+        if hook_bad:
             v.append(_v("tripwire-hook-missing", "critical",
                         "Tripwire is tripped but its lockdown rule is missing",
-                        "Tripped in %s mode; run `tuxwall-tripwire enforce` (the service "
-                        "re-applies it every 15 s)." % str(tw.get("trip_mode") or "medium").upper(),
-                        {"kind": "run", "cmd": ["/usr/local/sbin/tuxwall-tripwire", "enforce"]},
-                        "tripwire"))
+                        "Tripped in %s mode (%s): %s rule(s) missing on %s; run `tuxwall-tripwire "
+                        "enforce` (the service re-applies them every 15 s)."
+                        % (mode.upper(), "all forwarding + WAN input dropped" if mode == "high"
+                           else "forwarding to/from the WAN dropped",
+                           "FORWARD/INPUT" if mode == "high" else "FORWARD",
+                           "/".join(f.replace("v", "IPv") for f in hook_bad)),
+                        fix, "tripwire"))
+        if egress_bad:
+            v.append(_v("tripwire-egress-missing", "critical",
+                        "Tripwire is tripped but the router's egress restriction is missing",
+                        "While tripped the router itself may only reach DNS, NTP, WAN DHCP and the "
+                        "push server (OUTPUT -o %s ... TUXWALL-TRIPWIRE-EGRESS REJECT); missing on "
+                        "%s. Run `tuxwall-tripwire enforce`."
+                        % (ctx.wan, "/".join(f.replace("v", "IPv") for f in egress_bad)),
+                        fix, "tripwire"))
     # 5. CrowdSec enforcement. nftables mode: the bouncer's own tables and
     # input hook (priority before ufw, policy accept); iptables mode: the
     # CROWDSEC_CHAIN jump first in each configured chain.

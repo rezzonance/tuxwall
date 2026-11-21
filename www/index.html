@@ -1788,14 +1788,14 @@
             <span class="trip-set-note" id="sec-trip-strength-note"></span>
           </div>
           <div class="seg-btns trip-strength" id="sec-trip-strength" role="group" aria-labelledby="sec-trip-strength-label" aria-describedby="sec-trip-strength-note">
-            <button type="button" class="seg-btn" data-trip-strength="medium" aria-pressed="false"><span>Medium</span><em>cut forwarding</em></button>
-            <button type="button" class="seg-btn" data-trip-strength="high" aria-pressed="false"><span>High</span><em>+ close internet &rarr; router</em></button>
+            <button type="button" class="seg-btn" data-trip-strength="medium" aria-pressed="false"><span>Medium</span><em>cut internet</em></button>
+            <button type="button" class="seg-btn" data-trip-strength="high" aria-pressed="false"><span>High</span><em>cut all + close router</em></button>
           </div>
         </div>
         <div class="trip-set-row trip-set-stack">
           <div class="trip-set-copy">
             <span class="trip-set-title">Notifications</span>
-            <span class="trip-set-note">A block always sends an urgent push first, before the network is cut.</span>
+            <span class="trip-set-note">A block always sends an urgent push first, before the network is cut; the push server stays reachable while tripped.</span>
           </div>
           <div class="trip-notify" id="sec-trip-notify">
             <label class="trip-inline"><input type="checkbox" id="sec-trip-notify-log"> Push log-only events</label>
@@ -1816,7 +1816,7 @@
         </div>
         <p class="trip-rec-warn" role="note"><b>Only if you trust the router itself.</b> Recovery runs on the router: if the router may be compromised (unknown processes, changed system files, the trip came from the router), its answers can't be trusted &mdash; reinstall and restore a verified backup instead.</p>
         <div class="trip-rec-body" id="sec-trip-rec-idle">
-          <p class="trip-rec-lead">A time-boxed window for investigating with the assistant. The LAN stays cut off; <b>only the router</b> may reach the endpoints below over HTTPS, and DNS answers only those names. When the timer runs out it returns to the full block on its own.</p>
+          <p class="trip-rec-lead">A time-boxed window for investigating with the assistant. The LAN stays cut off from the internet. While tripped the router itself only reaches DNS, time and your push server; recovery lets <b>only the router</b> also reach the endpoints below over HTTPS, and DNS then answers only those names. When the timer runs out it returns to the tripped policy on its own.</p>
           <div class="trip-rec-cols">
             <section class="trip-rec-col" aria-labelledby="sec-trip-rec-allow-h">
               <h3 id="sec-trip-rec-allow-h">Allowlist (router only, HTTPS)</h3>
@@ -1921,7 +1921,7 @@
         </div>
       </div>
 
-      <p class="muted bl-note trip-about"><b>About Tripwire.</b> A kill switch for confirmed intrusion-class events: each check is <b>Off</b>, <b>Log only</b> (record + push) or <b>Block</b>, and the master switch turns them all off without losing settings. Exclusions (addresses, signature IDs, <b>internet-only</b>) and thresholds keep false positives out; router-originated, loopback and deception-port traffic never counts. A block uses the <b>block strength</b> &mdash; <b>Medium</b> cuts all forwarding while the router stays reachable (WireGuard too), <b>High</b> also closes new connections from the internet to the router. A trip never restores itself: investigate &mdash; optionally in <b>recovery mode</b>, a timed window in which only the router may reach the assistant's AI endpoints and your push server while the LAN stays cut off &mdash; then resolve with your admin password and the restore checklist. Every change is audited in <code>/var/log/tuxwall/tripwire-audit.log</code>.</p>
+      <p class="muted bl-note trip-about"><b>About Tripwire.</b> A kill switch for confirmed intrusion-class events: each check is <b>Off</b>, <b>Log only</b> (record + push) or <b>Block</b>, and the master switch turns them all off without losing settings. Exclusions (addresses, signature IDs, <b>internet-only</b>) and thresholds keep false positives out; router-originated, loopback and deception-port traffic never counts. A block uses the <b>block strength</b> &mdash; <b>Medium</b> cuts internet access (forwarding to and from the WAN) while VPN&rarr;LAN, LAN&harr;VLAN and the router itself stay reachable (WireGuard too); <b>High</b> cuts all forwarding and also closes new connections from the internet to the router. In both, the router's own internet traffic is limited to DNS, time (NTP), WAN DHCP and your push server until resolved; local DNS keeps answering. A trip never restores itself: investigate &mdash; optionally in <b>recovery mode</b>, a timed window in which the router may also reach the assistant's AI endpoints (DNS limited to them) while the LAN stays cut off &mdash; then resolve with your admin password and the restore checklist. Every change is audited in <code>/var/log/tuxwall/tripwire-audit.log</code>.</p>
       </div>
 
       <div class="fw-pane" data-sec-pane="sensors" hidden>
@@ -4140,7 +4140,7 @@
 </div>
 <script src="/scripts/worldmap.js?v=202611120056"></script>
 <script src="/scripts/community-settings.js?v=20261119195143"></script>
-<script src="/scripts/dashboard.js?v=20261119195143"></script>
+<script src="/scripts/dashboard.js?v=20261120190108"></script>
 <script src="/scripts/enhance.js?v=20261120180933"></script>
 <script src="/scripts/netmap.js?v=20261119081229"></script>
 <script src="/scripts/insights.js?v=20261112182249"></script>

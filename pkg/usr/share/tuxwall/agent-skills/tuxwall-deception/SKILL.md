@@ -34,12 +34,17 @@ Live state without shell: `tuxwall_crowdsec_decisions` (pass `ip` to check one a
 - Tripwire (`tuxwall-tripwire.service`, config `/etc/tuxwall/tripwire.json` schema v2: master `enabled`, block `strength`
   medium|high, `notify`, per-check `checks` {action off|log|block, threshold, exclusions}; derived legacy `mode`; state
   `/etc/tuxwall/tripwire-state.json`, history `/var/lib/tuxwall/tripwire-events.jsonl`): checks are Suricata priority-1
-  exploit classes and canary egress; Block checks cut WAN forwarding (high also closes WAN input). Router-originated/loopback
+  exploit classes and canary egress. Block strength: medium = internet only (FORWARD -i/-o <wan> DROP; VPN->LAN, LAN<->VLAN
+  keep working), high = all forwarding + new WAN input closed (WAN DHCP/ND/replies allowed). Both restrict the router's OWN WAN
+  egress while tripped (OUTPUT `TUXWALL-TRIPWIRE-EGRESS[-ALLOW]`, REJECT last): DNS only from uid unbound, NTP from the chrony
+  uid, WAN DHCP/ND, replies, HTTPS to the alerts.json push targets (ipsets `tw-egress4/6`); unbound still answers all names.
+  So while tripped, internet tools on the router (apt, curl, model providers) fail by design. Router-originated/loopback
   traffic is always ignored. Read-only: `sudo tuxwall-tripwire config`, `history --check C`, `test CHECK` (dry run, no side
   effects). No auto-restore: a trip is resolved deliberately by the owner in the dashboard (Security). Never change settings
-  on your own. Recovery mode (`sudo tuxwall-tripwire recovery-status`): a timed window while tripped in which only the
-  router may reach the AI/push allowlist (OUTPUT rules `TUXWALL-TRIPWIRE-RECOVERY`, ipsets `tw-recovery4/6`, unbound
-  runtime zones); if you were started with an incident brief, investigate read-only and never start/extend/end recovery,
+  on your own. Recovery mode (`sudo tuxwall-tripwire recovery-status`): a timed window while tripped that widens the router's
+  egress to the AI/push allowlist (one `TUXWALL-TRIPWIRE-RECOVERY-ALLOW` rule per family above the egress REJECT, ipsets
+  `tw-recovery4/6`, DNS limited to those names via unbound runtime zones); end/expiry returns to the tripped egress policy.
+  If you were started with an incident brief, investigate read-only and never start/extend/end recovery,
   restore or open the firewall yourself - that is the owner's call.
 - CrowdSec (`crowdsec`, `crowdsec-firewall-bouncer`): decisions block attackers; permanent bans in `/etc/tuxwall/custom-blocklist.txt`.
 

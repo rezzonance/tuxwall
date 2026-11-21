@@ -5,6 +5,9 @@ network namespaces only):
   dns  ADDR LOGFILE        authoritative stub for the *.test names (UDP+TCP 53)
   https CERT KEY PORT      TLS server on [::]:PORT (dual stack), answers "ok"
   tcp  PORT                plain TCP listener on [::]:PORT, answers "ok"
+  udp  PORT ADDR...        UDP echo on ADDR:PORT, one socket per address so
+                           replies leave from the address that was asked
+                           (NTP / DHCP stand-ins)
 """
 import socket
 import socketserver
@@ -97,6 +100,18 @@ def serve(port, ctx=None):
     V6Server(("::", port), H).serve_forever()
 
 
+def udp_echo(port, addrs):
+    def loop(addr):
+        s = socket.socket(socket.AF_INET6 if ":" in addr else socket.AF_INET, socket.SOCK_DGRAM)
+        s.bind((addr, port))
+        while True:
+            data, peer = s.recvfrom(2048)
+            s.sendto(data, peer)
+    for a in addrs[1:]:
+        threading.Thread(target=loop, args=(a,), daemon=True).start()
+    loop(addrs[0])
+
+
 if __name__ == "__main__":
     mode = sys.argv[1]
     if mode == "dns":
@@ -105,5 +120,7 @@ if __name__ == "__main__":
         c = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         c.load_cert_chain(sys.argv[2], sys.argv[3])
         serve(int(sys.argv[4]), c)
+    elif mode == "udp":
+        udp_echo(int(sys.argv[2]), sys.argv[3:])
     else:
         serve(int(sys.argv[2]))

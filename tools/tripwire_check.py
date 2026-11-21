@@ -13,9 +13,15 @@ only, never Block; validation; confirm gate for arming Block; no strength
 change while tripped; audit), per-check actions, exclusions (router /
 loopback, the two real false positives, WAN-only, CIDRs, signature ids),
 thresholds (sliding windows), the Test path (no side effects), the event
-history (hook, filters, retention, one-time import of tripwire.log), the lockdown rule plan (high mode keeps WAN DHCP,
-v6 ND and replies to router-opened connections above the DROP), stubbed
-enforce/lift idempotence, notify dedupe + summary, notify-before-enforce,
+history (hook, filters, retention, one-time import of tripwire.log), the lockdown rule plan (medium = forwarding
+to/from the WAN only, high = all forwarding + WAN INPUT with WAN DHCP, v6 ND
+and replies to router-opened connections above the DROP; both: the router's
+own egress - replies, DHCP/ND, DNS from the resolver uid, NTP from the time
+daemon, push targets, REJECT last; recovery = one more ACCEPT; canary uid
+handling; several / no WAN), WAN discovery (interfaces.json), stubbed
+enforce/lift idempotence + repair of foreign/misordered/duplicate/stale
+rules (the stub replays a chain model), the tripped egress allowlist
+(push targets, refresh, cleared on resolve), notify dedupe + summary, notify-before-enforce,
 the state lock (threads + processes) and atomic writes, set-mode audit and
 the "still tripped" warning, resolve, eve rotation (rename + copytruncate +
 oversized lines), the kernel follower, watcher death, and the daemon's
@@ -68,6 +74,8 @@ for k in [k for k in os.environ if k.startswith("TUXWALL_TRIPWIRE_")]:
 os.environ.update({"TUXWALL_TRIPWIRE_ROOT": ROOT, "TUXWALL_TRIPWIRE_PUSH_FILE": PUSH,
                    "TUXWALL_TRIPWIRE_EVE": EVE_PATH, "TUXWALL_TRIPWIRE_WAN": "wan0",
                    "TUXWALL_TRIPWIRE_KERNEL_CMD": "tail -n 0 -F %s" % KLOG,
+                   # no canary user in the sandbox (rule strings stay host-independent)
+                   "TUXWALL_TRIPWIRE_CANARY_USER": "tw-no-such-user",
                    # the router: LAN 192.168.1.1/24 (+ v6), VPN 10.0.0.1/24,
                    # WAN 73.0.0.2 on wan0, loopback
                    "TUXWALL_TRIPWIRE_OWN_IPS": "192.168.1.1/24 2001:db8:1::1/64 10.0.0.1/24 "
@@ -281,11 +289,27 @@ def test_absorb_scope():
 
 
 # ── rule plan + stubbed enforcement ─────────────────────────────────────────
+def _plan(plan, ipt, chain):
+    return next((s for i, c, s in plan if i == ipt and c == chain), None)
+
+
+CTX = {"resolver": 106, "ntp": [989], "canary": {"iptables": None, "ip6tables": None}}
+
+
 def test_rules():
-    med = E.lockdown_rules("medium", "wan0")
-    check([(i, c) for i, c, _ in med] == [("iptables", "FORWARD"), ("ip6tables", "FORWARD")],
-          "medium = FORWARD drop v4+v6 only")
-    high = E.lockdown_rules("high", "wan0")
+    med = E.lockdown_rules("medium", "wan0", ctx=CTX)
+    check({(i, c) for i, c, _ in med} == {(i, c) for i in ("iptables", "ip6tables")
+                                          for c in ("FORWARD", "OUTPUT")},
+          "medium = FORWARD + OUTPUT (egress), v4+v6, no INPUT")
+    for ipt in ("iptables", "ip6tables"):
+        fwd = [" ".join(s) for s in _plan(med, ipt, "FORWARD")]
+        check(fwd == ["-i wan0 -m comment --comment %s -j DROP" % E.MARK,
+                      "-o wan0 -m comment --comment %s -j DROP" % E.MARK],
+              "%s medium: only forwarding from/to the WAN is dropped (%s)" % (ipt, fwd))
+    high = E.lockdown_rules("high", "wan0", ctx=CTX)
+    for ipt in ("iptables", "ip6tables"):
+        check([" ".join(s) for s in _plan(high, ipt, "FORWARD")]
+              == ["-m comment --comment %s -j DROP" % E.MARK], "%s high: all forwarding" % ipt)
     inp = {i: s for i, c, s in high if c == "INPUT"}
     check(set(inp) == {"iptables", "ip6tables"}, "high adds INPUT v4+v6")
     for ipt, specs in inp.items():
@@ -300,17 +324,150 @@ def test_rules():
     check(sum("--icmpv6-type" in s for s in j6) == 3, "high allows v6 ND")
     check(not any("NEW" in s for s in j4 + j6), "no NEW state accepted")
 
+    # the router's own egress (both strengths)
+    for plan, tag in ((med, "medium"), (high, "high")):
+        for ipt in ("iptables", "ip6tables"):
+            specs = _plan(plan, ipt, "OUTPUT")
+            j = [" ".join(s) for s in specs]
+            check(specs[-1][-1] == "REJECT" and E.MARK_EGRESS in specs[-1]
+                  and E.MARK_EGRESS_ALLOW not in specs[-1], "%s %s: egress REJECT last" % (tag, ipt))
+            check(all(s[-1] == "ACCEPT" and E.MARK_EGRESS_ALLOW in s for s in specs[:-1]),
+                  "%s %s: egress allows above it" % (tag, ipt))
+            check(all(s[:2] == ["-o", "wan0"] for s in specs), "%s %s: WAN egress only" % (tag, ipt))
+            check(sum("--uid-owner 106" in x and "--dport 53 " in x for x in j) == 2
+                  and any("--uid-owner 106" in x and "--dport 853" in x for x in j),
+                  "%s %s: DNS only from the resolver uid" % (tag, ipt))
+            check(any("udp --dport 123 -m owner --uid-owner 989" in x for x in j)
+                  and any("--dport 4460 -m owner --uid-owner 989" in x for x in j),
+                  "%s %s: NTP (+ NTS-KE) only from the time daemon" % (tag, ipt))
+            check(any("--match-set %s dst,dst" % E.EGRESS_SETS[ipt] in x for x in j),
+                  "%s %s: push targets set" % (tag, ipt))
+            check(not any(E.REC_SETS[ipt] in x for x in j), "%s %s: no AI allowlist" % (tag, ipt))
+            check(not any("NEW" in x for x in j) and not any("--uid-owner" in x and "!" in x
+                                                           for x in j),
+                  "%s %s: no blanket NEW, no canary exception without its containment" % (tag, ipt))
+    j6 = [" ".join(s) for s in _plan(med, "ip6tables", "OUTPUT")]
+    check(sum("--icmpv6-type" in x for x in j6) == 4 and any("--sport 546" in x for x in j6),
+          "egress v6: ND/MLD + DHCPv6 out")
+    j4 = [" ".join(s) for s in _plan(med, "iptables", "OUTPUT")]
+    check(any("--sport 68 --dport 67" in x for x in j4), "egress v4: DHCP out")
+    nctx = dict(CTX, resolver=None, ntp=[])
+    jn = [" ".join(s) for s in _plan(E.lockdown_rules("medium", "wan0", ctx=nctx), "iptables",
+                                     "OUTPUT")]
+    check(not any("--dport 53" in x for x in jn) and any(x.startswith("-o wan0 -p udp --dport 123 -m")
+                                                         for x in jn),
+          "no resolver user: no DNS hole; no time daemon: plain udp 123")
+    cctx = dict(CTX, canary={"iptables": 995, "ip6tables": None})
+    pc = E.lockdown_rules("medium", "wan0", ctx=cctx)
+    j4 = [" ".join(s) for s in _plan(pc, "iptables", "OUTPUT")]
+    j6 = [" ".join(s) for s in _plan(pc, "ip6tables", "OUTPUT")]
+    check(j4[-1].startswith("-o wan0 -m owner ! --uid-owner 995 ")
+          and any("tw-egress4 dst,dst -m owner ! --uid-owner 995" in x for x in j4)
+          and not any("!" in x for x in j6),
+          "canary uid left to its own (loaded) containment, per family")
+    pu = E.lockdown_rules("medium", "wan0", recovery=True,
+                          ctx=dict(CTX, canary_uid=995, canary={"iptables": None,
+                                                                "ip6tables": None}))
+    ju = [" ".join(s) for s in _plan(pu, "iptables", "OUTPUT")]
+    check(all("! --uid-owner 995" in x for x in ju if "--match-set" in x)
+          and "!" not in ju[-1], "canary never gets the HTTPS allowlists; rejected here when its "
+          "containment is not loaded")
+    rp = E.lockdown_rules("medium", "wan0", recovery=True, ctx=CTX)
+    for ipt in ("iptables", "ip6tables"):
+        specs = _plan(rp, ipt, "OUTPUT")
+        rec = [s for s in specs if E.MARK_REC_ALLOW in s]
+        check(len(rec) == 1 and "--match-set" in rec[0] and E.REC_SETS[ipt] in rec[0]
+              and specs.index(rec[0]) < len(specs) - 1 and specs[-1][-1] == "REJECT",
+              "%s recovery: one AI-allowlist ACCEPT above the egress REJECT" % ipt)
+        check(_plan(rp, ipt, "FORWARD") == _plan(med, ipt, "FORWARD"),
+              "%s recovery keeps the trip's FORWARD rules" % ipt)
+    two = E.lockdown_rules("medium", ["wan0", "wan1"], ctx=CTX)
+    f2 = [" ".join(s) for s in _plan(two, "iptables", "FORWARD")]
+    o2 = _plan(two, "iptables", "OUTPUT")
+    check(len(f2) == 4 and any("-i wan1" in x for x in f2) and any("-o wan1" in x for x in f2),
+          "two WANs: both cut")
+    k = [s[-1] for s in o2]
+    check(k[-2:] == ["REJECT", "REJECT"] and "REJECT" not in k[:-2], "two WANs: REJECTs last")
+    none = E.lockdown_rules("medium", [], ctx=CTX)
+    check([(i, c, [" ".join(x) for x in s]) for i, c, s in none]
+          == [(i, "FORWARD", ["-m comment --comment %s -j DROP" % E.MARK])
+              for i in ("iptables", "ip6tables")], "no WAN known: all forwarding (fail closed)")
+
+    # WAN discovery: interfaces.json, else the default route (env = tests)
+    reset()
+    old = os.environ.pop("TUXWALL_TRIPWIRE_WAN")
+    try:
+        with open(E.INTERFACES_CONF, "w") as f:
+            json.dump({"wan": {"device": "enp9s0"}, "lan": {"device": "enp6s0"}}, f)
+        check(E.wan_ifaces() == ["enp9s0"], "WAN from interfaces.json")
+        os.environ["TUXWALL_TRIPWIRE_WAN"] = "a0, b0"
+        check(E.wan_ifaces() == ["a0", "b0"] and E.wan_iface() == "a0", "WAN list (env)")
+    finally:
+        os.environ["TUXWALL_TRIPWIRE_WAN"] = old
+
+    # canary containment detection (stub chain)
+    reset()
+    check(not E._canary_contained("iptables", 995), "no ufw chain: canary not contained")
+    E._ipt(["iptables", "-A", "ufw-before-output", "-p", "tcp", "-m", "owner", "--uid-owner", "995",
+            "-j", "REJECT"])
+    check(not E._canary_contained("iptables", 995), "a port-limited REJECT is not containment")
+    E._ipt(["iptables", "-A", "ufw-before-output", "-m", "owner", "--uid-owner", "995", "-j",
+            "REJECT"])
+    check(E._canary_contained("iptables", 995) and not E._canary_contained("ip6tables", 995)
+          and not E._canary_contained("iptables", 996), "catch-all REJECT = contained (v4 only)")
+
+    # stubbed enforcement: the stub replays a real chain model
     reset()
     set_mode_file("medium")
+    with open(E.STATE, "w") as f:
+        json.dump({"tripped": True, "mode": "medium"}, f)
     check(not E.lockdown_active("medium"), "nothing active at start")
     check(E.enforce("medium") is True, "enforce adds")
     check(E.lockdown_active("medium"), "active after enforce")
     check(E.enforce("medium") is False, "enforce idempotent")
+    log_ = enforce_log()
+    check("ipset create tw-egress4 hash:ip,port family inet" in log_
+          and "ipset create tw-egress6 hash:ip,port family inet6" in log_, "egress sets created")
+    rs = E.rules_summary()
+    check(rs["forward"] and not rs["forward_all"] and rs["egress"] and not rs["input"]
+          and not rs["recovery"], "summary: medium = WAN forwarding + egress (%s)" % rs)
+    # a foreign rule inserted above ours -> ours back on top, theirs kept
+    E._ipt(["iptables", "-I", "FORWARD", "1", "-i", "wg0", "-j", "ACCEPT"])
+    check(not E.lockdown_active("medium"), "foreign rule above ours = out of order")
+    check(E.enforce("medium") is True and E.lockdown_active("medium"), "re-enforce reorders")
+    fw = E._stub_chain("iptables", "FORWARD")
+    check(fw[-1] == "-i wg0 -j ACCEPT" and all(E.MARK in x for x in fw[:-1]),
+          "foreign rule kept, below ours")
+    # an ALLOW below the REJECT, a duplicate REJECT, a missing rule
+    out = E._stub_chain("iptables", "OUTPUT")
+    allow = next(x for x in out if E.MARK_EGRESS_ALLOW in x and "--match-set" in x)
+    E._ipt(["iptables", "-D", "OUTPUT"] + allow.split(" "))
+    E._ipt(["iptables", "-A", "OUTPUT"] + allow.split(" "))
+    check(not E.lockdown_active("medium"), "allow below the REJECT detected")
+    E.enforce("medium")
+    out = E._stub_chain("iptables", "OUTPUT")
+    check(E.lockdown_active("medium") and out.index(allow) < len(out) - 1, "order repaired")
+    E._ipt(["iptables", "-A", "OUTPUT"] + out[-1].split(" "))
+    E._ipt(["ip6tables", "-D", "FORWARD"] + E._stub_chain("ip6tables", "FORWARD")[0].split(" "))
+    check(not E.lockdown_active("medium"), "duplicate + missing detected")
+    check(E.enforce("medium") is True and E.lockdown_active("medium")
+          and sum(E.MARK_EGRESS + " -j REJECT" in x for x in E._stub_chain("iptables", "OUTPUT")) == 1
+          and len(E._stub_chain("ip6tables", "FORWARD")) == 2, "no duplicates, nothing missing")
+    # stale rules of another shape (an older engine / other strength) are cleaned
     with open(E.STATE, "w") as f:
-        json.dump({"tripped": True, "mode": "medium"}, f)
+        json.dump({"tripped": True, "mode": "high"}, f)
+    E.enforce("high")
+    check(E.lockdown_active("high") and E.rules_summary()["input"]
+          and E.rules_summary()["forward_all"], "high enforce")
+    E.enforce("medium")
+    check(E.lockdown_active("medium") and not E._stub_chain("iptables", "INPUT")
+          and not E._stub_chain("ip6tables", "INPUT"), "medium after high: INPUT rules removed")
     E.lift()
-    check(not E.lockdown_active("medium"), "lift removes")
-    check(E.enforce("high") is True and E.lockdown_active("high"), "high enforce")
+    check(not E.lockdown_active("medium") and not E.any_rules_present(), "lift removes")
+    log_ = enforce_log()
+    check("ipset destroy tw-egress4" in log_ and "ipset destroy tw-egress6" in log_,
+          "lift destroys the egress sets")
+    check(E.enforce("high") is True and E.lockdown_active("high"), "high enforce again")
 
 
 # ── notify dedupe + order ───────────────────────────────────────────────────
@@ -1127,28 +1284,17 @@ def _test_recovery():
           "alerts disabled: no push host")
     write_recovery_env()
 
-    # rule plan
-    plan = E.recovery_rules("wan0", 106)
-    check([(i, c) for i, c, _ in plan] == [("iptables", "OUTPUT"), ("ip6tables", "OUTPUT")],
-          "recovery rules: OUTPUT v4 + v6")
-    for ipt, _c, specs in plan:
+    # rule plan: recovery = the tripped egress policy + one ACCEPT per family
+    plan = E.lockdown_rules("medium", "wan0", recovery=True, ctx=CTX)
+    for ipt in ("iptables", "ip6tables"):
+        specs = _plan(plan, ipt, "OUTPUT")
         j = [" ".join(s) for s in specs]
-        check(specs[-1][-1] == "REJECT" and E.MARK_REC in specs[-1]
-              and E.MARK_REC_ALLOW not in specs[-1], "%s: REJECT last" % ipt)
-        check(all(s[-1] == "ACCEPT" and E.MARK_REC_ALLOW in s for s in specs[:-1]),
+        check(specs[-1][-1] == "REJECT" and E.MARK_EGRESS in specs[-1], "%s: REJECT last" % ipt)
+        check(all(s[-1] == "ACCEPT" and s[-3].endswith("-ALLOW") for s in specs[:-1]),
               "%s: allows above it" % ipt)
-        check(all(s[:2] == ["-o", "wan0"] for s in specs), "%s: WAN egress only" % ipt)
-        check(sum("--uid-owner 106" in x and "--dport 53" in x for x in j) == 2,
-              "%s: DNS only from the resolver uid (udp+tcp)" % ipt)
-        check(any("--match-set %s dst,dst" % E.REC_SETS[ipt] in x for x in j),
-              "%s: allowlist set" % ipt)
-        check(not any("NEW" in x for x in j), "%s: no blanket NEW" % ipt)
-    j6 = [" ".join(s) for s in plan[1][2]]
-    check(sum("--icmpv6-type" in x for x in j6) == 4 and any("--sport 546" in x for x in j6),
-          "v6: ND + DHCPv6 out")
-    check(len(E.recovery_rules("wan0", None)[0][2]) == len(plan[0][2]) - 2,
-          "no resolver user: no DNS hole")
-
+        check(sum("--match-set %s dst,dst" % E.REC_SETS[ipt] in x for x in j) == 1
+              and sum("--match-set %s dst,dst" % E.EGRESS_SETS[ipt] in x for x in j) == 1,
+              "%s: recovery set + push set" % ipt)
     # state machine
     try:
         E.recovery_start(60, by="dana")
@@ -1180,9 +1326,14 @@ def _test_recovery():
     check(res["phase"] == "recovery" and rec["active"], "phase recovery")
     check(abs(rec["expires"] - (t0 + 3600)) < 5, "60-minute timer")
     log_ = enforce_log()
-    check("iptables -I OUTPUT 1 -o wan0 -m comment --comment %s -j REJECT" % E.MARK_REC in log_
-          and "ip6tables -I OUTPUT 1 -o wan0 -m comment --comment %s -j REJECT" % E.MARK_REC
-          in log_, "recovery REJECT v4 + v6 applied (stub)")
+    check("iptables -I OUTPUT 1 -o wan0 -p tcp -m set --match-set tw-recovery4 dst,dst -m comment "
+          "--comment %s -j ACCEPT" % E.MARK_REC_ALLOW in log_
+          and "ip6tables -I OUTPUT 1 -o wan0 -p tcp -m set --match-set tw-recovery6 dst,dst -m "
+          "comment --comment %s -j ACCEPT" % E.MARK_REC_ALLOW in log_,
+          "recovery ACCEPT v4 + v6 applied (stub)")
+    out = E._stub_chain("iptables", "OUTPUT")
+    check(out[-1].endswith("--comment %s -j REJECT" % E.MARK_EGRESS)
+          and sum(E.MARK_REC_ALLOW in x for x in out) == 1, "recovery ACCEPT above the egress REJECT")
     check("ipset create tw-recovery4 hash:ip,port family inet" in log_
           and "ipset create tw-recovery6 hash:ip,port family inet6" in log_, "sets created")
     check("add tw-recovery4 198.51.100.7,tcp:443" in log_
@@ -1238,8 +1389,9 @@ def _test_recovery():
     st = E.load_state()
     check(st["tripped"] and "recovery" not in st and st["recovery_last"]["how"] == "expired",
           "expired: back to tripped")
-    check(not E.recovery_rules_present() and E.lockdown_active("medium"),
-          "expired: allowlist closed, trip block kept")
+    check(not E.recovery_rules_present() and E.lockdown_active("medium")
+          and E.rules_summary()["egress"], "expired: allowlist closed, trip block + egress kept")
+    check("ipset destroy tw-egress4" not in enforce_log(), "expired: push set kept")
     log_ = enforce_log()
     check("unbound-control local_zone_remove ." in log_ and "ipset destroy tw-recovery4" in log_,
           "expired: DNS restriction + sets removed")
@@ -1343,6 +1495,62 @@ def _test_recovery():
         check(False, "brief only while tripped")
     except ValueError:
         check(True, "brief only while tripped")
+
+
+def test_egress():
+    """Tripped egress: push targets only, refreshed, gone on resolve."""
+    reset()
+    write_recovery_env()
+    os.environ["TUXWALL_TRIPWIRE_FAKE_DNS"] = json.dumps(FAKE_DNS)
+    try:
+        al = E.egress_allowlist()
+        check([(h["host"], h["port"]) for h in al["hosts"]] == [("ntfy.sh", 443)] and not al["local"],
+              "egress allowlist = the push targets only (%s)" % al["hosts"])
+        check(E.egress_refresh() is None and "egress" not in E.load_state(),
+              "no egress refresh while not tripped")
+        E.trip("egress test", mode="medium", notify_user=False)
+        log_ = enforce_log()
+        check("add tw-egress4 198.51.100.10,tcp:443" in log_
+              and "add tw-egress6 2001:db8:10::10,tcp:443" in log_, "push target in the egress sets")
+        check(log_.index("-I FORWARD 1") < log_.index("add tw-egress4"),
+              "containment before the (DNS-dependent) allowlist load")
+        pub = E.egress_public()
+        h = pub["hosts"][0] if pub["hosts"] else {}
+        check(pub["active"] and h.get("host") == "ntfy.sh" and h.get("v4") == 1 and h.get("v6") == 1
+              and pub["dns"] == "open" and pub["refreshed"], "egress public view (%s)" % pub)
+        s = E.status()
+        check(s["egress"]["hosts"] and s["rules"]["egress"] and s["rules"]["forward"]
+              and not s["rules"]["forward_all"] and s["wan"] == ["wan0"], "status: egress + rules")
+        check(NTFY_TOPIC not in json.dumps(s) and NTFY_TOPIC not in json.dumps(E.ui_config()),
+              "status/config never show the push topic")
+        n0 = enforce_log().count("add tw-egress4")
+        check(E._egress_step() is None, "no refresh before the interval")
+        E.update_state(lambda st: st["egress"].__setitem__("refreshed", 0))
+        check(E._egress_step() == 2 and enforce_log().count("add tw-egress4") == n0 + 1,
+              "egress addresses refreshed after the interval")
+        with open(E.ALERTS_CONF, "w") as f:
+            json.dump({"enabled": True, "ntfy_url": "https://ntfy.sh/" + NTFY_TOPIC,
+                       "webhook_url": "http://hooks.example.net/x"}, f)
+        al = E.egress_allowlist()
+        check([x["host"] for x in al["hosts"]] == ["ntfy.sh"]
+              and any(x.get("host") == "hooks.example.net" for x in al["skipped"]),
+              "plain-HTTP webhook over the internet never allowlisted")
+        with open(E.ALERTS_CONF, "w") as f:
+            json.dump({"enabled": True, "ntfy_url": "https://ntfy.sh/" + NTFY_TOPIC,
+                       "webhook_url": "https://hooks.example.net:8443/x"}, f)
+        check(("hooks.example.net", 8443) in {(x["host"], x["port"]) for x in E.egress_allowlist()["hosts"]},
+              "HTTPS webhook on its own port allowlisted")
+        with contextlib.redirect_stdout(io.StringIO()):
+            E.resolve(by="t")
+        st = E.load_state()
+        log_ = enforce_log()
+        check("egress" not in st and not E.any_rules_present()
+              and "ipset destroy tw-egress4" in log_ and "ipset destroy tw-egress6" in log_,
+              "resolve removes the egress rules, sets and state")
+        check(E.egress_public()["active"] is False and E.egress_public()["dns"] == "normal",
+              "egress view after resolve")
+    finally:
+        os.environ.pop("TUXWALL_TRIPWIRE_FAKE_DNS", None)
 
 
 def test_dns_restrict():
@@ -1449,7 +1657,7 @@ def test_recovery_daemon():
     check(not E.recovery_rules_present(), "rules gone before restart")
     r = subprocess.run([sys.executable, "-B", ENGINE, "enforce"], env=env, capture_output=True,
                        text=True)
-    check("recovery: re-enforced" in r.stdout and E.recovery_rules_present()
+    check("re-enforced" in r.stdout and E.recovery_rules_present()
           and E.lockdown_active("high"), "ExecStartPre enforce re-applies trip + recovery")
     E.recovery_remove_rules()
     E.update_state(lambda s: s["recovery"].__setitem__("expires", time.time() + 4))
@@ -1505,7 +1713,7 @@ def main():
         for t in (test_eval, test_absorb_scope, test_rules, test_notify, test_state, test_mode_resolve,
                   test_config, test_exclusions, test_threshold, test_test_path,
                   test_history, test_eve_tail, test_kernel, test_daemon, test_recovery,
-                  test_dns_restrict, test_dns_client, test_recovery_daemon):
+                  test_egress, test_dns_restrict, test_dns_client, test_recovery_daemon):
             t()
     finally:
         shutil.rmtree(ROOT, ignore_errors=True)
