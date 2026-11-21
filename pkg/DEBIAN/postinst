@@ -215,6 +215,157 @@ PY
   echo "kea: lease_cmds hook added (backup $bak)"
 }
 
+# Unbound config written by this postinst goes in as one transaction (3.3.3;
+# it used to run `unbound-checkconf || true; systemctl restart unbound`, so a
+# rejected config was restarted into a DNS outage). unbound_backup records
+# each file's previous state (copy, or "did not exist") before it is written;
+# unbound_apply restarts unbound only when unbound-checkconf passes. A failed
+# check puts the previous files back and leaves the running unbound alone (it
+# keeps its old config in memory); a restart that does not come back is
+# rolled back and restarted on the old files. Never fails the postinst.
+# tools/pkg_scripts_check.py runs these.
+UNBOUND_TXN=""
+unbound_txn_begin() {       # unbound_txn_begin PARENT_DIR -> sets UNBOUND_TXN ("" when impossible)
+  mkdir -p "$1" 2>/dev/null || true
+  UNBOUND_TXN="$(mktemp -d "$1/unbound-postinst.XXXXXX" 2>/dev/null)" || UNBOUND_TXN=""
+}
+unbound_backup() {          # unbound_backup FILE  (call before writing FILE)
+  local f=$1 key
+  [[ -n $UNBOUND_TXN ]] || return 0
+  key=${f//\//%}
+  [[ -e $UNBOUND_TXN/$key.orig || -e $UNBOUND_TXN/$key.new ]] && return 0
+  if [[ -e $f ]]; then cp -p "$f" "$UNBOUND_TXN/$key.orig"; else : > "$UNBOUND_TXN/$key.new"; fi
+}
+unbound_restore() {         # put every file recorded by unbound_backup back
+  local b f
+  [[ -n $UNBOUND_TXN ]] || return 0
+  for b in "$UNBOUND_TXN"/*.orig; do
+    [[ -e $b ]] || continue
+    f=${b##*/}; f=${f%.orig}; f=${f//%//}
+    [[ -e $f ]] && cp -p "$f" "${b%.orig}.rejected" 2>/dev/null
+    cp -p "$b" "$f"
+  done
+  for b in "$UNBOUND_TXN"/*.new; do
+    [[ -e $b ]] || continue
+    f=${b##*/}; f=${f%.new}; f=${f//%//}
+    [[ -e $f ]] && cp -p "$f" "${b%.new}.rejected" 2>/dev/null
+    rm -f "$f"
+  done
+  return 0
+}
+unbound_apply() {           # -> one status line, never fails
+  local out
+  if ! command -v unbound-checkconf >/dev/null 2>&1; then
+    echo "unbound: unbound-checkconf not found - config written, unbound not restarted"; return 0
+  fi
+  if ! out="$(unbound-checkconf 2>&1)"; then
+    out=${out##*$'\n'}
+    if [[ -z $UNBOUND_TXN ]]; then
+      echo "unbound: config fails unbound-checkconf ($out) and no backup could be taken - unbound NOT restarted (still running its old config); fix it, then: systemctl restart unbound"
+      return 0
+    fi
+    unbound_restore
+    if unbound-checkconf >/dev/null 2>&1; then
+      echo "unbound: new config failed unbound-checkconf ($out) - previous config restored, unbound NOT restarted (still running its old config); rejected files kept in $UNBOUND_TXN"
+    else
+      echo "unbound: config fails unbound-checkconf even with the previous files ($out) - restored them, unbound NOT restarted (still running); fix the config, then: systemctl restart unbound"
+    fi
+    return 0
+  fi
+  if systemctl restart unbound >/dev/null 2>&1 && systemctl is-active --quiet unbound 2>/dev/null; then
+    [[ -n $UNBOUND_TXN ]] && rm -rf "$UNBOUND_TXN"
+    echo "unbound: config checked (unbound-checkconf) and restarted"; return 0
+  fi
+  unbound_restore
+  systemctl restart unbound >/dev/null 2>&1 || true
+  echo "unbound: did not come back after the restart - previous config restored and restarted (now: $(systemctl is-active unbound 2>/dev/null || true))${UNBOUND_TXN:+; files kept in $UNBOUND_TXN}"
+}
+
+# Fresh apt installs without tuxwall-install.sh's firewall baseline: SSH and
+# the dashboard port are opened on the LAN interface(s) and the VPN (wg0)
+# only - the installer's defaults, same rule comments - never on the WAN.
+# Without a LAN interface: only RFC1918/ULA sources (never the internet),
+# with a warning. Upgrades leave the rules alone. tools/pkg_scripts_check.py
+# runs these.
+fw_lan_ifaces() {           # fw_lan_ifaces WAN DETECTED_LAN [ROLES_JSON] [WG_CONF] -> one interface per line
+  local wan=$1 detected=$2 roles=${3:-/etc/tuxwall/interfaces.json} wgconf=${4:-/etc/wireguard/wg0.conf}
+  local out="" i
+  if [[ -s $roles ]]; then
+    out="$(python3 - "$roles" 2>/dev/null <<'PY' || true
+import json, sys
+d = json.load(open(sys.argv[1]))
+lan = d.get("lan") if isinstance(d.get("lan"), dict) else {}
+devs = [lan["device"]] if lan.get("device") else []
+devs += [v["device"] for v in d.get("vpn") or [] if isinstance(v, dict) and v.get("device")]
+print("\n".join(devs))
+PY
+)"
+  fi
+  [[ $out == *[![:space:]]* ]] || out=$detected
+  if [[ -e $wgconf ]] || ip link show wg0 >/dev/null 2>&1; then out+=$'\n'wg0; fi
+  while read -r i; do
+    [[ -n $i && $i != lo && $i != "$wan" ]] && printf '%s\n' "$i"
+  done <<<"$out" | awk '!seen[$0]++'
+  return 0
+}
+fw_ssh_ports() {            # fw_ssh_ports [SSHD] -> sshd's ports (sshd -T), none without an SSH server
+  local sshd=${1:-}
+  [[ -n $sshd ]] || { [[ -x /usr/sbin/sshd ]] && sshd=/usr/sbin/sshd; } || sshd="$(command -v sshd 2>/dev/null)" || true
+  [[ -n $sshd && -x $sshd ]] || return 0
+  { "$sshd" -T 2>/dev/null || true; } | awk '$1=="port"{print $2}' | sort -un | grep . || echo 22
+  return 0
+}
+fw_has_port_rule() {        # fw_has_port_rule PORT -> 0 when an allow/limit rule names it (active or not)
+  local p=$1 added
+  added="$(ufw show added 2>/dev/null | grep -E '^ufw (route )?(allow|limit)' || true)"
+  grep -Eq "(^|[[:space:]])${p}(/tcp)?([[:space:]]|$)|port ${p}([[:space:]]|$)" <<<"$added" && return 0
+  [[ $p == 22 ]] && grep -qi 'openssh' <<<"$added" && return 0
+  return 1
+}
+fw_fresh_allow() {          # fw_fresh_allow PORT ssh|dashboard WAN [IFACE...] -> status lines
+  local port=$1 what=$2 wan=$3 i net n=0 lan_c vpn_c priv_c
+  shift 3
+  case $what in
+    ssh) lan_c='TuxWall: SSH from LAN'; vpn_c='TuxWall: SSH from VPN'; priv_c='TuxWall: SSH (private networks)' ;;
+    *)   lan_c='TuxWall dashboard (LAN)'; vpn_c='TuxWall dashboard (VPN)'; priv_c='TuxWall dashboard (private networks)' ;;
+  esac
+  for i in "$@"; do
+    [[ -z $i || $i == lo || $i == "$wan" ]] && continue
+    case $i in
+      wg*) ufw allow in on "$i" to any port "$port" proto tcp comment "$vpn_c" >/dev/null 2>&1 || true ;;
+      *)   ufw allow in on "$i" to any port "$port" proto tcp comment "$lan_c" >/dev/null 2>&1 || true ;;
+    esac
+    echo "$what: port $port allowed on $i"
+    n=$((n + 1))
+  done
+  if (( n == 0 )); then
+    for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 fd00::/8; do
+      ufw allow proto tcp from "$net" to any port "$port" comment "$priv_c" >/dev/null 2>&1 || true
+    done
+    echo "WARNING: no LAN interface found - $what port $port allowed from private networks (RFC1918/ULA) only, not from the internet"
+  fi
+  return 0
+}
+
+# Package nginx site + generated listen include (3.3.3): the site is host
+# neutral and includes /etc/nginx/snippets/tuxwall-listen.conf, rendered here
+# from this box's LAN/VPN addresses by tuxwall-nginx-listen (nginx -t first,
+# the previous include is kept when the test fails). An enabled tuxwall site
+# that still hard-codes listen addresses (a local copy, or an edited site
+# kept by dpkg) does not include the file - its own lines stay in charge and
+# nothing is duplicated. tools/pkg_scripts_check.py runs this.
+nginx_listen_render() {     # nginx_listen_render [RENDERER] -> one status line, never fails
+  local bin=${1:-/usr/local/sbin/tuxwall-nginx-listen} out rc=0
+  [[ -f $bin ]] || { echo "nginx: $bin missing, listen include not rendered"; return 0; }
+  command -v nginx >/dev/null 2>&1 || { echo "nginx: not installed, listen include not rendered"; return 0; }
+  out="$(python3 "$bin" 2>&1)" || rc=$?
+  if (( rc )); then
+    echo "nginx: listen include left as it was (${out##*$'\n'})"
+  else
+    echo "nginx: ${out##*$'\n'}"
+  fi
+}
+
 case "$1" in
   configure)
 
@@ -226,11 +377,19 @@ case "$1" in
     mkdir -p /etc/tuxwall
 
     step 3 "Creating empty blocklist configs (so Unbound includes are valid)..."
+    # Every unbound file written below is backed up first (unbound_backup);
+    # unbound_apply restarts unbound only on a config that passes
+    # unbound-checkconf, else it puts the previous files back.
+    unbound_txn_begin /var/backups/tuxwall
     # Must live under /var/lib/unbound/ - Unbound's AppArmor profile only allows
     # it to read /etc/unbound/** and /var/lib/unbound/**
     mkdir -p /var/lib/unbound
-    [[ -f /var/lib/unbound/blocklist.conf ]] || : > /var/lib/unbound/blocklist.conf
+    if [[ ! -f /var/lib/unbound/blocklist.conf ]]; then
+      unbound_backup /var/lib/unbound/blocklist.conf
+      : > /var/lib/unbound/blocklist.conf
+    fi
     if [[ ! -s /var/lib/unbound/client-bans.conf ]]; then
+    unbound_backup /var/lib/unbound/client-bans.conf
     cat > /var/lib/unbound/client-bans.conf <<'EOF'
 # Managed by the tuxwall DHCP Clients page - DO NOT EDIT
 server:
@@ -238,6 +397,7 @@ EOF
     fi
 
     step 4 "Wiring blocklists into Unbound..."
+    unbound_backup /etc/unbound/unbound.conf.d/99-blocklists.conf
     cat > /etc/unbound/unbound.conf.d/99-blocklists.conf <<'EOF'
 # Managed by the tuxwall Blocklists page - DO NOT EDIT
 server:
@@ -255,6 +415,7 @@ EOF
     for f in remote-control.conf root-auto-trust-anchor-file.conf \
              log-local-actions.conf 98-local-domains.conf; do
       if [[ ! -s "/etc/unbound/unbound.conf.d/$f" ]]; then
+        unbound_backup "/etc/unbound/unbound.conf.d/$f"
         cp "/usr/share/tuxwall/unbound/$f" "/etc/unbound/unbound.conf.d/$f"
         echo "   installed $f (was absent)"
       fi
@@ -489,6 +650,7 @@ RADVD
     if ! grep -qs '^forward-zone:' /etc/unbound/unbound.conf.d/*.conf /etc/unbound/unbound.conf 2>/dev/null; then
       if [[ ! -s /etc/unbound/unbound.conf.d/router-dns.conf ]]; then
         echo "   No forward-zone configured - adding upstream forwarder (1.1.1.1/8.8.8.8)..."
+        unbound_backup /etc/unbound/unbound.conf.d/router-dns.conf
         cat > /etc/unbound/unbound.conf.d/router-dns.conf <<'EOF'
 server:
     do-not-query-localhost: no
@@ -501,8 +663,10 @@ EOF
         echo "   router-dns.conf already exists without forward-zone (recursive mode) - leaving untouched."
       fi
     fi
-    unbound-checkconf || true
-    systemctl restart unbound || true
+    _unbound_msg="$(unbound_apply)"
+    echo "   $_unbound_msg"
+    mkdir -p /var/log/tuxwall
+    printf '%s %s\n' "$(date '+%F %T')" "$_unbound_msg" >> /var/log/tuxwall/unbound-postinst.log 2>/dev/null || true
 
     # Cache-bust dashboard assets on every package upgrade: browsers cache
     # ?v= URLs hard, so a fresh stamp guarantees the shipped JS/CSS is
@@ -522,6 +686,9 @@ EOF
     else
       echo "   Existing site already serves /var/www/html - leaving nginx config untouched."
     fi
+    # host-specific default_server listen lines -> generated include (see nginx_listen_render)
+    chmod 755 /usr/local/sbin/tuxwall-nginx-listen 2>/dev/null || true
+    echo "   $(nginx_listen_render)"
     if nginx -t >/dev/null 2>&1; then
       systemctl enable --now nginx >/dev/null 2>&1 || true
       systemctl reload nginx || true
@@ -531,14 +698,27 @@ EOF
     fi
 
     step 6 "Setting up firewall (ufw)..."
-    # Only open SSH/HTTP when no such rule exists yet: upgrades must not
-    # re-add a WAN-wide OpenSSH allow after the admin scoped it to LAN/VPN.
     # tuxwall-install.sh sets the baseline itself (SSH from the LAN only,
-    # dashboard on the LAN) and exports TUXWALL_INSTALLER_FIREWALL=1: no
-    # interface-less SSH/80 rule (= open on the WAN) behind its back.
-    if [[ ${TUXWALL_INSTALLER_FIREWALL:-} != 1 ]]; then
-      ufw status 2>/dev/null | grep -q '22/tcp' || ufw allow OpenSSH >/dev/null 2>&1 || true
-      ufw status 2>/dev/null | grep -q '80/tcp' || ufw allow 80/tcp >/dev/null 2>&1 || true
+    # dashboard on the LAN) and exports TUXWALL_INSTALLER_FIREWALL=1. A plain
+    # apt install gets the same baseline here, on fresh installs only (3.3.3:
+    # it used to allow OpenSSH and 80/tcp on every interface, WAN included).
+    # Upgrades never add SSH/dashboard rules.
+    if [[ ${TUXWALL_INSTALLER_FIREWALL:-} != 1 && -z ${2:-} ]]; then
+      _fw_ifs=()
+      while read -r _i; do [[ -n $_i ]] && _fw_ifs+=("$_i"); done < <(fw_lan_ifaces "$WAN_IF_D" "$LAN_IF_D")
+      for _p in $(fw_ssh_ports); do
+        if fw_has_port_rule "$_p"; then
+          echo "   SSH port $_p already has a rule (left as is)"
+        else
+          fw_fresh_allow "$_p" ssh "$WAN_IF_D" "${_fw_ifs[@]}" | sed 's/^/   /'
+        fi
+      done
+      if fw_has_port_rule 80; then
+        echo "   dashboard port 80 already has a rule (left as is)"
+      else
+        fw_fresh_allow 80 dashboard "$WAN_IF_D" "${_fw_ifs[@]}" | sed 's/^/   /'
+      fi
+      echo "   SSH and the dashboard are not opened on the WAN${WAN_IF_D:+ ($WAN_IF_D)}."
     fi
     # Retire any WAN-wide OpenSSH allow, but only when scoped SSH access
     # already exists (LAN/VPN interface rules) — upgrades must neither
@@ -578,6 +758,8 @@ EOF
     # Best-effort: avahi-daemon is a hard Depends, but don't fail upgrades.
     if [[ -f /etc/avahi/avahi-daemon.conf ]]; then
       WAN_IF="$(ip route show default 2>/dev/null | awk '{print $5}' | head -n1)"
+      _avahi_bak="$(mktemp /etc/avahi/.avahi-daemon.conf.tuxwall-prev.XXXXXX 2>/dev/null)" \
+        && cp -p /etc/avahi/avahi-daemon.conf "$_avahi_bak" || _avahi_bak=""
       python3 - /etc/avahi/avahi-daemon.conf "${WAN_IF:-}" <<'PY' 2>/dev/null || true
 import re, sys
 path, wan = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")
@@ -608,7 +790,17 @@ if wan:
 with open(path, "w") as f: f.write(text)
 PY
       systemctl enable --now avahi-daemon >/dev/null 2>&1 || true
-      systemctl restart avahi-daemon >/dev/null 2>&1 || true
+      if ! systemctl restart avahi-daemon >/dev/null 2>&1 || ! systemctl is-active --quiet avahi-daemon 2>/dev/null; then
+        if [[ -n $_avahi_bak ]] && ! cmp -s "$_avahi_bak" /etc/avahi/avahi-daemon.conf; then
+          cp -p /etc/avahi/avahi-daemon.conf /etc/avahi/avahi-daemon.conf.tuxwall-rejected 2>/dev/null || true
+          cp -p "$_avahi_bak" /etc/avahi/avahi-daemon.conf
+          systemctl restart avahi-daemon >/dev/null 2>&1 || true
+          echo "   WARNING: avahi-daemon did not start with the reflector settings - previous avahi-daemon.conf restored (rejected copy: avahi-daemon.conf.tuxwall-rejected)"
+        else
+          echo "   WARNING: avahi-daemon is not running (systemctl status avahi-daemon)"
+        fi
+      fi
+      [[ -n $_avahi_bak ]] && rm -f "$_avahi_bak"
     fi
 
     # Interface roles record: generated from the live box when missing (the

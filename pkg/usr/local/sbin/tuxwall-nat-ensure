@@ -5,7 +5,8 @@
 # /etc/ufw/before.rules, which ufw reload APPENDS duplicates of instead of
 # replacing (verified 2026-11-05 in the field: six duplicate MASQUERADE
 # rules had accumulated across a week of reloads). Safe to run any number
-# of times: it checks with -C before adding.
+# of times: it checks with -C before adding, and exits 1 when the rule
+# cannot be added (tuxwall-nat.service then shows failed).
 #
 # The WAN interface comes from TUXWALL_WAN_IFACE (exotic setups: bonded WAN,
 # pppoe, ...), else the "wan" role in /etc/tuxwall/interfaces.json, else the
@@ -33,7 +34,16 @@ while [ -z "$WAN" ]; do
   sleep 1
 done
 
-iptables -t nat -C POSTROUTING -o "$WAN" -j MASQUERADE 2>/dev/null || \
-  iptables -t nat -A POSTROUTING -o "$WAN" -j MASQUERADE
-
+# -w: wait for the xtables lock (ufw/fail2ban/the bouncer may hold it at boot)
+# instead of failing. A failed add exits 1 with the reason on stderr (journal),
+# so tuxwall-nat.service shows "failed" and service monitoring alerts - it
+# used to exit 0 with LAN NAT missing.
+if iptables -w 10 -t nat -C POSTROUTING -o "$WAN" -j MASQUERADE 2>/dev/null; then
+  exit 0
+fi
+if ! err="$(iptables -w 10 -t nat -A POSTROUTING -o "$WAN" -j MASQUERADE 2>&1)"; then
+  echo "tuxwall-nat-ensure: could not add the LAN NAT masquerade on $WAN: ${err:-iptables failed}" >&2
+  exit 1
+fi
+echo "tuxwall-nat-ensure: LAN NAT masquerade added on $WAN"
 exit 0

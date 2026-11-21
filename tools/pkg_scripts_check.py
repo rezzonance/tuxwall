@@ -21,6 +21,16 @@ a fake `systemctl` (first in PATH, records its calls) and a temp marker:
 - kea_hook_migration (finding 8.2): adds the lease_cmds hook to an
   installer-written Kea config (header kept, kea-dhcp4 -t first, restart,
   rollback), idempotent; skips foreign configs / missing library.
+- unbound_apply (3.3.3): unbound restarted only after unbound-checkconf
+  passes; a rejected config puts the backed-up files back (new ones removed)
+  and leaves unbound running; a failed restart rolls back and restarts.
+- fresh-install firewall (3.3.3): SSH/dashboard on the LAN interface(s) +
+  wg0 only (installer comments), never the WAN; RFC1918/ULA sources when no
+  LAN is known; upgrades and installer runs add nothing.
+- nginx_listen_render: listen include rendered before nginx -t / reload,
+  never fails the postinst.
+- tuxwall-nat-ensure: idempotent (-C first), a failed -A exits 1 with the
+  reason on stderr (stubbed iptables).
 """
 import json
 import os
@@ -550,6 +560,304 @@ def t_kea_hook():
           "configure runs the Kea hook migration before the dashboard restart")
 
 
+def fakebin(d, files):
+    os.makedirs(d + "/fbin", exist_ok=True)
+    for name, body in files.items():
+        with open(d + "/fbin/" + name, "w") as f:
+            f.write(body)
+        os.chmod(d + "/fbin/" + name, 0o755)
+
+
+def bash_run(d, script, env=None, path_extra=True):
+    e = dict(os.environ, FAKE_LOG=d + "/calls")
+    e["PATH"] = d + "/fbin:" + (os.environ.get("PATH", "") if path_extra else "/usr/bin:/bin")
+    e.update(env or {})
+    if os.path.exists(d + "/calls"):
+        os.unlink(d + "/calls")
+    p = subprocess.run(["bash", "-c", "set -euo pipefail\n" + script, "x"], env=e,
+                       capture_output=True, text=True, timeout=60)
+    calls = open(d + "/calls").read().splitlines() if os.path.exists(d + "/calls") else []
+    return p.returncode, calls, p.stdout, p.stderr
+
+
+UB_FAKES = {
+    "unbound-checkconf": '#!/bin/sh\necho "checkconf" >> "$FAKE_LOG"\n'
+                         'if grep -rqs BROKEN "$UB_DIR"; then echo "$UB_DIR/x.conf:3: error: syntax error" >&2; exit 1; fi\n'
+                         'echo "unbound-checkconf: no errors"; exit 0\n',
+    "systemctl": '#!/bin/sh\necho "$*" >> "$FAKE_LOG"\n'
+                 'case "$1" in\n'
+                 '  restart) n=$(cat "$UB_DIR/../restarts" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$UB_DIR/../restarts"\n'
+                 '           [ "$n" -le "${FAKE_RESTART_FAILS:-0}" ] && exit 1; exit 0 ;;\n'
+                 '  is-active) n=$(cat "$UB_DIR/../restarts" 2>/dev/null || echo 0); [ "$n" -le "${FAKE_RESTART_FAILS:-0}" ] && exit 3; exit 0 ;;\n'
+                 'esac\nexit 0\n',
+}
+
+
+def t_unbound_apply():
+    fns = func("unbound_txn_begin") + func("unbound_backup") + func("unbound_restore") + func("unbound_apply")
+    check(all(n in fns for n in ("unbound_txn_begin", "unbound_backup", "unbound_restore", "unbound_apply")),
+          "postinst defines the unbound transaction functions")
+    body = SRC.split('case "$1" in\n  configure)', 1)[1]
+    check("unbound-checkconf || true" not in body and "systemctl restart unbound || true" not in body,
+          "configure no longer restarts unbound unchecked")
+    lines = body.splitlines()
+    writes = [i for i, l in enumerate(lines)
+              if re.search(r"(cat >|: >|^\s*cp ).*(/etc/unbound/unbound\.conf\.d/|/var/lib/unbound/)", l)]
+    check(len(writes) >= 5, "found the unbound writes in configure (%d)" % len(writes))
+    for i in writes:
+        prev = "\n".join(lines[max(0, i - 2):i])
+        check("unbound_backup" in prev, "unbound write backed up first: %s" % lines[i].strip())
+    begin = next(i for i, l in enumerate(lines) if l.strip().startswith("unbound_txn_begin "))
+    apply_ = next(i for i, l in enumerate(lines) if "$(unbound_apply)" in l)
+    check(begin < writes[0] and apply_ > writes[-1],
+          "transaction begins before the first write, applied after the last")
+
+    def box(old_main="server:\n    verbosity: 1\n", old_extra=None):
+        d = tempfile.mkdtemp(prefix="pkg-unbound-")
+        fakebin(d, UB_FAKES)
+        os.makedirs(d + "/conf.d")
+        with open(d + "/conf.d/99-blocklists.conf", "w") as f:
+            f.write(old_main)
+        if old_extra is not None:
+            with open(d + "/conf.d/extra.conf", "w") as f:
+                f.write(old_extra)
+        return d
+
+    def go(d, new_main, new_file="server:\n    # new\n", env=None):
+        script = fns + (
+            'unbound_txn_begin "$D/bk"\n'
+            'unbound_backup "$D/conf.d/99-blocklists.conf"\n'
+            'printf "%s" "$NEWMAIN" > "$D/conf.d/99-blocklists.conf"\n'
+            'unbound_backup "$D/conf.d/router-dns.conf"\n'
+            'printf "%s" "$NEWFILE" > "$D/conf.d/router-dns.conf"\n'
+            'unbound_backup "$D/conf.d/99-blocklists.conf"\n'   # second backup of the same file: first state wins
+            'unbound_apply\n'
+            'echo "TXN=$UNBOUND_TXN"\n')
+        e = {"D": d, "UB_DIR": d + "/conf.d", "NEWMAIN": new_main, "NEWFILE": new_file}
+        e.update(env or {})
+        rc, calls, out, err = bash_run(d, script, e)
+        return rc, calls, out, err
+
+    def read(d, name):
+        try:
+            return open(d + "/conf.d/" + name).read()
+        except FileNotFoundError:
+            return None
+
+    # 1. good config: checked, restarted, backups removed
+    d = box()
+    try:
+        rc, calls, out, err = go(d, "server:\n    verbosity: 2\n")
+        check(rc == 0 and calls[:2] == ["checkconf", "restart unbound"] and "checked" in out,
+              "unbound: valid config -> checkconf then restart (%s %s)" % (calls, out))
+        txn = out.split("TXN=")[-1].strip()
+        check(txn and not os.path.exists(txn), "unbound: backups removed after a good restart")
+        check(read(d, "router-dns.conf") == "server:\n    # new\n", "unbound: new files kept")
+    finally:
+        shutil.rmtree(d)
+    # 2. broken config: no restart, previous files back, new file removed, rejected copies kept
+    d = box()
+    try:
+        rc, calls, out, err = go(d, "server:\n    BROKEN\n")
+        check(rc == 0 and not any(c.startswith("restart") for c in calls), "unbound: rejected config -> no restart (%s)" % calls)
+        check(read(d, "99-blocklists.conf") == "server:\n    verbosity: 1\n" and read(d, "router-dns.conf") is None,
+              "unbound: previous files restored, created file removed")
+        check("NOT restarted" in out and "previous config restored" in out and "syntax error" in out,
+              "unbound: clear message (%s)" % out.strip())
+        txn = out.split("TXN=")[-1].strip()
+        check(any(f.endswith(".rejected") for f in os.listdir(txn)), "unbound: rejected files kept for diagnosis")
+        check(calls.count("checkconf") == 2, "unbound: restored config re-checked")
+    finally:
+        shutil.rmtree(d)
+    # 3. config already broken before the postinst: restored as it was, not restarted
+    d = box(old_extra="BROKEN before\n")
+    try:
+        rc, calls, out, err = go(d, "server:\n    verbosity: 2\n")
+        check(rc == 0 and "even with the previous files" in out and not any(c.startswith("restart") for c in calls)
+              and read(d, "99-blocklists.conf") == "server:\n    verbosity: 1\n",
+              "unbound: pre-existing broken config -> files restored, no restart (%s)" % out.strip())
+    finally:
+        shutil.rmtree(d)
+    # 4. valid config but unbound does not come back: rolled back and restarted again
+    d = box()
+    try:
+        rc, calls, out, err = go(d, "server:\n    verbosity: 2\n", env={"FAKE_RESTART_FAILS": "1"})
+        check(rc == 0 and calls.count("restart unbound") == 2 and "did not come back" in out
+              and read(d, "99-blocklists.conf") == "server:\n    verbosity: 1\n" and read(d, "router-dns.conf") is None,
+              "unbound: failed restart -> previous files + restart (%s %s)" % (calls, out.strip()))
+    finally:
+        shutil.rmtree(d)
+    # 5. no backup possible (txn dir unavailable): broken config is still never restarted
+    d = box()
+    try:
+        script = fns + 'UNBOUND_TXN=""\nprintf "BROKEN" > "$D/conf.d/99-blocklists.conf"\nunbound_apply\n'
+        rc, calls, out, err = bash_run(d, script, {"D": d, "UB_DIR": d + "/conf.d"})
+        check(rc == 0 and "NOT restarted" in out and not any(c.startswith("restart") for c in calls),
+              "unbound: no backup + broken config -> not restarted (%s)" % out.strip())
+    finally:
+        shutil.rmtree(d)
+
+
+FW_FAKES = {
+    "ufw": '#!/bin/sh\nif [ "$1" = show ] && [ "$2" = added ]; then echo "Added user rules:"; '
+           'cat "$FAKE_UFW_ADDED" 2>/dev/null; exit 0; fi\necho "$*" >> "$FAKE_LOG"\nexit 0\n',
+    "ip": '#!/bin/sh\n[ "$1 $2 $3" = "link show wg0" ] && [ "${FAKE_WG:-0}" = 1 ] && exit 0\nexit 1\n',
+    "sshd": '#!/bin/sh\n[ "$1" = -T ] || exit 1\nprintf "port 22\\nport 2222\\naddressfamily any\\n"\n',
+}
+
+
+def t_firewall_fresh():
+    fns = func("fw_lan_ifaces") + func("fw_ssh_ports") + func("fw_has_port_rule") + func("fw_fresh_allow")
+    check(all(n + "()" in fns for n in ("fw_lan_ifaces", "fw_ssh_ports", "fw_has_port_rule", "fw_fresh_allow")),
+          "postinst defines the fresh-install firewall functions")
+    body = SRC.split('case "$1" in\n  configure)', 1)[1]
+    check("ufw allow OpenSSH" not in body and "ufw allow 80/tcp" not in body, "no interface-less SSH/80 allow left")
+    d = tempfile.mkdtemp(prefix="pkg-fw-")
+    try:
+        fakebin(d, FW_FAKES)
+        roles = d + "/interfaces.json"
+        with open(roles, "w") as f:
+            json.dump({"wan": {"device": "enp5s0"}, "lan": {"device": "enp6s0"},
+                       "opt": [{"device": "enp6s0.10"}], "vpn": [{"device": "wg0"}]}, f)
+
+        def ifaces(wan, detected, roles_path, wg="0", wgconf="/nonexistent/wg0.conf"):
+            rc, calls, out, err = bash_run(d, fns + 'fw_lan_ifaces "$1" "$2" "$3" "$4"\n'.replace(
+                '"$1" "$2" "$3" "$4"', '"%s" "%s" "%s" "%s"' % (wan, detected, roles_path, wgconf)), {"FAKE_WG": wg})
+            return out.split()
+
+        check(ifaces("enp5s0", "eth1", roles) == ["enp6s0", "wg0"], "LAN/VPN from interfaces.json (no OPT/VLAN)")
+        check(ifaces("enp5s0", "eth1", d + "/none") == ["eth1"], "detected LAN without interfaces.json")
+        check(ifaces("enp5s0", "eth1", d + "/none", wg="1") == ["eth1", "wg0"], "wg0 when it exists")
+        open(d + "/wg0.conf", "w").close()
+        check(ifaces("enp5s0", "", d + "/none", wgconf=d + "/wg0.conf") == ["wg0"], "wg0 when configured")
+        check(ifaces("enp5s0", "", d + "/none") == [], "nothing found -> empty")
+        check(ifaces("enp6s0", "eth1", roles) == ["wg0"], "the WAN is never returned")
+        rc, calls, out, err = bash_run(d, fns + 'fw_ssh_ports "$D/fbin/sshd"\n', {"D": d})
+        check(out.split() == ["22", "2222"], "SSH ports from sshd -T (%r)" % out)
+        rc, calls, out, err = bash_run(d, fns + 'fw_ssh_ports /nonexistent/sshd\n')
+        check(out.strip() == "", "no SSH server -> no SSH ports")
+
+        def allow(args, added=""):
+            with open(d + "/added", "w") as f:
+                f.write(added)
+            rc, calls, out, err = bash_run(d, fns + "fw_fresh_allow %s\n" % args, {"FAKE_UFW_ADDED": d + "/added"})
+            return rc, calls, out
+
+        rc, calls, out = allow("22 ssh enp5s0 enp6s0 wg0")
+        check(calls == ["allow in on enp6s0 to any port 22 proto tcp comment TuxWall: SSH from LAN",
+                        "allow in on wg0 to any port 22 proto tcp comment TuxWall: SSH from VPN"],
+              "SSH on LAN + VPN only, installer comments (%s)" % calls)
+        rc, calls, out = allow("80 dashboard enp5s0 enp6s0")
+        check(calls == ["allow in on enp6s0 to any port 80 proto tcp comment TuxWall dashboard (LAN)"],
+              "dashboard on the LAN only (%s)" % calls)
+        rc, calls, out = allow("22 ssh enp5s0 enp5s0")
+        check(len(calls) == 4 and all(c.startswith("allow proto tcp from ") and " to any port 22 " in c for c in calls)
+              and {c.split()[4] for c in calls} == {"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fd00::/8"}
+              and "WARNING" in out, "no LAN -> RFC1918/ULA sources only + warning (%s)" % calls)
+        rc, calls, out = allow("22 ssh enp5s0")
+        check(not any(" on enp5s0" in c for c in calls) and not any(re.match(r"allow (22|OpenSSH)", c) for c in calls),
+              "never a WAN or internet-wide SSH rule")
+        for added, port, want in (("ufw allow in on enp6s0 to any port 22 proto tcp\n", 22, 0),
+                                  ("ufw allow OpenSSH\n", 22, 0), ("ufw allow 2222/tcp\n", 22, 1),
+                                  ("ufw allow 80/tcp\n", 80, 0), ("ufw allow in on wg0 to any port 8080 proto tcp\n", 80, 1)):
+            with open(d + "/added", "w") as f:
+                f.write(added)
+            rc, _c, _o, _e = bash_run(d, fns + "fw_has_port_rule %d\n" % port, {"FAKE_UFW_ADDED": d + "/added"})
+            check(rc == want, "fw_has_port_rule %d with %r -> %d" % (port, added.strip(), want))
+        # the configure block itself: fresh install adds LAN rules, upgrades add nothing
+        m = re.search(r"    if \[\[ \$\{TUXWALL_INSTALLER_FIREWALL:-\} != 1 && -z \$\{2:-\} \]\]; then\n.*?\n    fi\n",
+                      body, re.S)
+        check(m is not None, "fresh-only firewall block present in configure")
+        block = m.group(0) if m else ""
+        # host-independent: no real interfaces.json / wg0.conf, one SSH port
+        stub = ('fw_ssh_ports() { echo 22; }\n'
+                'eval "$(declare -f fw_lan_ifaces | sed \'1s/fw_lan_ifaces/_fw_lan_real/\')"\n'
+                'fw_lan_ifaces() { _fw_lan_real "$1" "$2" /nonexistent/roles.json /nonexistent/wg0.conf; }\n')
+        for prev, inst, expect in (("", "", True), ("3.3.2", "", False), ("", "1", False)):
+            with open(d + "/added", "w") as f:
+                f.write("")
+            script = fns + stub + 'WAN_IF_D=enp5s0; LAN_IF_D=enp6s0\nset -- configure "%s"\n' % prev + block
+            rc, calls, out, err = bash_run(d, script, {"FAKE_UFW_ADDED": d + "/added", "TUXWALL_INSTALLER_FIREWALL": inst})
+            if expect:
+                check(rc == 0 and calls == ["allow in on enp6s0 to any port 22 proto tcp comment TuxWall: SSH from LAN",
+                                            "allow in on enp6s0 to any port 80 proto tcp comment TuxWall dashboard (LAN)"],
+                      "fresh apt install: SSH + dashboard on the LAN (%s %s)" % (calls, err))
+            else:
+                check(rc == 0 and calls == [], "prev=%r installer=%r: rules untouched (%s)" % (prev, inst, calls))
+        with open(d + "/added", "w") as f:
+            f.write("ufw allow in on enp6s0 to any port 22 proto tcp\n")
+        script = fns + stub + 'WAN_IF_D=enp5s0; LAN_IF_D=enp6s0\nset -- configure ""\n' + block
+        rc, calls, out, err = bash_run(d, script, {"FAKE_UFW_ADDED": d + "/added", "TUXWALL_INSTALLER_FIREWALL": ""})
+        check(calls == ["allow in on enp6s0 to any port 80 proto tcp comment TuxWall dashboard (LAN)"]
+              and "already has a rule" in out, "existing SSH rule left as is (%s)" % calls)
+    finally:
+        shutil.rmtree(d)
+
+
+def t_nginx_listen_render():
+    fn = func("nginx_listen_render")
+    check("nginx_listen_render()" in fn, "postinst defines nginx_listen_render")
+    body = SRC.split('case "$1" in\n  configure)', 1)[1]
+    step5 = body[body.index('step 5 '):body.index('step 6 ')]
+    check("nginx_listen_render" in step5 and step5.index("nginx_listen_render") < step5.index("if nginx -t"),
+          "step 5 renders the listen include before nginx -t / reload")
+    d = tempfile.mkdtemp(prefix="pkg-nginx-")
+    try:
+        fakebin(d, {"nginx": "#!/bin/sh\nexit 0\n"})
+        for rc_r, want in ((0, "nginx: listen include written"), (1, "listen include left as it was")):
+            r = d + "/render%d" % rc_r
+            with open(r, "w") as f:
+                f.write("import sys\nprint('%s (x): 192.168.1.1:80')\nsys.exit(%d)\n"
+                        % ("listen include written" if rc_r == 0 else "nginx -t failed - previous state kept", rc_r))
+            rc, calls, out, err = bash_run(d, fn + 'nginx_listen_render "%s"\n' % r)
+            check(rc == 0 and want in out, "render rc=%d -> %r (%s)" % (rc_r, want, out.strip()))
+        rc, calls, out, err = bash_run(d, fn + 'nginx_listen_render /nonexistent\n')
+        check(rc == 0 and "missing" in out, "renderer missing -> message, no failure")
+        os.unlink(d + "/fbin/nginx")
+        rc, calls, out, err = bash_run(d, fn + 'nginx_listen_render "%s/render0"\n' % d, path_extra=False)
+        check(rc == 0 and "not installed" in out, "nginx missing -> message, no failure (%s)" % out.strip())
+    finally:
+        shutil.rmtree(d)
+
+
+def t_nat_ensure():
+    src = open(os.path.join(ROOT_DIR, "pkg", "usr", "local", "sbin", "tuxwall-nat-ensure")).read()
+    check("export PATH=/usr/sbin:/usr/bin:/sbin:/bin" in src, "nat-ensure pins PATH")
+    d = tempfile.mkdtemp(prefix="pkg-nat-")
+    try:
+        fakebin(d, {"iptables": '#!/bin/sh\necho "$*" >> "$FAKE_LOG"\n'
+                                'case " $* " in\n'
+                                '  *" -C "*) exit "${FAKE_C_RC:-1}" ;;\n'
+                                '  *" -A "*) [ "${FAKE_A_RC:-0}" = 0 ] && exit 0\n'
+                                '            echo "iptables: No chain/target/match by that name." >&2; exit "$FAKE_A_RC" ;;\n'
+                                'esac\nexit 0\n'})
+        script = d + "/nat-ensure"
+        with open(script, "w") as f:
+            f.write(src.replace("export PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+                                "export PATH=%s/fbin:/usr/sbin:/usr/bin:/sbin:/bin" % d))
+        os.chmod(script, 0o755)
+
+        def go(**env):
+            e = dict(os.environ, FAKE_LOG=d + "/calls", TUXWALL_WAN_IFACE="eth9", TUXWALL_NAT_WAIT="0")
+            e.update(env)
+            if os.path.exists(d + "/calls"):
+                os.unlink(d + "/calls")
+            p = subprocess.run(["sh", script], env=e, capture_output=True, text=True, timeout=30)
+            calls = open(d + "/calls").read().splitlines() if os.path.exists(d + "/calls") else []
+            return p.returncode, calls, p.stdout, p.stderr
+
+        rc, calls, out, err = go(FAKE_C_RC="0")
+        check(rc == 0 and calls == ["-w 10 -t nat -C POSTROUTING -o eth9 -j MASQUERADE"], "nat: rule present -> no add (%s)" % calls)
+        rc, calls, out, err = go(FAKE_C_RC="1", FAKE_A_RC="0")
+        check(rc == 0 and calls[-1] == "-w 10 -t nat -A POSTROUTING -o eth9 -j MASQUERADE" and len(calls) == 2
+              and "added" in out, "nat: missing -> added once, exit 0 (%s)" % calls)
+        rc, calls, out, err = go(FAKE_C_RC="1", FAKE_A_RC="4")
+        check(rc == 1 and "could not add" in err and "No chain/target" in err and "eth9" in err,
+              "nat: failed add -> exit 1 with the reason on stderr (rc=%s %r)" % (rc, err))
+    finally:
+        shutil.rmtree(d)
+
+
 def main():
     for p in (POSTINST, PRERM, os.path.join(ROOT_DIR, "pkg", "DEBIAN", "postrm")):
         r = subprocess.run(["bash", "-n", p], capture_output=True, text=True)
@@ -559,6 +867,10 @@ def main():
     t_prerm()
     t_radvd()
     t_kea_hook()
+    t_unbound_apply()
+    t_firewall_fresh()
+    t_nginx_listen_render()
+    t_nat_ensure()
     print("pkg_scripts_check: %d passed, %d failed" % (PASS, FAIL))
     sys.exit(1 if FAIL else 0)
 

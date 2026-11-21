@@ -1406,11 +1406,6 @@ build_local_deb() {
     if [[ -f $REPO_DIR/scripts/tuxwall-sqm.sh ]]; then
         install -D -m 755 "$REPO_DIR/scripts/tuxwall-sqm.sh" "$stage/pkg/usr/local/sbin/tuxwall-sqm.sh"
     fi
-    # The vhost hard-codes 192.168.1.1 / 10.0.0.1 / fd00:1::1 listeners, which
-    # stop nginx from starting on any box without exactly those addresses.
-    # [::] (all IPv6 addresses) has no hex digit, so it is kept.
-    sed -i -E '/^[[:space:]]*listen[[:space:]]+(([0-9]{1,3}\.){3}[0-9]{1,3}|\[[0-9a-fA-F:]*[0-9a-fA-F][0-9a-fA-F:]*\]):[0-9]+/d' \
-        "$stage/pkg/etc/nginx/sites-available/tuxwall"
     sed -i "s/^Version: .*/Version: $ver/" "$stage/pkg/DEBIAN/control"
     find "$stage/pkg" -type d -exec chmod 755 {} +
     chmod -R go-w "$stage/pkg"
@@ -1503,7 +1498,10 @@ step_post() {
         info "Traffic shaping seeded for $sqm_wan (off until enabled in System → Traffic Shaping)"
     fi
 
-    # nginx: drop listeners for addresses this box does not have.
+    # nginx: the packaged vhost is host neutral since 3.3.3 (its LAN/VPN
+    # listen lines are generated into /etc/nginx/snippets/tuxwall-listen.conf
+    # by tuxwall-nginx-listen); an older, edited vhost kept by dpkg may still
+    # name addresses - drop listeners for addresses this box does not have.
     local vhost=/etc/nginx/sites-available/tuxwall addr line
     if [[ -f $vhost ]]; then
         while read -r line; do
@@ -1672,6 +1670,11 @@ step_network_apply() {
 
 step_services() {
     q systemctl daemon-reload
+    # LAN/VPN addresses exist now (network applied): regenerate the vhost's
+    # default_server listen include (nginx -t inside; old file kept on failure)
+    if [[ -x /usr/local/sbin/tuxwall-nginx-listen ]]; then
+        q /usr/local/sbin/tuxwall-nginx-listen || warn "nginx listen include not updated (sudo tuxwall-nginx-listen)"
+    fi
     local svc
     local -a base=(nginx tuxwall tuxwall-nat avahi-daemon tuxwall-blocklist-update.timer suricata-update.timer)
     [[ $ROLE == gateway ]] && base=(unbound "${base[@]}")

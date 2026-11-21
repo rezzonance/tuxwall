@@ -1347,9 +1347,11 @@ def t_installer_defaults():
     check(G.classify_rule(r, ctx_v)["owner"] == "wireguard", "tuxwall-wireguard tag -> owner wireguard")
     # the postinst does not open SSH/80 behind the installer's back
     post = open(os.path.join(REPO, "pkg", "DEBIAN", "postinst")).read()
-    m = re.search(r'if \[\[ \$\{TUXWALL_INSTALLER_FIREWALL:-\} != 1 \]\]; then\n(.*?)\n    fi\n', post, re.S)
-    check(m and "ufw allow OpenSSH" in m.group(1) and "ufw allow 80/tcp" in m.group(1),
-          "postinst: SSH/80 fallback skipped when the installer set the firewall")
+    # (3.3.3: fresh apt installs only, LAN/VPN-scoped - tools/pkg_scripts_check.py runs it)
+    m = re.search(r'if \[\[ \$\{TUXWALL_INSTALLER_FIREWALL:-\} != 1 && -z \$\{2:-\} \]\]; then\n(.*?)\n    fi\n', post, re.S)
+    check(m and 'fw_fresh_allow "$_p" ssh' in m.group(1) and "fw_fresh_allow 80 dashboard" in m.group(1)
+          and "ufw allow OpenSSH" not in post and "ufw allow 80/tcp" not in post,
+          "postinst: SSH/80 baseline skipped when the installer set the firewall, never interface-less")
 
 
 def t_edit():
