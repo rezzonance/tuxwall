@@ -64,3 +64,33 @@ that scenario and is now inert; it can stay or be removed.
 6 hours: it collapses duplicate active decisions (keeping the longest expiry
 per value + scenario + type + origin; custom-blocklist bans collapse across
 origins) and prunes decision-less alerts older than 7 days.
+
+## Firewall bouncer: nftables mode (upgrades migrate)
+
+In iptables mode the bouncer keeps bans in ipsets, whose timeouts are capped
+at ~24.8 days: 90-day and 1-year bans silently drop out of the kernel. New
+installs therefore use nftables mode (input hook only, priority -10 so bans
+drop before ufw, no forward hook). Package upgrades move an existing
+iptables-mode bouncer over with `/usr/local/sbin/tuxwall-bouncer-nft-migrate`
+(run by the postinst; `--check` shows what it would do):
+
+- only when the bouncer is installed, active and in iptables mode, nft works
+  and the kernel keeps a 365-day set timeout (scratch table, removed again);
+  the deny action is kept; a `.local` override of `mode`/`nftables*` is
+  respected (skipped);
+- zero gap: the old bouncer is killed with SIGKILL so its CROWDSEC_CHAIN and
+  ipsets keep enforcing, the new one starts, and only once its nft sets hold
+  the bans (>= 90 % of the old ipset entries, input hook, priority before
+  ufw) are the old chain/jumps and ipsets removed;
+- otherwise (timeout 90 s, wrong hook/priority, failed start) the iptables
+  config is restored and the bouncer restarted - the box is left as it was,
+  and the migration is not retried automatically (`--force` retries);
+- once migrated, a bouncer the owner switches back to iptables stays so.
+
+Opt out: `sudo touch /etc/tuxwall/no-bouncer-migration`. Log:
+`/var/log/tuxwall/bouncer-migration.log`; state:
+`/var/lib/tuxwall/bouncer-nft-migration.json`; backups (config, iptables /
+ip6tables / ipset saves, nft ruleset): `/var/backups/tuxwall-bouncer-nft-<time>/`.
+Manual rollback: install the backed-up `crowdsec-firewall-bouncer.yaml.pre-nft`
+as `/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml` (root, 0600) and
+`sudo systemctl restart crowdsec-firewall-bouncer`.

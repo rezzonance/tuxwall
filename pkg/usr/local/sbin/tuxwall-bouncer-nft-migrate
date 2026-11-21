@@ -1,0 +1,468 @@
+#!/usr/bin/env python3
+"""Move an existing CrowdSec firewall bouncer from iptables to nftables mode.
+
+  tuxwall-bouncer-nft-migrate            migrate when needed (postinst runs this)
+  tuxwall-bouncer-nft-migrate --check    report what would happen, change nothing
+  tuxwall-bouncer-nft-migrate --force    retry after an earlier failed attempt
+
+Why: iptables mode keeps bans in ipsets, whose timeouts are capped at
+2147483 s (~24.8 days); 90-day / 1-year bans silently fall out of the kernel.
+nftables set elements keep the full duration. Fresh installs get nftables
+mode from tuxwall-install.sh (configure_bouncer); this is the upgrade path.
+
+Runs only when: CrowdSec's bouncer is installed and active in iptables mode,
+/etc/tuxwall/no-bouncer-migration does not exist, no .local override sets
+mode/nftables keys, no earlier attempt failed (unless --force), nft works and
+the kernel keeps a 365-day set timeout (scratch table, deleted again).
+
+Layout written (same as configure_bouncer, deny_action kept as configured):
+mode nftables, nftables_hooks [input] (no forward hook, like CROWDSEC_CHAIN
+in INPUT before), priority -10 for ipv4/ipv6 (before ufw's priority 0).
+
+Zero-gap switch (as done on the maintainer's router, Nov 20): back up the
+config/rulesets, write the new config, SIGKILL the running bouncer (a
+graceful iptables-mode stop deletes CROWDSEC_CHAIN and the ipsets; a killed
+one leaves them enforcing), restart it, wait until its nft tables carry the
+configured input hooks and their sets hold >= 90 % of the old ipset entries,
+then delete the CROWDSEC_CHAIN jumps/chains and the ipsets. If the tables do
+not populate in time (or the hooks/priority are wrong), the iptables config
+is restored and the bouncer restarted - the box is left as it was (the
+bouncer's own iptables start re-creates its chain/ipsets, ~10 s; the killed
+nft bouncer's tables keep enforcing meanwhile and are removed afterwards).
+
+Log: /var/log/tuxwall/bouncer-migration.log; state:
+/var/lib/tuxwall/bouncer-nft-migration.json. Never prints the bouncer's
+API key (the config is never echoed).
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+INCLUDES = os.environ.get("TW_INCLUDES", "/var/www/html/includes")
+DAY = 86400
+PROBE_TABLE = "tuxwall_nftprobe"
+PROBE_TIMEOUT_DAYS = 365
+PROBE_MIN_DAYS = 300
+FILL_RATIO = 0.9
+POPULATE_TIMEOUT = 90
+ROLLBACK_TIMEOUT = 60
+POLL = 0.5
+
+
+def _crowdsec_fw():
+    if INCLUDES not in sys.path:
+        sys.path.insert(0, INCLUDES)
+    sys.dont_write_bytecode = True
+    import crowdsec_fw
+    return crowdsec_fw
+
+
+# ── environment (paths + commands; tests inject their own) ──────────────────
+
+class Env:
+    unit = "crowdsec-firewall-bouncer"
+
+    def __init__(self, root=""):
+        r = root.rstrip("/")
+        self.config = r + "/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
+        self.opt_out = r + "/etc/tuxwall/no-bouncer-migration"
+        self.state = r + "/var/lib/tuxwall/bouncer-nft-migration.json"
+        self.logfile = r + "/var/log/tuxwall/bouncer-migration.log"
+        self.backup_root = r + "/var/backups"
+        self.quiet = False
+
+    def run(self, cmd, input=None, timeout=60):
+        try:
+            p = subprocess.run(cmd, input=input, capture_output=True, text=True, timeout=timeout)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return 127, str(exc)
+        return p.returncode, (p.stdout or "") + (p.stderr or "" if p.returncode else "")
+
+    def sleep(self, s):
+        time.sleep(s)
+
+    def now(self):
+        return time.time()
+
+    def log(self, msg):
+        line = "%s %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg)
+        if not self.quiet:
+            print("   bouncer-migration: " + msg, flush=True)
+        try:
+            os.makedirs(os.path.dirname(self.logfile), exist_ok=True)
+            with open(self.logfile, "a") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+
+
+# ── pure helpers ─────────────────────────────────────────────────────────────
+
+def render_nft_config(text):
+    """The bouncer config in TuxWall's nftables layout. Same edits as
+    tuxwall-install.sh configure_bouncer, except deny_action is kept."""
+    s = re.sub(r"(?m)^mode:.*$", "mode: nftables", text, count=1)
+    if not re.search(r"(?m)^mode:", s):
+        s = "mode: nftables\n" + s
+    if re.search(r"(?m)^nftables_hooks:", s):
+        s = re.sub(r"(?m)^nftables_hooks:[ \t]*\n(?:[ \t]*(?:-.*)?\n)*", "nftables_hooks:\n  - input\n\n", s, count=1)
+    else:
+        s = s.rstrip("\n") + "\n\nnftables_hooks:\n  - input\n"
+    out, fam = [], None
+    for line in s.splitlines():
+        m = re.match(r"^  (ipv4|ipv6):\s*$", line)
+        if m:
+            fam = m.group(1)
+        elif re.match(r"^\S", line):
+            fam = None
+        if fam and re.match(r"^    priority:", line):
+            continue
+        out.append(line)
+        if fam and re.match(r"^    chain:", line):
+            out.append("    priority: -10")
+    return "\n".join(out) + "\n"
+
+
+def local_override(local_text):
+    """Keys in crowdsec-firewall-bouncer.yaml.local that would override the
+    migrated layout (the owner's choice: then the migration is skipped)."""
+    return [k for k in ("mode", "nftables", "nftables_hooks")
+            if re.search(r"(?m)^%s\s*:" % re.escape(k), local_text or "")]
+
+
+def ipset_counts(text, prefixes):
+    """{name: entries} of `ipset list -t` for the bouncer's sets."""
+    out, name = {}, None
+    rx = re.compile(r"^(%s)(-\d+)?$" % "|".join(re.escape(p) for p in prefixes))
+    for line in (text or "").splitlines():
+        if line.startswith("Name:"):
+            name = line.split(":", 1)[1].strip()
+            name = name if rx.match(name) else None
+        elif name and line.startswith("Number of entries:"):
+            try:
+                out[name] = int(line.split(":", 1)[1])
+            except ValueError:
+                out[name] = 0
+    return out
+
+
+def probe_script():
+    return ("add table inet %s\n"
+            "add set inet %s p { type ipv4_addr; flags timeout; }\n"
+            "add element inet %s p { 192.0.2.1 timeout %dd }\n" % (PROBE_TABLE, PROBE_TABLE, PROBE_TABLE,
+                                                                   PROBE_TIMEOUT_DAYS))
+
+
+def probe_ok(C, nft_json):
+    """True when the probe element kept (nearly) its 365-day timeout."""
+    t = C.parse_table(C.nft_objects(nft_json))
+    els = (t["sets"].get("p") or {}).get("elements") or {}
+    exp = els.get("192.0.2.1")
+    return exp is not None and exp >= PROBE_MIN_DAYS * DAY
+
+
+def nft_ready(C, cfg, tables, ipset_total):
+    """(ready, problems, elements) for the bouncer's nft tables.
+    tables: {fam: parse_table() | None} (non-terse, with elements)."""
+    problems, total, enabled = [], 0, 0
+    for fam, f in cfg["nft"].items():
+        if not f["enabled"]:
+            continue
+        enabled += 1
+        tbl = tables.get(fam)
+        st = C.nft_family_state(cfg, fam, tbl)
+        problems += [p["id"] for p in st["problems"]]
+        if tbl is None:
+            continue
+        hooked = sorted(c["hook"] for c in tbl["chains"].values() if c.get("hook"))
+        if not f["set_only"] and hooked != sorted(cfg["hooks"]):
+            problems.append("crowdsec-nft-hooks:%s:%s" % (fam, ",".join(hooked)))
+        total += sum(len(s["elements"]) for n, s in tbl["sets"].items() if n.startswith(f["blacklist"] + "-"))
+    if not enabled:
+        problems.append("crowdsec-nft-no-family")
+    need = int(ipset_total * FILL_RATIO)
+    return (not problems and total >= need), problems, total
+
+
+def iptables_cleanup_cmds(chains, families=("v4", "v6")):
+    """Commands removing the old CROWDSEC_CHAIN (jumps first)."""
+    cmds = []
+    for fam in families:
+        ipt = "iptables" if fam == "v4" else "ip6tables"
+        for ch in chains:
+            cmds.append(("jump", [ipt, "-w", "-D", ch, "-j", "CROWDSEC_CHAIN"]))
+        cmds.append(("flush", [ipt, "-w", "-F", "CROWDSEC_CHAIN"]))
+        cmds.append(("chain", [ipt, "-w", "-X", "CROWDSEC_CHAIN"]))
+    return cmds
+
+
+# ── I/O steps ────────────────────────────────────────────────────────────────
+
+def _read(path):
+    try:
+        with open(path, "r", errors="replace") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _write_like(path, text, like=None):
+    """Atomic write keeping owner/mode of `like` (default: path itself)."""
+    st = os.stat(like or path)
+    fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", dir=os.path.dirname(path))
+    try:
+        os.fchmod(fd, st.st_mode & 0o7777)
+        if (st.st_uid, st.st_gid) != (os.geteuid(), os.getegid()):
+            os.fchown(fd, st.st_uid, st.st_gid)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def load_state(env):
+    try:
+        with open(env.state) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(env, result, **kw):
+    d = {"result": result, "ts": int(env.now())}
+    d.update(kw)
+    try:
+        os.makedirs(os.path.dirname(env.state), exist_ok=True)
+        with open(env.state + ".tmp", "w") as f:
+            json.dump(d, f, indent=2)
+        os.replace(env.state + ".tmp", env.state)
+    except OSError:
+        pass
+
+
+def unit_installed(env):
+    rc, _ = env.run(["systemctl", "cat", env.unit], timeout=15)
+    return rc == 0
+
+
+def nft_usable(env, C):
+    """(ok, reason). Probes a 365-day set timeout in a scratch table."""
+    rc, out = env.run(["nft", "list", "tables"], timeout=15)
+    if rc != 0:
+        return False, "nft does not work (%s)" % out.strip()[:120]
+    env.run(["nft", "delete", "table", "inet", PROBE_TABLE], timeout=15)
+    try:
+        rc, out = env.run(["nft", "-f", "-"], input=probe_script(), timeout=15)
+        if rc != 0:
+            return False, "nft timeout sets unsupported (%s)" % out.strip()[:120]
+        rc, out = env.run(["nft", "-j", "list", "set", "inet", PROBE_TABLE, "p"], timeout=15)
+        if rc != 0 or not probe_ok(C, out):
+            return False, "kernel does not keep a %d-day set timeout" % PROBE_TIMEOUT_DAYS
+    finally:
+        env.run(["nft", "delete", "table", "inet", PROBE_TABLE], timeout=15)
+    return True, ""
+
+
+def bouncer_tables(env, C, cfg):
+    def run(cmd, timeout=60):
+        return env.run(cmd, timeout=timeout)
+    return {fam: (C.list_table(run, f["family"], f["table"], terse=False) if f["enabled"] else None)
+            for fam, f in cfg["nft"].items()}
+
+
+def plan(env, C, force=False):
+    """('skip', reason, quiet) or ('migrate', ctx, False). Read-only."""
+    if os.path.exists(env.opt_out):
+        return "skip", "opt-out flag %s present" % env.opt_out, False
+    text = _read(env.config)
+    if text is None or not unit_installed(env):
+        return "skip", "CrowdSec firewall bouncer not installed", True
+    local = _read(env.config + ".local") or ""
+    cfg = C.bouncer_config(text, local)
+    if cfg["mode"] == "nftables":
+        return "skip", "bouncer already in nftables mode", True
+    if cfg["mode"] != "iptables":
+        return "skip", "bouncer mode %r is not managed" % cfg["mode"], False
+    st = load_state(env)
+    if st.get("result") == "failed" and not force:
+        return "skip", ("an earlier attempt failed (%s); retry with tuxwall-bouncer-nft-migrate --force"
+                        % st.get("reason", "?")), False
+    if st.get("result") == "migrated" and not force:
+        return "skip", ("back in iptables mode after an earlier migration (owner choice kept; "
+                        "tuxwall-bouncer-nft-migrate --force migrates again)"), False
+    over = local_override(local)
+    if over:
+        return "skip", "%s.local sets %s (owner override)" % (os.path.basename(env.config), ", ".join(over)), False
+    rc, out = env.run(["systemctl", "is-active", env.unit], timeout=15)
+    if out.strip() != "active":
+        return "skip", "bouncer service is not running (%s)" % (out.strip() or rc), False
+    ok, why = nft_usable(env, C)
+    if not ok:
+        return "skip", why, False
+    new_text = render_nft_config(text)
+    new_cfg = C.bouncer_config(new_text, local)
+    if new_cfg["mode"] != "nftables" or new_cfg["hooks"] != ["input"]:
+        return "skip", "could not render the nftables config", False
+    if any(f["enabled"] and f["priority"] >= 0 for f in new_cfg["nft"].values()):
+        return "skip", "config has no nftables ipv4/ipv6 sections to set priority -10 in", False
+    prefixes = [cfg["nft"]["v4"]["blacklist"], cfg["nft"]["v6"]["blacklist"]]
+    rc, out = env.run(["ipset", "list", "-t"], timeout=30)
+    counts = ipset_counts(out, prefixes) if rc == 0 else {}
+    return "migrate", {"text": text, "new_text": new_text, "cfg": cfg, "new_cfg": new_cfg,
+                       "local": local, "ipsets": counts}, False
+
+
+def backup(env, ctx):
+    d = os.path.join(env.backup_root, "tuxwall-bouncer-nft-%s" % time.strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    os.chmod(d, 0o700)
+    files = {"crowdsec-firewall-bouncer.yaml.pre-nft": ctx["text"]}
+    for name, cmd in (("iptables.save", ["iptables-save"]), ("ip6tables.save", ["ip6tables-save"]),
+                      ("ipset.save", ["ipset", "save"]), ("nft-ruleset.txt", ["nft", "list", "ruleset"])):
+        rc, out = env.run(cmd, timeout=60)
+        if rc == 0:
+            files[name] = out
+    for name, body in files.items():
+        p = os.path.join(d, name)
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(body)
+    return d
+
+
+def _kill_restart(env):
+    env.run(["systemctl", "kill", "-s", "KILL", env.unit], timeout=30)
+    env.sleep(0.3)
+    rc, out = env.run(["systemctl", "restart", env.unit], timeout=90)
+    return rc == 0, out.strip()[:200]
+
+
+def _iptables_back(env, ctx):
+    """True when the restored iptables bouncer enforces again."""
+    for ch in ctx["cfg"]["iptables_chains"]:
+        if env.run(["iptables", "-w", "-C", ch, "-j", "CROWDSEC_CHAIN"], timeout=15)[0] != 0:
+            return False
+    if sum(ctx["ipsets"].values()):
+        rc, out = env.run(["ipset", "list", "-t"], timeout=30)
+        prefixes = [ctx["cfg"]["nft"]["v4"]["blacklist"], ctx["cfg"]["nft"]["v6"]["blacklist"]]
+        return rc == 0 and sum(ipset_counts(out, prefixes).values()) > 0
+    return True
+
+
+def rollback(env, C, ctx, reason):
+    env.log("rolling back to iptables mode: %s" % reason)
+    try:
+        _write_like(env.config, ctx["text"])
+    except OSError as exc:
+        env.log("ERROR: could not restore %s: %s (backup in %s)" % (env.config, exc, ctx["backup"]))
+        save_state(env, "failed", reason=reason, rollback="config restore failed", backup=ctx["backup"])
+        return
+    ok, out = _kill_restart(env)
+    back = False
+    t0 = env.now()
+    while ok and env.now() - t0 < ROLLBACK_TIMEOUT:
+        if _iptables_back(env, ctx):
+            back = True
+            break
+        env.sleep(1)
+    if back:
+        for fam, f in ctx["new_cfg"]["nft"].items():
+            if C.list_table(lambda cmd, timeout=30: env.run(cmd, timeout=timeout), f["family"], f["table"]):
+                env.run(["nft", "delete", "table", f["family"], f["table"]], timeout=30)
+        env.log("rolled back: iptables bouncer enforcing again; nft tables removed")
+    else:
+        env.log("WARNING: iptables bouncer not confirmed after rollback (%s); nft tables left in place "
+                "(they keep enforcing). Check: systemctl status %s" % (out or "no CROWDSEC_CHAIN", env.unit))
+    save_state(env, "failed", reason=reason, rolled_back=back, backup=ctx["backup"])
+
+
+def migrate(env, C, force=False, check_only=False):
+    """0 = migrated / nothing to do / skipped, 1 = failed (rolled back)."""
+    action, info, quiet = plan(env, C, force)
+    if action == "skip":
+        if not quiet:
+            env.log("skipped: %s" % info)
+        return 0
+    ctx = info
+    total = sum(ctx["ipsets"].values())
+    if check_only:
+        env.log("would migrate: iptables -> nftables (ipsets %s)" % (ctx["ipsets"] or "none"))
+        return 0
+    env.log("migrating the CrowdSec bouncer to nftables mode (ipset entries %d)" % total)
+    ctx["backup"] = backup(env, ctx)
+    env.log("backup: %s" % ctx["backup"])
+    try:
+        _write_like(env.config, ctx["new_text"])
+    except OSError as exc:
+        env.log("skipped: could not write %s: %s" % (env.config, exc))
+        save_state(env, "failed", reason="config write failed", backup=ctx["backup"])
+        return 1
+    try:
+        ok, out = _kill_restart(env)
+        if not ok:
+            rollback(env, C, ctx, "bouncer did not start in nftables mode (%s)" % out)
+            return 1
+        t0, ready, problems, n = env.now(), False, [], 0
+        while env.now() - t0 < POPULATE_TIMEOUT:
+            ready, problems, n = nft_ready(C, ctx["new_cfg"], bouncer_tables(env, C, ctx["new_cfg"]), total)
+            if ready:
+                break
+            env.sleep(POLL)
+    except Exception as exc:
+        rollback(env, C, ctx, "error during the switch: %r" % exc)
+        return 1
+    if not ready:
+        rollback(env, C, ctx, "nft tables not ready after %ds (elements %d of %d ipset entries; %s)"
+                 % (POPULATE_TIMEOUT, n, total, ", ".join(problems) or "too few elements"))
+        return 1
+    env.log("nftables enforcing after %.1fs: %d elements (ipsets had %d)" % (env.now() - t0, n, total))
+    left = []
+    for kind, cmd in iptables_cleanup_cmds(ctx["cfg"]["iptables_chains"]):
+        if kind == "jump":
+            for _ in range(16):      # one jump per bouncer start that lost its stop
+                if env.run(cmd, timeout=15)[0] != 0:
+                    break
+        elif env.run(cmd, timeout=15)[0] != 0 and kind == "chain":
+            if env.run([cmd[0], "-w", "-S", "CROWDSEC_CHAIN"], timeout=15)[0] == 0:
+                left.append("%s CROWDSEC_CHAIN" % cmd[0])
+    for name in sorted(ctx["ipsets"]):
+        if env.run(["ipset", "destroy", name], timeout=15)[0] != 0:
+            left.append("ipset " + name)
+    if left:
+        env.log("note: could not remove %s (harmless leftovers; the firewall page lists them)" % ", ".join(left))
+    save_state(env, "migrated", elements=n, ipset_entries=total, backup=ctx["backup"], leftovers=left)
+    env.log("done: bouncer in nftables mode (input hook, priority -10); old CROWDSEC_CHAIN/ipsets removed")
+    return 0
+
+
+def main(argv):
+    env = Env(os.environ.get("TW_ROOT", ""))
+    try:
+        C = _crowdsec_fw()
+    except Exception as exc:
+        env.log("skipped: crowdsec_fw module unavailable (%r)" % exc)
+        return 0
+    if os.geteuid() != 0 and not os.environ.get("TW_ROOT"):
+        print("run as root", file=sys.stderr)
+        return 2
+    try:
+        return migrate(env, C, force="--force" in argv, check_only="--check" in argv)
+    except Exception as exc:  # never leave postinst with a traceback
+        env.log("ERROR: %r" % exc)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

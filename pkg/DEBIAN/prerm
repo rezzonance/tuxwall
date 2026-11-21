@@ -10,6 +10,12 @@ case "$1" in
     # tripwire: keep running across upgrades (a trip in force stays
     # enforced); stopped only when the package is removed
     if [ "$1" = remove ]; then
+      # the package disables it here, not the owner: forget the postinst
+      # "enabled once" marker so a reinstall enables it again (kept when the
+      # owner had disabled the unit - that choice survives a reinstall)
+      if systemctl is-enabled --quiet tuxwall-tripwire.service 2>/dev/null; then
+        rm -f /var/lib/tuxwall/.tripwire-enabled-once
+      fi
       systemctl stop tuxwall-tripwire.service 2>/dev/null || true
       systemctl disable tuxwall-tripwire.service 2>/dev/null || true
     fi

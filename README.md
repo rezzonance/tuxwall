@@ -318,6 +318,8 @@ sudo apt update && sudo apt upgrade tuxwall
 
 The dashboard itself can also check for package updates from the **System** page.
 
+Upgrades also move an existing CrowdSec firewall bouncer from iptables to nftables mode (full ban durations; zero-gap switch with automatic rollback; opt out with `sudo touch /etc/tuxwall/no-bouncer-migration` — details in `/etc/crowdsec/README-custom-blocklist.md`), and enable the tripwire service once if the package never enabled it before (its own settings decide what it watches; a service you disable later stays disabled).
+
 Remove the dashboard:
 
 ```bash

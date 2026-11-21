@@ -168,6 +168,65 @@ written then removed) and checks the host's tables are unchanged.
 firewall_safety_check.py covers the guard side (nft-mode invariants, nft
 table ownership).
 
+## bouncer_migrate_check.py — CrowdSec bouncer iptables → nftables upgrade (CI + root netns)
+
+```bash
+python3 tools/bouncer_migrate_check.py              # pure (CI)
+sudo python3 tools/bouncer_migrate_check.py --netns # + real nft/iptables/ipset in a scratch namespace
+```
+
+`pkg/usr/local/sbin/tuxwall-bouncer-nft-migrate` (run by postinst on
+upgrades): the config rendering is byte-identical to the installer's
+`configure_bouncer` except that the deny action is kept; `.local`
+overrides, `ipset list -t` counts, the 365-day timeout probe and the
+readiness rule (configured hooks only, priority before ufw, >= 90 % of the old
+ipset entries). The whole flow runs against a simulated host (systemctl, nft,
+iptables, ipset answered from an in-memory model under a temp root): every
+skip case (not installed, opt-out flag, already nftables, other modes, `.local`
+override, bouncer stopped, nft unusable, capped timeouts, earlier failure,
+owner switched back) changes nothing; the switch SIGKILLs the old bouncer,
+never polls with neither backend enforcing, then removes CROWDSEC_CHAIN and
+the ipsets; empty/short sets, a forward hook, priority 0 or a failed restart
+restore the iptables config and remove the nft tables; config owner/mode,
+0700/0600 backups, no API key in the log, a second run is a no-op, `--force`
+retries. `--netns` (namespace `twbmig`) runs the probe and the readiness check
+against real nft and removes a real CROWDSEC_CHAIN (two jumps) and ipset; the
+host's nft tables, ipsets and iptables rules are compared before/after.
+
+## kea_conf_check.py — Kea config with comments (CI)
+
+```bash
+python3 tools/kea_conf_check.py
+```
+
+`www/includes/kea_conf.py` and its users. Kea allows `//` and `#` line or
+trailing comments and `/* */` blocks; the installer writes a `// Generated
+by ...` header that strict `json.load` rejected (DHCP reservations returned
+500 on fresh installs). Covers stripping only outside strings (URLs with
+`//`, `#` in names, `/* */` and escaped quotes inside strings), the installer's
+real `kea_json` output, header split and the one-time "Edited from the TuxWall
+dashboard" mark (the installer keeps such a file on re-runs:
+`kea_is_replaceable` is run in bash), the atomic write (owner/mode kept, no
+temp file, idempotent, failed write leaves the file untouched), the API's
+reservation add/edit/delete on a commented file (Kea reload stubbed, nothing
+under /etc/kea opened), `topology._read_kea`, `assign_plan.r_kea` (header
+kept, body-comment warning) and `fw_lint.kea_reservations`.
+
+## pkg_scripts_check.py — maintainer-script decisions (CI)
+
+```bash
+python3 tools/pkg_scripts_check.py
+```
+
+Cuts the decision functions out of `pkg/DEBIAN/postinst` and runs them with
+bash against a fake `systemctl`: the tripwire unit is enabled once by the
+package (marker `/var/lib/tuxwall/.tripwire-enabled-once`) even when a legacy
+v1 `tripwire.json` exists, an enabled unit is only marked, a unit the owner
+disabled after the marker is never re-enabled, a failed enable leaves no
+marker; the bouncer migration runs on upgrades only and never fails the
+postinst; `prerm remove` forgets the marker only when it disables an enabled
+unit. Also `bash -n` on postinst/prerm/postrm and STEP_TOTAL vs the steps.
+
 ## port_owner_check.py — port-ownership incidents (CI)
 
 ```bash

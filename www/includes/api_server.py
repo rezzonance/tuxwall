@@ -62,6 +62,11 @@ try:
 except Exception as _exc:
     print("tuxwall: crowdsec_fw module unavailable: %r" % _exc, flush=True)
     _csfw = None
+try:
+    import kea_conf as _kea_conf
+except Exception as _exc:  # strict JSON only (no Kea comments) without it
+    print("tuxwall: kea_conf module unavailable: %r" % _exc, flush=True)
+    _kea_conf = None
 
 
 def _topo(fn, default=""):
@@ -249,8 +254,7 @@ def router_static():
         return _ROUTER_CACHE["data"]
     ip = ""
     try:
-        with open("/etc/kea/kea-dhcp4.conf", "r") as f:
-            kea = json.load(f)
+        kea = _read_kea()
         d4 = kea.get("Dhcp4", {})
         for o in d4.get("option-data", []):
             if o.get("name") == "routers":
@@ -297,12 +301,18 @@ _KEA_LOCK   = threading.Lock()
 
 
 def _read_kea():
+    """Parsed kea-dhcp4.conf; Kea's // # /* */ comments are allowed."""
+    if _kea_conf is not None:
+        return _kea_conf.read(KEA_CONF)
     with open(KEA_CONF) as f:
         return json.load(f)
 
 
 def _write_kea(data):
-    # Atomic write via temp file
+    """Atomic rewrite keeping owner/mode and the leading comment header."""
+    if _kea_conf is not None:
+        _kea_conf.write(KEA_CONF, data)
+        return
     tmp = KEA_CONF + ".tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=4)
@@ -534,8 +544,7 @@ def delete_reservation(body):
 def kea_reservations():
     """Static reservations defined in kea-dhcp4.conf."""
     try:
-        with open("/etc/kea/kea-dhcp4.conf", "r") as f:
-            kea = json.load(f)
+        kea = _read_kea()
     except (OSError, ValueError):
         return []
     out = []
@@ -12915,8 +12924,7 @@ def build_system():
 
     dhcp = {"subnet": "", "pools": [], "router": "", "dns": "", "domain": ""}
     try:
-        with open("/etc/kea/kea-dhcp4.conf", "r") as f:
-            kea = json.load(f)
+        kea = _read_kea()
         d4 = kea.get("Dhcp4", {})
         opts = {}
         for o in d4.get("option-data", []):
@@ -21130,11 +21138,9 @@ def _af_section_crowdsec():
 
 def _af_section_dhcp():
     try:
-        with open("/etc/kea/kea-dhcp4.conf") as f:
-            kea = json.load(f)
+        kea = _read_kea()
     except (OSError, ValueError):
-        topo_mod = globals().get("_topology")
-        kea = topo_mod._read_kea() if topo_mod is not None else {}
+        kea = {}
     subnets = (kea.get("Dhcp4") or {}).get("subnet4") or []
     counts = {}
     resp = kea_command("lease4-get-all")

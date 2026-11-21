@@ -32,7 +32,7 @@ jobs:
         run: pip install ruff pyyaml
 
       - name: Byte-compile
-        run: python3 -m py_compile www/includes/api_server.py www/includes/topology.py www/includes/assign_plan.py www/includes/assign_apply.py www/includes/fw_guard.py www/includes/fw_snap.py www/includes/backups.py
+        run: python3 -m py_compile www/includes/api_server.py www/includes/topology.py www/includes/assign_plan.py www/includes/assign_apply.py www/includes/fw_guard.py www/includes/fw_snap.py www/includes/backups.py www/includes/kea_conf.py www/includes/crowdsec_fw.py
 
       - name: Module-level name order (existing gate)
         run: python3 tools/py-name-check.py www/includes/api_server.py
@@ -40,7 +40,7 @@ jobs:
       - name: Undefined names, all scopes (the 3.2.0 bug class)
         # F821 only, isolated config: pre-existing style findings must not
         # fail this gate - an undefined name is always a release blocker.
-        run: ruff check --select F821 --isolated www/includes/api_server.py www/includes/topology.py www/includes/assign_plan.py www/includes/assign_apply.py www/includes/fw_guard.py www/includes/fw_snap.py www/includes/fw_lint.py www/includes/fw_edit.py www/includes/fw_hits.py www/includes/canary_egress.py www/includes/backups.py plugins/*/main.py pkg/usr/local/sbin/tuxwall-tripwire tools/tripwire_check.py tools/deception_check.py tools/custom_blocklist_check.py tools/port_owner_check.py collector/tuxwall-collector.py scripts/tuxwall-collector-admin tools/collector_severity_check.py
+        run: ruff check --select F821 --isolated www/includes/api_server.py www/includes/topology.py www/includes/assign_plan.py www/includes/assign_apply.py www/includes/fw_guard.py www/includes/fw_snap.py www/includes/fw_lint.py www/includes/fw_edit.py www/includes/fw_hits.py www/includes/canary_egress.py www/includes/backups.py www/includes/kea_conf.py www/includes/crowdsec_fw.py plugins/*/main.py pkg/usr/local/sbin/tuxwall-tripwire pkg/usr/local/sbin/tuxwall-bouncer-nft-migrate tools/kea_conf_check.py tools/bouncer_migrate_check.py tools/pkg_scripts_check.py tools/tripwire_check.py tools/deception_check.py tools/custom_blocklist_check.py tools/port_owner_check.py collector/tuxwall-collector.py scripts/tuxwall-collector-admin tools/collector_severity_check.py
 
       - name: Import + behavior smoke test
         run: python3 tools/api_server_smoke.py
@@ -75,6 +75,18 @@ jobs:
       - name: Backup safety (sanitizer leak fixtures, retention, limits, restore in a temp root)
         # pure tests: synthetic archives in a temp tree, fake backup script
         run: python3 tools/backup_safety_check.py
+
+      - name: Kea config with comments (tolerant reader, header kept, reservation API on a commented file)
+        # pure tests: temp files, Kea reload stubbed
+        run: python3 tools/kea_conf_check.py
+
+      - name: CrowdSec bouncer nftables upgrade migration (simulated host, zero gap, rollback)
+        # pure tests: systemctl/nft/iptables/ipset answered from an in-memory model in a temp root
+        run: python3 tools/crowdsec_fw_check.py && python3 tools/bouncer_migrate_check.py
+
+      - name: Package maintainer scripts (tripwire enable-once, bouncer migration gating)
+        # pure tests: postinst/prerm functions run with bash against a fake systemctl
+        run: python3 tools/pkg_scripts_check.py
 
   dashboard:
     name: dashboard.js gates

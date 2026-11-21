@@ -22,6 +22,10 @@ import sys
 import tempfile
 import time
 
+if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import kea_conf  # noqa: E402
+
 CONF = "/etc/tuxwall/interfaces.json"
 PROFILE = "/etc/tuxwall/install-profile.json"
 NETWORK_JSON = "/etc/tuxwall/network.json"
@@ -83,36 +87,10 @@ def _read_kea():
     if not text:
         return {}
     try:
-        return json.loads(text)
-    except ValueError:
-        pass
-    # Kea accepts // # and /* */ comments; strip them outside strings
-    out, i, n, q = [], 0, len(text), False
-    while i < n:
-        c = text[i]
-        if q:
-            out.append(c)
-            if c == "\\" and i + 1 < n:
-                out.append(text[i + 1]); i += 1
-            elif c == '"':
-                q = False
-        elif c == '"':
-            q = True; out.append(c)
-        elif c == "#" or text.startswith("//", i):
-            while i < n and text[i] != "\n":
-                i += 1
-            continue
-        elif text.startswith("/*", i):
-            j = text.find("*/", i + 2)
-            i = n if j < 0 else j + 2
-            continue
-        else:
-            out.append(c)
-        i += 1
-    try:
-        return json.loads("".join(out))
+        doc = kea_conf.loads(text)
     except ValueError:
         return {}
+    return doc if isinstance(doc, dict) else {}
 
 
 def _default_route_dev():

@@ -476,9 +476,9 @@ def r_kea(ctx, m, res):
             res.warn("Kea is not configured (%s missing); DHCP settings are not rendered." % T.KEA_CONF)
         return
     try:
-        doc = json.loads(text)
+        doc = T.kea_conf.loads(text)
     except ValueError:
-        res.warn("%s is not plain JSON (comments?); DHCP changes are not rendered." % T.KEA_CONF)
+        res.warn("%s is not valid JSON; DHCP changes are not rendered." % T.KEA_CONF)
         return
     new = copy.deepcopy(doc)
     d4 = new.get("Dhcp4") or {}
@@ -585,7 +585,10 @@ def r_kea(ctx, m, res):
             out_if.append(d)
     ic["interfaces"] = out_if
     if new != doc:
-        res.file("kea", T.KEA_CONF, text, json.dumps(new, indent=4), 0o644)
+        res.file("kea", T.KEA_CONF, text, T.kea_conf.dumps(new, T.kea_conf.split_header(text)[0]), 0o644)
+        if T.kea_conf.body_has_comments(text):
+            res.warn("%s is rewritten from its parsed form: comments inside the JSON are not kept "
+                     "(the header comment and the snapshot are)." % T.KEA_CONF)
 
 
 def _pool_ok(pool, ipi):
@@ -1199,7 +1202,7 @@ def run_validators(ctx, res, tmp):
                         break
                     # the device does not exist yet (new VLAN / NIC): test the rest with a stand-in
                     standins.append(mm.group(1))
-                    kd = json.loads(body)
+                    kd = T.kea_conf.loads(body)
                     k4 = kd.get("Dhcp4") or {}
                     il = [x for x in (k4.get("interfaces-config") or {}).get("interfaces") or []
                           if x.split("/")[0] != mm.group(1)]

@@ -11,7 +11,7 @@ STATE_DIR=/var/lib/tuxwall
 # Pure block characters, no ANSI cursor tricks - renders identically on a
 # terminal, in apt/dpkg logs, and under unattended-upgrades. Built with bash
 # string appends (not tr) because tr is byte-oriented and mangles UTF-8.
-STEP_TOTAL=12
+STEP_TOTAL=13
 STEP_NOW=0
 step() {
   local label="$1" text="$2" width=24 i
@@ -22,6 +22,45 @@ step() {
   for ((i = 0; i < filled; i++)); do bar+="█"; done
   for ((i = filled; i < width; i++)); do empty+="░"; done
   printf '[%s%s] [%s/9] %s\n' "$bar" "$empty" "$label" "$text"
+}
+
+# Tripwire unit: the package enables it ONCE (marker file), whatever
+# /etc/tuxwall/tripwire.json holds - the engine's own config decides what it
+# does (mode disabled = idle). A unit the owner disabled after that is never
+# re-enabled. tools/pkg_scripts_check.py runs these two functions.
+# tripwire_unit_action MARKER yes|no(enabled now) -> enable | mark | restart
+tripwire_unit_action() {
+  if [[ -e $1 ]]; then echo restart
+  elif [[ $2 == yes ]]; then echo mark      # already enabled: record it, keep running
+  else echo enable
+  fi
+}
+tripwire_unit_setup() {   # tripwire_unit_setup MARKER
+  local marker=$1 enabled=no
+  systemctl is-enabled --quiet tuxwall-tripwire.service 2>/dev/null && enabled=yes
+  case "$(tripwire_unit_action "$marker" "$enabled")" in
+    enable)
+      if systemctl enable tuxwall-tripwire.service >/dev/null 2>&1; then
+        touch "$marker"
+        systemctl restart tuxwall-tripwire.service >/dev/null 2>&1 || true
+      fi ;;
+    mark)
+      touch "$marker"
+      systemctl try-restart tuxwall-tripwire.service >/dev/null 2>&1 || true ;;
+    *)
+      systemctl try-restart tuxwall-tripwire.service >/dev/null 2>&1 || true ;;
+  esac
+}
+
+# CrowdSec bouncer iptables -> nftables (full ban durations), upgrades only:
+# fresh installs get nftables from tuxwall-install.sh. The helper decides
+# (installed? iptables mode? opt-out /etc/tuxwall/no-bouncer-migration? nft
+# + long set timeouts?), switches with zero gap and rolls back on failure.
+bouncer_migration() {     # bouncer_migration PREV_VERSION [HELPER]
+  local helper=${2:-/usr/local/sbin/tuxwall-bouncer-nft-migrate}
+  [[ -n $1 && -f $helper ]] || return 0
+  chmod 755 "$helper" 2>/dev/null || true
+  "$helper" || echo "   CrowdSec bouncer left as it was (details: /var/log/tuxwall/bouncer-migration.log)"
 }
 
 case "$1" in
@@ -442,6 +481,9 @@ PY
       systemctl start --no-block suricata-update.service >/dev/null 2>&1 || true
     fi
 
+    step 6e "CrowdSec bouncer: nftables migration (upgrades; skipped when not applicable)..."
+    bouncer_migration "${2:-}"
+
     step 7 "Enabling dashboard service and daily blocklist updates..."
     # tuxwall.service's sandbox ReadWritePaths includes optional
     # directories (cloudflared on boxes that run a tunnel, wireguard).
@@ -467,17 +509,14 @@ PY
     # /etc/tuxwall/tripwire.json): the service idles with no detection
     # threads, but it must run so a check enabled on Security > Tripwire takes
     # effect and a trip in force is re-applied at boot. An older {"mode"}
-    # config is migrated to schema v2 at service start (Log only, never Block). Enabled once, the
-    # first time it is seen (no config yet); an admin who disabled the unit
-    # later keeps that choice. Upgrades restart a running engine.
+    # config is migrated to schema v2 at service start (Log only, never Block).
+    # Enabled once by the package (marker $STATE_DIR/.tripwire-enabled-once),
+    # also when a legacy tripwire.json exists without an enabled unit; an
+    # admin who disabled the unit later keeps that choice. Upgrades restart a
+    # running engine.
     chmod 750 /usr/local/sbin/tuxwall-tripwire 2>/dev/null || true
     chmod 750 /usr/local/sbin/tuxwall-tripwire-restore 2>/dev/null || true
-    if ! systemctl is-enabled --quiet tuxwall-tripwire.service 2>/dev/null \
-       && [[ ! -e /etc/tuxwall/tripwire.json ]]; then
-        systemctl enable --now tuxwall-tripwire.service >/dev/null 2>&1 || true
-    else
-        systemctl try-restart tuxwall-tripwire.service >/dev/null 2>&1 || true
-    fi
+    tripwire_unit_setup "$STATE_DIR/.tripwire-enabled-once"
 
     step 8 "Triggering initial blocklist download (background)..."
     sleep 2

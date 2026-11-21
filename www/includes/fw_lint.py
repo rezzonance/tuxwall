@@ -18,6 +18,10 @@ try:
     import canary_egress as CE
 except ImportError:  # pragma: no cover
     CE = None
+try:
+    import kea_conf as KC
+except ImportError:  # pragma: no cover
+    KC = None
 
 SEV_RANK = {s: i for i, s in enumerate(G.SEVERITIES)}
 RISKY_FORWARD = {21: "FTP", 23: "Telnet", 135: "MS-RPC", 139: "NetBIOS", 445: "SMB", 1433: "MSSQL",
@@ -146,6 +150,8 @@ def evaluate_route(rules, defaults, iin, iout):
 
 def kea_reservations(ctx):
     txt = ctx.read("/etc/kea/kea-dhcp4.conf")
+    if KC is not None:
+        txt = KC.strip_comments(txt)
     return set(re.findall(r'"ip-address"\s*:\s*"([0-9.]+)"', txt))
 
 
