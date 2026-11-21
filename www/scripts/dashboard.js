@@ -13826,7 +13826,12 @@
         refreshUpdates();
         if (document.querySelector('#sys-subtabs [data-sys-pane="plugins"].active')) loadPluginsView();
       }
-      if (view === "logs") {
+      if (view === "logs" && !isAdminUser()) {
+        // /api/logs/** is admin-only server-side (raw service journals)
+        stopLogTimer();
+        if (els.logView) els.logView.textContent = "";
+        if (els.logMeta) els.logMeta.textContent = "Service logs are available to administrators only.";
+      } else if (view === "logs") {
         loadLogSources();
         startLogTimer();
       } else {
@@ -15832,7 +15837,8 @@
     // The AI Assistant reaches the opencode agent, which runs shell commands
     // and holds sudo, so it is admin-only server-side. Hide it for viewers
     // rather than leaving a panel that only returns 403.
-    document.querySelectorAll('.nav-item[data-view="settings"], .nav-item[data-view="ai"], #ai-panel-btn')
+    // Service logs (/api/logs/**) are admin-only server-side too.
+    document.querySelectorAll('.nav-item[data-view="settings"], .nav-item[data-view="ai"], .nav-item[data-view="logs"], #ai-panel-btn')
       .forEach((el) => { el.hidden = !isAdmin; });
     document.dispatchEvent(new CustomEvent("tw:role", { detail: { admin: isAdmin } }));
     const pluginTab = document.querySelector('#sys-subtabs [data-sys-pane="plugins"]');
@@ -15851,7 +15857,7 @@
     if (els.incidentSettings) els.incidentSettings.hidden = !isAdmin;
     if (isAdmin) loadPluginHost(); else clearPluginHost();
     refreshAvatarUI();
-    if (!isAdmin && (state.activeView === "settings" || state.activeView === "ai" ||
+    if (!isAdmin && (state.activeView === "settings" || state.activeView === "ai" || state.activeView === "logs" ||
                      (state.activeView || "").startsWith("plugin:"))) {
       switchView("overview");
     }

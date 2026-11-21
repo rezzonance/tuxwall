@@ -11459,8 +11459,11 @@ VIEWER_POST_PATHS = frozenset({
 
 # GETs that disclose credentials or grant shell reach, so admin-only.
 # /api/backups/** ships raw archives containing auth.json and WireGuard
-# private keys; /api/agent/** reaches the opencode agent.
+# private keys; /api/agent/** reaches the opencode agent; /api/logs/**
+# returns raw service journals (client IPs/hostnames, auth failures, URLs,
+# tokens printed by services - 3.3.3).
 ADMIN_GET_PREFIXES = (
+    "/api/logs",
     "/api/firewall/snapshots",
     "/api/backups",
     "/api/agent",
@@ -12014,9 +12017,12 @@ def auth_session_state(identity=None):
         "id": "dark", "name": "Dark", "dark": True,
         "colors": {k: v for k, v in BUILTIN_THEMES[0]["colors"].items()},
     }
-    _uc = load_ui_conf()
-    state["router_lat"] = _uc.get("router_lat")
-    state["router_lon"] = _uc.get("router_lon")
+    # The router's location only for signed-in users (attack map, settings):
+    # this endpoint answers unauthenticated callers too (login page).
+    if me is not None:
+        _uc = load_ui_conf()
+        state["router_lat"] = _uc.get("router_lat")
+        state["router_lon"] = _uc.get("router_lon")
     return state
 
 
