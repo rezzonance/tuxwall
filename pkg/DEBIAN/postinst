@@ -63,6 +63,61 @@ bouncer_migration() {     # bouncer_migration PREV_VERSION [HELPER]
   "$helper" || echo "   CrowdSec bouncer left as it was (details: /var/log/tuxwall/bouncer-migration.log)"
 }
 
+# radvd reads /etc/tuxwall/radvd.conf through a radvd.service drop-in
+# (radvd --config ...): the dashboard's sandbox (ProtectSystem=full) cannot
+# replace a file directly in /etc. Migration, once: copy /etc/radvd.conf
+# (content + mode; the old file is left in place, unused), configtest the
+# copy, install the drop-in, restart a running radvd and put everything back
+# if it does not come up. Skipped (logged) when a local script still writes
+# /etc/radvd.conf - radvd would stop seeing its changes - or with the opt-out
+# /etc/tuxwall/no-radvd-migration. tools/pkg_scripts_check.py runs these.
+RADVD_NEW=/etc/tuxwall/radvd.conf
+RADVD_OLD=/etc/radvd.conf
+RADVD_DROPIN=/etc/systemd/system/radvd.service.d/10-tuxwall.conf
+RADVD_DROPIN_SRC=/usr/share/tuxwall/radvd/10-tuxwall.conf
+radvd_foreign_writers() {   # radvd_foreign_writers [ROOT] -> files naming /etc/radvd.conf (not TuxWall's)
+  local r=${1:-} f
+  for f in "$r"/usr/local/sbin/* "$r"/usr/local/bin/* "$r"/etc/systemd/system/*.service \
+           "$r"/etc/cron.d/* "$r"/etc/networkd-dispatcher/*/*; do
+    [[ -f $f ]] || continue
+    case "${f##*/}" in tuxwall*|system-backup.sh) continue ;; esac
+    grep -qsF "$RADVD_OLD" "$f" && printf '%s\n' "${f#"$r"}"
+  done
+  return 0
+}
+radvd_migration() {         # radvd_migration [ROOT] -> one status line, never fails
+  local r=${1:-} new old dropin copied=0 w
+  new=$r$RADVD_NEW; old=$r$RADVD_OLD; dropin=$r$RADVD_DROPIN
+  if [[ -e $dropin ]]; then echo "radvd: already reads $RADVD_NEW"; return 0; fi
+  [[ -f $r$RADVD_DROPIN_SRC ]] || { echo "radvd: drop-in not shipped, left as it was"; return 0; }
+  [[ -e $r/etc/tuxwall/no-radvd-migration ]] && { echo "radvd: migration opted out (/etc/tuxwall/no-radvd-migration)"; return 0; }
+  w="$(radvd_foreign_writers "$r" | tr '\n' ' ')"
+  [[ -z $w ]] || { echo "radvd: left on $RADVD_OLD - written by ${w% } (point it at $RADVD_NEW, then reinstall)"; return 0; }
+  if [[ ! -s $new ]]; then
+    [[ -s $old ]] || { echo "radvd: no config yet, nothing to migrate"; return 0; }
+    mkdir -p "${new%/*}"
+    cp -p "$old" "$new" || { rm -f "$new"; echo "radvd: copy failed, left on $RADVD_OLD"; return 0; }
+    copied=1
+  fi
+  if ! radvd --configtest --config "$new" >/dev/null 2>&1; then
+    (( copied )) && rm -f "$new"
+    echo "radvd: configtest of $RADVD_NEW failed, left on $RADVD_OLD"; return 0
+  fi
+  mkdir -p "${dropin%/*}"
+  install -m 644 "$r$RADVD_DROPIN_SRC" "$dropin"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  if systemctl is-active --quiet radvd.service 2>/dev/null; then
+    if ! systemctl restart radvd.service >/dev/null 2>&1 || ! systemctl is-active --quiet radvd.service 2>/dev/null; then
+      rm -f "$dropin"
+      (( copied )) && rm -f "$new"
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      systemctl restart radvd.service >/dev/null 2>&1 || true
+      echo "radvd: did not start with $RADVD_NEW - rolled back to $RADVD_OLD"; return 0
+    fi
+  fi
+  echo "radvd: now reads $RADVD_NEW ($RADVD_OLD left in place, unused)"
+}
+
 case "$1" in
   configure)
 
@@ -221,7 +276,8 @@ KEA
       echo "   installed basic Kea DHCP config ($LAN_IF, $LAN_SUBNET, pool $_base.100-$_base.199)"
     fi
 
-    if [[ -n "$LAN_IF" && ! -s /etc/radvd.conf ]]; then
+    RADVD_FRESH=0
+    if [[ -n "$LAN_IF" && ! -s $RADVD_NEW && ! -s $RADVD_OLD ]]; then
       # Random RFC 4193 ULA /48 global id (stable once written - this file
       # is never regenerated after the first install)
       _gid="$(od -An -tx1 -N5 /dev/urandom 2>/dev/null | tr -d ' \n')"
@@ -245,10 +301,19 @@ interface $LAN_IF
     RDNSS $_ula::1 { };
 };
 RADVD
-      install -o root -g root -m 0644 "$TMP" /etc/radvd.conf
+      mkdir -p "${RADVD_NEW%/*}"
+      install -o root -g root -m 0644 "$TMP" "$RADVD_NEW"
       rm -f "$TMP"
-      systemctl enable --now radvd >/dev/null 2>&1 || true
+      RADVD_FRESH=1
       echo "   installed basic radvd config ($LAN_IF, ULA $_ula::/64)"
+    fi
+    # radvd config path: /etc/radvd.conf -> /etc/tuxwall/radvd.conf (see radvd_migration)
+    _radvd_msg="$(radvd_migration)"
+    echo "   $_radvd_msg"
+    mkdir -p /var/log/tuxwall
+    printf '%s %s\n' "$(date '+%F %T')" "$_radvd_msg" >> /var/log/tuxwall/radvd-migration.log 2>/dev/null || true
+    if (( RADVD_FRESH )); then
+      systemctl enable --now radvd >/dev/null 2>&1 || true
     fi
 
     # Router base: resolv.conf + forwarding + WAN NAT. Same guarded
@@ -371,8 +436,13 @@ EOF
     step 6 "Setting up firewall (ufw)..."
     # Only open SSH/HTTP when no such rule exists yet: upgrades must not
     # re-add a WAN-wide OpenSSH allow after the admin scoped it to LAN/VPN.
-    ufw status 2>/dev/null | grep -q '22/tcp' || ufw allow OpenSSH >/dev/null 2>&1 || true
-    ufw status 2>/dev/null | grep -q '80/tcp' || ufw allow 80/tcp >/dev/null 2>&1 || true
+    # tuxwall-install.sh sets the baseline itself (SSH from the LAN only,
+    # dashboard on the LAN) and exports TUXWALL_INSTALLER_FIREWALL=1: no
+    # interface-less SSH/80 rule (= open on the WAN) behind its back.
+    if [[ ${TUXWALL_INSTALLER_FIREWALL:-} != 1 ]]; then
+      ufw status 2>/dev/null | grep -q '22/tcp' || ufw allow OpenSSH >/dev/null 2>&1 || true
+      ufw status 2>/dev/null | grep -q '80/tcp' || ufw allow 80/tcp >/dev/null 2>&1 || true
+    fi
     # Retire any WAN-wide OpenSSH allow, but only when scoped SSH access
     # already exists (LAN/VPN interface rules) — upgrades must neither
     # re-add it nor lock out fresh installs that have nothing else.

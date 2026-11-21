@@ -225,7 +225,14 @@ v1 `tripwire.json` exists, an enabled unit is only marked, a unit the owner
 disabled after the marker is never re-enabled, a failed enable leaves no
 marker; the bouncer migration runs on upgrades only and never fails the
 postinst; `prerm remove` forgets the marker only when it disables an enabled
-unit. Also `bash -n` on postinst/prerm/postrm and STEP_TOTAL vs the steps.
+unit. The radvd path migration (`radvd_migration`, temp root + fake
+systemctl/radvd): /etc/radvd.conf copied to /etc/tuxwall/radvd.conf with its
+mode, configtest before the drop-in, daemon-reload + restart, a second run is a
+no-op; skipped without changes for a local script that writes /etc/radvd.conf
+(e.g. a prefix-delegation sync), the opt-out file, a failing configtest, no
+config; a restart failure puts the old setup back; fresh installs get the
+drop-in for the new file. The installer's inline drop-in must equal the shipped
+one. Also `bash -n` on postinst/prerm/postrm and STEP_TOTAL vs the steps.
 
 ## unit_paths_check.py — tuxwall.service writable paths (CI + root sandbox)
 
@@ -267,3 +274,16 @@ socket-activated sshd on LAN/VPN addresses (held by systemd, pid 1, until
 the first connection) raises nothing; a socket on 0.0.0.0, `*` or the WAN
 address, a real stranger, pid 1 without a matching socket unit and a
 socket-activated stranger service all still alert.
+
+## Installer firewall defaults (in firewall_safety_check.py)
+
+`t_installer_defaults` cuts `step_firewall` out of `tuxwall-install.sh`, runs
+it with bash against a fake `ufw` (its two file edits redirected to a temp
+dir), loads the recorded rules plus the postinst's LAN mDNS rule into a
+ruleset and runs the Findings lint on it: a fresh gateway install has no
+medium/high/critical finding, SSH and the dashboard work from the LAN and are
+closed on the WAN, 51820/udp stays closed until WireGuard is set up (then
+tagged `tuxwall-wireguard`, WAN only, plus SSH/DNS from the VPN subnets via
+`api_server.wg_ufw_open_rules`). A session over the WAN gets the same
+LAN-only rules; `--ssh-wan` adds a rate-limited WAN rule that Findings
+flags; the old defaults reproduce the VM's 2 high + 2 medium findings.

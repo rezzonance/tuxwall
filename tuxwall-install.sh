@@ -73,7 +73,7 @@ LAN_SUBNET=""        # e.g. 192.168.1.1/24 (host part = gateway address)
 DOMAIN=""
 WITH_CROWDSEC=1 WITH_AGENT=1 WITH_SPEEDTEST=1 WITH_GEOIP=1 WITH_APT_REPO=1
 ASSUME_YES=0 DRY_RUN=0 CONSOLE_STAGE=0 FROM_CONSOLE=0 DISABLE_MULTIPATH=0
-AGENT_EDIT_WEBROOT=0 FORCE_NET=0
+AGENT_EDIT_WEBROOT=0 FORCE_NET=0 SSH_WAN=0
 APPLY_NET="auto"     # auto | now | reboot
 
 # ── Derived state ───────────────────────────────────────────────────────────
@@ -83,7 +83,8 @@ PHYS_IFACES=()
 DEF_IF=""
 SSH_CONN="" SSH_CLIENT_IP="" SSH_SERVER_IP="" SSH_SERVER_PORT="" SSH_IFACE=""
 SSH_PORTS=()
-SSH_SCOPE=""         # lan | any
+SSH_SCOPE=""         # lan | wan (gateway: LAN + rate-limited WAN, --ssh-wan) | any (dashboard role)
+SSH_EXTRA_IFACE=""   # gateway: the non-LAN, non-WAN interface of the installer's SSH session
 NET_CIDR="" NET_GW="" NET_MASK="" NET_PREFIX="" NET_POOL_LO="" NET_POOL_HI=""
 ULA=""
 KEA_ACTION="" RADVD_ACTION="" UNBOUND_ACTION=""
@@ -236,6 +237,10 @@ Role and network:
   --apply-network now|reboot|auto
                            When to activate the LAN config (default auto:
                            deferred to a reboot if it would cut your session)
+  --ssh-wan                Gateway: also allow SSH on the WAN (rate-limited).
+                           Default: SSH from the LAN only (plus the VPN once
+                           WireGuard is set up); an SSH session over the WAN
+                           stays open, new logins must come from the LAN.
 
 Components (all on by default):
   --no-crowdsec  --no-agent  --no-speedtest  --no-geoip  --no-apt-repo
@@ -269,6 +274,7 @@ parse_args() {
             --domain)            DOMAIN="${2:-}"; shift 2 ;;
             --replace-configs)   FORCE_NET=1; shift ;;
             --apply-network)     APPLY_NET="${2:-}"; shift 2 ;;
+            --ssh-wan)           SSH_WAN=1; shift ;;
             --no-crowdsec)       WITH_CROWDSEC=0; shift ;;
             --no-agent)          WITH_AGENT=0; shift ;;
             --no-speedtest)      WITH_SPEEDTEST=0; shift ;;
@@ -412,9 +418,18 @@ gen_ula() {
     printf 'fd%s:%s:%s' "${gid:0:2}" "${gid:2:4}" "${gid:6:4}"
 }
 
-existing_ula() {   # reuse the ULA from an existing radvd.conf
-    [[ -f /etc/radvd.conf ]] || return 0
-    sed -nE 's/^[[:space:]]*prefix[[:space:]]+(fd[0-9a-f]{2}:[0-9a-f]{1,4}:[0-9a-f]{1,4})::\/64.*/\1/p' /etc/radvd.conf | head -n1 || true
+# radvd reads /etc/tuxwall/radvd.conf through a radvd.service drop-in (the
+# dashboard's sandbox cannot replace files directly in /etc); boxes without
+# the drop-in still use the stock /etc/radvd.conf.
+RADVD_CONF=/etc/tuxwall/radvd.conf
+RADVD_CONF_LEGACY=/etc/radvd.conf
+RADVD_DROPIN=/etc/systemd/system/radvd.service.d/10-tuxwall.conf
+radvd_conf_in_use() { if [[ -e $RADVD_DROPIN ]]; then echo "$RADVD_CONF"; else echo "$RADVD_CONF_LEGACY"; fi; }
+
+existing_ula() {   # reuse the ULA from an existing radvd config
+    local f; f="$(radvd_conf_in_use)"
+    [[ -f $f ]] || return 0
+    sed -nE 's/^[[:space:]]*prefix[[:space:]]+(fd[0-9a-f]{2}:[0-9a-f]{1,4}:[0-9a-f]{1,4})::\/64.*/\1/p' "$f" | head -n1 || true
 }
 
 kea_is_replaceable() {
@@ -427,7 +442,7 @@ kea_is_replaceable() {
     grep -q '192\.0\.2\.' "$f" && return 0          # Kea's shipped sample config
     return 1
 }
-radvd_is_replaceable()   { [[ ! -s /etc/radvd.conf ]] || grep -q "$INSTALLER_MARK" /etc/radvd.conf; }
+radvd_is_replaceable()   { local f; f="$(radvd_conf_in_use)"; [[ ! -s $f ]] || grep -q "$INSTALLER_MARK" "$f"; }
 unbound_is_replaceable() {
     local f=/etc/unbound/unbound.conf.d/router-dns.conf
     [[ ! -s $f ]] || grep -q "$INSTALLER_MARK" "$f"
@@ -750,8 +765,20 @@ gather_config() {
         elif (( FORCE_NET )); then UNBOUND_ACTION=replace
         else UNBOUND_ACTION=keep; fi
 
-        # SSH scope: keep remote admins connected.
-        if [[ -n $SSH_IFACE && $SSH_IFACE != "$LAN" ]]; then SSH_SCOPE=any; else SSH_SCOPE=lan; fi
+        # SSH: from the LAN only (WireGuard setup adds the VPN), never on the
+        # WAN unless --ssh-wan. A session over another (management)
+        # interface keeps that interface. The current session survives any
+        # choice (established connections stay allowed).
+        SSH_SCOPE=lan SSH_EXTRA_IFACE=""
+        if (( SSH_WAN )); then
+            SSH_SCOPE=wan
+        elif [[ -n $SSH_IFACE && $SSH_IFACE == "$WAN" ]]; then
+            if (( INTERACTIVE )) && confirm "You are connected through the WAN ($WAN). Keep SSH reachable on the WAN too (rate-limited; Firewall → Findings flags it)?" n; then
+                SSH_SCOPE=wan
+            fi
+        elif [[ -n $SSH_IFACE && $SSH_IFACE != "$LAN" && $SSH_IFACE != lo ]]; then
+            SSH_EXTRA_IFACE=$SSH_IFACE
+        fi
 
         decide_network_apply
     else
@@ -812,11 +839,15 @@ review() {
         kv "IPv6 (ULA)"  "$ULA::/64 on $LAN, advertised by radvd   [radvd: $RADVD_ACTION]"
         kv "DNS"         "Unbound for the LAN, gateway.$DOMAIN → $NET_GW   [resolver: $UNBOUND_ACTION]"
         kv "Firewall"    "default deny in, LAN → gateway allowed, LAN → WAN routed + NAT"
-        if [[ $SSH_SCOPE == lan ]]; then
-            kv "SSH"     "port ${SSH_PORTS[*]:-none} allowed from the LAN only"
+        if [[ $SSH_SCOPE == wan ]]; then
+            kv "SSH"     "port ${SSH_PORTS[*]:-none} allowed from the LAN and ${C_Y}on the WAN ($WAN, rate-limited)${C_0}"
         else
-            kv "SSH"     "port ${SSH_PORTS[*]:-none} allowed on all interfaces (you are connected via ${SSH_IFACE:-?})"
+            kv "SSH"     "port ${SSH_PORTS[*]:-none} allowed from the LAN${SSH_EXTRA_IFACE:+ and $SSH_EXTRA_IFACE (your session)} only, never the WAN"
+            if [[ -n $SSH_IFACE && $SSH_IFACE == "$WAN" ]]; then
+                kv ""    "${C_Y}you are connected via the WAN: this session stays open, new logins only from the LAN (--ssh-wan keeps the WAN)${C_0}"
+            fi
         fi
+        kv "WireGuard"   "51820/udp opens on the WAN only once you set WireGuard up (VPN page)"
         if [[ $NET_APPLY_DECISION == now ]]; then
             kv "Activate"    "LAN config applied during the install ($NET_APPLY_REASON)"
         else
@@ -985,20 +1016,33 @@ step_firewall() {
         info "UFW already active: keeping your default policies"
     fi
 
-    # SSH first, so enabling the firewall can never cut the session.
+    # SSH first, so enabling the firewall can never cut the session
+    # (established connections stay allowed whatever the rules say).
+    # Gateway: never on the WAN unless --ssh-wan.
     for p in "${SSH_PORTS[@]}"; do
         if ufw_has_ssh_rule "$p"; then
             info "SSH port $p already has a rule (left as is)"
-        elif [[ $SSH_SCOPE == lan && -n $LAN ]]; then
+        elif [[ $ROLE == gateway && -n $LAN ]]; then
             q ufw allow in on "$LAN" to any port "$p" proto tcp comment 'TuxWall: SSH from LAN'
             ok "SSH port $p allowed from the LAN ($LAN)"
+            if [[ -n $SSH_EXTRA_IFACE ]]; then
+                q ufw allow in on "$SSH_EXTRA_IFACE" to any port "$p" proto tcp comment 'TuxWall: SSH (installer session)'
+                ok "SSH port $p allowed on $SSH_EXTRA_IFACE (your session)"
+            fi
+            if [[ $SSH_SCOPE == wan ]]; then
+                q ufw limit in on "$WAN" to any port "$p" proto tcp comment 'TuxWall: SSH from WAN (--ssh-wan)'
+                warn "SSH port $p is reachable from the internet on $WAN (rate-limited, --ssh-wan); Firewall → Findings flags it"
+            elif [[ -n $SSH_IFACE && $SSH_IFACE == "$WAN" ]]; then
+                note "This SSH session (via the WAN) stays open; new SSH logins only from the LAN ($LAN)."
+            fi
         else
             q ufw allow "$p/tcp" comment 'TuxWall: SSH'
             ok "SSH port $p allowed"
-            [[ $ROLE == gateway ]] && note "Tip: once you manage the box from the LAN, scope SSH to $LAN in Firewall → Rules."
         fi
     done
     (( ${#SSH_PORTS[@]} )) || info "No SSH server found: no SSH rule needed"
+    # the package's postinst opens SSH/80 only when nothing did: here we did
+    export TUXWALL_INSTALLER_FIREWALL=1
 
     if [[ $ROLE == gateway ]]; then
         q ufw allow in on "$LAN" comment 'TuxWall: LAN to gateway'
@@ -1006,10 +1050,11 @@ step_firewall() {
         # opening 80/tcp on every interface.
         q ufw allow in on "$LAN" to any port 80 proto tcp comment 'TuxWall dashboard (LAN)'
         q ufw route allow in on "$LAN" out on "$WAN" comment 'tuxwall: LAN -> WAN'
-        q ufw allow 51820/udp comment 'WireGuard'
+        # WireGuard's port is opened on the WAN by the dashboard's WireGuard
+        # setup (tagged tuxwall-wireguard), not before a VPN exists.
         grep -q '^net/ipv4/ip_forward' /etc/ufw/sysctl.conf 2>/dev/null || echo 'net/ipv4/ip_forward=1' >>/etc/ufw/sysctl.conf
         grep -q '^net/ipv6/conf/all/forwarding' /etc/ufw/sysctl.conf 2>/dev/null || echo 'net/ipv6/conf/all/forwarding=1' >>/etc/ufw/sysctl.conf
-        ok "LAN → gateway allowed, LAN → WAN routed, WireGuard 51820/udp open"
+        ok "LAN → gateway allowed, LAN → WAN routed (WireGuard's port opens when you set WireGuard up)"
     else
         local net
         for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 fd00::/8; do
@@ -1167,8 +1212,35 @@ interface $LAN
 RADVD
 }
 
+# Same bytes as pkg/usr/share/tuxwall/radvd/10-tuxwall.conf (the package may
+# be older than this installer; tools/pkg_scripts_check.py compares them).
+radvd_dropin() {
+    cat <<'DROPIN'
+# TuxWall: radvd reads /etc/tuxwall/radvd.conf instead of /etc/radvd.conf.
+# The dashboard runs with ProtectSystem=full (/etc read-only except its
+# ReadWritePaths), so it can only replace radvd's config inside /etc/tuxwall.
+# Installed by the TuxWall installer / postinst as
+# /etc/systemd/system/radvd.service.d/10-tuxwall.conf after
+# `radvd --configtest --config /etc/tuxwall/radvd.conf` passed. The old
+# /etc/radvd.conf is left in place, unused. Undo: delete this drop-in,
+# `systemctl daemon-reload`, `systemctl restart radvd`.
+[Unit]
+ConditionPathExists=
+ConditionPathExists=/etc/tuxwall/radvd.conf
+
+[Service]
+ExecStartPre=
+ExecStartPre=/usr/sbin/radvd --logmethod stderr_clean --configtest --config /etc/tuxwall/radvd.conf
+ExecStart=
+ExecStart=/usr/sbin/radvd --logmethod stderr_clean --config /etc/tuxwall/radvd.conf
+ExecReload=
+ExecReload=/usr/sbin/radvd --logmethod stderr_clean --configtest --config /etc/tuxwall/radvd.conf
+ExecReload=/bin/kill -HUP $MAINPID
+DROPIN
+}
+
 write_radvd() {
-    local f=/etc/radvd.conf tmp
+    local f=$RADVD_CONF tmp
     tmp="$(mktemp)"
     radvd_conf >"$tmp"
     if command -v radvd >/dev/null 2>&1 && ! q radvd --configtest --config "$tmp"; then
@@ -1177,9 +1249,15 @@ write_radvd() {
         return 0
     fi
     backup_file "$f"
+    mkdir -p "${f%/*}"
     install -m 644 "$tmp" "$f"
     rm -f "$tmp"
-    ok "radvd: advertising $ULA::/64 and DNS $ULA::1 on $LAN"
+    # radvd reads it through the drop-in; the stock file (if any) stays, unused
+    mkdir -p "${RADVD_DROPIN%/*}"
+    radvd_dropin >"$RADVD_DROPIN"
+    chmod 644 "$RADVD_DROPIN"
+    q systemctl daemon-reload || true
+    ok "radvd: advertising $ULA::/64 and DNS $ULA::1 on $LAN ($f)"
 }
 
 unbound_router_conf() {

@@ -35,6 +35,7 @@ except ImportError:  # pragma: no cover
         _CS = None
 
 HONEYPOT_TAG = "tuxwall-honeypot"
+WIREGUARD_TAG = "tuxwall-wireguard"   # the listen-port rule added by the WireGuard setup
 CANARY_PORTS = (22, 5900, 1433, 6379)   # TCP on the WAN IPv4 (SNMP 161/udp retired 2026-11-19)
 MGMT_PORTS = (22, 80, 443, 8008, 4096, 8744, 53, 67)
 DASHBOARD_PORTS = (80, 443)
@@ -584,6 +585,8 @@ def classify_rule(r, ctx):
         return _mk("canary", "Tagged %s" % c)
     if c.startswith("tuxwall-policy:"):
         return _mk("policy", "Interfaces policy cell %s" % c.split(":", 1)[1])
+    if c == WIREGUARD_TAG and not r["route"] and r["proto"] in ("udp", "any"):
+        return _mk("wireguard", "Tagged %s (WireGuard listen port)" % WIREGUARD_TAG)
     if c.startswith("tuxwall: ") or c.startswith("tuxwall:"):
         return _mk("nat", "Installer forwarding rule (%s)" % c)
     if (not r["route"] and r["dir"] == "in" and r["action"] == "allow" and r["proto"] == "tcp"
@@ -1131,7 +1134,7 @@ def tuples_from_rule_text(argv):
         if iptype not in ("both", fam):
             continue
         src, dst = r.src, r.dst
-        if fam == "v6" and iptype == "both":
+        if fam == "v6":  # also v6-only rules (`from fd00::/64`): ufw writes ::/0
             src = "::/0" if src == "0.0.0.0/0" else src
             dst = "::/0" if dst == "0.0.0.0/0" else dst
         act = ("route:" if r.forward else "") + r.action

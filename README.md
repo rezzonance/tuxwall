@@ -157,6 +157,10 @@ sudo bash tuxwall-install.sh             # guided install, review screen include
 
 From a repository clone, run `sudo bash tuxwall-install.sh` instead (it defaults to building the package from your checkout). For headless or fresh-appliance installs, `sudo bash tuxwall-install.sh --console` stages a one-time first-boot wizard on the console. Unattended installs pass `--yes` with `--wan`/`--lan` and the options from `--help`.
 
+**Firewall defaults (gateway):** incoming traffic is denied by default; SSH and the dashboard are allowed from the LAN only, never on the WAN. If you run the installer over an SSH session that arrives on the WAN, that session stays open, but new SSH logins must come from the LAN (pass `--ssh-wan` to keep a rate-limited SSH rule on the WAN; Firewall → Findings flags it). WireGuard's port (51820/udp) is opened on the WAN only when you set WireGuard up on the VPN page, together with SSH and DNS from the VPN subnets. Upgrades do not apply these defaults to an existing install: rules that already open SSH or WireGuard on the WAN stay, and Firewall → Findings keeps flagging them until you scope or remove them.
+
+**WAN on DHCP behind another router:** systemd-networkd (what netplan uses on Ubuntu Server) sends its DUID as the DHCPv4 client identifier by default, not the MAC address. An upstream router or ISP box with a MAC-based address reservation may therefore not recognise the TuxWall WAN and hand out a different address after a reboot. Either make the WAN identify itself by MAC — netplan: `dhcp-identifier: mac` under the WAN interface (then `sudo netplan apply`); plain systemd-networkd: `ClientIdentifier=mac` in the WAN's `[DHCPv4]` section — or create the upstream reservation for the client ID/DUID the TuxWall WAN actually sends.
+
 Future updates are normal APT updates:
 
 ```bash
@@ -244,7 +248,7 @@ Most settings are available from the dashboard and are written directly to the u
 | `/etc/tuxwall/` | Dashboard settings, `opencode.json`, `llm.json`, `sqm.conf` |
 | `/etc/unbound/unbound.conf.d/` | DNS, local domains, blocklists and RPZ zones |
 | `/etc/kea/kea-dhcp4.conf` | DHCP subnets, pools and reservations |
-| `/etc/radvd.conf` | IPv6 router advertisements |
+| `/etc/tuxwall/radvd.conf` | IPv6 router advertisements (radvd reads it through `/etc/systemd/system/radvd.service.d/10-tuxwall.conf`; installs that were not migrated still use `/etc/radvd.conf`) |
 | `/etc/ufw/` | Firewall and NAT rules |
 | `/etc/wireguard/wg0.conf` | WireGuard interface and peers |
 | `/etc/suricata/suricata.yaml` | IDS/IPS interfaces and HOME_NET |
@@ -318,7 +322,7 @@ sudo apt update && sudo apt upgrade tuxwall
 
 The dashboard itself can also check for package updates from the **System** page.
 
-Upgrades also move an existing CrowdSec firewall bouncer from iptables to nftables mode (full ban durations; zero-gap switch with automatic rollback; opt out with `sudo touch /etc/tuxwall/no-bouncer-migration` — details in `/etc/crowdsec/README-custom-blocklist.md`), and enable the tripwire service once if the package never enabled it before (its own settings decide what it watches; a service you disable later stays disabled).
+Upgrades move radvd's config from `/etc/radvd.conf` to `/etc/tuxwall/radvd.conf` (copied, checked with `radvd --configtest`, then a radvd drop-in; radvd is restarted and put back if it does not come up; the old file is left in place, unused). The step is skipped and logged in `/var/log/tuxwall/radvd-migration.log` when a local script still writes `/etc/radvd.conf` (point it at the new file, then reinstall the package) or with `sudo touch /etc/tuxwall/no-radvd-migration`. Upgrades also move an existing CrowdSec firewall bouncer from iptables to nftables mode (full ban durations; zero-gap switch with automatic rollback; opt out with `sudo touch /etc/tuxwall/no-bouncer-migration` — details in `/etc/crowdsec/README-custom-blocklist.md`), and enable the tripwire service once if the package never enabled it before (its own settings decide what it watches; a service you disable later stays disabled).
 
 Remove the dashboard:
 

@@ -1158,6 +1158,200 @@ def t_lint():
         shutil.rmtree(r)
 
 
+# ── installer defaults: a fresh gateway install is findings-clean ───────────
+
+INSTALLER = os.path.join(REPO, "tuxwall-install.sh")
+FAKE_UFW = """#!/bin/sh
+for a in "$@"; do printf '%s\\n' "$a"; done >> "$UFW_LOG"
+echo "--end--" >> "$UFW_LOG"
+case "$1" in status) echo "Status: inactive" ;; esac
+exit 0
+"""
+FRESH_IPT = """*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+:ufw-before-input - [0:0]
+:ufw-before-output - [0:0]
+:ufw-user-input - [0:0]
+-A INPUT -j ufw-before-input
+-A OUTPUT -j ufw-before-output
+COMMIT
+*nat
+:POSTROUTING ACCEPT [0:0]
+-A POSTROUTING -o eth0 -j MASQUERADE
+COMMIT
+"""
+
+
+def installer_ufw_calls(env):
+    """Run the installer's real step_firewall (cut out of tuxwall-install.sh)
+    with bash against a fake ufw; the two files it edits are redirected into
+    a temp dir. Returns the ufw argv lists in order."""
+    src = open(INSTALLER).read()
+    fns = ""
+    for name in ("ufw_has_ssh_rule", "step_firewall"):
+        m = re.search(r"^%s\(\) \{.*?^\}\n" % name, src, re.M | re.S)
+        check(m, "installer defines %s" % name)
+        fns += m.group(0) if m else ""
+    d = tempfile.mkdtemp(prefix="twinst-")
+    try:
+        os.makedirs(d + "/bin")
+        with open(d + "/bin/ufw", "w") as f:
+            f.write(FAKE_UFW)
+        os.chmod(d + "/bin/ufw", 0o755)
+        with open(d + "/default-ufw", "w") as f:
+            f.write("IPV6=no\n")
+        fns = fns.replace("/etc/default/ufw", d + "/default-ufw").replace("/etc/ufw/sysctl.conf", d + "/sysctl.conf")
+        check("/etc/" not in fns, "installer firewall step redirected into the temp dir")
+        stubs = ('q() { "$@"; }\ninfo() { :; }\nok() { :; }\nnote() { :; }\nwarn() { echo "WARN $*"; }\n'
+                 'LOG=/dev/null\n')
+        sets = "".join("%s=%s\n" % (k, v) for k, v in env.items())
+        p = subprocess.run(["bash", "-c", "set -euo pipefail\n" + stubs + sets + fns + "step_firewall\n"
+                            'echo "EXPORT=${TUXWALL_INSTALLER_FIREWALL:-}"'],
+                           env=dict(os.environ, PATH=d + "/bin:" + os.environ.get("PATH", ""),
+                                    UFW_LOG=d + "/calls"),
+                           capture_output=True, text=True, timeout=60)
+        check(p.returncode == 0, "installer step_firewall ran (%s)" % (p.stderr or p.stdout)[-300:])
+        check("EXPORT=1" in p.stdout, "installer exports TUXWALL_INSTALLER_FIREWALL=1 for the postinst")
+        check(open(d + "/default-ufw").read() == "IPV6=yes\n", "installer enables IPv6 in ufw")
+        calls, cur = [], []
+        for ln in open(d + "/calls").read().splitlines():
+            if ln == "--end--":
+                calls.append(cur)
+                cur = []
+            else:
+                cur.append(ln)
+        return calls, p.stdout
+    finally:
+        shutil.rmtree(d)
+
+
+def fresh_root(vpn=False):
+    root = make_root(specs=[], honeypot=False, legacy=False)
+    for p in ("/etc/wireguard/wg0.conf", "/etc/systemd/system/opencanary.service", "/etc/tuxwall/tripwire.json",
+              "/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"):
+        os.unlink(root + p)
+    with open(root + "/etc/passwd", "w") as f:
+        f.write("root:x:0:0::/root:/bin/bash\n")
+    topo = {"version": 1, "wan": {"device": WAN}, "lan": {"device": LAN, "address": "192.168.1.1/24"}}
+    if vpn:
+        topo["vpn"] = [{"id": "wg0", "name": "WireGuard", "device": "wg0", "address": "10.0.0.1/24"}]
+        with open(root + "/etc/wireguard/wg0.conf", "w") as f:
+            f.write("[Interface]\nAddress = 10.0.0.1/24, fd00:2::1/64\nListenPort = 51820\n")
+    with open(root + "/etc/tuxwall/interfaces.json", "w") as f:
+        json.dump(topo, f)
+    with open(root + "/etc/ufw/ufw.conf", "w") as f:
+        f.write("ENABLED=yes\nLOGLEVEL=low\n")
+    return root
+
+
+def ruleset_from_calls(rs, calls):
+    for argv in calls:
+        if argv and argv[0] in ("allow", "limit", "deny", "reject", "route"):
+            rs, _ = G.proposed_add(rs, argv)
+    return rs
+
+
+# the package's postinst adds the mDNS reflector port on RFC1918 interfaces (LAN)
+POSTINST_LAN = [["allow", "in", "on", LAN, "to", "any", "port", "5353", "proto", "udp", "comment", "mDNS reflector"]]
+SERIOUS = ("critical", "high", "medium")
+
+
+def t_installer_defaults():
+    import importlib
+    base = {"ROLE": "gateway", "LAN": LAN, "WAN": WAN, "SSH_PORTS": "(22)", "SSH_SCOPE": "lan",
+            "SSH_EXTRA_IFACE": '""', "SSH_IFACE": LAN}
+
+    def lint(calls, vpn=False, extra=()):
+        root = fresh_root(vpn)
+        try:
+            ctx, _ = mkctx(root, run=Runner(ipt=FRESH_IPT, ss=""), client="192.168.1.50", canary_active=False)
+            rs = ruleset_from_calls(G.load_ruleset(ctx), list(calls) + POSTINST_LAN + list(extra))
+            return rs, ctx, L.findings(rs, ctx)
+        finally:
+            shutil.rmtree(root)
+
+    def allowed(rs, iface, src, proto, port):
+        fam = "v6" if ":" in src else "v4"
+        return G.evaluate_input(rs[fam], rs["defaults"], {"iface": iface, "src": src, "dst": "",
+                                                          "proto": proto, "dport": port})[0]
+
+    # 1. fresh gateway install, session from the LAN (or the console)
+    calls, _ = installer_ufw_calls(base)
+    rs, ctx, fs = lint(calls)
+    bad = ["%s %s" % (f["severity"], f["title"]) for f in fs if f["severity"] in SERIOUS]
+    check(not bad, "installer: fresh install has no medium/high/critical findings %s" % bad)
+    check(["default", "deny", "incoming"] in calls and ["default", "deny", "routed"] in calls
+          and calls[-1] == ["--force", "enable"], "installer: default deny in/routed, then enable")
+    check(not any("51820" in " ".join(c) for c in calls), "installer: no WireGuard port before WireGuard exists")
+    check(not [c for c in calls if c and c[0] in ("allow", "limit") and "on" not in c and "from" not in c],
+          "installer: every allow is scoped to an interface or source")
+    for fam_src in ("192.168.1.50", "fd00:1::50"):
+        check(allowed(rs, LAN, fam_src, "tcp", 22), "installer: SSH from the LAN (%s)" % fam_src)
+        check(allowed(rs, LAN, fam_src, "tcp", 80), "installer: dashboard from the LAN (%s)" % fam_src)
+    for src in ("198.51.100.7", "2001:db8::7"):
+        check(not allowed(rs, WAN, src, "tcp", 22), "installer: no SSH on the WAN (%s)" % src)
+        check(not allowed(rs, WAN, src, "tcp", 80), "installer: no dashboard on the WAN (%s)" % src)
+        check(not allowed(rs, WAN, src, "udp", 51820), "installer: no 51820/udp on the WAN (%s)" % src)
+    check(not [v for v in G.invariants(rs, ctx, rs) if v["id"] == "lockout"],
+          "installer: the LAN admin keeps the dashboard (guard lockout check)")
+    check(any(r["route"] and r["in"] == LAN and r["out"] == WAN for r in rs["v4"]), "installer: LAN -> WAN routed")
+
+    # 2. installing over an SSH session that arrives on the WAN: still LAN only
+    calls_w, out_w = installer_ufw_calls(dict(base, SSH_IFACE=WAN))
+    check(calls_w == calls, "installer: a WAN session gets the same LAN-only rules")
+    # 3. session over a third (management) interface: that interface too, never the WAN
+    calls_m, _ = installer_ufw_calls(dict(base, SSH_IFACE="eth2", SSH_EXTRA_IFACE="eth2"))
+    rs_m, _, fs_m = lint(calls_m)
+    check(allowed(rs_m, "eth2", "10.9.9.9", "tcp", 22) and not allowed(rs_m, WAN, "198.51.100.7", "tcp", 22),
+          "installer: management-interface session keeps SSH there, not on the WAN")
+    check(not [f for f in fs_m if f["severity"] in SERIOUS], "installer: management interface rule is clean")
+    # 4. --ssh-wan opt-in: rate-limited SSH on the WAN, flagged by Findings
+    calls_o, out_o = installer_ufw_calls(dict(base, SSH_SCOPE="wan", SSH_IFACE=WAN))
+    rs_o, _, fs_o = lint(calls_o)
+    check(any(c[:4] == ["limit", "in", "on", WAN] for c in calls_o), "installer: --ssh-wan adds a WAN limit rule")
+    check(any(f["id"].startswith("guard:mgmt-wan") and f["severity"] == "high" for f in fs_o),
+          "installer: --ssh-wan is flagged high by Findings")
+    check("WARN" in out_o, "installer: --ssh-wan warns")
+    # 5. the old defaults (allow 22/tcp + 51820/udp everywhere) are what Findings flagged on the VM
+    old = [c for c in calls if "SSH" not in " ".join(c)] + [["allow", "22/tcp", "comment", "TuxWall: SSH"],
+                                                           ["allow", "51820/udp", "comment", "WireGuard"]]
+    _, _, fs_old = lint(old)
+    sev = sorted(f["severity"] for f in fs_old if f["severity"] in SERIOUS)
+    check(sev == ["high", "high", "medium", "medium"], "installer: old defaults = 2 high + 2 medium (VM E5) %s" % sev)
+
+    # 6. after the dashboard's WireGuard setup: port on the WAN only, DNS + SSH from the VPN
+    api = importlib.import_module("api_server")
+    # flattened like api_server._ufw (an argument with spaces is split)
+    wg = [[x for a in rule for x in (a.split() if " " in a else [a])]
+          for rule in api.wg_ufw_open_rules(51820, WAN, "10.0.0.0/24", [22])]
+    rs_v, ctx_v, fs_v = lint(calls, vpn=True, extra=wg)
+    bad = ["%s %s" % (f["severity"], f["title"]) for f in fs_v if f["severity"] in SERIOUS]
+    check(not bad, "wireguard setup: still no medium/high/critical findings %s" % bad)
+    port = [r for r in rs_v["v4"] + rs_v["v6"] if r["dport"] == "51820"]
+    check(len(port) == 2 and all(r["in"] == WAN and G.classify_rule(r, ctx_v)["owner"] == "wireguard"
+                                 and r["comment"] == api.WG_UFW_TAG for r in port),
+          "wireguard setup: 51820/udp on the WAN only (v4+v6), tagged, owner wireguard")
+    for src in ("198.51.100.7", "2001:db8::7"):
+        check(allowed(rs_v, WAN, src, "udp", 51820), "wireguard setup: handshake reachable on the WAN (%s)" % src)
+        check(not allowed(rs_v, WAN, src, "tcp", 22), "wireguard setup: still no SSH on the WAN (%s)" % src)
+    for src in ("10.0.0.2", "fd00:2::2"):
+        check(allowed(rs_v, "wg0", src, "tcp", 22), "wireguard setup: SSH from the VPN (%s)" % src)
+        check(allowed(rs_v, "wg0", src, "udp", 53), "wireguard setup: DNS from the VPN (%s)" % src)
+    check(not allowed(rs_v, "wg0", "192.0.2.9", "tcp", 22), "wireguard setup: SSH on wg0 only from the VPN subnets")
+    nowan = api.wg_ufw_open_rules(51821, "", "10.0.0.0/24", [])
+    check(nowan[0] == ["allow", "51821/udp", "comment", api.WG_UFW_TAG] and len(nowan) == 5,
+          "wireguard setup without a known WAN: tagged port rule, no SSH rules without sshd")
+    r = G.parse_tuple("### tuple ### allow udp 51821 0.0.0.0/0 any 0.0.0.0/0 in comment=" + HEX(api.WG_UFW_TAG), "v4")
+    check(G.classify_rule(r, ctx_v)["owner"] == "wireguard", "tuxwall-wireguard tag -> owner wireguard")
+    # the postinst does not open SSH/80 behind the installer's back
+    post = open(os.path.join(REPO, "pkg", "DEBIAN", "postinst")).read()
+    m = re.search(r'if \[\[ \$\{TUXWALL_INSTALLER_FIREWALL:-\} != 1 \]\]; then\n(.*?)\n    fi\n', post, re.S)
+    check(m and "ufw allow OpenSSH" in m.group(1) and "ufw allow 80/tcp" in m.group(1),
+          "postinst: SSH/80 fallback skipped when the installer set the firewall")
+
+
 def t_edit():
     root = lint_root()
     run = Runner()
@@ -1361,6 +1555,7 @@ def main():
         t_canary_rules()
     t_lint()
     if HAVE_UFW:
+        t_installer_defaults()
         t_edit()
         t_api()
     else:

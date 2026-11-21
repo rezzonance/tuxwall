@@ -31,7 +31,14 @@ PROFILE = "/etc/tuxwall/install-profile.json"
 NETWORK_JSON = "/etc/tuxwall/network.json"
 VLAN_FILE = "/etc/tuxwall/vlans.json"
 KEA_CONF = "/etc/kea/kea-dhcp4.conf"
-RADVD_CONF = "/etc/radvd.conf"
+# radvd reads /etc/tuxwall/radvd.conf through RADVD_DROPIN (radvd -C ...):
+# tuxwall.service runs with ProtectSystem=full, so a file directly in /etc
+# cannot be replaced by the API. Without the drop-in (not migrated yet: the
+# postinst skips boxes where a local script still writes /etc/radvd.conf)
+# radvd still reads the stock path.
+RADVD_CONF = "/etc/tuxwall/radvd.conf"
+RADVD_CONF_LEGACY = "/etc/radvd.conf"
+RADVD_DROPIN = "/etc/systemd/system/radvd.service.d/10-tuxwall.conf"
 UNBOUND_DIR = "/etc/unbound/unbound.conf.d"
 NETPLAN_DIR = "/etc/netplan"
 SURICATA_CONF = "/etc/suricata/suricata.yaml"
@@ -131,8 +138,24 @@ def _netplan():
     return eth, vlans
 
 
+def radvd_conf_path(root=""):
+    """The radvd config radvd actually reads: RADVD_CONF once the TuxWall
+    drop-in is installed, else the stock /etc/radvd.conf."""
+    return RADVD_CONF if os.path.exists((root or "") + RADVD_DROPIN) else RADVD_CONF_LEGACY
+
+
+def radvd_conf_text(root=""):
+    """(path, text) of the radvd config in effect; reads the stock file when
+    the drop-in is installed but the new file is still missing (migration)."""
+    path = radvd_conf_path(root)
+    text = _read((root or "") + path)
+    if not text and path != RADVD_CONF_LEGACY:
+        text = _read((root or "") + RADVD_CONF_LEGACY)
+    return path, text
+
+
 def _radvd_ifaces():
-    return re.findall(r"^\s*interface\s+(\S+)\s*\{", _read(RADVD_CONF), re.M)
+    return re.findall(r"^\s*interface\s+(\S+)\s*\{", radvd_conf_text()[1], re.M)
 
 
 # ---------------------------------------------------------------- inventory
@@ -909,7 +932,7 @@ def bindings(topo=None):
     kea4 = (_read_kea().get("Dhcp4") or {})
     kea_ifaces = [str(i).split("/")[0] for i in
                   ((kea4.get("interfaces-config") or {}).get("interfaces") or [])]
-    radvd_text = _read(RADVD_CONF)
+    radvd_text = radvd_conf_text()[1]
     radvd = {}
     for m in re.finditer(r"^\s*interface\s+(\S+)\s*\{(.*?)^\};", radvd_text, re.M | re.S):
         radvd[m.group(1)] = re.findall(r"^\s*prefix\s+(\S+)", m.group(2), re.M)

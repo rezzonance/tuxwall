@@ -8864,6 +8864,40 @@ def _wg_endpoint(listen_port):
     return "{}:{}".format(wan or "YOUR_WAN_IP", listen_port)
 
 
+WG_UFW_TAG = "tuxwall-wireguard"     # the listen port on the WAN (fw_guard owner "wireguard")
+WG_SSH_UFW_TAG = "tuxwall-vpn-ssh"   # SSH from VPN clients (an ordinary, editable rule)
+
+
+def _sshd_ports():
+    """Ports sshd listens on (`sshd -T`); [22] when it cannot tell, [] without sshd."""
+    try:
+        out = subprocess.run(["sshd", "-T"], capture_output=True, text=True, timeout=10).stdout
+    except FileNotFoundError:
+        return []
+    except Exception:
+        out = ""
+    ports = sorted({int(m) for m in re.findall(r"(?m)^port (\d+)$", out or "") if 0 < int(m) < 65536})
+    return ports or [22]
+
+
+def wg_ufw_open_rules(listen_port, wan, client_subnet, ssh_ports=()):
+    """ufw argv lists for a new WireGuard server: the listen port on the WAN
+    only (never on every interface), DNS + SSH from the VPN subnets."""
+    if wan:
+        rules = [["allow", "in", "on", wan, "to", "any", "port", str(listen_port), "proto", "udp",
+                  "comment", WG_UFW_TAG]]
+    else:  # no WAN known: reachable at all beats a VPN nobody can reach
+        rules = [["allow", "{}/udp".format(listen_port), "comment", WG_UFW_TAG]]
+    for net in (client_subnet, WG_V6_SUBNET):
+        for proto in ("udp", "tcp"):
+            rules.append(["allow", "in on {} from {} to any port 53 proto {}".format(WG_IFACE, net, proto)])
+    for port in ssh_ports:
+        for net in (client_subnet, WG_V6_SUBNET):
+            rules.append(["allow", "in", "on", WG_IFACE, "from", net, "to", "any", "port", str(port),
+                          "proto", "tcp", "comment", WG_SSH_UFW_TAG])
+    return rules
+
+
 def setup_wireguard(body):
     if os.path.exists(WG_CONF):
         return {"ok": True, "already": True}
@@ -8910,11 +8944,8 @@ def setup_wireguard(body):
     save_wg_state(state)
     write_wg_conf(state)
     client_subnet = wg_client_subnet(state)
-    _ufw(["allow", "{}/udp".format(listen_port)])
-    _ufw(["allow", "in on {} from {} to any port 53 proto udp".format(WG_IFACE, client_subnet)])
-    _ufw(["allow", "in on {} from {} to any port 53 proto tcp".format(WG_IFACE, client_subnet)])
-    _ufw(["allow", "in on {} from {} to any port 53 proto udp".format(WG_IFACE, WG_V6_SUBNET)])
-    _ufw(["allow", "in on {} from {} to any port 53 proto tcp".format(WG_IFACE, WG_V6_SUBNET)])
+    for rule in wg_ufw_open_rules(listen_port, get_wan_interface(), client_subnet, _sshd_ports()):
+        _ufw(rule)
     wg_systemctl(["enable", "wg-quick@{}".format(WG_IFACE)])
     wg_systemctl(["restart", "wg-quick@{}".format(WG_IFACE)])
     ensure_wg_routing()

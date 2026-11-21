@@ -698,9 +698,79 @@ def t_tools():
     check(not [n for n in os.listdir("/etc/kea") if n.startswith(".tuxwall-plan-")], "tools: kea temp file left")
 
 
+def t_radvd_path():
+    """radvd reads /etc/tuxwall/radvd.conf once its TuxWall drop-in exists
+    (the API's sandbox cannot replace /etc/radvd.conf); legacy boxes keep
+    the stock path with a warning; the new file falls back to the old one."""
+    import backups as B
+    legacy_text = sample("2nic")[1]["/etc/radvd.conf"]
+
+    def unlock(b):
+        rec = json.loads(b.read(T.CONF))
+        rec["apply_locked"] = False
+        _write(b, T.CONF, json.dumps(rec, indent=2) + "\n")
+
+    def add_ra(b):
+        unlock(b)
+        t = topo(b)
+        t["opt"].append({"name": "Guest", "device": "eth2", "address": "10.10.30.1/24", "dhcp": True, "ra": True,
+                         "pool": "10.10.30.50-10.10.30.99"})
+        return {"topology": t, "presets": {"opt1": "guest"}}
+
+    # not migrated: stock path, apply would hit the read-only /etc -> warning
+    b = Box("2nic")
+    check(T.radvd_conf_path(b.root) == T.RADVD_CONF_LEGACY, "radvd: no drop-in -> stock path")
+    res = P.build(add_ra(b), "", b.ctx())
+    check(T.RADVD_CONF_LEGACY in res.files and T.RADVD_CONF not in res.files, "radvd legacy: plan writes /etc/radvd.conf")
+    check(any("radvd still reads /etc/radvd.conf" in w for w in res.warnings), "radvd legacy: warning")
+    b.close()
+    # migrated: drop-in + /etc/tuxwall/radvd.conf; the stock file is left alone
+    b = Box("2nic")
+    _write(b, T.RADVD_DROPIN, "[Service]\n")
+    _write(b, T.RADVD_CONF, legacy_text)
+    _write(b, T.RADVD_CONF_LEGACY, "# stale, unused\n")
+    check(T.radvd_conf_path(b.root) == T.RADVD_CONF and T.radvd_conf_text(b.root) == (T.RADVD_CONF, legacy_text),
+          "radvd: drop-in -> /etc/tuxwall/radvd.conf")
+    body = add_ra(b)
+    res = P.build(body, "", b.ctx())
+    f = res.files.get(T.RADVD_CONF) or {}
+    check(T.RADVD_CONF_LEGACY not in res.files and f.get("old") == legacy_text and "interface eth2 {" in f.get("new", ""),
+          "radvd migrated: plan edits /etc/tuxwall/radvd.conf only")
+    check(not any("radvd still reads" in w for w in res.warnings), "radvd migrated: no legacy warning")
+    r = b.plan(body)
+    h0 = b.digest()
+    run = Runner()
+    code, out = A.apply(dict(body, plan_hash=r["plan_hash"]), root=b.root, runner=run, schedule=lambda *a: None)
+    check(code == 200 and "interface eth2 {" in b.read(T.RADVD_CONF) and b.read(T.RADVD_CONF_LEGACY) == "# stale, unused\n",
+          "radvd migrated: apply writes the new file, never /etc/radvd.conf (%s %s)" % (code, out.get("error")))
+    check("systemctl restart radvd" in run.calls, "radvd migrated: radvd restarted")
+    A.rollback(out.get("id"))
+    check(b.digest() == h0, "radvd migrated: rollback restores the new file")
+    b.close()
+    # drop-in present, new file missing: read the stock file, create the new one
+    b = Box("2nic")
+    _write(b, T.RADVD_DROPIN, "[Service]\n")
+    check(T.radvd_conf_text(b.root) == (T.RADVD_CONF, legacy_text), "radvd: fallback read of /etc/radvd.conf")
+    body = add_ra(b)
+    res = P.build(body, "", b.ctx())
+    f = res.files.get(T.RADVD_CONF) or {}
+    check(f.get("old") is None and "interface eth1 {" in f.get("new", "") and "interface eth2 {" in f.get("new", ""),
+          "radvd fallback: new file created from the stock config")
+    r = b.plan(body)
+    h0 = b.digest()
+    code, out = A.apply(dict(body, plan_hash=r["plan_hash"]), root=b.root, runner=Runner(), schedule=lambda *a: None)
+    check(code == 200 and os.path.exists(b.root + T.RADVD_CONF), "radvd fallback: apply creates the new file")
+    A.rollback(out.get("id"))
+    check(b.digest() == h0 and not os.path.exists(b.root + T.RADVD_CONF), "radvd fallback: rollback removes it again")
+    b.close()
+    # backups: the new file restarts radvd on restore, the rest of etc/tuxwall tuxwall
+    check(B.service_for("etc/tuxwall/radvd.conf") == "radvd" and B.service_for("etc/radvd.conf") == "radvd"
+          and B.service_for("etc/tuxwall/interfaces.json") == "tuxwall", "radvd: backup restore service hints")
+
+
 def main():
     tests = [t_no_changes, t_lan_readdress, t_add_opt, t_vlan, t_swap, t_validation, t_policy_edits, t_raw_wg,
-             t_apply_sandbox, t_vlan_tab, t_legacy_sync]
+             t_apply_sandbox, t_vlan_tab, t_legacy_sync, t_radvd_path]
     if "--tools" in sys.argv:
         tests.append(t_tools)
     for fn in tests:

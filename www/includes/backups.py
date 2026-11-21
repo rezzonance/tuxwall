@@ -137,6 +137,9 @@ ITEMS = [
     {"arc": "var/lib/kea", "path": "/var/lib/kea", "label": "KEA DHCP leases", "service": "kea-dhcp4-server"},
 ]
 ITEM_BY_ARC = {i["arc"]: i for i in ITEMS}
+# radvd's config since the radvd.service drop-in (etc/radvd.conf = stock path,
+# still restored on boxes that were not migrated); captured by etc/tuxwall
+RADVD_ARC = "etc/tuxwall/radvd.conf"
 NOT_INCLUDED = ("databases (CrowdSec/reports/MariaDB: see the USB backup), GeoIP databases, "
                 "caches, logs and history files, home directories (incl. the opencode credential store)")
 
@@ -204,6 +207,8 @@ def service_for(name):
             if best is None or len(arc) > len(best):
                 best = arc
     svc = ITEM_BY_ARC[best]["service"] if best else None
+    if name == RADVD_ARC:
+        svc = "radvd"
     if name.startswith("etc/systemd/") and not name.startswith("etc/systemd/network/") \
             and name != "etc/systemd/resolved.conf":
         svc = "daemon-reload"

@@ -605,7 +605,8 @@ _RADVD_BLOCK = re.compile(r"^interface\s+(\S+)\s*\{.*?^\};[ \t]*\n?", re.M | re.
 
 
 def r_radvd(ctx, m, res):
-    text = ctx.read(T.RADVD_CONF)
+    # path radvd reads; text falls back to /etc/radvd.conf while the new file is missing
+    path, text = T.radvd_conf_text(ctx.root)
     new = text
     have = set(re.findall(r"^\s*interface\s+(\S+)\s*\{", text, re.M))
     for i in m.old:
@@ -630,7 +631,11 @@ def r_radvd(ctx, m, res):
             res.change("radvd", "radvd blocks follow their networks to the new devices.")
         if not re.search(r"^\s*interface\s+\S+\s*\{", new, re.M):
             res.warn("No network advertises IPv6 any more; radvd will fail to start (stop it if that is intended).")
-        res.file("radvd", T.RADVD_CONF, text or None, new)
+        if path == T.RADVD_CONF_LEGACY:
+            res.warn("radvd still reads %s, which the dashboard cannot replace (read-only /etc in its sandbox): "
+                     "this apply will fail and roll back. Upgrading the package moves radvd to %s; see "
+                     "/var/log/tuxwall/radvd-migration.log if it was skipped." % (T.RADVD_CONF_LEGACY, T.RADVD_CONF))
+        res.file("radvd", path, (ctx.read(path) if ctx.exists(path) else "") or None, new)
 
 
 # ---------------------------------------------------------------- unbound
@@ -1226,10 +1231,11 @@ def run_validators(ctx, res, tmp):
         else:
             rc, txt = None, "/etc/kea is not writable (run as root to test-load the config)"
         add("kea", "kea-dhcp4 -t", rc, txt)
-    if T.RADVD_CONF in res.files:
+    rp = next((p for p in (T.RADVD_CONF, T.RADVD_CONF_LEGACY) if p in res.files), None)
+    if rp and res.files[rp]["new"] is not None:
         fp = os.path.join(tmp, "radvd.conf")
         with open(fp, "w") as f:
-            f.write(res.files[T.RADVD_CONF]["new"])
+            f.write(res.files[rp]["new"])
         rc, txt = _run(["radvd", "--configtest", "-C", fp])
         add("radvd", "radvd --configtest", rc, txt)
     if any(p.startswith(T.UNBOUND_DIR) for p in res.files):

@@ -60,8 +60,7 @@ TRIPWIRE_CLI = os.path.join(ROOT_DIR, "pkg", "usr", "local", "sbin", "tuxwall-tr
 PROTECTED = ("/etc", "/usr", "/boot", "/efi")  # ProtectSystem=full
 
 # Single-file entries of the unit: in-place writes only (no temp + rename).
-FILE_ENTRIES = {"/etc/hosts", "/etc/hosts.allow", "/etc/hosts.deny", "/etc/hostname", "/etc/fstab",
-                "/etc/radvd.conf"}
+FILE_ENTRIES = {"/etc/hosts", "/etc/hosts.allow", "/etc/hosts.deny", "/etc/hostname", "/etc/fstab"}
 
 # ── the audit: write site -> path (directory writes: "dir:<path>") ─────────
 # Module constants are resolved below; "api:NAME" = a module-level constant
@@ -78,7 +77,7 @@ WRITES = [
     # interface assignments (assign_apply._write: mkstemp in the target dir)
     ("assign: netplan files", "dir:topology.NETPLAN_DIR"),
     ("assign: kea", "topology.KEA_CONF"),
-    ("assign: radvd", "topology.RADVD_CONF"),
+    ("assign: radvd (/etc/tuxwall/radvd.conf, read by radvd through its TuxWall drop-in)", "topology.RADVD_CONF"),
     ("assign: unbound conf.d", "dir:topology.UNBOUND_DIR"),
     ("assign: before.rules", "topology.UFW_BEFORE"),
     ("assign: user.rules/user6.rules", "topology.UFW_USER"),
@@ -154,8 +153,10 @@ KNOWN_GAPS = {
     "/etc/hosts.deny": _RESTORE_GAP,
     "/etc/nftables.conf": _RESTORE_GAP,
     "/etc/systemd/resolved.conf": _RESTORE_GAP,
-    "/etc/radvd.conf": _RESTORE_GAP + "; assign_apply._write (mkstemp in /etc) fails too - open owner "
-                       "decision (in-place write vs. stale single-file bind)",
+    # the stock path: radvd reads topology.RADVD_CONF (/etc/tuxwall) once the
+    # postinst installed the radvd.service drop-in; still the restore target
+    # of old archives and of boxes the migration skipped
+    "/etc/radvd.conf": _RESTORE_GAP,
     "/etc/rsyslog.d/45-tuxwall-unbound.conf": "self-heal only: the package ships the file; the API "
                                               "re-creates it only after someone deleted it",
 }
@@ -477,8 +478,10 @@ for key, name in (("restore_ssh", "etc/ssh/sshd_config"), ("restore_hosts", "etc
     except Exception as exc:
         res[key] = err(exc)
 
-# 4. interface assignments: suricata (new dir entry) and radvd (known gap)
-for key, path in (("assign_suricata", "/etc/suricata/suricata.yaml"), ("assign_radvd", "/etc/radvd.conf")):
+# 4. interface assignments: suricata (new dir entry), radvd (its TuxWall path;
+#    the stock /etc/radvd.conf stays read-only)
+for key, path in (("assign_suricata", "/etc/suricata/suricata.yaml"), ("assign_radvd", "/etc/tuxwall/radvd.conf"),
+                  ("assign_radvd_legacy", "/etc/radvd.conf")):
     try:
         A._write(path, "# assigned\n", 0o644)
         res[key] = {"ok": True}
@@ -594,7 +597,8 @@ def t_sandbox(scratch):
     for r, label in ((a, "unit-only"), (b, "drop-ins")):
         check(not r["restore_hosts"].get("ok") and r["restore_hosts"].get("sandbox"),
               "%s: /etc/hosts restore refused with the sandbox message" % label)
-        check(ro(r["assign_radvd"]), "%s: /etc/radvd.conf atomic write still EROFS (known gap)" % label)
+        check(r["assign_radvd"].get("ok") is True, "%s: /etc/tuxwall/radvd.conf writable (radvd drop-in path)" % label)
+        check(ro(r["assign_radvd_legacy"]), "%s: stock /etc/radvd.conf stays read-only" % label)
         for k in ("etc_root", "etc_rsyslog", "boot", "usr_bin"):
             check(ro(r[k]), "%s: %s stays read-only" % (label, k))
 
