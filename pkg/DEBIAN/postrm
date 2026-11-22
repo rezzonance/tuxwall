@@ -2,6 +2,23 @@
 # tuxwall postrm: cleanup on purge (files dpkg can't track are removed here).
 set -euo pipefail
 
+# The rsyslog drop rule is written by the postinst since 3.3.5 (dpkg no
+# longer tracks it): removed with the package unless it has local edits.
+RSYSLOG_RULE=/etc/rsyslog.d/45-tuxwall-unbound.conf
+RSYSLOG_RULE_SUMS="755f925804a59fb5440a28364e3525f3a7ad8436a1d3e3d9095a27f46949bf1f ac67c6b092adcd8a4c04e1e6f0f594651a0dd40cd897e58d76a785aaa2404d1a"
+
+case "$1" in
+  remove|purge)
+    if [ -f "$RSYSLOG_RULE" ]; then
+      sum="$(sha256sum "$RSYSLOG_RULE" 2>/dev/null | cut -d' ' -f1)" || sum=""
+      case " $RSYSLOG_RULE_SUMS " in
+        *" $sum "*) rm -f "$RSYSLOG_RULE"
+                    systemctl try-restart rsyslog.service 2>/dev/null || true ;;
+      esac
+    fi
+    ;;
+esac
+
 case "$1" in
   purge)
     rm -f /etc/unbound/unbound.conf.d/99-blocklists.conf

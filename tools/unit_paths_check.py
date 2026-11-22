@@ -115,7 +115,7 @@ WRITES = [
     ("api sqm.conf", "api:SQM_CONF"),
     ("api router-dns.conf + .bak", "api:UNBOUND_ROUTER_CONF"),
     ("api log-local-actions.conf", "api:UNBOUND_LOCAL_ACTIONS_CONF"),
-    ("api rsyslog drop rule (self-heal; the package ships it)", "api:UNBOUND_RSYSLOG_RULE"),
+    ("api rsyslog drop rule (best-effort self-heal; the postinst installs it)", "api:UNBOUND_RSYSLOG_RULE"),
     ("api portforward.json", "api:PF_PERSIST"),
     ("api dmz.json", "api:DMZ_PERSIST"),
     ("api vlans.json", "api:VLAN_PERSIST_FILE"),
@@ -157,8 +157,9 @@ KNOWN_GAPS = {
     # postinst installed the radvd.service drop-in; still the restore target
     # of old archives and of boxes the migration skipped
     "/etc/radvd.conf": _RESTORE_GAP,
-    "/etc/rsyslog.d/45-tuxwall-unbound.conf": "self-heal only: the package ships the file; the API "
-                                              "re-creates it only after someone deleted it",
+    "/etc/rsyslog.d/45-tuxwall-unbound.conf": "postinst-owned since 3.3.5 (rsyslog_unbound_rule); the API "
+                                              "re-creates it only after a delete, and under the sandbox "
+                                              "that write fails - skipped quietly, logged once",
 }
 
 # /etc, /usr, /boot literals in the API code that are only read (or are

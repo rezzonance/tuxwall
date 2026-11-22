@@ -398,6 +398,52 @@ plugins_dir_perms() {       # plugins_dir_perms [DIR] [OWNER] -> one status line
   echo "plugins: $dir $owner 0755 (was $was); plugin dirs 0755, files 0644, settings/pin/secrets 0600"
 }
 
+# rsyslog drop rule for unbound's always_nxdomain notices (3.3.5). It was a
+# plain package file under /etc until 3.3.4: dpkg overwrote local edits,
+# never restarted rsyslog on a change, and the API's self-heal after a delete
+# fails under tuxwall.service's sandbox. Now the postinst owns it: installed
+# when absent, a known older TuxWall version is updated, a locally edited
+# copy is kept. rsyslog is restarted only when the file content changed and
+# `rsyslogd -N1` accepts the result (else the previous state is put back).
+# An upgrade from 3.2.2-3.3.4 finds the file just removed by dpkg (same
+# bytes as rsyslog already runs) - restored without a restart.
+RSYSLOG_RULE_SRC=/usr/share/tuxwall/rsyslog/45-tuxwall-unbound.conf
+RSYSLOG_RULE=/etc/rsyslog.d/45-tuxwall-unbound.conf
+# sha256 of copies an older TuxWall wrote (the API's pre-3.3.5 self-heal text)
+RSYSLOG_RULE_OLD="ac67c6b092adcd8a4c04e1e6f0f594651a0dd40cd897e58d76a785aaa2404d1a"
+rsyslog_unbound_rule() {    # rsyslog_unbound_rule [PREV_VERSION] [SRC] [DST] -> one status line, never fails
+  local prev=${1:-} src=${2:-$RSYSLOG_RULE_SRC} dst=${3:-$RSYSLOG_RULE} cur old="" restart=1
+  [[ -f $src ]] || { echo "rsyslog rule: $src missing - skipped"; return 0; }
+  if [[ ! -d $(dirname "$dst") ]] || ! command -v rsyslogd >/dev/null 2>&1; then
+    echo "rsyslog rule: rsyslog not installed - skipped"; return 0
+  fi
+  if [[ -e $dst ]]; then
+    if cmp -s "$src" "$dst"; then echo "rsyslog rule: $dst up to date"; return 0; fi
+    cur="$(sha256sum "$dst" 2>/dev/null | cut -d' ' -f1)" || cur=""
+    if [[ " $RSYSLOG_RULE_OLD " != *" $cur "* ]]; then
+      echo "rsyslog rule: $dst has local edits - kept (TuxWall's version: $src)"; return 0
+    fi
+    old="$(mktemp)" && cp -p "$dst" "$old" || { echo "rsyslog rule: cannot back up $dst - unchanged"; return 0; }
+  elif [[ -n $prev ]] && dpkg --compare-versions "$prev" ge 3.2.2 && dpkg --compare-versions "$prev" lt 3.3.5; then
+    restart=0
+  fi
+  if ! install -m 0644 "$src" "$dst"; then
+    [[ -n $old ]] && rm -f "$old"
+    echo "rsyslog rule: could not write $dst - unchanged"; return 0
+  fi
+  if (( ! restart )); then
+    echo "rsyslog rule: $dst restored (rsyslog already runs it - not restarted)"; return 0
+  fi
+  if ! rsyslogd -N1 >/dev/null 2>&1; then
+    if [[ -n $old ]]; then cp -p "$old" "$dst"; rm -f "$old"; else rm -f "$dst"; fi
+    echo "rsyslog rule: rsyslogd -N1 rejected the configuration - previous state kept"; return 0
+  fi
+  [[ -n $old ]] && rm -f "$old"
+  systemctl try-restart rsyslog.service >/dev/null 2>&1 || true
+  echo "rsyslog rule: $dst installed; rsyslog restarted"
+  return 0
+}
+
 # AI assistant (3.3.4): setup-opencode-agent.sh ships in the package. 3.3.3
 # and older looked for it but never shipped it, so a fresh apt install had no
 # opencode binary (tuxwall-agent.service crash-looped; the package drop-in
@@ -494,6 +540,9 @@ EOF
         echo "   installed $f (was absent)"
       fi
     done
+
+    # unbound's block notices: kept out of /var/log/syslog (journald only)
+    echo "   $(rsyslog_unbound_rule "${2:-}")"
 
     # AGENTS.md for the agent: installed in step 9, after the agent setup has
     # created the tuxwall-agent user (agents_md_install).

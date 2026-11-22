@@ -38,6 +38,12 @@ a fake `systemctl` (first in PATH, records its calls) and a temp marker:
   when the opencode binary is missing, honours /etc/tuxwall/no-agent, every
   failure is a warning with the re-run command; agents_md_install runs after
   it and never clobbers an edited AGENTS.md.
+- rsyslog_unbound_rule (3.3.5): /etc/rsyslog.d/45-tuxwall-unbound.conf is
+  postinst-owned: installed when absent (no restart when dpkg just removed
+  3.2.2-3.3.4's identical package copy), an older TuxWall copy updated, a
+  local edit kept; rsyslog restarted only on a change that rsyslogd -N1
+  accepts, else the previous state is put back. postrm removes it unless
+  edited.
 """
 import json
 import os
@@ -994,6 +1000,95 @@ def t_agents_md_install():
         shutil.rmtree(d)
 
 
+RSYSLOG_FAKES = {
+    "rsyslogd": '#!/bin/sh\necho "rsyslogd $*" >> "$FAKE_LOG"\nexit "${FAKE_N1_RC:-0}"\n',
+    "systemctl": '#!/bin/sh\necho "systemctl $*" >> "$FAKE_LOG"\nexit 0\n',
+}
+
+
+def t_rsyslog_rule():
+    fn = func("rsyslog_unbound_rule")
+    check("rsyslog_unbound_rule()" in fn, "postinst defines rsyslog_unbound_rule")
+    pre = "\n".join(l for l in SRC.splitlines() if l.startswith(("RSYSLOG_RULE_SRC=", "RSYSLOG_RULE=",
+                                                                   "RSYSLOG_RULE_OLD="))) + "\n"
+    body = SRC.split('case "$1" in\n  configure)', 1)[1]
+    check('rsyslog_unbound_rule "${2:-}"' in body, "configure runs rsyslog_unbound_rule with the previous version")
+    shipped = os.path.join(ROOT_DIR, "pkg/usr/share/tuxwall/rsyslog/45-tuxwall-unbound.conf")
+    check(os.path.isfile(shipped), "rule ships under /usr/share/tuxwall/rsyslog")
+    check(not os.path.exists(os.path.join(ROOT_DIR, "pkg/etc/rsyslog.d")), "no dpkg-tracked copy under pkg/etc/rsyslog.d")
+    want = open(shipped).read()
+    api = open(os.path.join(ROOT_DIR, "www/includes/api_server.py")).read()
+    m = re.search(r"^UNBOUND_RSYSLOG_CONTENT = \(.*?^\)\n", api, re.M | re.S)
+    ns = {}
+    exec(m.group(0) if m else "", ns)
+    check(ns.get("UNBOUND_RSYSLOG_CONTENT") == want, "API self-heal writes the packaged bytes")
+    old_api = ("# TuxWall 2026-11-03: unbound's always_nxdomain block notifications feed\n"
+               "# the dashboard Traffic Monitor via JOURNALD (journalctl -u unbound), not\n"
+               "# from this file. Duplicating them into /var/log/syslog wrote ~583k\n"
+               "# lines/day of noise for nothing. Drop them here; journald is unaffected\n"
+               "# (and rate/size-capped by systemd).\n"
+               "if $programname == 'unbound' and $msg contains 'always_nxdomain' then stop\n")
+
+    def go(prev="", existing=None, n1_rc=0, rsyslog=True, mode=0o644):
+        d = tempfile.mkdtemp(prefix="pkg-rsyslog-")
+        fakebin(d, RSYSLOG_FAKES if rsyslog else {"systemctl": RSYSLOG_FAKES["systemctl"]})
+        os.makedirs(d + "/rsyslog.d")
+        dst = d + "/rsyslog.d/45-tuxwall-unbound.conf"
+        if existing is not None:
+            with open(dst, "w") as f:
+                f.write(existing)
+            os.chmod(dst, mode)
+        rc, calls, out, err = bash_run(d, pre + fn + 'rsyslog_unbound_rule "%s" "%s" "%s"\n' % (prev, shipped, dst),
+                                       env={"FAKE_N1_RC": str(n1_rc)}, path_extra=rsyslog)
+        content = open(dst).read() if os.path.exists(dst) else None
+        shutil.rmtree(d)
+        return rc, calls, out.strip(), content
+
+    rc, calls, out, c = go()
+    check(rc == 0 and c == want and "rsyslogd -N1" in calls and "systemctl try-restart rsyslog.service" in calls,
+          "fresh install: installed, checked, rsyslog restarted (%s %s)" % (out, calls))
+    rc, calls, out, c = go(prev="3.3.4")
+    check(rc == 0 and c == want and calls == [] and "not restarted" in out,
+          "upgrade from 3.3.4 (dpkg removed its copy): restored, no restart (%s %s)" % (out, calls))
+    rc, calls, out, c = go(prev="3.1.0")
+    check(c == want and "systemctl try-restart rsyslog.service" in calls,
+          "upgrade from a version that never shipped it: installed + restart (%s)" % calls)
+    rc, calls, out, c = go(prev="3.3.4", existing=want)
+    check(rc == 0 and c == want and calls == [] and "up to date" in out, "identical: untouched, no restart")
+    rc, calls, out, c = go(prev="3.3.4", existing=old_api)
+    check(c == want and calls == ["rsyslogd -N1", "systemctl try-restart rsyslog.service"],
+          "older TuxWall copy: updated, checked, restarted (%s)" % calls)
+    edited = want + "# mine\n"
+    rc, calls, out, c = go(prev="3.3.4", existing=edited)
+    check(rc == 0 and c == edited and calls == [] and "local edits" in out, "local edit: kept, no restart (%s)" % out)
+    rc, calls, out, c = go(n1_rc=1)
+    check(rc == 0 and c is None and calls == ["rsyslogd -N1"] and "previous state kept" in out,
+          "rsyslogd -N1 rejects a new file: removed again, no restart (%s %s)" % (out, calls))
+    rc, calls, out, c = go(prev="3.3.4", existing=old_api, n1_rc=1)
+    check(rc == 0 and c == old_api and "systemctl try-restart rsyslog.service" not in calls,
+          "rsyslogd -N1 rejects an update: old copy put back, no restart")
+    rc, calls, out, c = go(rsyslog=False)
+    check(rc == 0 and c is None and "not installed" in out, "no rsyslogd: skipped (%s)" % out)
+
+    postrm = open(os.path.join(ROOT_DIR, "pkg/DEBIAN/postrm")).read()
+    for arg, content, gone in (("remove", want, True), ("purge", old_api, True), ("remove", edited, False),
+                               ("upgrade", want, False)):
+        d = tempfile.mkdtemp(prefix="pkg-postrm-")
+        fakebin(d, RSYSLOG_FAKES)
+        dst = d + "/45-tuxwall-unbound.conf"
+        with open(dst, "w") as f:
+            f.write(content)
+        script = postrm.replace("/etc/rsyslog.d/45-tuxwall-unbound.conf", dst)
+        script = script.split('case "$1" in\n  purge)', 1)[0] + "exit 0\n"
+        with open(d + "/postrm", "w") as f:
+            f.write(script)
+        e = dict(os.environ, FAKE_LOG=d + "/calls", PATH=d + "/fbin:" + os.environ.get("PATH", ""))
+        p = subprocess.run(["bash", d + "/postrm", arg], env=e, capture_output=True, text=True, timeout=30)
+        check(p.returncode == 0 and os.path.exists(dst) != gone,
+              "postrm %s: rule %s" % (arg, "removed" if gone else "kept"))
+        shutil.rmtree(d)
+
+
 def main():
     for p in (POSTINST, PRERM, os.path.join(ROOT_DIR, "pkg", "DEBIAN", "postrm")):
         r = subprocess.run(["bash", "-n", p], capture_output=True, text=True)
@@ -1010,6 +1105,7 @@ def main():
     t_nat_ensure()
     t_agent_setup_step()
     t_agents_md_install()
+    t_rsyslog_rule()
     print("pkg_scripts_check: %d passed, %d failed" % (PASS, FAIL))
     sys.exit(1 if FAIL else 0)
 

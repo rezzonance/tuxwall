@@ -18218,14 +18218,16 @@ def _ensure_service_reload():
         pass
 
 UNBOUND_RSYSLOG_RULE = "/etc/rsyslog.d/45-tuxwall-unbound.conf"
+# same bytes as the packaged /usr/share/tuxwall/rsyslog/45-tuxwall-unbound.conf
 UNBOUND_RSYSLOG_CONTENT = (
-    "# TuxWall 2026-11-03: unbound's always_nxdomain block notifications feed\n"
-    "# the dashboard Traffic Monitor via JOURNALD (journalctl -u unbound), not\n"
-    "# from this file. Duplicating them into /var/log/syslog wrote ~583k\n"
-    "# lines/day of noise for nothing. Drop them here; journald is unaffected\n"
-    "# (and rate/size-capped by systemd).\n"
+    "# TuxWall 2026-11-03: unbound's log-local-actions (always_nxdomain block\n"
+    "# notifications) are consumed by the dashboard's Traffic Monitor from\n"
+    "# JOURNALD (journalctl -u unbound), not from this file. Duplicating them\n"
+    "# into /var/log/syslog wrote ~583k lines/day of noise for nothing.\n"
+    "# Drop them here; journald is unaffected (and has its own size caps).\n"
     "if $programname == 'unbound' and $msg contains 'always_nxdomain' then stop\n"
 )
+_UNBOUND_RSYSLOG_SKIPPED = []   # non-empty once the self-heal write failed
 
 
 def _ensure_unbound_local_actions():
@@ -18240,15 +18242,22 @@ def _ensure_unbound_local_actions():
             wrote_conf = True
         except Exception:
             pass
-    if not os.path.exists(UNBOUND_RSYSLOG_RULE):
+    # The package's postinst installs the rsyslog rule (3.3.5+). This is only
+    # a best-effort self-heal after someone deleted it: tuxwall.service's
+    # sandbox keeps /etc/rsyslog.d read-only, so the write normally fails -
+    # skip quietly and say so once per process (no retry storm per poll).
+    if (not _UNBOUND_RSYSLOG_SKIPPED and not os.path.exists(UNBOUND_RSYSLOG_RULE)
+            and os.path.isdir(os.path.dirname(UNBOUND_RSYSLOG_RULE))):
         try:
-            os.makedirs(os.path.dirname(UNBOUND_RSYSLOG_RULE), exist_ok=True)
             with open(UNBOUND_RSYSLOG_RULE, "w") as f:
                 f.write(UNBOUND_RSYSLOG_CONTENT)
             subprocess.run(["systemctl", "restart", "rsyslog"],
                            capture_output=True, text=True, timeout=10)
-        except Exception:
-            pass
+        except Exception as exc:
+            _UNBOUND_RSYSLOG_SKIPPED.append(True)
+            print("tuxwall: %s is missing and cannot be re-created here (%s); unbound block "
+                  "notices also go to syslog until it is back: sudo dpkg-reconfigure tuxwall"
+                  % (UNBOUND_RSYSLOG_RULE, getattr(exc, "strerror", None) or exc), flush=True)
     if wrote_conf:
         try:
             subprocess.run(["unbound-control", "reload"],

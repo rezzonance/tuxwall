@@ -102,4 +102,43 @@ try:
 except ValueError:
     pass
 
+# --- rsyslog rule self-heal (3.3.5): a write the sandbox refuses is skipped
+# quietly and logged ONCE; nothing is retried on every Traffic Monitor poll.
+import contextlib
+import io
+import subprocess
+import tempfile
+
+with tempfile.TemporaryDirectory() as td:
+    calls = []
+    real_run = mod.subprocess.run
+    mod.subprocess.run = lambda *a, **k: calls.append(a[0]) or subprocess.CompletedProcess(a[0], 0, "", "")
+    try:
+        mod.UNBOUND_LOCAL_ACTIONS_CONF = os.path.join(td, "log-local-actions.conf")
+        open(mod.UNBOUND_LOCAL_ACTIONS_CONF, "w").close()
+        ro = os.path.join(td, "rsyslog.d")
+        os.makedirs(ro)
+        os.chmod(ro, 0o555)
+        mod.UNBOUND_RSYSLOG_RULE = os.path.join(ro, "45-tuxwall-unbound.conf")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            for _ in range(3):
+                mod._ensure_unbound_local_actions()
+        if os.geteuid() != 0:   # root ignores the mode bits
+            assert buf.getvalue().count("cannot be re-created") == 1, buf.getvalue()
+            assert calls == [], calls
+            assert not os.path.exists(mod.UNBOUND_RSYSLOG_RULE)
+        os.chmod(ro, 0o755)
+        del mod._UNBOUND_RSYSLOG_SKIPPED[:]
+        mod._ensure_unbound_local_actions()
+        with open(mod.UNBOUND_RSYSLOG_RULE) as f:
+            assert f.read() == mod.UNBOUND_RSYSLOG_CONTENT
+        assert ["systemctl", "restart", "rsyslog"] in calls
+        mod.UNBOUND_RSYSLOG_RULE = os.path.join(td, "no-rsyslog", "45-tuxwall-unbound.conf")
+        calls[:] = []
+        mod._ensure_unbound_local_actions()
+        assert calls == [] and not mod._UNBOUND_RSYSLOG_SKIPPED, "no rsyslog.d -> silently nothing"
+    finally:
+        mod.subprocess.run = real_run
+
 print("api_server smoke test OK")
