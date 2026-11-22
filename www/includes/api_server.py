@@ -4343,7 +4343,7 @@ REPORTING_DEFAULT_URL = "https://tuxwall.org/report"
 # refuses reports from below MIN_REPORTER_VERSION (3.2.4) - that release is
 # the one that stops consumers from ever banning Cloudflare edge IPs.
 # Keep in sync with pkg/DEBIAN/control.
-TUXWALL_VERSION = "3.3.3"
+TUXWALL_VERSION = "3.3.4"
 REPORTING_TIMEOUT = 10
 REPORT_QUEUE_FILE = os.path.join(BLOCKLIST_DIR, "report-queue.json")
 REPORT_QUEUE_MAX = 2000              # queued reports kept at most (oldest dropped)

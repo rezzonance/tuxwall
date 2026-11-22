@@ -194,9 +194,9 @@ sudo apt install tuxwall
 Download the current package from [Releases](https://github.com/rezzonance/tuxwall/releases), then:
 
 ```bash
-sudo bash tuxwall-install.sh --deb tuxwall_3.3.3_all.deb
+sudo bash tuxwall-install.sh --deb tuxwall_3.3.4_all.deb
 # or the classic way:
-sudo dpkg -i tuxwall_3.3.3_all.deb && sudo apt -f install
+sudo dpkg -i tuxwall_3.3.4_all.deb && sudo apt -f install
 ```
 </details>
 
