@@ -40,7 +40,7 @@ jobs:
       - name: Undefined names, all scopes (the 3.2.0 bug class)
         # F821 only, isolated config: pre-existing style findings must not
         # fail this gate - an undefined name is always a release blocker.
-        run: ruff check --select F821 --isolated www/includes/api_server.py tools/plugin_security_check.py tools/auth_gate_check.py tools/nginx_listen_check.py pkg/usr/local/sbin/tuxwall-nginx-listen www/includes/topology.py www/includes/assign_plan.py www/includes/assign_apply.py www/includes/fw_guard.py www/includes/fw_snap.py www/includes/fw_lint.py www/includes/fw_edit.py www/includes/fw_hits.py www/includes/canary_egress.py www/includes/backups.py www/includes/kea_conf.py www/includes/crowdsec_fw.py plugins/*/main.py pkg/usr/local/sbin/tuxwall-tripwire pkg/usr/local/sbin/tuxwall-bouncer-nft-migrate tools/kea_conf_check.py tools/bouncer_migrate_check.py tools/pkg_scripts_check.py tools/agent_setup_check.py tools/unit_paths_check.py tools/tripwire_check.py tools/deception_check.py tools/custom_blocklist_check.py tools/port_owner_check.py collector/tuxwall-collector.py scripts/tuxwall-collector-admin tools/collector_severity_check.py pkg/usr/local/lib/tuxwall/opencode_config.py tools/opencode_config_check.py tools/sqm_check.py tools/stray_files_check.py tools/privacy_check.py tools/release_workflow_check.py tools/deb_contents_check.py
+        run: ruff check --select F821 --isolated www/includes/api_server.py tools/plugin_security_check.py tools/auth_gate_check.py tools/nginx_listen_check.py pkg/usr/local/sbin/tuxwall-nginx-listen www/includes/topology.py www/includes/assign_plan.py www/includes/assign_apply.py www/includes/fw_guard.py www/includes/fw_snap.py www/includes/fw_lint.py www/includes/fw_edit.py www/includes/fw_hits.py www/includes/canary_egress.py www/includes/backups.py www/includes/kea_conf.py www/includes/crowdsec_fw.py plugins/*/main.py pkg/usr/local/sbin/tuxwall-tripwire pkg/usr/local/sbin/tuxwall-bouncer-nft-migrate tools/kea_conf_check.py tools/bouncer_migrate_check.py tools/pkg_scripts_check.py tools/agent_setup_check.py tools/unit_paths_check.py tools/tripwire_check.py tools/deception_check.py tools/custom_blocklist_check.py tools/allowlist_check.py tools/port_owner_check.py collector/tuxwall-collector.py scripts/tuxwall-collector-admin tools/collector_severity_check.py pkg/usr/local/lib/tuxwall/opencode_config.py tools/opencode_config_check.py tools/sqm_check.py tools/stray_files_check.py tools/privacy_check.py tools/release_workflow_check.py tools/deb_contents_check.py
 
       - name: Import + behavior smoke test
         run: python3 tools/api_server_smoke.py
@@ -67,6 +67,10 @@ jobs:
       - name: Custom banlist sync (diff, refresh, guards, add/remove; fake cscli in a temp root)
         # pure tests: banlist file in a temp dir, cscli answered from an in-memory decision table
         run: python3 tools/custom_blocklist_check.py
+
+      - name: CrowdSec allowlists (validation, broad/0-0 refusal, ban lifting, lock-out confirm, cached guard; fake cscli)
+        # pure tests: cscli answered from in-memory lists (documentation addresses only)
+        run: python3 tools/allowlist_check.py
 
       - name: Port ownership incidents (systemd socket activation, sshd/canary split)
         # pure tests: synthetic ss / systemctl list-sockets output

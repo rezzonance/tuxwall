@@ -2715,6 +2715,11 @@ def ban_crowdsec_ip(ip, duration="24h"):
     seconds = int(duration[:-1]) * BAN_DURATION_SECONDS[duration[-1]]
     if seconds > 90 * 86400:
         return {"ok": False, "error": "Duration too long (max 90d)."}
+    allowed = _allowlist_match(ip)
+    if allowed:
+        return {"ok": False, "allowlisted": allowed,
+                "error": "%s is allowlisted in %s - remove it from that allowlist (Whitelist) "
+                         "before banning it." % (ip, allowed)}
     try:
         proc = subprocess.run(
             [CROWDSEC_BIN, "decisions", "add", "--ip", ip, "--duration", duration,
@@ -2725,6 +2730,11 @@ def ban_crowdsec_ip(ip, duration="24h"):
         return {"ok": False, "error": str(exc)}
     if proc.returncode != 0:
         return {"ok": False, "error": (proc.stderr or proc.stdout or "cscli failed").strip()}
+    said = (proc.stdout or "") + (proc.stderr or "")
+    if "allowlist" in said.lower():
+        # cscli refuses allowlisted values without --bypass-allowlist
+        return {"ok": False, "allowlisted": True,
+                "error": "%s is in a CrowdSec allowlist - not banned (%s)" % (ip, said.strip()[-200:])}
     _invalidate_crowdsec_decisions_cache()
     return {
         "ok": True,
@@ -3789,6 +3799,7 @@ class CommunityAutoWorker(threading.Thread):
         skipped_cf = 0
         skipped_low = 0
         skipped_infra = 0
+        skipped_allowlist = 0
         try:
             never_ban = _community_never_ban_ips()
         except Exception:
@@ -3805,6 +3816,9 @@ class CommunityAutoWorker(threading.Thread):
             # protected ranges only cover the big public providers.
             if b["ip"] in never_ban:
                 skipped_infra += 1
+                continue
+            if _allowlist_match(b["ip"]):
+                skipped_allowlist += 1
                 continue
             # 2026-11-09 audit: the feed publishes single-reporter LOW
             # entries (the deception gate trusts self-attested evidence
@@ -3835,6 +3849,7 @@ class CommunityAutoWorker(threading.Thread):
             state["skipped_cf"] = skipped_cf
             state["skipped_low"] = skipped_low
             state["skipped_infra"] = skipped_infra
+            state["skipped_allowlist"] = skipped_allowlist
             state["pending"] = max(0, len(missing) - added)
             _save_community_auto(state)
 
@@ -4605,6 +4620,31 @@ def _report_q_prune_stale(now=None):
     return n
 
 
+def _report_q_drop_allowlisted(now=None):
+    """Drop queued reports whose IP was allowlisted after it was queued
+    (the enqueue path already refuses allowlisted IPs). -> count dropped."""
+    with REPORT_Q_LOCK:
+        ips = {str((i.get("payload") or {}).get("ip") or "") for i in REPORT_Q["items"]}
+    if not ips:
+        return 0
+    allowed = {ip for ip in ips if ip and _allowlist_match(ip)}
+    if not allowed:
+        return 0
+    with REPORT_Q_LOCK:
+        items = REPORT_Q["items"]
+        keep = [i for i in items if str((i.get("payload") or {}).get("ip") or "") not in allowed]
+        n = len(items) - len(keep)
+        if n:
+            REPORT_Q["items"] = keep
+            st = REPORT_Q["stats"]
+            st["dropped_total"] = int(st.get("dropped_total") or 0) + n
+            _report_q_save()
+    if n:
+        print("[report-queue] dropped %d queued report(s): IP now in a CrowdSec allowlist" % n,
+              flush=True)
+    return n
+
+
 def _report_payload(ip, hits=0, reason="", source="", category="", suricata=None):
     """The report body WITHOUT the key (the key is added at send time, so
     the persisted queue never holds it). None for a non-global address."""
@@ -4746,7 +4786,7 @@ def _report_q_process(now=None, limit=REPORT_BATCH):
     out = {"sent": 0, "retry": 0, "refused": 0, "discarded": 0, "left": 0,
            "paused": False, "held": False}
     _report_q_load()
-    out["discarded"] = _report_q_prune_stale(now)
+    out["discarded"] = _report_q_prune_stale(now) + _report_q_drop_allowlisted(now)
     conf = load_reporting_conf()
     if not conf["enabled"]:
         # switched off: hold what is queued (sent when switched back on)
@@ -5156,12 +5196,536 @@ def _is_own_or_recent_wan(ip):
     return ip and ip in set(_recent_wan_ips()) | {_honey_wan_ip(), _honey_wan6()}
 
 
+# --- CrowdSec allowlists (Ban Management "Whitelist" section) ---------------
+# 2026-11-22: CrowdSec >= 1.6.8 keeps centralized allowlists (cscli
+# allowlists ...). The LAN Ban Management page lists every list and adds /
+# removes entries through these helpers (admin only). Values are validated
+# here (IP or CIDR, normalised), cscli always runs with an argv list.
+# Adding an entry lifts the bans it covers; removing one that covers this
+# router, its LAN/VPN, upstream infrastructure or the requesting browser
+# needs an explicit confirmation. The deception guard, manual bans and
+# community-auto honour the lists through a cached network set.
+ALLOWLIST_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+ALLOWLIST_EXPIRY_RE = re.compile(r"^([1-9][0-9]{0,4})([mhd])$")
+ALLOWLIST_EXPIRY_MAX = 365 * 86400
+ALLOWLIST_COMMENT_MAX = 200
+ALLOWLIST_VALUE_MAX = 64
+ALLOWLIST_BROAD_PREFIX = {4: 16, 6: 32}   # broader than this needs confirm_broad
+ALLOWLIST_CACHE_TTL = 300
+ALLOWLIST_RETRY = 60
+ALLOWLIST_LIFT_SHOW = 50
+# Lists rewritten by TuxWall itself (name -> event that rewrites them).
+# Nothing regenerates a list today; a future regenerator must be listed
+# here so the page warns before manual edits.
+ALLOWLIST_MANAGED = {}
+_ALLOWLIST_CACHE = {"ts": 0.0, "nets": None, "refreshing": False, "ok": False}
+_ALLOWLIST_CACHE_LOCK = threading.Lock()
+_ALLOWLIST_WRITE_LOCK = threading.Lock()
+_GO_ZERO_TIME = "0001-01-01T00:00:00"
+
+
+def _cscli_text(args, timeout=CROWDSEC_TIMEOUT):
+    """-> (returncode, stdout, stderr); rc -1 when cscli could not run."""
+    try:
+        proc = subprocess.run([CROWDSEC_BIN] + list(args), capture_output=True,
+                              text=True, timeout=timeout)
+    except Exception as exc:
+        return -1, "", str(exc)
+    return proc.returncode, proc.stdout or "", proc.stderr or ""
+
+
+def _cscli_err(rc, out, err):
+    lines = [ln for ln in (err or out or "").strip().splitlines() if ln.strip()]
+    msg = lines[-1] if lines else "cscli failed"
+    m = re.search(r'msg="([^"]*)"', msg)
+    return ("cscli rc=%d: %s" % (rc, m.group(1) if m else msg))[:300]
+
+
+def _allowlist_ts(text):
+    """cscli ISO time -> epoch seconds; None for Go's zero time / invalid."""
+    s = str(text or "").strip()
+    if not s or s.startswith(_GO_ZERO_TIME):
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _allowlist_net(value):
+    """Normalised network for an allowlist value, or None."""
+    s = str(value or "").strip()
+    try:
+        if "/" in s:
+            net = ipaddress.ip_network(s, strict=False)
+        else:
+            net = ipaddress.ip_network(_plain_ip(ipaddress.ip_address(s.split("%")[0])))
+    except ValueError:
+        return None
+    return net
+
+
+def _allowlist_value_str(net):
+    """Single addresses as plain IPs (as cscli stores them), ranges as CIDR."""
+    if net.prefixlen == net.max_prefixlen:
+        return str(net.network_address)
+    return str(net)
+
+
+def _allowlist_parse(raw, now=None):
+    """`cscli allowlists list -o json` -> normalised lists (sorted by name)."""
+    now = time.time() if now is None else now
+    lists = []
+    for al in raw if isinstance(raw, list) else []:
+        if not isinstance(al, dict) or not al.get("name"):
+            continue
+        name = str(al["name"])
+        entries = []
+        for it in al.get("items") or []:
+            if not isinstance(it, dict):
+                continue
+            value = str(it.get("value") or "")
+            net = _allowlist_net(value)
+            exp = _allowlist_ts(it.get("expiration"))
+            entries.append({
+                "value": value,
+                "cidr": str(net) if net is not None else None,
+                "comment": str(it.get("description") or ""),
+                "expiration": it.get("expiration") if exp is not None else None,
+                "expires_ts": exp,
+                "expired": exp is not None and exp <= now,
+                "created": it.get("created_at") or None,
+                "created_ts": _allowlist_ts(it.get("created_at")),
+            })
+        lists.append({
+            "name": name,
+            "description": str(al.get("description") or ""),
+            "created": al.get("created_at") or None,
+            "updated": al.get("updated_at") or None,
+            "console_managed": bool(al.get("console_managed")),
+            "managed_by": ALLOWLIST_MANAGED.get(name),
+            "count": len(entries),
+            "entries": entries,
+        })
+    lists.sort(key=lambda x: x["name"])
+    return lists
+
+
+def _allowlist_fetch():
+    """-> (lists, error). One cscli call (~0.1 s)."""
+    rc, out, err = _cscli_text(["allowlists", "list", "-o", "json"])
+    if rc != 0:
+        return None, _cscli_err(rc, out, err)
+    try:
+        raw = json.loads(out.strip() or "[]")
+    except ValueError:
+        return None, "cscli returned invalid JSON"
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        return None, "unexpected cscli output"
+    return _allowlist_parse(raw), None
+
+
+def _allowlist_nets_from(lists):
+    nets = []
+    for al in lists or []:
+        for e in al["entries"]:
+            net = _allowlist_net(e["value"])
+            if net is not None:
+                nets.append((net, al["name"], e["expires_ts"]))
+    return tuple(nets)
+
+
+def _allowlist_store(lists):
+    with _ALLOWLIST_CACHE_LOCK:
+        if lists is not None:
+            _ALLOWLIST_CACHE.update(ts=time.time(), nets=_allowlist_nets_from(lists), ok=True)
+        else:
+            # keep the last good set; retry after ALLOWLIST_RETRY
+            _ALLOWLIST_CACHE.update(
+                ts=time.time() - ALLOWLIST_CACHE_TTL + ALLOWLIST_RETRY,
+                nets=_ALLOWLIST_CACHE["nets"] if _ALLOWLIST_CACHE["nets"] is not None else (),
+                ok=_ALLOWLIST_CACHE["ok"])
+        _ALLOWLIST_CACHE["refreshing"] = False
+
+
+def _allowlist_refresh():
+    lists, err = _allowlist_fetch()
+    if err:
+        print("[allowlist] refresh failed: %s" % err, flush=True)
+    _allowlist_store(lists)
+    return lists
+
+
+def _allowlist_cached_nets():
+    """(network, list name, expires_ts) for every allowlist entry, cached
+    ALLOWLIST_CACHE_TTL. Only the very first call loads synchronously (the
+    API warms it at start); later a stale set is refreshed in the
+    background, so the deception hot path never waits on cscli."""
+    with _ALLOWLIST_CACHE_LOCK:
+        nets, ts = _ALLOWLIST_CACHE["nets"], _ALLOWLIST_CACHE["ts"]
+        stale = nets is None or time.time() - ts >= ALLOWLIST_CACHE_TTL
+        start = stale and nets is not None and not _ALLOWLIST_CACHE["refreshing"]
+        if start:
+            _ALLOWLIST_CACHE["refreshing"] = True
+    if nets is None:
+        _allowlist_refresh()
+        with _ALLOWLIST_CACHE_LOCK:
+            return _ALLOWLIST_CACHE["nets"] or ()
+    if start:
+        try:
+            threading.Thread(target=_allowlist_refresh, name="allowlist", daemon=True).start()
+        except RuntimeError:
+            with _ALLOWLIST_CACHE_LOCK:
+                _ALLOWLIST_CACHE["refreshing"] = False
+    return nets
+
+
+def _allowlist_match(ip, nets=None, now=None):
+    """Name of the first allowlist whose live (unexpired) entry covers `ip`,
+    else None."""
+    try:
+        addr = _plain_ip(ipaddress.ip_address(str(ip or "").strip().split("%")[0]))
+    except ValueError:
+        return None
+    now = time.time() if now is None else now
+    for net, name, exp in (_allowlist_cached_nets() if nets is None else nets):
+        if exp is not None and exp <= now:
+            continue
+        if addr.version == net.version and addr in net:
+            return name
+    return None
+
+
+def _allowlist_clean_value(value):
+    """-> (network, error). IP or CIDR, normalised (host bits dropped,
+    IPv4-mapped / NAT64 IPv6 written as IPv4)."""
+    if not isinstance(value, str):
+        return None, "value must be an IP address or CIDR range"
+    s = value.strip()
+    if not s or len(s) > ALLOWLIST_VALUE_MAX or not re.fullmatch(r"[0-9A-Fa-f:./]+", s):
+        return None, "value must be an IP address or CIDR range"
+    try:
+        if "/" in s:
+            net = ipaddress.ip_network(s, strict=False)
+            if net.version == 6 and (net.subnet_of(ipaddress.ip_network("::ffff:0:0/96"))
+                                     or net.subnet_of(_NAT64_NET)):
+                return None, "write IPv4 ranges in IPv4 notation"
+        else:
+            net = ipaddress.ip_network(_plain_ip(ipaddress.ip_address(s)))
+    except ValueError:
+        return None, "value must be an IP address or CIDR range"
+    return net, None
+
+
+def _allowlist_clean_comment(text):
+    if text is None:
+        return "", None
+    if not isinstance(text, str):
+        return None, "comment must be text"
+    s = text.strip()
+    if len(s) > ALLOWLIST_COMMENT_MAX:
+        return None, "comment is limited to %d characters" % ALLOWLIST_COMMENT_MAX
+    if s and not s.isprintable():
+        return None, "comment may only contain printable characters"
+    return s, None
+
+
+def _allowlist_clean_expiry(text):
+    """'never' / '' -> (None, None); '1h', '24h', '7d', '30d', '90m' ... ->
+    (Go duration cscli accepts, i.e. days as hours, None)."""
+    if text is None or (isinstance(text, str) and text.strip().lower() in ("", "never", "0")):
+        return None, None
+    if not isinstance(text, str):
+        return None, "expiration must be 'never' or a duration like 1h, 24h, 7d, 30d"
+    m = ALLOWLIST_EXPIRY_RE.match(text.strip().lower())
+    if not m:
+        return None, "expiration must be 'never' or a duration like 1h, 24h, 7d, 30d"
+    n, unit = int(m.group(1)), m.group(2)
+    seconds = n * {"m": 60, "h": 3600, "d": 86400}[unit]
+    if seconds > ALLOWLIST_EXPIRY_MAX:
+        return None, "expiration is limited to 365 days"
+    return ("%dh" % (n * 24) if unit == "d" else "%d%s" % (n, unit)), None
+
+
+def _allowlist_broad_warning(net):
+    """Warning text when `net` is broader than ALLOWLIST_BROAD_PREFIX."""
+    limit = ALLOWLIST_BROAD_PREFIX[net.version]
+    if net.prefixlen >= limit:
+        return None
+    return ("%s is a very broad range (%s addresses, broader than /%d). CrowdSec will never ban "
+            "anything inside it and the honeypot/canary will not trap or report it."
+            % (net, "{:,}".format(net.num_addresses) if net.version == 4 else "2^%d" % (128 - net.prefixlen),
+               limit))
+
+
+def _allowlist_lockout_reasons(net, client_ip=None, lan_nets=(), own_ips=(), infra_ips=(),
+                               wan_ips=(), protected=()):
+    """Why removing `net` from an allowlist could lock the owner out or
+    break this router: it covers the browser's own address, a LAN/VLAN/VPN
+    network (incl. the delegated IPv6 prefix), any of the router's own
+    addresses, a WAN address it holds or held, infrastructure it depends on
+    (DNS/NTP/gateway/resolver/APT) or a protected range (Cloudflare edge /
+    model API). Pure - inputs are gathered by _allowlist_lockout_live()."""
+    out = []
+
+    def addr_of(v):
+        try:
+            return _plain_ip(ipaddress.ip_address(str(v).split("%")[0]))
+        except ValueError:
+            return None
+
+    def covers(v):
+        a = addr_of(v)
+        return a is not None and a.version == net.version and a in net
+
+    if client_ip and covers(client_ip) and not addr_of(client_ip).is_loopback:
+        out.append("your own address %s (the browser you are using now)" % addr_of(client_ip))
+    for n in lan_nets:
+        if n.version == net.version and not n.is_loopback and n.overlaps(net):
+            out.append("the router's LAN/VLAN/VPN network %s" % n)
+    seen = set()
+    for label, values in (("this router's own address", own_ips),
+                          ("a WAN address this router holds or recently held", wan_ips),
+                          ("infrastructure this router depends on (DNS/NTP/gateway/resolver/APT)",
+                           infra_ips)):
+        hits = sorted({str(addr_of(v)) for v in values if v and covers(v)} - seen)
+        seen.update(hits)
+        hits = [h for h in hits if not ipaddress.ip_address(h).is_loopback]
+        if hits:
+            out.append("%s: %s%s" % (label, ", ".join(hits[:4]),
+                                      " (+%d more)" % (len(hits) - 4) if len(hits) > 4 else ""))
+    for p in protected:
+        if p.version == net.version and p.overlaps(net):
+            out.append("protected infrastructure range %s (Cloudflare edge / model API)" % p)
+            break
+    return out
+
+
+def _allowlist_lockout_live(net, client_ip):
+    own = set()
+    try:
+        data = json.loads(subprocess.run(["ip", "-j", "addr"], capture_output=True,
+                                         text=True, timeout=5).stdout or "[]")
+        for iface in data:
+            for a in iface.get("addr_info", []):
+                if a.get("local"):
+                    own.add(a["local"])
+    except Exception:
+        pass
+    try:
+        wan = set(_recent_wan_ips()) | {a for a in (_honey_wan_ip(), _honey_wan6()) if a}
+    except Exception:
+        wan = set()
+    try:
+        lan = [n for n in _honey_lan_nets()]
+    except Exception:
+        lan = []
+    return _allowlist_lockout_reasons(net, client_ip, lan, own, _deception_never_ban_ips(),
+                                      wan, PROTECTED_NETS)
+
+
+def _allowlist_lift_bans(net):
+    """Delete every CrowdSec decision INSIDE `net` (`--range X --contained`
+    never touches a broader range containing it), then let crowdsec_fw
+    rebuild `inet tuxwall_crowdsec_ranges`. -> summary dict."""
+    covered, broader = [], []
+    if _csfw is not None:
+        try:
+            db = _csfw.db_path()
+            if db and os.path.exists(db):
+                bans = _csfw.active_bans(db)
+                for kind in ("ip", "range"):
+                    for value in bans[kind]:
+                        n = _allowlist_net(value)
+                        if n is None or n.version != net.version:
+                            continue
+                        if n.subnet_of(net):
+                            covered.append(value)
+                        elif kind == "range" and n.overlaps(net):
+                            broader.append(value)
+        except Exception as exc:
+            print("[allowlist] decision scan failed: %r" % (exc,), flush=True)
+    rc, out, err = _cscli_text(["decisions", "delete", "--range", str(net), "--contained"])
+    res = {"lifted": sorted(covered)[:ALLOWLIST_LIFT_SHOW], "lifted_count": len(covered),
+           "still_banned_by_ranges": sorted(broader)[:10]}
+    if rc != 0:
+        res["lift_error"] = _cscli_err(rc, out, err)
+        return res
+    m = re.search(r"(\d+) decision\(s\) deleted", out + err)
+    if m:
+        res["decisions_deleted"] = int(m.group(1))
+    try:
+        _invalidate_crowdsec_decisions_cache()
+    except Exception:
+        pass
+    if any("/" in v for v in covered) or res.get("decisions_deleted"):
+        _crowdsec_fw_sync_async()
+    return res
+
+
+def _allowlist_audit(identity, action, name, value, extra=""):
+    user = (identity or {}).get("username") or "?"
+    print("[allowlist] %s %s %s %s%s" % (user, action, value, name, (" " + extra) if extra else ""),
+          flush=True)
+
+
+def build_allowlists():
+    lists, err = _allowlist_fetch()
+    if err:
+        return 502, {"ok": False, "error": "CrowdSec allowlists unavailable: " + err}
+    _allowlist_store(lists)
+    return 200, {"ok": True, "lists": lists,
+                 "broad_prefix": {"v4": ALLOWLIST_BROAD_PREFIX[4], "v6": ALLOWLIST_BROAD_PREFIX[6]}}
+
+
+def _allowlist_find(lists, name):
+    return next((al for al in lists if al["name"] == name), None)
+
+
+def allowlist_add(body, identity=None, client_ip=None):
+    """POST /api/crowdsec/allowlists/add {list, value, comment, expiration,
+    confirm_broad} -> (status, payload)."""
+    name = body.get("list")
+    if not isinstance(name, str) or not ALLOWLIST_NAME_RE.match(name):
+        return 400, {"ok": False, "error": "invalid allowlist name"}
+    net, err = _allowlist_clean_value(body.get("value"))
+    if err:
+        return 400, {"ok": False, "error": err}
+    if net.prefixlen == 0:
+        return 400, {"ok": False, "error": "refusing to allowlist the whole internet (%s)" % net}
+    comment, err = _allowlist_clean_comment(body.get("comment"))
+    if err:
+        return 400, {"ok": False, "error": err}
+    expiry, err = _allowlist_clean_expiry(body.get("expiration"))
+    if err:
+        return 400, {"ok": False, "error": err}
+    warn = _allowlist_broad_warning(net)
+    if warn and body.get("confirm_broad") is not True:
+        return 409, {"ok": False, "needs_confirm": "broad", "warning": warn,
+                     "error": "broad range - confirmation required"}
+    value = _allowlist_value_str(net)
+    with _ALLOWLIST_WRITE_LOCK:
+        lists, ferr = _allowlist_fetch()
+        if ferr:
+            return 502, {"ok": False, "error": "CrowdSec allowlists unavailable: " + ferr}
+        al = _allowlist_find(lists, name)
+        if al is None:
+            return 404, {"ok": False, "error": "no allowlist named %s" % name}
+        if al["console_managed"]:
+            return 409, {"ok": False, "error": "%s is managed by the CrowdSec console" % name}
+        if any(e["cidr"] == str(net) for e in al["entries"]):
+            return 409, {"ok": False, "error": "%s is already in %s - remove it first to change "
+                                              "its comment or expiry" % (value, name)}
+        args = ["allowlists", "add", name, value]
+        if expiry:
+            args.append("--expiration=" + expiry)
+        if comment:
+            args.append("--comment=" + comment)
+        rc, out, cerr = _cscli_text(args)
+        if rc != 0:
+            return 502, {"ok": False, "error": _cscli_err(rc, out, cerr)}
+        lists, ferr = _allowlist_fetch()
+        _allowlist_store(lists)
+        al = _allowlist_find(lists or [], name)
+        if ferr or al is None or not any(e["cidr"] == str(net) for e in al["entries"]):
+            return 502, {"ok": False, "error": "cscli did not add %s to %s (%s)"
+                         % (value, name, ferr or (out + cerr).strip()[:200] or "not listed afterwards")}
+        lift = _allowlist_lift_bans(net)
+    _allowlist_audit(identity, "added", "to " + name, value,
+                     "expires=%s lifted=%d" % (expiry or "never", lift.get("lifted_count", 0)))
+    msg = "Added %s to %s" % (value, name)
+    if lift.get("lifted_count"):
+        msg += "; lifted %d ban(s)" % lift["lifted_count"]
+    if lift.get("still_banned_by_ranges"):
+        msg += "; still covered by broader range ban(s): " + ", ".join(lift["still_banned_by_ranges"])
+    if lift.get("lift_error"):
+        msg += "; lifting existing bans failed: " + lift["lift_error"]
+    return 200, dict({"ok": True, "list": name, "value": value, "expiration": expiry or "never",
+                      "message": msg, "entries": al["entries"]}, **lift)
+
+
+def allowlist_remove(body, identity=None, client_ip=None):
+    """POST /api/crowdsec/allowlists/remove {list, value, confirm_lockout}."""
+    name = body.get("list")
+    if not isinstance(name, str) or not ALLOWLIST_NAME_RE.match(name):
+        return 400, {"ok": False, "error": "invalid allowlist name"}
+    net, err = _allowlist_clean_value(body.get("value"))
+    if err:
+        return 400, {"ok": False, "error": err}
+    with _ALLOWLIST_WRITE_LOCK:
+        lists, ferr = _allowlist_fetch()
+        if ferr:
+            return 502, {"ok": False, "error": "CrowdSec allowlists unavailable: " + ferr}
+        al = _allowlist_find(lists, name)
+        if al is None:
+            return 404, {"ok": False, "error": "no allowlist named %s" % name}
+        if al["console_managed"]:
+            return 409, {"ok": False, "error": "%s is managed by the CrowdSec console" % name}
+        entry = next((e for e in al["entries"] if e["cidr"] == str(net)), None)
+        if entry is None:
+            return 404, {"ok": False, "error": "%s is not in %s" % (_allowlist_value_str(net), name)}
+        reasons = _allowlist_lockout_live(net, client_ip)
+        if reasons and body.get("confirm_lockout") is not True:
+            return 409, {"ok": False, "needs_confirm": "lockout", "reasons": reasons,
+                         "error": "lock-out risk - confirmation required",
+                         "warning": ("Removing %s from %s lets CrowdSec (and the deception layer) ban "
+                                     "addresses it covers:\n- %s\n\nA ban there can cut you off from "
+                                     "this router or break its internet access."
+                                     % (entry["value"], name, "\n- ".join(reasons)))}
+        rc, out, cerr = _cscli_text(["allowlists", "remove", name, entry["value"]])
+        if rc != 0:
+            return 502, {"ok": False, "error": _cscli_err(rc, out, cerr)}
+        lists, ferr = _allowlist_fetch()
+        _allowlist_store(lists)
+        al = _allowlist_find(lists or [], name)
+        if ferr or al is None or any(e["cidr"] == str(net) for e in al["entries"]):
+            return 502, {"ok": False, "error": "cscli did not remove %s from %s (%s)"
+                         % (entry["value"], name, ferr or "still listed afterwards")}
+    _allowlist_audit(identity, "removed", "from " + name, entry["value"],
+                     "confirmed-lockout" if reasons else "")
+    return 200, {"ok": True, "list": name, "value": entry["value"],
+                 "message": "Removed %s from %s" % (entry["value"], name), "entries": al["entries"]}
+
+
+def allowlist_create(body, identity=None, client_ip=None):
+    """POST /api/crowdsec/allowlists/create {name, description}."""
+    name = body.get("name")
+    if not isinstance(name, str) or not ALLOWLIST_NAME_RE.match(name):
+        return 400, {"ok": False, "error": "list name: 1-64 of a-z, 0-9, '-' and '_', starting "
+                                          "with a letter or digit"}
+    desc, err = _allowlist_clean_comment(body.get("description"))
+    if err:
+        return 400, {"ok": False, "error": err.replace("comment", "description")}
+    with _ALLOWLIST_WRITE_LOCK:
+        lists, ferr = _allowlist_fetch()
+        if ferr:
+            return 502, {"ok": False, "error": "CrowdSec allowlists unavailable: " + ferr}
+        if _allowlist_find(lists, name) is not None:
+            return 409, {"ok": False, "error": "an allowlist named %s already exists" % name}
+        rc, out, cerr = _cscli_text(["allowlists", "create", name,
+                                     "--description=" + (desc or "created on the Ban Management page")])
+        if rc != 0:
+            return 502, {"ok": False, "error": _cscli_err(rc, out, cerr)}
+        lists, ferr = _allowlist_fetch()
+        _allowlist_store(lists)
+        if ferr or _allowlist_find(lists or [], name) is None:
+            return 502, {"ok": False, "error": "cscli did not create %s" % name}
+    _allowlist_audit(identity, "created", "", name)
+    return 200, {"ok": True, "name": name, "message": "Created allowlist %s" % name}
+
+
 # --- Deception never-ban guard (every honeypot/canary ban + report path) -----
 # 2026-11-19 (deception phase 1): the honeypot and canary used to ban and
 # report any source with only a LAN/self check (and the IPv6 LAN guard
 # missed the delegated global prefix). _deception_guard() is now consulted
 # by _deception_cscli_ban() and _spawn_report(), i.e. by every path that
-# bans or reports a deception catch.
+# bans or reports a deception catch. 2026-11-22: it also honours the
+# CrowdSec allowlists (cached, see _allowlist_cached_nets).
 _NEVER_BAN = {"ts": 0.0, "ips": None, "refreshing": False}
 _NEVER_BAN_LOCK = threading.Lock()
 _NEVER_BAN_TTL = 600
@@ -5224,6 +5788,9 @@ def _deception_guard(ip):
     except ValueError:
         return "invalid address"
     s = str(addr)
+    allowed = _allowlist_match(addr)
+    if allowed:
+        return "CrowdSec allowlist %s" % allowed
     if not addr.is_global:
         return "non-global address"
     if _honey_is_lan(s):
@@ -11474,6 +12041,7 @@ ADMIN_GET_PREFIXES = (
     "/api/system/dhcp-form",
     "/api/system/unbound-form",
     "/api/community",
+    "/api/crowdsec/allowlists",
 )
 
 
@@ -16685,6 +17253,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_custom_blocklist())
         elif path == "/api/crowdsec/ban-state":
             self._send(200, build_crowdsec_ban_state())
+        elif path == "/api/crowdsec/allowlists":
+            code, res = build_allowlists()
+            self._send(code, res)
         elif path == "/api/plugins":
             self._send(200, list_plugins())
         elif path == "/api/plugins/available":
@@ -17512,6 +18083,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, unban_crowdsec_ip(body.get("ip")))
             except Exception as exc:
                 self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path in ("/api/crowdsec/allowlists/add", "/api/crowdsec/allowlists/remove",
+                      "/api/crowdsec/allowlists/create"):
+            fn = {"add": allowlist_add, "remove": allowlist_remove,
+                  "create": allowlist_create}[path.rsplit("/", 1)[1]]
+            try:
+                code, res = fn(body, identity, _client_key(self))
+            except Exception as exc:
+                print("[allowlist] %s failed: %r" % (path, exc), flush=True)
+                code, res = 500, {"ok": False, "error": str(exc)[:200]}
+            self._send(code, res)
 
         elif path == "/api/plugins/install":
             try:
@@ -22009,6 +22591,7 @@ def main():
     start_canary_fw_watchdog()    # canary WAN rules follow its live listeners (IPv4, 60 s)
     _report_worker_ensure()       # sends reports queued before a restart (persistent queue)
     threading.Thread(target=_deception_never_ban_ips, name="never-ban", daemon=True).start()
+    threading.Thread(target=_allowlist_cached_nets, name="allowlist", daemon=True).start()
     get_security_monitor()
     get_system_monitor()
     get_latency_monitor()

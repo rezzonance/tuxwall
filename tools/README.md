@@ -129,6 +129,24 @@ the canary firewall plan (IPv4 only, grace before closing) and the cached
 tail read of `opencanary.log`. A loopback load test (127.0.0.2, never the
 WAN) proves one client cannot exceed the per-IP cap and fds stay bounded.
 
+## allowlist_check.py — CrowdSec allowlists (CI)
+
+```bash
+python3 tools/allowlist_check.py
+```
+
+Imports `www/includes/api_server.py` with `subprocess.run` replaced by a fake
+CrowdSec (in-memory allowlists answering `cscli allowlists list/add/remove/create`
+and `decisions delete`; documentation addresses only). Covers value / comment /
+expiry / list-name validation, the 0.0.0.0/0 and ::/0 refusal, broad ranges
+needing `confirm_broad`, lifting the bans an entry covers (`--range X
+--contained`) while reporting broader range bans, the lock-out detection on
+removal (browser address, LAN/VLAN/VPN, router and WAN addresses,
+infrastructure, protected ranges) with `confirm_lockout`, list creation, the
+cached network set (background refresh, invalidated after a change, expired
+entries ignored), and the deception guard, manual bans and the report queue
+honouring it.
+
 ## custom_blocklist_check.py — custom banlist sync (CI)
 
 ```bash

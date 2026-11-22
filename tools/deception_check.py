@@ -144,6 +144,9 @@ class FakeRun:
 
 RUN = FakeRun()
 A.subprocess.run = RUN
+# CrowdSec allowlists: none here (tools/allowlist_check.py covers them); a
+# never-stale empty cache keeps cscli out of the guard paths counted below.
+A._ALLOWLIST_CACHE.update(ts=time.time() + 10 ** 9, nets=(), ok=True)
 
 
 def _no_network(*a, **kw):
