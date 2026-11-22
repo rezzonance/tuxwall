@@ -267,6 +267,7 @@ sudo systemctl restart radvd            # IPv6 RAs
 For traffic shaping, set the WAN interface and rates from **System → Traffic Shaping**, or edit `/etc/tuxwall/sqm.conf` and run:
 
 ```bash
+sudo /usr/local/sbin/tuxwall-sqm.sh --dry-run   # print the tc commands, change nothing
 sudo systemctl enable --now tuxwall-sqm
 ```
 

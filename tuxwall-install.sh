@@ -1402,10 +1402,6 @@ build_local_deb() {
     rsync -a "${excl[@]}" "$REPO_DIR/pkg/" "$stage/pkg/"
     mkdir -p "$stage/pkg/var/www/html"
     rsync -a "${excl[@]}" "$REPO_DIR/www/" "$stage/pkg/var/www/html/"
-    # Ship the SQM helper in the package (the plain .deb never had it).
-    if [[ -f $REPO_DIR/scripts/tuxwall-sqm.sh ]]; then
-        install -D -m 755 "$REPO_DIR/scripts/tuxwall-sqm.sh" "$stage/pkg/usr/local/sbin/tuxwall-sqm.sh"
-    fi
     sed -i "s/^Version: .*/Version: $ver/" "$stage/pkg/DEBIAN/control"
     find "$stage/pkg" -type d -exec chmod 755 {} +
     chmod -R go-w "$stage/pkg"
@@ -1487,8 +1483,10 @@ step_post() {
         [[ -f /etc/tuxwall/ui.json ]] || install -m 644 "$REPO_DIR/config/ui.json" /etc/tuxwall/ui.json
         [[ -f /etc/tuxwall/custom-blocklist.txt ]] || install -m 644 "$REPO_DIR/config/custom-blocklist.txt" /etc/tuxwall/custom-blocklist.txt
         [[ -f /etc/tuxwall/llm.json ]] || install -m 600 "$REPO_DIR/config/llm.json.example" /etc/tuxwall/llm.json
-        if [[ ! -x /usr/local/sbin/tuxwall-sqm.sh && -f $REPO_DIR/scripts/tuxwall-sqm.sh ]]; then
-            install -m 755 "$REPO_DIR/scripts/tuxwall-sqm.sh" /usr/local/sbin/tuxwall-sqm.sh
+        # The package ships the SQM helper since 3.3.5; an older --source deb
+        # package does not, so fall back to the copy in this checkout.
+        if [[ ! -x /usr/local/sbin/tuxwall-sqm.sh && -f $REPO_DIR/pkg/usr/local/sbin/tuxwall-sqm.sh ]]; then
+            install -m 755 "$REPO_DIR/pkg/usr/local/sbin/tuxwall-sqm.sh" /usr/local/sbin/tuxwall-sqm.sh
         fi
     elif [[ ! -f /etc/tuxwall/llm.json && -f /etc/tuxwall/llm.json.example ]]; then
         install -m 600 /etc/tuxwall/llm.json.example /etc/tuxwall/llm.json

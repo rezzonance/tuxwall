@@ -113,6 +113,9 @@ jobs:
       - name: No stray backup/editor files tracked in www/ pkg/ scripts/ nginx/
         run: python3 tools/stray_files_check.py
 
+      - name: SQM helper packaged, generic, --dry-run equals a real run (stubbed tc/ip in a temp dir)
+        run: python3 tools/sqm_check.py
+
   dashboard:
     name: dashboard.js gates
     runs-on: ubuntu-latest

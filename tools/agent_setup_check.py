@@ -64,10 +64,6 @@ PATH_RE = re.compile(r"/(?:usr/local/share/tuxwall|usr/local/sbin|usr/local/lib/
                      r"|var/www/html/scripts)/[A-Za-z0-9_./-]*")
 # Named but deliberately not in the .deb (each with the reason):
 NOT_SHIPPED = {
-    # tuxwall-install.sh puts it there (local builds + step_post); the API
-    # reports "SQM script missing" without it. Shipping it would overwrite
-    # hand-installed copies - an owner decision, not part of 3.3.4.
-    "/usr/local/sbin/tuxwall-sqm.sh",
     # fallback candidate only; /var/www/html/scripts/install-speedtest.sh ships
     "/usr/local/share/tuxwall/scripts/install-speedtest.sh",
 }
