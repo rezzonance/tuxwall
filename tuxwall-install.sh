@@ -1454,6 +1454,10 @@ step_package() {
         q useradd --create-home --shell /bin/bash tuxwall-agent
         info "Created the tuxwall-agent user"
     fi
+    # --no-agent: the postinst installs the AI assistant when opencode is
+    # missing unless this opt-out exists (step_agent does it otherwise).
+    mkdir -p /etc/tuxwall
+    if (( WITH_AGENT )); then rm -f /etc/tuxwall/no-agent; else touch /etc/tuxwall/no-agent; fi
 
     case "$SOURCE" in
         local) build_local_deb ;;
@@ -1571,15 +1575,20 @@ PY
 }
 
 step_agent() {
-    local script="" args=()
-    [[ -f $REPO_DIR/scripts/setup-opencode-agent.sh ]] && script="$REPO_DIR/scripts/setup-opencode-agent.sh"
-    [[ -z $script && -f /usr/local/share/tuxwall/scripts/setup-opencode-agent.sh ]] && script=/usr/local/share/tuxwall/scripts/setup-opencode-agent.sh
+    # The package ships the script (the postinst already ran it when opencode
+    # was missing); a re-run is idempotent and downloads nothing then.
+    local script="" args=() cand
+    for cand in /usr/local/share/tuxwall/scripts/setup-opencode-agent.sh \
+                "$REPO_DIR/pkg/usr/local/share/tuxwall/scripts/setup-opencode-agent.sh"; do
+        [[ -f $cand ]] && { script=$cand; break; }
+    done
     if [[ -z $script ]]; then
         warn "setup-opencode-agent.sh not found; skipped the AI assistant."
         return 0
     fi
     [[ -f $REPO_DIR/config/opencode.json ]] && args=("$REPO_DIR/config/opencode.json")
-    if run_long "Installing the opencode agent (downloads from opencode.ai)" bash "$script" "${args[@]}"; then
+    if run_long "Installing the opencode agent (pinned, checksum-verified download)" \
+            env TUXWALL_AGENT_EDIT_WEBROOT="$AGENT_EDIT_WEBROOT" bash "$script" "${args[@]}"; then
         ok "AI assistant ready (tuxwall-agent.service on 127.0.0.1:4096)"
     else
         warn "AI assistant setup failed (offline?). Re-run later: sudo bash $script"
