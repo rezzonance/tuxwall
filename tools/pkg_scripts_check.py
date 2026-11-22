@@ -34,6 +34,10 @@ a fake `systemctl` (first in PATH, records its calls) and a temp marker:
   entries and symlinks untouched, a missing dir is not created.
 - tuxwall-nat-ensure: idempotent (-C first), a failed -A exits 1 with the
   reason on stderr (stubbed iptables).
+- agent_setup_step (3.3.4, finding 8.3): the shipped setup script runs only
+  when the opencode binary is missing, honours /etc/tuxwall/no-agent, every
+  failure is a warning with the re-run command; agents_md_install runs after
+  it and never clobbers an edited AGENTS.md.
 """
 import json
 import os
@@ -908,6 +912,88 @@ def t_nat_ensure():
         shutil.rmtree(d)
 
 
+def t_agent_setup_step():
+    fn = func("agent_setup_step")
+    check("agent_setup_step()" in fn and "AGENT_SETUP=/usr/local/share/tuxwall/scripts/setup-opencode-agent.sh" in SRC
+          and "AGENT_BIN=/home/tuxwall-agent/.opencode/bin/opencode" in SRC, "postinst defines agent_setup_step")
+    body = SRC.split('case "$1" in\n  configure)', 1)[1]
+    step9 = body[body.index('step 9 '):]
+    check("agent_setup_step" in step9 and "agents_md_install" in step9
+          and step9.index("agent_setup_step") < step9.index("agents_md_install") < step9.index("api.token"),
+          "step 9: agent setup, then AGENTS.md, then the token group")
+    check("setup-opencode-agent.sh not shipped" not in SRC and "already active; no action needed" not in SRC
+          and "/var/www/html/scripts/setup-opencode-agent.sh" not in SRC, "no misleading SKIP message / web-root lookup")
+    check(not re.search(r"^\s+agents_md_install\b|AGENTS_DST_DIR|install [^\n]*AGENTS\.md", body[:body.index('step 9 ')], re.M),
+          "AGENTS.md is not installed before the agent user exists")
+    d = tempfile.mkdtemp(prefix="pkg-agent-")
+    try:
+        script = d + "/setup.sh"
+        binp = d + "/bin/opencode"
+        optout = d + "/no-agent"
+
+        def go(script_rc=None, have_bin=False, opt=False, have_script=True):
+            if os.path.exists(script):
+                os.unlink(script)
+            if have_script:
+                with open(script, "w") as f:
+                    f.write('echo "setup $*" >> "%s/calls"\necho "[+] fake setup"\nexit %d\n' % (d, script_rc or 0))
+            os.makedirs(d + "/bin", exist_ok=True)
+            if have_bin:
+                with open(binp, "w") as f:
+                    f.write("#!/bin/sh\n")
+                os.chmod(binp, 0o755)
+            elif os.path.exists(binp):
+                os.unlink(binp)
+            if opt:
+                open(optout, "w").close()
+            elif os.path.exists(optout):
+                os.unlink(optout)
+            return bash_run(d, fn + 'agent_setup_step "%s" "%s" "%s"\necho done\n' % (script, binp, optout))
+
+        rc, calls, out, err = go(have_bin=True)
+        check(rc == 0 and not calls and "already installed - unchanged" in out,
+              "binary present -> setup not run, nothing changed (%s)" % calls)
+        rc, calls, out, err = go(script_rc=0)
+        check(rc == 0 and calls == ["setup "] and "opencode agent ready" in out,
+              "binary missing -> setup runs without arguments (%s)" % calls)
+        for src_rc in (1, 2, 3, 4):
+            rc, calls, out, err = go(script_rc=src_rc)
+            check(rc == 0 and "WARNING: AI assistant not installed" in out and "sudo bash " + script in out
+                  and out.rstrip().endswith("done"), "setup exit %d -> warning + command, postinst continues" % src_rc)
+        rc, calls, out, err = go(opt=True)
+        check(rc == 0 and not calls and "no-agent" in out and "sudo bash " + script in out, "opt-out -> skipped with the command")
+        rc, calls, out, err = go(have_script=False)
+        check(rc == 0 and "missing" in out and out.rstrip().endswith("done"), "script missing -> warning, no failure")
+    finally:
+        shutil.rmtree(d)
+
+
+def t_agents_md_install():
+    fn = func("agents_md_install")
+    check("agents_md_install()" in fn, "postinst defines agents_md_install")
+    d = tempfile.mkdtemp(prefix="pkg-agentsmd-")
+    try:
+        me = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
+        src = d + "/AGENTS.md"
+        with open(src, "w") as f:
+            f.write("# agent\n")
+        home = d + "/home"
+        os.makedirs(home)
+        rc, calls, out, err = bash_run(d, fn + 'agents_md_install "%s" "%s" "%s"\n' % (src, home, me))
+        dst = home + "/.config/opencode/AGENTS.md"
+        check(rc == 0 and os.path.isfile(dst) and "installed AGENTS.md" in out, "fresh home -> AGENTS.md installed (%s)" % err)
+        check(os.stat(home + "/.config/opencode").st_mode & 0o777 == 0o700 and os.stat(dst).st_mode & 0o777 == 0o644,
+              "config dir 0700, AGENTS.md 0644")
+        with open(dst, "w") as f:
+            f.write("edited\n")
+        rc, calls, out, err = bash_run(d, fn + 'agents_md_install "%s" "%s" "%s"\n' % (src, home, me))
+        check(rc == 0 and open(dst).read() == "edited\n" and not out.strip(), "an edited AGENTS.md is never clobbered")
+        rc, calls, out, err = bash_run(d, fn + 'agents_md_install "%s" "%s/none" nosuchuser-tw\necho done\n' % (src, d))
+        check(rc == 0 and out.strip() == "done" and not os.path.exists(d + "/none"), "no agent user -> nothing, no failure")
+    finally:
+        shutil.rmtree(d)
+
+
 def main():
     for p in (POSTINST, PRERM, os.path.join(ROOT_DIR, "pkg", "DEBIAN", "postrm")):
         r = subprocess.run(["bash", "-n", p], capture_output=True, text=True)
@@ -922,6 +1008,8 @@ def main():
     t_nginx_listen_render()
     t_plugins_dir_perms()
     t_nat_ensure()
+    t_agent_setup_step()
+    t_agents_md_install()
     print("pkg_scripts_check: %d passed, %d failed" % (PASS, FAIL))
     sys.exit(1 if FAIL else 0)
 

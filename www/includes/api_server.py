@@ -14669,9 +14669,16 @@ class Handler(BaseHTTPRequestHandler):
     # ── opencode agent proxy ────────────────────────────────────────────
     AGENT_BASE = "http://127.0.0.1:4096"
     AGENT_PASSWORD = os.environ.get("TUXWALL_AGENT_PASSWORD", "")
+    # 3.3.4: without the opencode binary the agent is "not installed" (the
+    # unit is skipped) - errors say so and carry the install command.
+    AGENT_BIN = "/home/tuxwall-agent/.opencode/bin/opencode"
+    AGENT_SETUP_CMD = "sudo bash /usr/local/share/tuxwall/scripts/setup-opencode-agent.sh"
 
     def _agent_ok(self):
         return True
+
+    def _agent_installed(self):
+        return os.access(self.AGENT_BIN, os.X_OK)
 
     def _agent_log(self, msg):
         """Log an agent-proxy event to stderr -> journald (journalctl -u tuxwall.service)."""
@@ -15210,6 +15217,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _agent_error(self, exc):
         """Build a structured error payload from an AgentError (or any exception)."""
+        if not self._agent_installed():
+            return {
+                "ok": False,
+                "installed": False,
+                "error": "AI assistant not installed",
+                "hint": "Install it on the router: " + self.AGENT_SETUP_CMD,
+                "fix": self.AGENT_SETUP_CMD,
+            }
         if isinstance(exc, AgentError):
             return {
                 "ok": False,
@@ -16490,7 +16505,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/agent/status":
             try:
                 health = self._agent_call("GET", "/global/health", timeout=5)
-                self._send(200, {"ok": True, "server": health})
+                self._send(200, {"ok": True, "installed": True, "server": health})
             except Exception as exc:
                 self._send(200, self._agent_error(exc))
         elif path == "/api/agent/session":
@@ -17609,7 +17624,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/agent/status":
             try:
                 health = self._agent_call("GET", "/global/health", timeout=5)
-                self._send(200, {"ok": True, "server": health})
+                self._send(200, {"ok": True, "installed": True, "server": health})
             except Exception as exc:
                 self._send(200, self._agent_error(exc))
 

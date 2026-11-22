@@ -233,6 +233,35 @@ no-op; skipped without changes for a local script that writes /etc/radvd.conf
 config; a restart failure puts the old setup back; fresh installs get the
 drop-in for the new file. The installer's inline drop-in must equal the shipped
 one. Also `bash -n` on postinst/prerm/postrm and STEP_TOTAL vs the steps.
+The AI assistant step (`agent_setup_step`, 3.3.4) runs the setup script only
+when the opencode binary is missing (never on an install that has it), honours
+`/etc/tuxwall/no-agent` and turns every failure into a warning with the re-run
+command; `agents_md_install` runs after it (the agent user exists by then) and
+never clobbers an edited AGENTS.md.
+
+## agent_setup_check.py — AI assistant install (CI)
+
+```bash
+python3 tools/agent_setup_check.py
+```
+
+Finding 8.3: 3.3.3 looked for `setup-opencode-agent.sh` but never shipped it,
+so fresh apt installs had no assistant and `tuxwall-agent.service`
+crash-looped. Packaging: every file the maintainer scripts, the installer and
+the shipped units name under `/usr/local/share/tuxwall`, `/usr/local/sbin`,
+`/usr/local/lib/tuxwall`, `/usr/share/tuxwall` and `/var/www/html/scripts`
+is in `pkg/` or `www/` (executables 100755 in git), with a documented
+not-shipped list. The setup script, sourced with `curl`/`uname` stubbed in a
+temp dir: binary present -> no download; `uname -m` -> npm target (x64 /
+x64-baseline without AVX2 / arm64, others skipped); the pinned version's
+per-target SHA-256 is enforced, a mismatch, an override version without
+`TUXWALL_OPENCODE_SHA256` or an archive without the binary installs nothing;
+offline -> rc 2 with the re-run command; no pipe-to-shell; config/unit
+install-if-absent; web root only with `TUXWALL_AGENT_EDIT_WEBROOT=1`. The
+`/usr/lib/systemd/system/tuxwall-agent.service.d/10-installed.conf` drop-in
+skips the unit while the binary it starts is missing; the API answers
+`installed:false` with the install command; `bash -n` on the script and the
+installer.
 
 ## unit_paths_check.py — tuxwall.service writable paths (CI + root sandbox)
 

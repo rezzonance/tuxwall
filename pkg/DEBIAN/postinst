@@ -398,6 +398,48 @@ plugins_dir_perms() {       # plugins_dir_perms [DIR] [OWNER] -> one status line
   echo "plugins: $dir $owner 0755 (was $was); plugin dirs 0755, files 0644, settings/pin/secrets 0600"
 }
 
+# AI assistant (3.3.4): setup-opencode-agent.sh ships in the package. 3.3.3
+# and older looked for it but never shipped it, so a fresh apt install had no
+# opencode binary (tuxwall-agent.service crash-looped; the package drop-in
+# /usr/lib/systemd/system/tuxwall-agent.service.d/10-installed.conf now skips
+# the unit until the binary exists). Runs the setup only when the binary is
+# missing: an install that has opencode is left exactly as it is (no
+# download, config/unit/token untouched, nothing restarted).
+# /etc/tuxwall/no-agent (tuxwall-install.sh --no-agent) skips it. Best effort:
+# offline or a refused download -> the re-run command, never fails.
+# tools/pkg_scripts_check.py runs these.
+AGENT_SETUP=/usr/local/share/tuxwall/scripts/setup-opencode-agent.sh
+AGENT_BIN=/home/tuxwall-agent/.opencode/bin/opencode
+agent_setup_step() {        # agent_setup_step [SCRIPT] [BIN] [OPTOUT] -> status lines, never fails
+  local script=${1:-$AGENT_SETUP} bin=${2:-$AGENT_BIN} optout=${3:-/etc/tuxwall/no-agent}
+  if [[ -x $bin ]]; then
+    echo "   opencode agent already installed - unchanged."
+  elif [[ -e $optout ]]; then
+    echo "   AI assistant not installed ($optout). Install it later with:"
+    echo "     sudo bash $script"
+  elif [[ ! -f $script ]]; then
+    echo "   WARNING: $script is missing - AI assistant not installed."
+  elif bash "$script"; then
+    echo "   opencode agent ready (tuxwall-agent.service, 127.0.0.1:4096)"
+  else
+    echo "   WARNING: AI assistant not installed (offline or download refused). Install it later with:"
+    echo "     sudo bash $script"
+  fi
+  return 0
+}
+# AGENTS.md (agent context) install-if-absent for the agent user; needs the
+# user, so it runs after the agent setup (which creates it). Never clobbers
+# an edited copy; creates only missing directories, owned by the agent.
+agents_md_install() {       # agents_md_install [SRC] [HOME] [USER]
+  local src=${1:-/usr/share/tuxwall/AGENTS.md} home=${2:-/home/tuxwall-agent} user=${3:-tuxwall-agent} grp
+  grp="$(id -gn "$user" 2>/dev/null)" && [[ -f $src && -d $home ]] || return 0
+  [[ -f $home/.config/opencode/AGENTS.md ]] && return 0
+  [[ -d $home/.config ]] || install -d -m 0755 -o "$user" -g "$grp" "$home/.config" || return 0
+  [[ -d $home/.config/opencode ]] || install -d -m 0700 -o "$user" -g "$grp" "$home/.config/opencode" || return 0
+  install -o "$user" -g "$grp" -m 0644 "$src" "$home/.config/opencode/AGENTS.md" || return 0
+  echo "   installed AGENTS.md (agent context) for $user"
+}
+
 case "$1" in
   configure)
 
@@ -453,26 +495,8 @@ EOF
       fi
     done
 
-    # AGENTS.md for the dashboard's opencode agent: install-if-absent into
-    # the tuxwall-agent user's config (never clobber an edited copy). Gives
-    # every install's AI agent base tuxwall understanding - the canonical
-    # context URL, the safety rules, the file map, offline operation - so it
-    # never starts from scratch.
-    AGENTS_SRC="/usr/share/tuxwall/AGENTS.md"
-    AGENTS_DST_DIR="/home/tuxwall-agent/.config/opencode"
-    # 2026-11-09 audit: this used to run BEFORE the agent user exists
-    # (the user is created by the agent setup later in this script) -
-    # 'install -o tuxwall-agent' then failed under set -e and aborted
-    # the entire fresh-install postinst. Guard: only install when the
-    # user already exists; the agent setup installs it after useradd.
-    if [[ -f "$AGENTS_SRC" ]] && id tuxwall-agent >/dev/null 2>&1; then
-      mkdir -p "$AGENTS_DST_DIR"
-      if [[ ! -f "$AGENTS_DST_DIR/AGENTS.md" ]]; then
-        install -o tuxwall-agent -g tuxwall-agent -m 0644 \
-          "$AGENTS_SRC" "$AGENTS_DST_DIR/AGENTS.md"
-        echo "   installed AGENTS.md (agent context) for tuxwall-agent"
-      fi
-    fi
+    # AGENTS.md for the agent: installed in step 9, after the agent setup has
+    # created the tuxwall-agent user (agents_md_install).
 
     # Resilience drop-in: unbound must never hit systemd's start limit.
     # A transient bind failure (optional interface address absent at
@@ -922,24 +946,10 @@ PY
     curl -s -X POST http://127.0.0.1:8008/api/blocklists/update >/dev/null 2>&1 || true
 
     step 9 "Setting up the opencode AI agent (dashboard AI assistant)..."
-    # Best-effort: needs internet for the opencode installer. The dashboard
-    # works fine without it; re-run the script later if it fails.
-    AGENT_SETUP=""
-    for cand in /var/www/html/scripts/setup-opencode-agent.sh \
-                /usr/local/share/tuxwall/scripts/setup-opencode-agent.sh; do
-      [[ -f "$cand" ]] && AGENT_SETUP="$cand" && break
-    done
-    if [[ -z "$AGENT_SETUP" ]]; then
-      echo "     SKIP: setup-opencode-agent.sh not shipped - agent step deferred."
-      echo "     (tuxwall-agent.service already active; no action needed.)"
-    elif bash "$AGENT_SETUP" \
-            /etc/tuxwall/opencode.json \
-            /etc/systemd/system/tuxwall-agent.service; then
-      echo "     opencode agent ready (tuxwall-agent.service, 127.0.0.1:4096)"
-    else
-      echo "     WARNING: opencode agent setup failed (offline?). Re-run later:"
-      echo "       sudo bash $AGENT_SETUP"
-    fi
+    # Best-effort: needs internet for the opencode download (fresh installs
+    # only). The dashboard works fine without it.
+    agent_setup_step
+    agents_md_install
     # Read-only TuxWall MCP tool for the agent: the API creates
     # /etc/tuxwall/agent/api.token at start (root:tuxwall-agent 0640) - make
     # sure the group is right now that the agent user exists.
