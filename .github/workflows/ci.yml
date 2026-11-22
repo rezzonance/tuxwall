@@ -121,3 +121,4 @@ jobs:
         run: |
           node --check www/scripts/dashboard.js
           node --check www/scripts/community-settings.js
+          node --check www/scripts/ai-panel.js

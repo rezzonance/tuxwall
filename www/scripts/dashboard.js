@@ -14030,7 +14030,9 @@
       if (!elAgentStatus) return;
       try {
         const d = await fetchJSON("/api/agent/status");
-        elAgentStatus.textContent = d.ok ? "● agent online" : "● agent offline: " + (d.error || "") + (d.status ? " (HTTP " + d.status + ")" : "");
+        elAgentStatus.textContent = d.ok ? "● agent online"
+          : d.installed === false ? "● AI assistant not installed — run: " + (d.fix || "")
+          : "● agent offline: " + (d.error || "") + (d.status ? " (HTTP " + d.status + ")" : "");
         elAgentStatus.title = d.detail || d.hint || "";
         elAgentStatus.className = "agent-status" + (d.ok ? " agent-on" : " agent-off");
       } catch (err) {

@@ -192,6 +192,7 @@
     turnSid: null,
     turn: null,           // live render state
     lastPrompt: "",
+    missing: null,        // /api/agent/status when the agent is not installed
     unsub: null,
     watchdog: null,
     ctxOff: false,
@@ -388,6 +389,24 @@
     parent.appendChild(el);
     return el;
   }
+  // 3.3.4: no opencode binary on the router -> say so with the install
+  // command instead of a generic error (/api/agent/status installed:false)
+  function notInstalledBox(d) {
+    elLog.innerHTML = "";
+    const el = document.createElement("div");
+    el.className = "aip-error";
+    el.setAttribute("role", "status");
+    el.innerHTML = IC.alert + '<div class="aip-error-b"><b>AI assistant not installed</b><span></span><span><code></code></span></div>';
+    el.querySelector("span").textContent = "Install it on the router, then reopen this panel:";
+    el.querySelector("code").textContent = (d && d.fix) || "sudo bash /usr/local/share/tuxwall/scripts/setup-opencode-agent.sh";
+    elLog.appendChild(el);
+  }
+  async function checkInstalled() {
+    let d = null;
+    try { d = await api().get("/api/agent/status"); } catch (_) { return; }
+    S.missing = d && d.installed === false ? d : null;
+    if (S.missing && S.open && !S.busy) notInstalledBox(S.missing);
+  }
   function errText(er) {
     if (!er) return "";
     if (typeof er === "string") return er;
@@ -472,6 +491,7 @@
     } catch (err) {
       if (seq !== S.loadSeq) return;
       if (err.notFound) { api().setSession(null); S.sid = null; elLog.innerHTML = ""; emptyState(); return; }
+      if (S.missing) { notInstalledBox(S.missing); return; }
       elLog.innerHTML = "";
       errorBox(elLog, "Could not load the conversation: " + err.message, false);
     }
@@ -886,6 +906,7 @@
     const a = api();
     text = String(text || "").trim();
     if (!text || S.busy || !a) return;
+    if (S.missing) { notInstalledBox(S.missing); return; }
     if (a.pageBusy()) { errorBox(elLog, "The AI Assistant page is still running a task. Wait for it or stop it there.", false); scrollEnd(true); return; }
     let full = text;
     if (!opts.raw) {
@@ -989,6 +1010,7 @@
           pollPending(S.busy);
         });
       }
+      checkInstalled();
       S.stick = true;
     }
     renderCtx();
