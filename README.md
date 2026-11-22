@@ -191,7 +191,7 @@ sudo apt install tuxwall
 <details>
 <summary>Manual .deb install</summary>
 
-Download the current package from [Releases](https://github.com/rezzonance/tuxwall/releases), then:
+Download the current package, `SHA256SUMS` and `SHA256SUMS.asc` from [Releases](https://github.com/rezzonance/tuxwall/releases) and check them ([SECURITY.md](SECURITY.md#verifying-releases)), then:
 
 ```bash
 sudo bash tuxwall-install.sh --deb tuxwall_3.3.4_all.deb
@@ -313,6 +313,8 @@ TuxWall is a security appliance, so a few defaults matter:
 - **Community reporting is deception-only and always on.** When a trap catches a completed connection, the attacker IP and evidence are reported to the tuxwall.org community ban list. Configs, logs and personal data are never shared. If you do not want catches from your gateway shared, do not enable the deception layer. Full details are shown on the Deception page.
 
 Read-only viewers cannot change firewall rules, restart services, read backups or drive the AI agent; admin rights are required for every destructive action, and the check is enforced server-side.
+
+**Found a vulnerability?** Please report it privately, not in a public issue — see [SECURITY.md](SECURITY.md) for how, what is in scope, and how to verify packages (APT signing key `5D79 B908 2DCA EB9C CB73 1382 F5D8 2357 16BD BDD1`, signed `SHA256SUMS` on every release).
 
 ## Updating and removing
 
