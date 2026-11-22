@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Built .deb listing: files 3.3.5 moved into the package are there with
+the right modes, files it moved out are gone.
+
+    python3 tools/deb_contents_check.py tuxwall_X_all.deb
+
+CI builds the package exactly like .github/workflows/apt.yml and runs this
+plus `tools/stray_files_check.py --deb`.
+"""
+import subprocess
+import sys
+
+PASS = FAIL = 0
+
+
+def check(cond, msg):
+    global PASS, FAIL
+    if cond:
+        PASS += 1
+    else:
+        FAIL += 1
+        print("FAIL:", msg)
+
+
+REQUIRED = {
+    # path: mode string as dpkg-deb -c prints it
+    "./usr/local/sbin/tuxwall-sqm.sh": "-rwxr-xr-x",
+    "./usr/local/lib/tuxwall/opencode_config.py": "-rwxr-xr-x",
+    "./usr/lib/systemd/system/tuxwall-agent.service.d/20-local-config.conf": "-rw-r--r--",
+    "./usr/lib/systemd/system/tuxwall-agent.service.d/10-installed.conf": "-rw-r--r--",
+    "./usr/share/tuxwall/opencode.default.json": "-rw-r--r--",
+    "./usr/share/tuxwall/rsyslog/45-tuxwall-unbound.conf": "-rw-r--r--",
+    "./etc/tuxwall/opencode.json": "-rw-r--r--",
+    "./etc/systemd/system/tuxwall-sqm.service": "-rw-r--r--",
+    "./usr/local/share/tuxwall/scripts/setup-opencode-agent.sh": "-rwxr-xr-x",
+    "./var/www/html/includes/api_server.py": None,
+}
+ABSENT = (
+    "./etc/rsyslog.d/45-tuxwall-unbound.conf",   # postinst-owned since 3.3.5
+    "./etc/tuxwall/opencode.local.json",         # the owner's file, never shipped
+)
+
+
+def main(argv):
+    if len(argv) != 1:
+        print(__doc__)
+        return 2
+    out = subprocess.run(["dpkg-deb", "-c", argv[0]], capture_output=True, text=True, check=True).stdout
+    entries = {}
+    for line in out.splitlines():
+        parts = line.split(None, 5)
+        if len(parts) == 6:
+            entries[parts[5].split(" -> ")[0]] = (parts[0], parts[1])
+    for path, mode in REQUIRED.items():
+        got = entries.get(path)
+        check(got is not None, "in the package: " + path)
+        if got and mode:
+            check(got[0] == mode, "{} mode {} (want {})".format(path, got[0], mode))
+        if got:
+            check(got[1] == "root/root", "{} owned root/root (got {})".format(path, got[1]))
+    for path in ABSENT:
+        check(path not in entries, "not in the package: " + path)
+    conff = subprocess.run(["dpkg-deb", "-f", argv[0], "Package"], capture_output=True, text=True).stdout.strip()
+    check(conff == "tuxwall", "package name tuxwall")
+    ctl = subprocess.run(["dpkg-deb", "-I", argv[0], "conffiles"], capture_output=True, text=True).stdout.split()
+    check("/etc/tuxwall/opencode.json" in ctl and "/etc/tuxwall/opencode.local.json" not in ctl,
+          "conffiles: opencode.json yes, opencode.local.json no")
+    check(all(c.startswith("/etc/") for c in ctl) and all("./" + c.lstrip("/") in entries for c in ctl),
+          "every conffile is shipped under /etc")
+    print("deb_contents_check: {} passed, {} failed".format(PASS, FAIL))
+    return 1 if FAIL else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
