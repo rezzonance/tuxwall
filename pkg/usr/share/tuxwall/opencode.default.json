@@ -1,0 +1,425 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode/iceman-free",
+  "small_model": "opencode/iceman-free",
+  "permissions": [
+    {
+      "action": "shell",
+      "resource": "*",
+      "effect": "ask"
+    },
+    {
+      "action": "shell",
+      "resource": "systemctl status *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "systemctl is-active *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "systemctl show *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "systemctl list-units *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "systemctl list-timers *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "journalctl *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "ufw status*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "ip *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "ip -s link",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "cat /var/log/*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "cat /etc/tuxwall/*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "cat /etc/crowdsec/*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "cat /etc/nginx/*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "tail *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "head *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "grep *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "ls *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "wc *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "stat *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "file *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "sha256sum *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "df *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "free *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "uptime",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "hostname*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "uname *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "uname",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "date*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "id*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "which *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "dpkg -l*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "dpkg -s *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "apt list*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "apt-cache *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "opencode --version",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "opencode version",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "ping *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "curl 127.0.0.1:*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "curl localhost:*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "curl tuxwall.org*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "unbound-control status",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "unbound-control stats_noreset",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "cscli decisions list",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "cscli alerts list",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "wg show",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "sudo systemctl status *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "sudo systemctl is-active *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "sudo journalctl *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "sudo nft list *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "sudo iptables-save",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "sudo wg show*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "sudo ufw status*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "sudo cscli decisions list",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "sudo cscli alerts list",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "sudo systemctl restart tuxwall",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "sudo systemctl restart nginx",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "sudo systemctl reload *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "sudo systemctl daemon-reload",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "sudo speedtest *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "sudo /usr/local/sbin/tuxwall-sqm.sh",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "ss",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "ss -tulpn",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "ss -tln",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "find /var/log -type f -name *",
+      "effect": "allow"
+    },
+    {
+      "action": "edit",
+      "resource": "*",
+      "effect": "ask"
+    },
+    {
+      "action": "tuxwall_overview",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "tuxwall_firewall_rules",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "tuxwall_firewall_findings",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "tuxwall_interfaces",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "tuxwall_dhcp_leases",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "tuxwall_dns_stats",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "tuxwall_crowdsec_decisions",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "tuxwall_security_events",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "tuxwall_incidents",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "tuxwall_insights",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "read",
+      "resource": "/etc/tuxwall/agent/keys/*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*/etc/tuxwall/agent/*",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "/home/tuxwall-agent/.local/share/opencode/opencode.db*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*opencode.db*",
+      "effect": "deny"
+    }
+  ],
+  "instructions": [
+    "/var/lib/tuxwall/agent/facts.md"
+  ],
+  "skills": [
+    "/usr/share/tuxwall/agent-skills"
+  ],
+  "mcp": {
+    "servers": {
+      "tuxwall": {
+        "type": "local",
+        "command": [
+          "/usr/bin/python3",
+          "/usr/local/lib/tuxwall/tuxwall_mcp.py"
+        ],
+        "codemode": false
+      }
+    }
+  }
+}

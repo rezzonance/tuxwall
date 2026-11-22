@@ -44,6 +44,9 @@ a fake `systemctl` (first in PATH, records its calls) and a temp marker:
   local edit kept; rsyslog restarted only on a change that rsyslogd -N1
   accepts, else the previous state is put back. postrm removes it unless
   edited.
+- agent_config_split (3.3.5): runs opencode_config.py migrate; restarts the
+  agent only after a move (rc 10); a left-alone config is a note, a helper
+  failure a warning; never fails the postinst.
 """
 import json
 import os
@@ -1089,6 +1092,29 @@ def t_rsyslog_rule():
         shutil.rmtree(d)
 
 
+def t_agent_config_split():
+    fn = func("agent_config_split")
+    check("agent_config_split()" in fn, "postinst defines agent_config_split")
+    d = tempfile.mkdtemp(prefix="pkg-ocsplit-")
+    try:
+        fakebin(d, {"systemctl": '#!/bin/sh\necho "systemctl $*" >> "$FAKE_LOG"\nexit 0\n'})
+        helper = d + "/helper.py"
+        for rc_h, msg, restart, want in ((0, "x is the shipped default", False, "shipped default"),
+                                         (10, "moving providers.unsloth", True, "opencode.local.json"),
+                                         (3, "lists differ - left as it is", False, "NOTE"),
+                                         (1, "boom", False, "WARNING")):
+            with open(helper, "w") as f:
+                f.write("import sys\nassert sys.argv[1:] == ['migrate']\nprint(%r)\nsys.exit(%d)\n" % (msg, rc_h))
+            rc, calls, out, err = bash_run(d, fn + 'agent_config_split "%s"\n' % helper)
+            check(rc == 0 and want in out and msg in out, "split rc=%d -> %r (%s)" % (rc_h, want, out.strip()))
+            check(("systemctl try-restart tuxwall-agent.service" in calls) == restart,
+                  "split rc=%d: agent restarted only after a move (%s)" % (rc_h, calls))
+        rc, calls, out, err = bash_run(d, fn + 'agent_config_split /nonexistent\n')
+        check(rc == 0 and "missing" in out and calls == [], "helper missing -> skipped")
+    finally:
+        shutil.rmtree(d)
+
+
 def main():
     for p in (POSTINST, PRERM, os.path.join(ROOT_DIR, "pkg", "DEBIAN", "postrm")):
         r = subprocess.run(["bash", "-n", p], capture_output=True, text=True)
@@ -1106,6 +1132,7 @@ def main():
     t_agent_setup_step()
     t_agents_md_install()
     t_rsyslog_rule()
+    t_agent_config_split()
     print("pkg_scripts_check: %d passed, %d failed" % (PASS, FAIL))
     sys.exit(1 if FAIL else 0)
 

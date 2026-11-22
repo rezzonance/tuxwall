@@ -473,6 +473,31 @@ agent_setup_step() {        # agent_setup_step [SCRIPT] [BIN] [OPTOUT] -> status
   fi
   return 0
 }
+# AI agent config split (3.3.5): /etc/tuxwall/opencode.json is the package's
+# defaults (conffile); owner additions (custom providers, default model) live
+# in /etc/tuxwall/opencode.local.json, which opencode merges over it (package
+# drop-in tuxwall-agent.service.d/20-local-config.conf). The dashboard edited
+# opencode.json until 3.3.4 - every package change to it then stopped at a
+# dpkg conffile prompt. opencode_config.py migrate moves those owner keys to
+# the local file ONLY when that is lossless and puts the shipped bytes back;
+# anything else stays as it is with a note. Restarts the agent only after a
+# move (the local file is read at start). Never fails.
+OC_SPLIT=/usr/local/lib/tuxwall/opencode_config.py
+agent_config_split() {      # agent_config_split [HELPER] -> status lines, never fails
+  local helper=${1:-$OC_SPLIT} out rc=0
+  [[ -f $helper ]] || { echo "   agent config: $helper missing - skipped"; return 0; }
+  out="$(python3 "$helper" migrate 2>&1)" || rc=$?
+  case $rc in
+    0)  echo "   agent config: ${out:-nothing to do}" ;;
+    10) echo "   agent config: $out"
+        systemctl try-restart tuxwall-agent.service >/dev/null 2>&1 || true
+        echo "   agent config: owner settings now in /etc/tuxwall/opencode.local.json (agent restarted if it was running)" ;;
+    3)  echo "   agent config: NOTE: $out"
+        echo "     Dashboard changes (custom providers, default model) now go to /etc/tuxwall/opencode.local.json." ;;
+    *)  echo "   agent config: WARNING: ${out:-opencode_config.py failed (rc $rc)} - nothing changed" ;;
+  esac
+  return 0
+}
 # AGENTS.md (agent context) install-if-absent for the agent user; needs the
 # user, so it runs after the agent setup (which creates it). Never clobbers
 # an edited copy; creates only missing directories, owned by the agent.
@@ -999,6 +1024,7 @@ PY
     # only). The dashboard works fine without it.
     agent_setup_step
     agents_md_install
+    agent_config_split
     # Read-only TuxWall MCP tool for the agent: the API creates
     # /etc/tuxwall/agent/api.token at start (root:tuxwall-agent 0640) - make
     # sure the group is right now that the agent user exists.

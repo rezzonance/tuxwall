@@ -245,7 +245,7 @@ Most settings are available from the dashboard and are written directly to the u
 
 | Path | Purpose |
 |---|---|
-| `/etc/tuxwall/` | Dashboard settings, `opencode.json`, `llm.json`, `sqm.conf` |
+| `/etc/tuxwall/` | Dashboard settings, `opencode.json` + `opencode.local.json`, `llm.json`, `sqm.conf` |
 | `/etc/unbound/unbound.conf.d/` | DNS, local domains, blocklists and RPZ zones |
 | `/etc/kea/kea-dhcp4.conf` | DHCP subnets, pools and reservations |
 | `/etc/tuxwall/radvd.conf` | IPv6 router advertisements (radvd reads it through `/etc/systemd/system/radvd.service.d/10-tuxwall.conf`; installs that were not migrated still use `/etc/radvd.conf`) |
@@ -292,13 +292,14 @@ The **AI Assistant** page embeds an [opencode](https://opencode.ai) agent runnin
 
 It can inspect the system, audit firewall rules, tune DNS, read logs and edit config files — but **every command and file change requires your approval in the dashboard before it runs**. The agent runs with a deliberately narrow sudo allowlist for named service actions, not blanket root access.
 
-A fresh install ships a working `opencode.json` that uses opencode's free hosted models with a conservative read-only permission set, so the assistant works with zero setup. For a fully local deployment, point it at Ollama. Models and permissions live in:
+A fresh install ships a working `opencode.json` that uses opencode's free hosted models with a conservative read-only permission set, so the assistant works with zero setup. For a fully local deployment, add your Ollama / LM Studio / vLLM server under **AI Assistant → Models**. The configuration is split in two:
 
 ```text
-/etc/tuxwall/opencode.json
+/etc/tuxwall/opencode.json        package defaults (models, permission allowlist) - updated by the package
+/etc/tuxwall/opencode.local.json  your additions (custom servers, default model) - written by the dashboard
 ```
 
-Existing installs keep their configured copy on upgrade.
+opencode merges the local file over the defaults (objects merge, your values win), so package updates never stop at a configuration-file prompt. Upgrading from 3.3.4 or older moves providers added to `opencode.json` into `opencode.local.json` when that is lossless, and otherwise leaves the file alone with a note.
 
 ## Security and community data
 

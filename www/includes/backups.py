@@ -814,7 +814,7 @@ def contents(path):
 
 EXPORT_PREFIXES = ("etc/", "usr/local/bin/", "usr/local/sbin/", "var/lib/tuxwall/")
 SECRET_FILE_RES = [re.compile(p) for p in (
-    r"(^|/)auth\.json$", r"(^|/)llm\.json$", r"(^|/)opencode\.json\.bak",
+    r"(^|/)auth\.json$", r"(^|/)llm\.json$", r"(^|/)opencode(\.local)?\.json\.bak",
     r"^etc/tuxwall/(internal-token|agent-token|backup-passphrase)$", r"(^|/)canary-token$", r"(^|/)api\.token$",
     r"^etc/tuxwall/agent(/|$)", r"(^|/)keys?/", r"^etc/cloudflared/(?!config\.ya?ml$)",
     r"credentials", r"(^|/)private[-_]?key", r"(^|/)privatekey$", r"(^|/)publickey$",

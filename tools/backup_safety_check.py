@@ -212,6 +212,9 @@ def synthetic_members():
             "apiKey": sv("opencodekey"), "baseURL": "http://192.168.1.5:8000/v1"}},
             "y": {"settings": {"apiKey": "{file:/etc/tuxwall/agent/keys/y.key}"}}}}).encode()),
         ("./etc/tuxwall/opencode.json.bak", json.dumps({"apiKey": sv("opencodebak")}).encode()),
+        ("./etc/tuxwall/opencode.local.json", json.dumps({"providers": {"z": {"settings": {
+            "apiKey": sv("oclocalkey"), "baseURL": "http://192.168.1.6:8000/v1"}}}}).encode()),
+        ("./etc/tuxwall/opencode.local.json.bak", json.dumps({"apiKey": sv("oclocalbak")}).encode()),
         ("./etc/tuxwall/alerts.json", json.dumps({"enabled": True, "ntfy_url": "https://ntfy.sh/" + sv("ntfy"),
                                                   "webhook_url": "https://hooks.example/" + sv("hook"),
                                                   "min_severity": "warning"}).encode()),

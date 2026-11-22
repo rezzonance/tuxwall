@@ -109,7 +109,8 @@ WRITES = [
     ("api auth.json", "api:AUTH_FILE"),
     ("api internal token", "api:INTERNAL_TOKEN_FILE"),
     ("api agent api.token (mkstemp in dir)", "api:AGENT_API_TOKEN_FILE"),
-    ("api opencode.json + .bak (mkstemp in dir)", "api:OPENCODE_CONF"),
+    ("api opencode.json + .bak (mkstemp in dir; only without the 3.3.5 drop-in)", "api:OPENCODE_CONF"),
+    ("api opencode.local.json + .bak (mkstemp in dir)", "api:OPENCODE_LOCAL_CONF"),
     ("api agent keys", "dir:api:AGENT_KEYS_DIR"),
     ("api baselines.json", "api:BASELINES_FILE"),
     ("api sqm.conf", "api:SQM_CONF"),
@@ -171,6 +172,7 @@ READ_ONLY = {
     "/usr/bin/aide", "/usr/bin/avahi-browse", "/usr/bin/cscli", "/usr/bin/dig", "/usr/bin/fastfetch",
     "/usr/bin/ssh", "/usr/bin/sshpass", "/usr/sbin/nft", "/usr/share/ieee-data/oui.csv",
     "/usr/bin:/bin", "/usr/bin:/bin:/usr/local/bin", "/usr/sbin:/usr/bin:/sbin:/bin",
+    "/usr/lib/systemd/system/tuxwall-agent.service.d/20-local-config.conf",
 }
 
 PASS = FAIL = 0

@@ -11657,13 +11657,23 @@ def _agent_ro_identity(handler, path):
 # managed from the dashboard (admin only, like every /api/agent route).
 # - Catalog keys/OAuth go to opencode's own credential store via its API;
 #   the browser only ever sees a masked tail ("••••abcd").
-# - Custom OpenAI-compatible servers are written to /etc/tuxwall/opencode.json
-#   (world-readable) in the V2 "providers" shape; their keys live in
-#   /etc/tuxwall/agent/keys/<id>.key (0640 root:tuxwall-agent) referenced
-#   as "{file:...}" so the config file itself never holds a secret.
+# - Custom OpenAI-compatible servers and the default model are written to
+#   /etc/tuxwall/opencode.local.json (3.3.5; world-readable) in the V2
+#   "providers" shape; their keys live in /etc/tuxwall/agent/keys/<id>.key
+#   (0640 root:tuxwall-agent) referenced as "{file:...}" so no config file
+#   holds a secret. /etc/tuxwall/opencode.json is the package's defaults
+#   (dpkg conffile) and is no longer edited here, so package updates never
+#   stop at a conffile prompt. opencode merges the two itself: the package
+#   drop-in tuxwall-agent.service.d/20-local-config.conf passes the local
+#   file as OPENCODE_CONFIG_CONTENT (a layer above OPENCODE_CONFIG; objects
+#   merge, local values win), read at start - so a change restarts the
+#   agent. Without that drop-in (API newer than the unit files) the agent
+#   would never read the local file: opencode.json is edited as before.
 # - Key material is never logged: credential calls use log_body=False and
 #   upstream error text is scrubbed of the submitted key.
 OPENCODE_CONF = "/etc/tuxwall/opencode.json"
+OPENCODE_LOCAL_CONF = "/etc/tuxwall/opencode.local.json"
+AGENT_LOCAL_CONF_DROPIN = "/usr/lib/systemd/system/tuxwall-agent.service.d/20-local-config.conf"
 AGENT_KEYS_DIR = AGENT_API_TOKEN_DIR + "/keys"
 _OC_CONF_LOCK = threading.Lock()
 AGENT_PROVIDER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
@@ -11715,31 +11725,86 @@ def _agent_redact(obj):
     return obj
 
 
-def _oc_conf_read():
-    with open(OPENCODE_CONF) as f:
-        conf = json.load(f)
+def _oc_local_mode():
+    return os.path.isfile(AGENT_LOCAL_CONF_DROPIN)
+
+
+def _oc_conf_path():
+    """The file dashboard changes go to (see OPENCODE_CONF above)."""
+    return OPENCODE_LOCAL_CONF if _oc_local_mode() else OPENCODE_CONF
+
+
+def _oc_load(path, missing_ok=False):
+    try:
+        with open(path) as f:
+            conf = json.load(f)
+    except FileNotFoundError:
+        if missing_ok:
+            return {}
+        raise
     if not isinstance(conf, dict):
-        raise ValueError("opencode.json is not a JSON object")
+        raise ValueError("{} is not a JSON object".format(os.path.basename(path)))
     return conf
 
 
+def _oc_deep_merge(base, over):
+    """opencode's rule for these layers: objects merge, other values replace."""
+    if isinstance(base, dict) and isinstance(over, dict):
+        out = dict(base)
+        for k, v in over.items():
+            out[k] = _oc_deep_merge(base[k], v) if k in base else v
+        return out
+    return over
+
+
+def _oc_conf_read():
+    """The document the dashboard edits (opencode.local.json; {} if absent)."""
+    return _oc_load(_oc_conf_path(), missing_ok=_oc_local_mode())
+
+
+def _oc_conf_base():
+    """The package defaults under the local file ({} outside local mode)."""
+    if not _oc_local_mode():
+        return {}
+    try:
+        return _oc_load(OPENCODE_CONF)
+    except (OSError, ValueError):
+        return {}
+
+
+def _oc_conf_view():
+    """What the agent runs with: the defaults with the local file merged over."""
+    if not _oc_local_mode():
+        return _oc_load(OPENCODE_CONF)
+    return _oc_deep_merge(_oc_conf_base(), _oc_load(OPENCODE_LOCAL_CONF, missing_ok=True))
+
+
 def _oc_conf_write(conf):
-    """Atomic rewrite of /etc/tuxwall/opencode.json keeping owner/mode; the
-    previous version is kept as opencode.json.bak (0600). Caller holds
-    _OC_CONF_LOCK."""
-    st = os.stat(OPENCODE_CONF)
+    """Atomic rewrite of the edited file (see _oc_conf_path) keeping
+    owner/mode (a new local file takes opencode.json's); the previous
+    version is kept as <file>.bak (0600). Caller holds _OC_CONF_LOCK."""
+    path = _oc_conf_path()
     data = json.dumps(conf, indent=2, ensure_ascii=False) + "\n"
     json.loads(data)
-    d = os.path.dirname(OPENCODE_CONF)
-    with open(OPENCODE_CONF, "rb") as f:
-        prev = f.read()
-    for target, payload, mode, uid, gid in (
-            (OPENCODE_CONF + ".bak", prev, 0o600, 0, 0),
-            (OPENCODE_CONF, data.encode("utf-8"), st.st_mode & 0o7777, st.st_uid, st.st_gid)):
-        fd, tmp = tempfile.mkstemp(prefix=".opencode.json.", dir=d)
+    d = os.path.dirname(path)
+    try:
+        st = os.stat(path)
+        with open(path, "rb") as f:
+            prev = f.read()
+    except FileNotFoundError:
+        prev = None
         try:
-            os.fchmod(fd, mode)
-            os.fchown(fd, uid, gid)
+            st = os.stat(OPENCODE_CONF)
+        except OSError:
+            st = None
+    mode, uid, gid = (st.st_mode & 0o7777, st.st_uid, st.st_gid) if st else (0o644, 0, 0)
+    targets = [(path + ".bak", prev, 0o600, 0, 0)] if prev is not None else []
+    targets.append((path, data.encode("utf-8"), mode, uid, gid))
+    for target, payload, tmode, tuid, tgid in targets:
+        fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", dir=d)
+        try:
+            os.fchmod(fd, tmode)
+            os.fchown(fd, tuid, tgid)
             with os.fdopen(fd, "wb") as f:
                 f.write(payload)
                 f.flush()
@@ -11751,6 +11816,20 @@ def _oc_conf_write(conf):
             except OSError:
                 pass
             raise
+
+
+def _oc_conf_apply():
+    """opencode reads opencode.local.json only at start: restart the agent
+    (try-restart: a stopped agent stays stopped). Returns True when it was
+    restarted; False outside local mode (opencode hot-reloads opencode.json)."""
+    if not _oc_local_mode():
+        return False
+    try:
+        r = subprocess.run(["systemctl", "try-restart", "tuxwall-agent.service"],
+                           capture_output=True, text=True, timeout=60)
+        return r.returncode == 0
+    except Exception:
+        return False
 
 
 def _agent_key_path(pid):
@@ -15470,7 +15549,8 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     def _agent_custom_list():
         try:
-            conf = _oc_conf_read()
+            conf = _oc_conf_view()
+            base = _oc_conf_base()
         except Exception:
             return []
         out = []
@@ -15478,6 +15558,7 @@ class Handler(BaseHTTPRequestHandler):
             provs = conf.get(block)
             if not isinstance(provs, dict):
                 continue
+            in_base = base.get(block) if isinstance(base.get(block), dict) else {}
             for pid, p in provs.items():
                 if not isinstance(p, dict):
                     continue
@@ -15489,13 +15570,16 @@ class Handler(BaseHTTPRequestHandler):
                             "hasKey": bool(key),
                             "keyInFile": isinstance(key, str) and key.startswith("{file:"),
                             "models": list((p.get("models") or {}).keys())[:200],
-                            "legacy": legacy})
+                            "legacy": legacy,
+                            # defined by the package defaults (opencode.json):
+                            # the dashboard can override it, not remove it
+                            "source": "opencode.json" if pid in in_base else "local"})
         return out
 
     def _agent_default_info(self, model_ids=None):
         configured = ""
         try:
-            m = _oc_conf_read().get("model")
+            m = _oc_conf_view().get("model")
             if isinstance(m, str):
                 configured = m
             elif isinstance(m, dict) and m.get("providerID"):
@@ -15813,16 +15897,17 @@ class Handler(BaseHTTPRequestHandler):
             pid = str(body.get("id") or "").strip()
             if not AGENT_PROVIDER_ID_RE.match(pid):
                 raise ValueError("Provider id required")
+            def defines(doc):
+                return any(isinstance(doc.get(b), dict) and pid in doc[b] for b in ("providers", "provider"))
             with _OC_CONF_LOCK:
                 conf = _oc_conf_read()
-                found = False
-                for block in ("providers", "provider"):
-                    provs = conf.get(block)
-                    if isinstance(provs, dict) and pid in provs:
-                        found = True
-                if not found:
+                view = _oc_conf_view()
+                if not defines(view):
                     return 404, {"ok": False, "error": "Custom provider not found"}
-                m = conf.get("model")
+                if defines(_oc_conf_base()) or not defines(conf):
+                    return 409, {"ok": False, "error": "'{}' is part of the package defaults in {}; it cannot "
+                                                       "be removed here".format(pid, OPENCODE_CONF)}
+                m = view.get("model")
                 cur = m if isinstance(m, str) else (m.get("providerID", "") + "/" if isinstance(m, dict) else "")
                 if cur.startswith(pid + "/"):
                     return 409, {"ok": False, "error": "A model of this provider is the default; "
@@ -15835,9 +15920,10 @@ class Handler(BaseHTTPRequestHandler):
                             conf.pop(block)
                 _oc_conf_write(conf)
                 _agent_key_remove(pid)
-            self._agent_log("custom provider {} removed".format(pid))
-            gone, _n = self._agent_wait_provider(pid, present=False)
-            return 200, {"ok": True, "unloaded": gone}
+                restarted = _oc_conf_apply()
+            self._agent_log("custom provider {} removed{}".format(pid, " (agent restarted)" if restarted else ""))
+            gone, _n = self._agent_wait_provider(pid, present=False, timeout=45.0 if restarted else 15.0)
+            return 200, {"ok": True, "unloaded": gone, "restarted": restarted}
         if path == "/api/agent/models/default":
             model = str(body.get("model") or "").strip()
             if model:
@@ -15849,11 +15935,13 @@ class Handler(BaseHTTPRequestHandler):
                 if model:
                     conf["model"] = model
                 else:
-                    conf.pop("model", None)
+                    conf.pop("model", None)   # local mode: back to the package default
                 _oc_conf_write(conf)
-            self._agent_log("default model -> {}".format(model or "(automatic)"))
+                restarted = _oc_conf_apply()
+            self._agent_log("default model -> {}{}".format(model or "(automatic)",
+                                                           " (agent restarted)" if restarted else ""))
             eff = ""
-            deadline = time.time() + 15
+            deadline = time.time() + (45 if restarted else 15)
             while True:
                 eff = self._agent_default_info().get("effective") or ""
                 if not model or eff == model or time.time() >= deadline:
@@ -15949,9 +16037,12 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("Too many models (max 200)")
         with _OC_CONF_LOCK:
             conf = _oc_conf_read()
+            view = _oc_conf_view()
             provs = conf.get("providers") if isinstance(conf.get("providers"), dict) else {}
             legacy = conf.get("provider") if isinstance(conf.get("provider"), dict) else {}
-            existing = pid in provs or pid in legacy
+            vprovs = view.get("providers") if isinstance(view.get("providers"), dict) else {}
+            vlegacy = view.get("provider") if isinstance(view.get("provider"), dict) else {}
+            existing = pid in vprovs or pid in vlegacy
             if not existing:
                 try:
                     integ_ids = {i["id"] for i in self._agent_integrations()}
@@ -15960,8 +16051,10 @@ class Handler(BaseHTTPRequestHandler):
                     integ_ids, prov_ids = set(), set()
                 if pid in prov_ids or (pid in integ_ids and pid not in AGENT_LOCAL_RUNTIME_IDS):
                     raise ValueError("'{}' is already used by a built-in provider; choose another ID".format(pid))
-            prev = provs.get(pid) or legacy.get(pid) or {}
-            prev_settings = prev.get("settings") if pid in provs else prev.get("options")
+            # the merged entry: in local mode a provider of the package
+            # defaults is overridden in the local file (objects merge)
+            prev = vprovs.get(pid) or vlegacy.get(pid) or {}
+            prev_settings = prev.get("settings") if pid in vprovs else prev.get("options")
             prev_settings = prev_settings if isinstance(prev_settings, dict) else {}
             prev_models = prev.get("models") if isinstance(prev.get("models"), dict) else {}
             entry = {"name": name, "package": AGENT_OPENAI_COMPAT_PKG,
@@ -15992,9 +16085,12 @@ class Handler(BaseHTTPRequestHandler):
             _oc_conf_write(conf)
             if clear:
                 _agent_key_remove(pid)
-        self._agent_log("custom provider {} saved ({} models)".format(pid, len(models)))
-        loaded, count = self._agent_wait_provider(pid, present=True, expect_models=models)
-        return 200, {"ok": True, "id": pid, "loaded": loaded, "models": count,
+            restarted = _oc_conf_apply()
+        self._agent_log("custom provider {} saved ({} models){}".format(
+            pid, len(models), " (agent restarted)" if restarted else ""))
+        loaded, count = self._agent_wait_provider(pid, present=True, expect_models=models,
+                                                  timeout=45.0 if restarted else 15.0)
+        return 200, {"ok": True, "id": pid, "loaded": loaded, "models": count, "restarted": restarted,
                      "message": ("Saved; {} model(s) available".format(count) if loaded
                                  else "Saved, but opencode has not loaded it yet")}
 
