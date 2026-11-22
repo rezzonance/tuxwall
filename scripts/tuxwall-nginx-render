@@ -3,7 +3,7 @@
 # with listen addresses derived from THIS box's actual interfaces.
 #
 # 2026-11-09 audit: the shipped nginx configs hardcoded one machine's
-# addresses (192.168.1.1, 10.0.0.1, fd00:1::1, housenetwork.site) - on
+# addresses (192.168.1.1, 10.0.0.1, fd00:1::1, the owner's domain) - on
 # any other box nginx fails to bind and the dashboard never comes up.
 # This renderer reads the actual LAN/WG addresses and emits the vhost.
 #

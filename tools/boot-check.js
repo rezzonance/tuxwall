@@ -91,7 +91,7 @@ global.document = new Proxy({
 global.window = new Proxy({
   addEventListener() {}, removeEventListener() {},
   matchMedia: () => ({ matches: false, addEventListener() {}, addListener() {} }),
-  location: { href: "https://router.housenetwork.site/", hash: "", host: "router.housenetwork.site", hostname: "router.housenetwork.site", protocol: "https:", origin: "https://router.housenetwork.site", search: "" },
+  location: { href: "https://router.example.com/", hash: "", host: "router.example.com", hostname: "router.example.com", protocol: "https:", origin: "https://router.example.com", search: "" },
   innerWidth: 1920, innerHeight: 1080, devicePixelRatio: 1,
   requestAnimationFrame: (cb) => setTimeout(cb, 0),
   cancelAnimationFrame: (id) => clearTimeout(id),

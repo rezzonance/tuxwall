@@ -1059,7 +1059,7 @@ def _domains_reload_or_rollback(domains, prev_conf):
 def _domain_entry_from_payload(body, existing=None):
     name = valid_domain_name(body.get("domain"))
     if not name:
-        return None, "Invalid domain name (use e.g. plex.housenetwork.site)."
+        return None, "Invalid domain name (use e.g. plex.example.com)."
     ip = (body.get("ip") or "").strip()
     try:
         addr = ipaddress.ip_address(ip)
@@ -1295,7 +1295,7 @@ def import_domain(body):
     with DOMAIN_LOCK:
         name = valid_domain_name(body.get("domain"))
         if not name:
-            return {"ok": False, "error": "Invalid domain name (use e.g. plex.housenetwork.site)."}
+            return {"ok": False, "error": "Invalid domain name (use e.g. plex.example.com)."}
         src = next(
             (d for d in discover_local_domains() if d["domain"] == name), None
         )
@@ -9456,7 +9456,7 @@ def write_rpz_zone(entries):
     serial = time.strftime("%Y%m%d%H")
     lines = [
         "$TTL 300",
-        "@ IN SOA {}. hostmaster.housenetwork.site. (".format(RPZ_ZONE_NAME),
+        "@ IN SOA {0}. hostmaster.{0}. (".format(RPZ_ZONE_NAME),
         "        {} ; serial".format(serial),
         "        3600       ; refresh",
         "        600        ; retry",

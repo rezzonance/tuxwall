@@ -107,6 +107,9 @@ jobs:
         # pure tests: parses the shipped unit + drop-ins and the code's path constants/literals
         run: python3 tools/unit_paths_check.py
 
+      - name: Privacy (no maintainer domain or public address ranges in any tracked file)
+        run: python3 tools/privacy_check.py
+
   dashboard:
     name: dashboard.js gates
     runs-on: ubuntu-latest

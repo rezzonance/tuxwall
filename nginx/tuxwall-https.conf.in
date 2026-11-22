@@ -31,7 +31,7 @@ server {
     ssl_session_tickets off;
 
     # Pins this hostname to HTTPS in the browser for a year. No
-    # includeSubDomains: other *.housenetwork.site services are
+    # includeSubDomains: other *.example.com services are
     # unaffected. To back it out, serve `max-age=0` here and visit the
     # host once over HTTPS before removing the header.
     add_header Strict-Transport-Security "max-age=31536000" always;
