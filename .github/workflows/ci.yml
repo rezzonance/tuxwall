@@ -110,6 +110,9 @@ jobs:
       - name: Privacy (no maintainer domain or public address ranges in any tracked file)
         run: python3 tools/privacy_check.py
 
+      - name: No stray backup/editor files tracked in www/ pkg/ scripts/ nginx/
+        run: python3 tools/stray_files_check.py
+
   dashboard:
     name: dashboard.js gates
     runs-on: ubuntu-latest
