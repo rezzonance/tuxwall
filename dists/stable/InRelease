@@ -4,43 +4,43 @@ Hash: SHA512
 Architectures: all amd64
 Codename: stable
 Components: main
-Date: Sun, 22 Nov 2026 16:18:08 +0000
+Date: Sun, 22 Nov 2026 17:20:41 +0000
 Description: TuxWall network firewall dashboard
 Label: TuxWall APT Repository
 Origin: TuxWall
 Suite: stable
 MD5Sum:
- bc4736abca74d0cf875559251338d545              205 Release
- 79474488c7e07605289a67d65bfc8fcb            40272 main/binary-all/Packages
- d79611e703d727e5c25f6d9f5db27b31            17010 main/binary-all/Packages.gz
- 79474488c7e07605289a67d65bfc8fcb            40272 main/binary-amd64/Packages
- d79611e703d727e5c25f6d9f5db27b31            17010 main/binary-amd64/Packages.gz
+ 32e983a565b2c19c483dceaf981b35f2              205 Release
+ eb74653398eb9b421517bcebb662c34b            40272 main/binary-all/Packages
+ ff78ef34244d0da3a03703bed24e2c71            17016 main/binary-all/Packages.gz
+ eb74653398eb9b421517bcebb662c34b            40272 main/binary-amd64/Packages
+ ff78ef34244d0da3a03703bed24e2c71            17016 main/binary-amd64/Packages.gz
 SHA1:
- d205c2837f7872d6e0ec41fbad79ac703a89cc21              205 Release
- d8156ae75336ec2b456a8a424d532694052753e4            40272 main/binary-all/Packages
- 8c258ab6bdfda51e4a7568ab58247244bdf0e047            17010 main/binary-all/Packages.gz
- d8156ae75336ec2b456a8a424d532694052753e4            40272 main/binary-amd64/Packages
- 8c258ab6bdfda51e4a7568ab58247244bdf0e047            17010 main/binary-amd64/Packages.gz
+ 3379ae99b3b128b8888d7382fcf22012bae65e89              205 Release
+ a262ec5306a0bac9df4fa6a45408cd2393f037a5            40272 main/binary-all/Packages
+ b8c9954bda616295be08e6f276f1d41389174720            17016 main/binary-all/Packages.gz
+ a262ec5306a0bac9df4fa6a45408cd2393f037a5            40272 main/binary-amd64/Packages
+ b8c9954bda616295be08e6f276f1d41389174720            17016 main/binary-amd64/Packages.gz
 SHA256:
- 88b7c12bf9b80df1fd12e7d43bf3dc51b0cd54e4c1cc91986eb05926ed05ab9f              205 Release
- b62b2534829ee609d94ab149960026dc90d6cd1b14bfb88a6a6c28d1ba2c0e41            40272 main/binary-all/Packages
- 72bc623b0a4a4aa2812a613aa8e12320716a6835f28f57171550b8494f1ca7ab            17010 main/binary-all/Packages.gz
- b62b2534829ee609d94ab149960026dc90d6cd1b14bfb88a6a6c28d1ba2c0e41            40272 main/binary-amd64/Packages
- 72bc623b0a4a4aa2812a613aa8e12320716a6835f28f57171550b8494f1ca7ab            17010 main/binary-amd64/Packages.gz
+ f3febcc83d8ea3c37aa33859575e243a3b1ab470556431ae6a37d73640859fb3              205 Release
+ 51a66f0fb6c4a7a48c44a6cb3de2e3eba028fffd60260df2b13a4916c8fe702d            40272 main/binary-all/Packages
+ d2cef7bf99644fe56dac56c9418136abcf96746bea6dd80d7f35c4c8993877c0            17016 main/binary-all/Packages.gz
+ 51a66f0fb6c4a7a48c44a6cb3de2e3eba028fffd60260df2b13a4916c8fe702d            40272 main/binary-amd64/Packages
+ d2cef7bf99644fe56dac56c9418136abcf96746bea6dd80d7f35c4c8993877c0            17016 main/binary-amd64/Packages.gz
 SHA512:
- 3d89fab209679ce1f6a0a4259f88c817ca9e31ba0c43fba379236cbf8c55cc9241417b8917080cb81cb6d198c8d682eac2988c4fc84489e27f71104e3e30d502              205 Release
- f0332c86c8cc707be04ad150a46a5878f6e13817a630a1ac7d6530bc8d265c8efd640a90e4bfe89cf5346cfab1d8fc22ce27f95ce5dbdee8917ab8f8fb19686c            40272 main/binary-all/Packages
- 3463482bf50e2ef1477b625a5ef4317ba4635d14f69e8fd56d0b5e0522e135180a53e961dc98475327176a3bbc64d43ef7d4fcfb0e5778499d632e2f99ea4b3a            17010 main/binary-all/Packages.gz
- f0332c86c8cc707be04ad150a46a5878f6e13817a630a1ac7d6530bc8d265c8efd640a90e4bfe89cf5346cfab1d8fc22ce27f95ce5dbdee8917ab8f8fb19686c            40272 main/binary-amd64/Packages
- 3463482bf50e2ef1477b625a5ef4317ba4635d14f69e8fd56d0b5e0522e135180a53e961dc98475327176a3bbc64d43ef7d4fcfb0e5778499d632e2f99ea4b3a            17010 main/binary-amd64/Packages.gz
+ 4e1bcf59c82664e36d07fe0d063b2a90e840dcb09966a3de59c244807072983fd8be2445cce5c25e42dbc0baf31ea1bf147d1f4ee9ca44a7cd4c553a2db5c515              205 Release
+ e80fab71414febdcdffe056f25983661e3986e72eb092cedb790f06fbba6e7861df0151f1624c9c9f0fb0093d6b5a4a9815a032624ee1657688ddca3efd84cb2            40272 main/binary-all/Packages
+ 22e5d985975c31d86daeb0f18e17c7dd0159657b1c0c9edd9eb29eef4236a1d3d4b38ac23f76d675bac9bf9b6d159eeb09c2b7260b79422ebf8c98d290002ed3            17016 main/binary-all/Packages.gz
+ e80fab71414febdcdffe056f25983661e3986e72eb092cedb790f06fbba6e7861df0151f1624c9c9f0fb0093d6b5a4a9815a032624ee1657688ddca3efd84cb2            40272 main/binary-amd64/Packages
+ 22e5d985975c31d86daeb0f18e17c7dd0159657b1c0c9edd9eb29eef4236a1d3d4b38ac23f76d675bac9bf9b6d159eeb09c2b7260b79422ebf8c98d290002ed3            17016 main/binary-amd64/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iQEzBAEBCgAdFiEEXXm5CC3K65zLcxOC9dgjVxa9vdEFAmsDFcAACgkQ9dgjVxa9
-vdH9GQf/UQy7mi/nMSV0sQKf8Bg3mMIHd+Msd4Dax1OyorVCqcHHSF9lG6m9FIU8
-fq2xp/2DGrLyU6TYaeAyfaTJq+H2In8Ggd5mkoy7vm7AEx/ueMmkB2kbPqnkit0Q
-M0wnZ0je5t0ZJaH8d/SQX1u+9akyBPM78tdG7UkLycu6w9QkbtPMbkXNMGFYWWTS
-SH/5i4d3qHYw7468g6q2Zqgh4lWBdJrTrT13Lin9trsxZpatHJc2VtN8eK8+5mPi
-9d6aD7h3O97Mt0ztj3dV9CX1LU2aLQ5i3cZy78ksFcbM5qY4mSgKJzqmG51XtRcp
-Gx3ruF+PTybj1nL7qvANfdsJcXIQKA==
-=LX2t
+iQEzBAEBCgAdFiEEXXm5CC3K65zLcxOC9dgjVxa9vdEFAmsDJGkACgkQ9dgjVxa9
+vdHNGAgAgDPkaZmTg+ezomBC6KpjsmumISEDjdry0sWySUT9IIPuQjXoxhgf7s+l
+dyrkC60OG3FOlwcR8xzd4rx4nxwhrPdtx3fsUjc9UoUPivNWyUzUG0ngl+9eXwYs
+u2ZPQAqJ9MMy+VCxnuhMlT1HycDV3tktx50JHvrKz8Gio57SEoAyPUiPAZI9GxUq
+zzE22dvSBA8dc/fHlNaajfaXkpHLzqiZpi2Jr/RIXaTMZ09mej95NGhvDPc+n33G
+JS5zaij7zIVJslNoVo2cOxruHIJw4ml9foH/C1DcRu9MyV/j9G29sEP57yc6FnHi
+9lNBMljJFYLOwBKLyfHyYPOtXLVxRQ==
+=9NPt
 -----END PGP SIGNATURE-----
