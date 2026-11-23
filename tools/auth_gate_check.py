@@ -3,9 +3,11 @@
 
   python3 tools/auth_gate_check.py
 
-The real Handler serves on 127.0.0.1:<random>; users and sessions are
-in-memory fixtures (the real session/cookie code runs), the UI config is a
-fixture with a router location. Checks:
+The real Handler serves on 127.0.0.1:<random> through tools/api_harness.py
+(sandboxed: no subprocess, no writes outside a temp dir, no network); users
+are a scratch auth.json, sessions are real, the UI config is a fixture with
+a router location. Every route x role x Origin is covered by
+tools/route_permission_check.py; these are the focused regressions. Checks:
 
 - /api/auth/session without a session: no router_lat/router_lon (3.3.3;
   it answers the login page), but theme/setup fields still there; with a
@@ -19,21 +21,15 @@ fixture with a router location. Checks:
   admin reaches the handler, which gets the JSON body, the identity and the
   client address (X-Real-IP from the loopback proxy).
 """
-import http.client
-import importlib.util
-import json
 import os
 import sys
-import threading
-import time
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TARGET = os.path.join(ROOT, "www", "includes", "api_server.py")
 sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import api_harness  # noqa: E402
 
-spec = importlib.util.spec_from_file_location("api_server_auth_gate", TARGET)
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
+H = api_harness.Harness(name="api_server_auth_gate")
+mod = H.mod
 
 PASS = FAIL = 0
 
@@ -47,10 +43,6 @@ def check(cond, name):
         print("FAIL:", name)
 
 
-USERS = [{"username": "boss", "role": "admin", "owner": True},
-         {"username": "watcher", "role": "viewer"}]
-mod._ensure_default_auth = lambda: None
-mod._load_users = lambda: [dict(u) for u in USERS]
 mod.load_ui_conf = lambda: {"router_lat": 40.1, "router_lon": -75.2, "active_theme": "dark"}
 mod._custom_theme_files = lambda: []
 mod.build_status = lambda: {"ok": True, "stub": True}
@@ -59,43 +51,17 @@ mod.build_allowlists = lambda: (200, {"ok": True, "lists": [], "stub": True})
 for _n in ("add", "remove", "create"):
     setattr(mod, "allowlist_" + _n, (lambda n: lambda body, ident, ip: (
         AL_CALLS.append((n, body, ident.get("username"), ip)) or (200, {"ok": True, "stub": n})))(_n))
-now = time.time()
-for tok, user in (("tok-admin", "boss"), ("tok-viewer", "watcher")):
-    mod._sessions[tok] = {"username": user, "exp": now + 3600, "last": now}
-
-server = mod.ThreadingHTTPServer(("127.0.0.1", 0), mod.Handler)
-server.daemon_threads = True
-threading.Thread(target=server.serve_forever, daemon=True).start()
-PORT = server.server_address[1]
+ROLE = {"tok-admin": "admin", "tok-viewer": "viewer"}
 
 
 def get(path, token=None):
-    c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=10)
-    headers = {"Cookie": "%s=%s" % (mod.SESSION_COOKIE, token)} if token else {}
-    c.request("GET", path, headers=headers)
-    r = c.getresponse()
-    body = r.read()
-    c.close()
-    try:
-        return r.status, json.loads(body or b"{}")
-    except ValueError:
-        return r.status, {}
+    r = H.request("GET", path, role=ROLE.get(token))
+    return r.status, (r.json if isinstance(r.json, dict) else {})
 
 
 def post(path, body, token=None, extra=None):
-    c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=10)
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Cookie"] = "%s=%s" % (mod.SESSION_COOKIE, token)
-    headers.update(extra or {})
-    c.request("POST", path, body=json.dumps(body), headers=headers)
-    r = c.getresponse()
-    data = r.read()
-    c.close()
-    try:
-        return r.status, json.loads(data or b"{}")
-    except ValueError:
-        return r.status, {}
+    r = H.request("POST", path, role=ROLE.get(token), body=body, headers=extra)
+    return r.status, (r.json if isinstance(r.json, dict) else {})
 
 
 try:
@@ -142,10 +108,10 @@ try:
     check(AL_CALLS and AL_CALLS[-1] == ("add", {"list": "home", "value": "192.0.2.1", "confirm_broad": True},
                                         "boss", "192.168.1.50"), "handler gets body, identity and client IP")
     st, d = post("/api/crowdsec/allowlists/remove", {"list": "home", "value": "192.0.2.1"}, "tok-admin",
-                 {"Origin": "http://127.0.0.1:%d" % PORT})
+                 {"Origin": H.origin})
     check(st == 200 and d.get("stub") == "remove", "same-origin remove as admin reaches the handler")
 finally:
-    server.shutdown()
+    H.close()
 
 print("auth gates: %d passed, %d failed" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

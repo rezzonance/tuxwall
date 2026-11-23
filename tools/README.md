@@ -147,6 +147,45 @@ cached network set (background refresh, invalidated after a change, expired
 entries ignored), and the deception guard, manual bans and the report queue
 honouring it.
 
+## route_permission_check.py — who may reach every API route (CI)
+
+```bash
+python3 tools/route_permission_check.py              # coverage + full matrix (~7 s)
+python3 tools/route_permission_check.py --mutants    # + mutation self-test (CI runs this)
+python3 tools/route_permission_check.py --dump       # print every observed status
+python3 tools/route_discovery.py                     # just the discovered route list
+```
+
+- `route_discovery.py` finds the routes with the AST: every `do_<METHOD>` of
+  the handler class and every helper the request path is passed to
+  (`path ==`, `path in (...)`/constants, `path.startswith(...)`, `re.match`
+  on the path - alternations expanded - and dict dispatch). Coverage is
+  measured against a crude grep of `"/api/..."` literals; uncovered literals
+  need a reason in `route_policy.NOT_ROUTES` (the opencode agent's upstream
+  paths) and coverage must stay >= 95 %.
+- `route_policy.py` is the table: `PUBLIC`, `TOKEN_AUTH`, `VIEWER_OK`,
+  `AGENT_TOKEN_OK`, `CSRF_EXEMPT`, `NO_ORIGIN_OK` / `ORIGIN_REQUIRED` /
+  `NO_ORIGIN_DEFAULT`, `HANDLER_MAY_REFUSE`, `COOKIE_CASES`; one-line reason
+  per entry, `REVIEW:` marks behaviour waiting for an owner decision.
+  Anything not listed is admin-only + CSRF-checked; a route that behaves
+  otherwise fails with "classify ... in tools/route_policy.py".
+- `api_harness.py` (shared with `auth_gate_check.py`) serves the real
+  Handler on loopback with a scratch auth.json, real sessions and token files,
+  and a fail-closed sandbox installed before the module loads: subprocesses,
+  signals, writes/renames/chmods outside the scratch dir, DNS and every
+  connection except to the harness raise `SideEffectBlocked` and are recorded
+  per request. Refused requests must not have attempted any; admin requests
+  that get past the gates are stopped there (they show up as 500s - fine,
+  the suite only tests the gates).
+- Matrix per route: no session, viewer, admin + same Origin, and for POSTs a
+  foreign Origin, `Origin: null`, a foreign Referer, another port on the same
+  host and no Origin at all; the agent read token; PUT/DELETE/PATCH/OPTIONS/
+  HEAD -> 501; unknown paths; path spellings (`//`, case, `%xx`, `/./`,
+  `..`, `;`) of admin-only GETs; Host/Origin parsing (IPv6 literals);
+  JSON-only, traceback-free unauthenticated answers; session cookie flags.
+- HTTPS work: add a `COOKIE_CASES` row (and flip `SAME_HOST_OTHER_PORT`
+  once scheme/port are compared); the request helper takes any headers.
+
 ## custom_blocklist_check.py — custom banlist sync (CI)
 
 ```bash
