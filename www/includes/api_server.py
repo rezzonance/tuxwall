@@ -17533,18 +17533,27 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get(AGENT_API_TOKEN_HEADER) is not None:
             self._send(403, {"ok": False, "error": "The agent read token is GET-only"})
             return
+        # Every POST route lives under /api/ (nginx proxies nothing else).
+        if not path.startswith("/api/"):
+            self._send(404, {"ok": False, "error": "Not found"})
+            return
         qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
         # Lightweight CSRF check: when the browser sends Origin/Referer, its
         # host must match the Host we were reached on. Same-origin dashboard
-        # traffic is unaffected; cross-site form posts are rejected.
+        # traffic is unaffected; cross-site form posts are rejected. An
+        # Origin without a host ("null": sandboxed frames, cross-origin
+        # redirects) counts as foreign (route-permission suite, 2026-11-23).
         origin = self.headers.get("Origin") or self.headers.get("Referer")
-        if origin and path.startswith("/api/"):
+        if origin:
             try:
                 o_host = urllib.parse.urlsplit(origin).hostname or ""
             except Exception:
                 o_host = ""
-            h_host = (self.headers.get("Host") or "").split(":")[0].strip().lower()
-            if o_host and o_host.lower() != h_host:
+            try:  # urlsplit: also right for an IPv6 literal Host ("[fd00::1]:80")
+                h_host = urllib.parse.urlsplit("//" + (self.headers.get("Host") or "").strip()).hostname or ""
+            except Exception:
+                h_host = ""
+            if not o_host or o_host.lower() != h_host.lower():
                 self._send(403, {"ok": False, "error": "Cross-site request rejected"})
                 return
         length = int(self.headers.get("Content-Length") or 0)
