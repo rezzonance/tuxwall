@@ -104,8 +104,6 @@ VIEWER_OK = {
     "GET /api/security/tripwire/history": "tripwire history",
     "GET /api/security/tripwire/recovery": "recovery-mode preview; AI provider list only for admins",
     "GET /api/security/ai-models": "model list for the AI summary picker",
-    "GET /api/security/ai-config": "REVIEW: LLM base URL/model and a masked key (first/last 4 chars) shown to viewers",
-    "GET /api/security/ai-summary": "REVIEW: a viewer GET triggers a paid LLM call (outbound request, cost)",
     "GET /api/ai/chat/models": "model list for the AI chat picker (chat itself is admin)",
     # CrowdSec / blocklists
     "GET /api/crowdsec": "CrowdSec decisions view",

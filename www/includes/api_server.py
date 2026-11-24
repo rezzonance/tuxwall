@@ -12062,6 +12062,10 @@ ADMIN_GET_PREFIXES = (
     "/api/community",
     "/api/crowdsec/allowlists",
     "/api/https",
+    # AI security summary: each GET is a (possibly paid) LLM request; the
+    # config view shows the API key's first/last 4 characters (3.3.6).
+    "/api/security/ai-summary",
+    "/api/security/ai-config",
 )
 
 
