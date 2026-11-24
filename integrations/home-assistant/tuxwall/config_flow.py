@@ -15,10 +15,18 @@ except ImportError:
     # HA < 2024.11 (FlowResult was removed from data_entry_flow in 2024.12)
     from homeassistant.data_entry_flow import FlowResult
 
-from .api import TuxwallApiClient, TuxwallApiError, TuxwallAuthError
+from .api import (
+    TuxwallApiClient,
+    TuxwallApiError,
+    TuxwallAuthError,
+    TuxwallHttpsRedirect,
+    TuxwallSslError,
+)
 from .const import (
+    CONF_CA_CERT,
     CONF_SCAN_INTERVAL,
     CONF_TOTP_CODE,
+    CONF_VERIFY_SSL,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
 )
@@ -29,6 +37,8 @@ STEP_USER_SCHEMA = vol.Schema(
         vol.Required(CONF_USERNAME): str,
         vol.Required(CONF_PASSWORD): str,
         vol.Optional(CONF_TOTP_CODE, default=""): str,
+        vol.Optional(CONF_CA_CERT, default=""): str,
+        vol.Optional(CONF_VERIFY_SSL, default=True): bool,
     }
 )
 
@@ -41,12 +51,14 @@ class TuxwallConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             host = user_input[CONF_HOST].rstrip("/")
             if not host.startswith(("http://", "https://")):
-                host = f"http://{host}"
+                host = f"https://{host}"
             client = TuxwallApiClient(
                 host,
                 user_input[CONF_USERNAME],
                 user_input[CONF_PASSWORD],
                 user_input.get(CONF_TOTP_CODE, ""),
+                verify_ssl=user_input.get(CONF_VERIFY_SSL, True),
+                ca_cert=user_input.get(CONF_CA_CERT, ""),
             )
             try:
                 await client.login()
@@ -57,6 +69,10 @@ class TuxwallConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     raise TuxwallAuthError("Session was not established")
             except TuxwallAuthError:
                 errors["base"] = "invalid_auth"
+            except TuxwallSslError:
+                errors["base"] = "ssl_error"
+            except TuxwallHttpsRedirect:
+                errors["base"] = "use_https"
             except TuxwallApiError:
                 errors["base"] = "cannot_connect"
             else:

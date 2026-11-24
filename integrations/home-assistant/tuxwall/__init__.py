@@ -23,7 +23,9 @@ import voluptuous as vol
 
 from .api import TuxwallApiClient, TuxwallApiError, TuxwallAuthError
 from .const import (
+    CONF_CA_CERT,
     CONF_TOTP_CODE,
+    CONF_VERIFY_SSL,
     CORE_SERVICES,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
@@ -48,6 +50,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data[CONF_USERNAME],
         entry.data[CONF_PASSWORD],
         entry.data.get(CONF_TOTP_CODE, ""),
+        verify_ssl=entry.data.get(CONF_VERIFY_SSL, True),
+        ca_cert=entry.data.get(CONF_CA_CERT, ""),
     )
     try:
         await client.login()

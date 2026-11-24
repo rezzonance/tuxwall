@@ -8,6 +8,11 @@ DOMAIN: Final = "tuxwall"
 DEFAULT_SCAN_INTERVAL: Final = 30
 
 CONF_TOTP_CODE: Final = "totp_code"
+# HTTPS (TuxWall 3.3.6+ serves the dashboard over https with the router's
+# own CA): a CA file readable by Home Assistant (e.g. /config/tuxwall-ca.crt),
+# or verify_ssl off as a last resort.
+CONF_VERIFY_SSL: Final = "verify_ssl"
+CONF_CA_CERT: Final = "ca_cert"
 # Own constant: CONF_SCAN_INTERVAL was deprecated in HA 2024.10 and may be
 # removed on current versions - never import it from homeassistant.const.
 CONF_SCAN_INTERVAL: Final = "scan_interval"

@@ -44,8 +44,18 @@ Unbound DNS block; requires an **admin** tuxwall user).
    the SSH add-on).
 3. Restart Home Assistant, then **Settings → Devices & Services → Add
    Integration → TuxWall**. Enter the base URL (e.g.
-   `http://192.168.1.1`), username and password; add the TOTP code only if
+   `https://192.168.1.1`), username and password; add the TOTP code only if
    that account has 2FA.
+   - **HTTPS (TuxWall 3.3.6+):** the dashboard redirects http to https with
+     a certificate from the router's own CA. Download the CA
+     (dashboard **Settings → Security → HTTPS → Download CA certificate**),
+     copy it into the HA config folder (e.g. `/config/tuxwall-ca.crt`) and
+     enter that path as *Router CA certificate file*. Unticking *Verify the
+     HTTPS certificate* also works but is not recommended.
+   - An existing entry that uses `http://` stops at login with "redirects to
+     https" after the router upgrade: remove and re-add it with `https://`,
+     or keep http with `sudo touch /etc/tuxwall/no-https-redirect && sudo
+     tuxwall-tls refresh --reload` on the router.
 4. Poll interval (10–3600s) is adjustable under the integration's
    *Configure* options.
 
