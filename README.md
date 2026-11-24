@@ -195,9 +195,9 @@ sudo apt install tuxwall
 Download the current package, `SHA256SUMS` and `SHA256SUMS.asc` from [Releases](https://github.com/rezzonance/tuxwall/releases) and check them ([SECURITY.md](SECURITY.md#verifying-releases)), then:
 
 ```bash
-sudo bash tuxwall-install.sh --deb tuxwall_3.3.5_all.deb
+sudo bash tuxwall-install.sh --deb tuxwall_3.3.6_all.deb
 # or the classic way:
-sudo dpkg -i tuxwall_3.3.5_all.deb && sudo apt -f install
+sudo dpkg -i tuxwall_3.3.6_all.deb && sudo apt -f install
 ```
 </details>
 
