@@ -1050,6 +1050,7 @@ step_firewall() {
         # An explicit LAN-scoped dashboard rule also stops the package from
         # opening 80/tcp on every interface.
         q ufw allow in on "$LAN" to any port 80 proto tcp comment 'TuxWall dashboard (LAN)'
+        q ufw allow in on "$LAN" to any port 443 proto tcp comment 'TuxWall dashboard HTTPS (LAN)'
         q ufw route allow in on "$LAN" out on "$WAN" comment 'tuxwall: LAN -> WAN'
         # WireGuard's port is opened on the WAN by the dashboard's WireGuard
         # setup (tagged tuxwall-wireguard), not before a VPN exists.
@@ -1060,8 +1061,9 @@ step_firewall() {
         local net
         for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 fd00::/8; do
             q ufw allow proto tcp from "$net" to any port 80 comment 'TuxWall dashboard (private networks)'
+            q ufw allow proto tcp from "$net" to any port 443 comment 'TuxWall dashboard HTTPS (private networks)'
         done
-        ok "Dashboard (80/tcp) allowed from private networks only"
+        ok "Dashboard (80+443/tcp) allowed from private networks only"
     fi
 
     if (( ! was_active )); then
@@ -1682,6 +1684,11 @@ step_services() {
     if [[ -x /usr/local/sbin/tuxwall-nginx-listen ]]; then
         q /usr/local/sbin/tuxwall-nginx-listen || warn "nginx listen include not updated (sudo tuxwall-nginx-listen)"
     fi
+    # dashboard HTTPS: certificate SANs + 443 listeners for the addresses that
+    # exist now (nginx -t inside, previous files kept on failure)
+    if [[ -x /usr/local/sbin/tuxwall-tls ]]; then
+        q /usr/local/sbin/tuxwall-tls refresh || warn "dashboard HTTPS not updated (sudo tuxwall-tls refresh --reload)"
+    fi
     local svc
     local -a base=(nginx tuxwall tuxwall-nat avahi-daemon tuxwall-blocklist-update.timer suricata-update.timer)
     [[ $ROLE == gateway ]] && base=(unbound "${base[@]}")
@@ -1851,7 +1858,9 @@ console_disarm() {
 #  Main
 ###############################################################################
 final_summary() {
-    local url="http://${NET_GW:-$(hostname -I 2>/dev/null | awk '{print $1}' || true)}/"
+    local host="${NET_GW:-$(hostname -I 2>/dev/null | awk '{print $1}' || true)}" url
+    url="http://$host/"
+    [[ "$(/usr/local/sbin/tuxwall-tls decide 2>/dev/null || true)" == active ]] && url="https://$host/"
     printf '\n'
     hr
     if (( CRIT_FAIL )); then
@@ -1862,6 +1871,7 @@ final_summary() {
     hr
     kv "Dashboard"  "$url"
     kv "First login" "open the dashboard and create the first administrator"
+    [[ $url == https://* ]] && kv "Certificate" "trust the router's CA: http://$host/tuxwall-ca.crt (Settings → Security → HTTPS)"
     [[ $ROLE == gateway ]] && kv "Gateway name" "gateway.$DOMAIN"
     kv "Log"        "$LOG"
     [[ -d $BACKUP_DIR ]] && kv "Backups" "$BACKUP_DIR"
