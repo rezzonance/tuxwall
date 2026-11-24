@@ -41,6 +41,9 @@
   inheritance); a real nginx on loopback serves them on /, /index.html,
   static files, 404 and the CA download over http + https (HSTS https
   only); the 3.3.5 `add_header Cache-Control` location fails both.
+- upgrade notice: postinst https_announce (marker only when an upgrade
+  turned TuxWall HTTPS on), announce_info / dismiss_announce, API route
+  and dashboard banner wiring.
 """
 import importlib.machinery
 import importlib.util
@@ -1003,6 +1006,98 @@ def t_postinst():
         shutil.rmtree(d)
 
 
+def t_announce():
+    """Upgrade notice: postinst https_announce decides, https_tls reads/dismisses."""
+    fns = func("https_serving") + func("https_announce")
+    check(func("https_serving") and func("https_announce"), "postinst defines https_serving + https_announce")
+    step5 = SRC[SRC.index('step 5 "'):SRC.index('step 6 "')]
+    check(re.search(r"_https_was=no\n\s*https_serving && _https_was=yes\n\s*https_setup [^\n]*\n"
+                    r"\s*https_announce \"\$\{2:-\}\" \"\$_https_was\"", step5),
+          "postinst step 5: serving state read before https_setup, https_announce right after (prev version)")
+    d = tempfile.mkdtemp(prefix="https-announce-")
+    try:
+        active = H.render_snippet(H.Env(tls_dir="/etc/tuxwall/tls", nginx_version="1.28.0"), dec(),
+                                  dict(H.SETTINGS_DEFAULT))
+        hatch = H.render_snippet(H.Env(tls_dir="/etc/tuxwall/tls", nginx_version="1.28.0"), dec(redirect=False),
+                                 dict(H.SETTINGS_DEFAULT))
+        owner = H.render_snippet(H.Env(), dec(mode="owner-managed", reasons=["local copy of sites-enabled/tuxwall"]),
+                                 dict(H.SETTINGS_DEFAULT))
+        snip, marker = d + "/tuxwall-tls.conf", d + "/lib/https-announce"
+
+        def run(prev, was, text):
+            if os.path.exists(marker):
+                os.unlink(marker)
+            if text is None:
+                if os.path.exists(snip):
+                    os.unlink(snip)
+            else:
+                write(snip, text)
+            p = subprocess.run(["bash", "-c", "set -euo pipefail\n" + fns + 'https_announce "$1" "$2" "$3" "$4"',
+                                "x", prev, was, snip, marker], capture_output=True, text=True, timeout=30)
+            meta = json.load(open(marker)) if os.path.exists(marker) else None
+            return p.returncode, meta, p.stdout
+
+        def serving(text):
+            if text is None:
+                if os.path.exists(snip):
+                    os.unlink(snip)
+            else:
+                write(snip, text)
+            return subprocess.run(["bash", "-c", fns + 'https_serving "$1"', "x", snip]).returncode == 0
+        check(serving(active) and serving(hatch) and not serving(owner) and not serving(None),
+              "https_serving: active/escape-hatch snippet yes; owner-managed note / no snippet no")
+        rc, meta, out = run("3.3.5", "no", active)
+        check(rc == 0 and meta and meta["from"] == "3.3.5" and meta["redirect"] is True
+              and isinstance(meta["since"], int) and "one-time notice" in out,
+              "upgrade 3.3.5 -> HTTPS on: marker written (from, since, redirect) + status line (%s)" % meta)
+        check(mode(marker) == 0o644, "marker 0644")
+        rc, meta, out = run("", "no", active)
+        check(rc == 0 and meta is None and out == "", "fresh install: no marker")
+        rc, meta, _ = run("3.3.6", "yes", active)
+        check(rc == 0 and meta is None, "upgrade with HTTPS already served: no marker")
+        rc, meta, _ = run("3.3.5", "no", owner)
+        check(rc == 0 and meta is None, "upgrade, owner-managed (no listeners): no marker")
+        rc, meta, _ = run("3.3.5", "no", None)
+        check(rc == 0 and meta is None, "upgrade, HTTPS off / no snippet: no marker")
+        rc, meta, _ = run("3.3.5", "no", hatch)
+        check(rc == 0 and meta and meta["redirect"] is False, "upgrade with the escape hatch: marker, redirect false")
+        rc, meta, _ = run('3.3.5"; rm -rf /', "no", active)
+        check(rc == 0 and meta and meta["from"] == "3.3.5rm-rf", "version string sanitised in the JSON (%s)" % meta)
+        write(d + "/file", "x")
+        p = subprocess.run(["bash", "-c", "set -euo pipefail\n" + fns + 'https_announce 3.3.5 no "$1" "$2"; echo done',
+                            "x", snip, d + "/file/sub/marker"], capture_output=True, text=True, timeout=30)
+        check(p.returncode == 0 and p.stdout.strip() == "done", "unwritable marker path: no failure, no message")
+
+        # the API side (https_tls): shown only while the marker exists AND HTTPS is served
+        env = H.Env(snippet=snip, announce=marker)
+        run("3.3.5", "no", active)
+        a = H.announce_info(env)
+        check(a and a["from"] == "3.3.5" and a["redirect"] is True and a["since"], "announce_info: marker + serving (%s)" % a)
+        write(snip, hatch)
+        check(H.announce_info(env)["redirect"] is False, "announce_info: redirect read from the live snippet")
+        write(snip, owner)
+        check(H.announce_info(env) is None, "announce_info: hidden while TuxWall HTTPS is not served")
+        write(snip, active)
+        write(marker, "not json")
+        a = H.announce_info(env)
+        check(a and a["since"] is None and a["from"] == "", "announce_info: unreadable marker still announces")
+        r = H.dismiss_announce(env)
+        check(r["ok"] and not os.path.exists(marker) and H.announce_info(env) is None, "dismiss removes the marker")
+        check(H.dismiss_announce(env)["ok"], "dismiss is idempotent")
+        check(H.Env().announce == "/var/lib/tuxwall/https-announce", "default marker path")
+    finally:
+        shutil.rmtree(d)
+    api = open(os.path.join(ROOT, "www", "includes", "api_server.py")).read()
+    check('"/api/https/dismiss-announce"' in api and 'action == "dismiss-announce"' in api,
+          "API: POST /api/https/dismiss-announce (admin prefix /api/https, CSRF like every POST)")
+    check('"announce": announce_info(env)' in open(os.path.join(ROOT, "www", "includes", "https_tls.py")).read(),
+          "status() reports the notice")
+    js = open(os.path.join(ROOT, "www", "scripts", "https-settings.js")).read()
+    check("/dismiss-announce" in js and "https-banner" in js and "no-https-redirect" in js,
+          "dashboard: banner + dismiss + escape hatch mentioned")
+    check('id="https-banner"' in open(os.path.join(ROOT, "www", "index.html")).read(), "index.html: banner element")
+
+
 def t_package():
     site = open(SITE).read()
     check("include /etc/nginx/snippets/tuxwall-tls[.]conf;" in site, "package site includes the TLS snippet (glob)")
@@ -1094,6 +1189,7 @@ t_real_nginx()
 t_headers_static()
 t_headers_served()
 t_postinst()
+t_announce()
 t_package()
 t_fw_guard()
 print("https: %d passed, %d failed" % (PASS, FAIL))

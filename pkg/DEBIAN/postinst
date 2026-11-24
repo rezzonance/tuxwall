@@ -406,6 +406,31 @@ https_setup() {             # https_setup WAN DETECTED_LAN [HELPER] -> status li
   return 0
 }
 
+# One-time dashboard notice for admins when an UPGRADE switched the router to
+# TuxWall HTTPS (the snippet had no 443 listeners before https_setup and has
+# them after): the API shows it while the marker exists and HTTPS is served,
+# an admin dismisses it (removes the marker). Fresh installs, owner-managed
+# setups (no listeners in the snippet) and upgrades where HTTPS was already
+# on get none. tools/https_check.py runs these.
+HTTPS_SNIPPET=/etc/nginx/snippets/tuxwall-tls.conf
+HTTPS_ANNOUNCE=/var/lib/tuxwall/https-announce
+https_serving() {           # https_serving [SNIPPET] -> 0 when TuxWall HTTPS is live
+  grep -qs '^listen ' "${1:-$HTTPS_SNIPPET}"
+}
+https_announce() {          # https_announce PREV_VERSION WAS_SERVING(yes|no) [SNIPPET] [MARKER] -> never fails
+  local prev=$1 was=$2 snip=${3:-$HTTPS_SNIPPET} marker=${4:-$HTTPS_ANNOUNCE} redirect=false
+  [[ -n $prev && $was != yes ]] || return 0
+  https_serving "$snip" || return 0
+  grep -qs 'return 301 https://' "$snip" && redirect=true
+  prev=$(printf '%s' "$prev" | tr -cd 'A-Za-z0-9.+~:-' | cut -c1-40)
+  if mkdir -p "$(dirname "$marker")" 2>/dev/null &&
+     printf '{"from": "%s", "since": %s, "redirect": %s}\n' "$prev" "$(date +%s)" "$redirect" > "$marker" 2>/dev/null; then
+    chmod 0644 "$marker" 2>/dev/null || true
+    echo "https: the dashboard switched to HTTPS with this upgrade - admins see a one-time notice in the dashboard"
+  fi
+  return 0
+}
+
 # Plugin code belongs to root (3.3.3): /etc/tuxwall/plugins is set to
 # root:root 0755 - it used to be group-writable by tuxwall-agent, so the agent
 # could add, rename or swap plugin directories. Inside each plugin the API's
@@ -860,7 +885,10 @@ EOF
     chmod 755 /usr/local/sbin/tuxwall-nginx-listen 2>/dev/null || true
     echo "   $(nginx_listen_render)"
     chmod 755 /usr/local/sbin/tuxwall-tls 2>/dev/null || true
+    _https_was=no
+    https_serving && _https_was=yes
     https_setup "$WAN_IF_D" "$LAN_IF_D" | sed 's/^/   /'
+    https_announce "${2:-}" "$_https_was" | sed 's/^/   /'
     if nginx -t >/dev/null 2>&1; then
       systemctl enable --now nginx >/dev/null 2>&1 || true
       systemctl reload nginx || true

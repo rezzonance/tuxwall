@@ -214,6 +214,10 @@ X-Frame-Options / X-Content-Type-Options / Referrer-Policy / HSTS (nginx does
 not inherit them then), and a real nginx on loopback serving the site +
 snippet sends them on `/`, `/index.html`, static files, 404s and the CA
 download over http and https (HSTS on https only); the 3.3.5 site fails it.
+Upgrade notice: the postinst `https_announce` writes `/var/lib/tuxwall/https-announce`
+only on an upgrade that turned TuxWall HTTPS on (not fresh installs, owner-managed
+setups, HTTPS already on, HTTPS off), the API shows it while HTTPS is served,
+dismiss removes it; banner wiring in the dashboard.
 
 ## custom_blocklist_check.py — custom banlist sync (CI)
 

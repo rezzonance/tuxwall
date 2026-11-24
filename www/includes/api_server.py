@@ -18876,7 +18876,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/interfaces/plan":
             self._send(*interfaces_plan(body, _client_key(self)))
 
-        elif path in ("/api/https/settings", "/api/https/regenerate", "/api/https/custom-cert"):
+        elif path in ("/api/https/settings", "/api/https/regenerate", "/api/https/custom-cert",
+                      "/api/https/dismiss-announce"):
             self._send(*https_post(path.rsplit("/", 1)[1], body, identity, _client_key(self)))
         elif path in ("/api/interfaces/apply", "/api/interfaces/confirm", "/api/interfaces/rollback"):
             self._send(*interfaces_apply(path.rsplit("/", 1)[1], body, identity, _client_key(self)))
@@ -19842,17 +19843,23 @@ def https_status():
 
 
 def https_post(action, body, identity, client=""):
-    """POST /api/https/{settings,regenerate,custom-cert} (admin)."""
+    """POST /api/https/{settings,regenerate,custom-cert,dismiss-announce} (admin)."""
     body = body if isinstance(body, dict) else {}
     try:
         m = _https_mod()
     except Exception as exc:
         return 503, {"ok": False, "error": "HTTPS module missing: %s" % exc}
     env = m.Env()
+    who = "%s@%s" % ((identity or {}).get("username") or "?", client or "?")
+    if action == "dismiss-announce":
+        # the one-time "dashboard is now on HTTPS" notice after an upgrade
+        if os.path.exists(env.announce):
+            m._log(env, "upgrade notice dismissed by %s" % who)
+        res = m.dismiss_announce(env)
+        return 200, dict(res, announce=m.announce_info(env))
     if not os.path.exists(env.wrapper):
         return 409, {"ok": False, "error": "TuxWall's own HTTPS arrives with the package upgrade "
                                            "(tuxwall-tls is not installed yet)."}
-    who = "%s@%s" % ((identity or {}).get("username") or "?", client or "?")
     if action == "settings":
         changes = {}
         for k in ("enabled", "redirect", "hsts"):

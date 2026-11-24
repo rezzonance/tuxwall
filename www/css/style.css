@@ -5869,3 +5869,9 @@ body.light-theme .svc-banner {
 /* card children rules (#totp-card > *, > p.muted) must not reshape the box */
 #totp-card > .vl-info, #https-card > .vl-info { margin: 12px 16px; padding: 12px 14px; }
 #https-body > details > summary { padding: 0 16px; }
+/* one-time "dashboard is now on HTTPS" notice (https-settings.js) */
+.vl-info.https-banner { margin: 0 0 16px; display: flex; gap: 10px 14px; align-items: flex-start; flex-wrap: wrap; }
+.vl-info.https-banner[hidden] { display: none; }
+.https-banner-text { flex: 1 1 320px; min-width: 0; overflow-wrap: anywhere; }
+.https-banner-text a { color: var(--accent); }
+.https-banner-actions { flex: 0 0 auto; }

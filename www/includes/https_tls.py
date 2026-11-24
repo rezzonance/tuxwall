@@ -97,6 +97,7 @@ class Env:
         self.listen_script = "/usr/local/sbin/tuxwall-nginx-listen"
         self.wrapper = "/usr/local/sbin/tuxwall-tls"
         self.state = "/var/lib/tuxwall/tls-state.json"
+        self.announce = "/var/lib/tuxwall/https-announce"   # postinst: an upgrade switched to HTTPS
         self.log = "/var/log/tuxwall/tls.log"
         self.openssl = "openssl"
         self.nginx_test = ["nginx", "-t"]
@@ -1060,6 +1061,35 @@ def _summary(dec, certs, snippet_changed, dry=False):
 
 # ── status (dashboard card) ──────────────────────────────────────────────────
 
+def snippet_serves(env):
+    """The generated snippet has 443 listeners (TuxWall HTTPS is live)."""
+    return "\nlisten " in "\n" + (_read(env.snippet) or "")
+
+
+def announce_info(env):
+    """The one-time admin notice after a package upgrade switched the
+    dashboard to HTTPS (marker written by the postinst; fresh installs and
+    owner-managed setups never get one). Shown only while TuxWall's HTTPS
+    is actually served; None otherwise."""
+    if not os.path.isfile(env.announce) or not snippet_serves(env):
+        return None
+    meta = _read_json(env.announce)
+    meta = meta if isinstance(meta, dict) else {}
+    since = meta.get("since")
+    return {"since": since if isinstance(since, (int, float)) else None,
+            "from": str(meta.get("from") or "")[:40],
+            "redirect": "return 301 https://" in (_read(env.snippet) or "")}
+
+
+def dismiss_announce(env):
+    """Admin dismissed the notice: drop the marker (idempotent)."""
+    try:
+        os.unlink(env.announce)
+    except FileNotFoundError:
+        pass
+    return {"ok": True, "message": "Notice dismissed."}
+
+
 def status(env=None):
     env = env or Env()
     settings = load_settings(env)
@@ -1116,9 +1146,10 @@ def status(env=None):
         "ca_http": ca_http,
         "timer_active": timer,
         "snippet_present": os.path.exists(env.snippet),
+        "announce": announce_info(env),
         # nginx runs what the settings/addresses say (else: refresh pending)
         "applied": (_read(env.snippet) == render_snippet(env, dec, settings)) if dec["mode"] == "active"
-        else not ("\nlisten " in "\n" + (_read(env.snippet) or "")),
+        else not snippet_serves(env),
         "last": _read_json(env.state),
     }
 

@@ -5,7 +5,9 @@
    serves HTTPS). With an HTTPS site set up outside TuxWall ("owner-managed")
    the card only reports it - no switch that would fight that setup.
    Markup lives in index.html (#https-card); styles are the shared card /
-   community-settings classes (cs-set*, fw-switch, badge). */
+   community-settings classes (cs-set*, fw-switch, badge). Also the one-time
+   admin banner (#https-banner, .vl-info) after an upgrade switched the
+   dashboard to HTTPS: status.announce; POST /api/https/dismiss-announce. */
 (() => {
   "use strict";
 
@@ -101,7 +103,74 @@
       </details>`;
   }
 
+  const README_HTTPS = "https://github.com/rezzonance/tuxwall#https-for-the-dashboard";
+
+  // One-time notice after a package upgrade switched the dashboard to HTTPS
+  // (status.announce, from the postinst marker; admins only). Dismiss = POST.
+  function renderBanner() {
+    const b = document.getElementById("https-banner");
+    if (!b) return;
+    const a = isAdmin && data && data.ok !== false && data.mode === "active" ? data.announce : null;
+    if (!a) {
+      b.hidden = true;
+      b.innerHTML = "";
+      return;
+    }
+    const from = a.from ? ` from ${esc(a.from)}` : "";
+    const integ = a.redirect
+      ? `Integrations that reach the dashboard over <code>http://</code> (Home Assistant, scripts) must switch to <code>https://</code>, or keep plain http with the escape hatch <code>/etc/tuxwall/no-https-redirect</code>`
+      : `Plain http still serves the dashboard (redirect off), so <code>http://</code> integrations (Home Assistant, scripts) keep working; switch them to <code>https://</code> when you can`;
+    b.innerHTML = `
+      <div class="https-banner-text">
+        <strong>The dashboard is now served over HTTPS</strong> (package upgrade${from}).
+        Trust this router's certificate authority once per device to remove the browser warning:
+        <a href="#settings" data-https-banner="settings">Settings → Security → HTTPS</a> →
+        <a href="${API}/ca.crt" download="tuxwall-ca.crt">Download CA certificate</a>.
+        ${integ} (<a href="${README_HTTPS}" target="_blank" rel="noopener noreferrer">README</a>).
+      </div>
+      <div class="https-banner-actions">
+        <button class="btn btn-sm" type="button" data-https-banner="dismiss">Dismiss</button>
+      </div>`;
+    b.hidden = false;
+    b.querySelector('[data-https-banner="settings"]').addEventListener("click", (e) => {
+      e.preventDefault();
+      const nav = document.querySelector('.nav-item[data-view="settings"]');
+      if (nav) nav.click();
+      setTimeout(() => {
+        const tab = document.querySelector('#settings-subtabs [data-settings-pane="security"]');
+        if (tab) tab.click();
+        const c = card();
+        if (c) c.scrollIntoView({ block: "start", behavior: "smooth" });
+      }, 60);
+    });
+    b.querySelector('[data-https-banner="dismiss"]').addEventListener("click", dismissBanner);
+  }
+
+  async function dismissBanner(e) {
+    const btn = e && e.currentTarget;
+    if (btn) btn.disabled = true;
+    try {
+      const res = await fetch(API + "/dismiss-announce", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        cache: "no-store",
+        body: "{}",
+      });
+      const d = await res.json().catch(() => null);
+      if (!res.ok || !d || !d.ok) throw new Error((d && d.error) || `HTTP ${res.status}`);
+      if (data) data.announce = null;
+      renderBanner();
+    } catch (err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.title = `Not dismissed: ${err.message || err}`;
+      }
+    }
+  }
+
   function render() {
+    renderBanner();
     const el = body();
     const c = card();
     if (!el || !c) return;
