@@ -12,6 +12,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import TuxwallCoordinator
 from .const import ATTR_IFNAME, ATTR_IPV6, DOMAIN
+from .crowdsec_data import crowdsec_active_count, crowdsec_ips
 
 SENSORS: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
@@ -107,8 +108,7 @@ class TuxwallSensor(SensorEntity):
         if key == "fw_blocks":
             return ((d.get("firewall") or {}).get("traffic") or {}).get("block")
         if key == "crowdsec_bans":
-            bans = (d.get("crowdsec") or {}).get("decisions") or []
-            return len(bans) if isinstance(bans, list) else None
+            return crowdsec_active_count(d.get("crowdsec"))
         if key == "dns_queries":
             return ((d.get("dns") or {}).get("totals") or {}).get("queries")
         if key == "dns_blocked_pct":
@@ -145,9 +145,9 @@ class TuxwallSensor(SensorEntity):
                 ATTR_IPV6: (wan.get("ipv6") or [])[:2],
             }
         if self.entity_description.key == "crowdsec_bans":
-            bans = (d.get("crowdsec") or {}).get("decisions") or []
-            if isinstance(bans, list):
-                return {"ips": [b.get("ip") or b.get("value") for b in bans][:25]}
+            ips = crowdsec_ips(d.get("crowdsec"))
+            if ips is not None:
+                return {"ips": ips}
         if self.entity_description.key == "attacks_per_min":
             stats = (d.get("security") or {}).get("stats") or {}
             return {k: stats.get(k) for k in ("unique_ips", "hits_1h")}

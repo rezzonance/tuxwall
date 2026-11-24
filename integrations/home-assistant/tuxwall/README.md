@@ -59,6 +59,23 @@ Unbound DNS block; requires an **admin** tuxwall user).
 4. Poll interval (10–3600s) is adjustable under the integration's
    *Configure* options.
 
+### Updating
+
+Copy the new folder over `/config/custom_components/tuxwall/` (replace
+every file, including the new ones) and restart Home Assistant. The
+existing entry and its entities are kept.
+
+## Changelog
+
+- **1.1.0** — CrowdSec numbers come from `GET /api/crowdsec/summary` (a few
+  KB) instead of the full decision list (`/api/crowdsec`, several MB on a
+  router with thousands of bans, fetched every poll; it could exceed the
+  15 s request timeout). Routers without the endpoint answer 404 and the
+  integration falls back to `/api/crowdsec` (retrying the summary hourly).
+  The *CrowdSec active bans* sensor and its `ips` attribute (the first 25
+  addresses, soonest expiry first) are unchanged.
+- **1.0.0** — first release.
+
 ## Example automations
 
 Notify when a core gateway service drops (the "no internet" first check):

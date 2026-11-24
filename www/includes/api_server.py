@@ -2479,8 +2479,130 @@ def _parse_iso(ts):
         return None
 
 
-_CROWDSEC_DEC_CACHE = {"at": 0.0, "data": None, "refreshing": False}
-_CROWDSEC_DEC_LOCK = threading.Lock()
+class _SwrCache:
+    """Stale-while-revalidate cache for one slow-to-build value.
+
+    Fresh (younger than ttl): returned. Stale: returned at once while ONE
+    background thread rebuilds it. Empty (first call, or after drop()): the
+    caller builds synchronously, one build at a time - concurrent callers
+    wait for it instead of starting their own. Only results passing ok() are
+    stored, so a failed rebuild keeps the last good value. mark_stale(): the
+    source changed but the old value is still fine to show - the next read
+    revalidates; a build already running stores its result as stale (and a
+    background one runs again). drop(): the next read must see the change
+    (an interactive ban), so the value is forgotten and a build already
+    running is discarded. on_update() runs after a background refresh
+    stored a new value (outside the lock) - a cold build replaces nothing,
+    so nothing derived from an older value can exist."""
+
+    def __init__(self, name, ttl, build, ok=None, on_update=None):
+        self.name = name
+        self.ttl = ttl
+        self._build = build
+        self._ok = ok or (lambda v: isinstance(v, dict) and bool(v.get("ok")))
+        self._on_update = on_update
+        self._lock = threading.Lock()
+        self._cold = threading.Lock()
+        self.data = None
+        self.at = 0.0          # when the stored value's build started; 0 = stale
+        self.gen = 0           # bumped by drop()
+        self.soft_gen = 0      # bumped by mark_stale()
+        self.refreshing = False
+        self._again = False
+
+    def _store(self, out, t0, gen, soft_gen):
+        """Under the lock: keep a build's result unless a drop() overlapped it."""
+        if not self._ok(out) or self.gen != gen:
+            return False
+        self.data = out
+        self.at = t0 if self.soft_gen == soft_gen else 0.0
+        return True
+
+    def read(self):
+        """(value, stale). value is the error result if a cold build failed."""
+        with self._lock:
+            data = self.data
+            if data is not None:
+                if time.time() - self.at < self.ttl:
+                    return data, False
+                start = not self.refreshing
+                if start:
+                    self.refreshing = True
+        if data is not None:
+            if start:
+                self._spawn()
+            return data, True
+        with self._cold:
+            with self._lock:
+                if self.data is not None:     # built while we waited
+                    return self.data, time.time() - self.at >= self.ttl
+                gen, soft_gen = self.gen, self.soft_gen
+            t0 = time.time()
+            out = self._build()
+            with self._lock:
+                self._store(out, t0, gen, soft_gen)
+            return out, False
+
+    def get(self):
+        return self.read()[0]
+
+    def peek(self):
+        with self._lock:
+            return self.data, self.at
+
+    def _spawn(self):
+        try:
+            threading.Thread(target=self._refresh, name=self.name, daemon=True).start()
+        except RuntimeError:
+            with self._lock:
+                self.refreshing = False
+
+    def _refresh(self):
+        try:
+            while True:
+                with self._lock:
+                    gen, soft_gen = self.gen, self.soft_gen
+                    self._again = False
+                t0 = time.time()
+                try:
+                    out = self._build()
+                except Exception as exc:
+                    print("[%s] background refresh failed: %r" % (self.name, exc), flush=True)
+                    out = None
+                with self._lock:
+                    stored = out is not None and self._store(out, t0, gen, soft_gen)
+                    again = self._again and self.gen == gen
+                    if not again:
+                        self.refreshing = False
+                if stored and self._on_update:
+                    self._on_update()
+                if not again:
+                    return
+        except BaseException:
+            with self._lock:
+                self.refreshing = False
+            raise
+
+    def mark_stale(self, kick=False):
+        with self._lock:
+            self.soft_gen += 1
+            self.at = 0.0
+            if self.refreshing:
+                self._again = True
+                return
+            start = kick and self.data is not None
+            if start:
+                self.refreshing = True
+        if start:
+            self._spawn()
+
+    def drop(self):
+        with self._lock:
+            self.gen += 1
+            self.data = None
+            self.at = 0.0
+
+
 # The full-list fetch is far heavier than the per-call cscli probes: with
 # >10k active decisions `cscli decisions list --limit 0` needs 15-20s just
 # to serialize, so a 20s cache with a 15s timeout meant every dashboard
@@ -2494,22 +2616,29 @@ _CROWDSEC_LIST_TIMEOUT = 90  # full `decisions list --limit 0` only
 
 
 _CROWDSEC_PANEL_TTL = 30.0  # 2026-11-03 audit: cache cscli-heavy panel payloads
-_CROWDSEC_PANEL_LOCK = threading.Lock()
-_CROWDSEC_PANEL_CACHE = {"crowdsec": None, "ban_state": None, "at": 0.0}
 
 
-def _invalidate_crowdsec_panel_cache():
-    with _CROWDSEC_PANEL_LOCK:
-        _CROWDSEC_PANEL_CACHE["at"] = 0.0
-        _CROWDSEC_PANEL_CACHE["crowdsec"] = None
-        _CROWDSEC_PANEL_CACHE["ban_state"] = None
+def _invalidate_crowdsec_panel_cache(soft=False):
+    for cache in (_CROWDSEC_PANEL_CACHE, _CROWDSEC_BAN_STATE_CACHE):
+        if soft:
+            cache.mark_stale()
+        else:
+            cache.drop()
 
 
-def _invalidate_crowdsec_decisions_cache():
-    _invalidate_crowdsec_panel_cache()
-    with _CROWDSEC_DEC_LOCK:
-        _CROWDSEC_DEC_CACHE["at"] = 0.0
-        _CROWDSEC_DEC_CACHE["data"] = None
+def _invalidate_crowdsec_decisions_cache(soft=False):
+    """After a decision change. Default (interactive ban/unban/banlist edit):
+    the caches are emptied, so the dashboard's next read shows the change
+    (and waits for the full list). soft=True (automatic bans: deception,
+    community-auto): the last snapshot keeps being served while the next
+    read refreshes it in the background - these happen several times an
+    hour, and emptying the cache made the next poll of any client wait
+    ~15 s for the full list."""
+    _invalidate_crowdsec_panel_cache(soft)
+    if soft:
+        _CROWDSEC_DEC_CACHE.mark_stale()
+    else:
+        _CROWDSEC_DEC_CACHE.drop()
 
 
 def _fetch_crowdsec_active_decisions():
@@ -2584,63 +2713,26 @@ def _fetch_crowdsec_active_decisions():
     return {"ok": True, "decisions": active}
 
 
-def _start_crowdsec_dec_refresh():
-    """Refresh the decision snapshot in a background thread (single-flight)."""
-    with _CROWDSEC_DEC_LOCK:
-        if _CROWDSEC_DEC_CACHE["refreshing"]:
-            return
-        _CROWDSEC_DEC_CACHE["refreshing"] = True
-
-    def _run():
-        try:
-            result = _fetch_crowdsec_active_decisions()
-            if result.get("ok"):
-                with _CROWDSEC_DEC_LOCK:
-                    _CROWDSEC_DEC_CACHE["data"] = result
-                    _CROWDSEC_DEC_CACHE["at"] = time.time()
-        finally:
-            with _CROWDSEC_DEC_LOCK:
-                _CROWDSEC_DEC_CACHE["refreshing"] = False
-
-    threading.Thread(target=_run, daemon=True).start()
-
-
 def _crowdsec_active_decisions():
     """Active decisions, cached; stale snapshots are served, never errors.
 
     Fresh: returned directly. Aged out but present: a background refresh
     is started and the last good snapshot is returned flagged stale - a
     slow or failing cscli must not blank the CrowdSec panel on every poll.
-    Only a cold start (no snapshot yet, e.g. first call after boot) does a
-    synchronous fetch, which may take a while on installs with many
-    thousands of decisions.
+    Only a cold start (no snapshot yet, e.g. first call after boot, or after
+    an interactive ban) does a synchronous fetch, which may take a while on
+    installs with many thousands of decisions; concurrent callers share it.
     """
-    now = time.time()
-    with _CROWDSEC_DEC_LOCK:
-        cached = _CROWDSEC_DEC_CACHE["data"]
-        if cached is not None and now - _CROWDSEC_DEC_CACHE["at"] < _CROWDSEC_DEC_TTL:
-            return cached
-    if cached is None:
-        result = _fetch_crowdsec_active_decisions()
-        if result.get("ok"):
-            with _CROWDSEC_DEC_LOCK:
-                _CROWDSEC_DEC_CACHE["data"] = result
-                _CROWDSEC_DEC_CACHE["at"] = time.time()
-        return result
-    _start_crowdsec_dec_refresh()
-    out = dict(cached)
-    out["stale"] = True
-    return out
+    data, stale = _CROWDSEC_DEC_CACHE.read()
+    if stale:
+        data = dict(data)
+        data["stale"] = True
+    return data
 
 
-def build_crowdsec():
+def _build_crowdsec_panel():
     # 2026-11-03 audit: cached - every cscli call costs a fresh LAPI login
     # (bcrypt hash) plus SQLite scans, and the dashboard polls ~every 10s.
-    now = time.time()
-    with _CROWDSEC_PANEL_LOCK:
-        cached = _CROWDSEC_PANEL_CACHE["crowdsec"]
-        if cached is not None and now - _CROWDSEC_PANEL_CACHE["at"] < _CROWDSEC_PANEL_TTL:
-            return cached
     core = _crowdsec_active_decisions()
     if not core.get("ok"):
         return core
@@ -2654,24 +2746,10 @@ def build_crowdsec():
         "alerts": _cscli(["alerts", "list", "-o", "json"], []) or [],
         "enforcement": crowdsec_enforcement(),
     }
-    with _CROWDSEC_PANEL_LOCK:
-        _CROWDSEC_PANEL_CACHE["crowdsec"] = out
-        _CROWDSEC_PANEL_CACHE["at"] = now
     return out
 
 
-def build_crowdsec_ban_state():
-    """Compact Ban/Unban state for Security ▸ Top Attackers.
-
-    One decisions query plus the local permanent blocklist file, returned as
-    a small list of IPs. This replaces fetching the full ~700 KB CrowdSec
-    payload and the full blocklist just to label the action buttons.
-    """
-    now = time.time()
-    with _CROWDSEC_PANEL_LOCK:
-        cached = _CROWDSEC_PANEL_CACHE["ban_state"]
-        if cached is not None and now - _CROWDSEC_PANEL_CACHE["at"] < _CROWDSEC_PANEL_TTL:
-            return cached
+def _build_crowdsec_ban_state():
     core = _crowdsec_active_decisions()
     if not core.get("ok"):
         return {"ok": False, "error": core.get("error") or "CrowdSec unavailable"}
@@ -2684,24 +2762,79 @@ def build_crowdsec_ban_state():
         if d.get("ip") and d.get("type") != "unban":
             banned.add(d["ip"])
     ips = sorted(banned)
-    out = {"ok": True, "ips": ips, "count": len(ips)}
-    with _CROWDSEC_PANEL_LOCK:
-        _CROWDSEC_PANEL_CACHE["ban_state"] = out
-        _CROWDSEC_PANEL_CACHE["at"] = now
-    return out
+    return {"ok": True, "ips": ips, "count": len(ips)}
+
+
+def _crowdsec_decisions_updated():
+    # panel payloads are derived from the decision snapshot
+    _invalidate_crowdsec_panel_cache(soft=True)
+
+
+# Each payload has its own timestamp: they once shared one, so building
+# either made the other's old value look fresh for another TTL.
+# (Builders are looked up at call time, so tests can stub them.)
+_CROWDSEC_DEC_CACHE = _SwrCache("crowdsec-decisions", _CROWDSEC_DEC_TTL,
+                                lambda: _fetch_crowdsec_active_decisions(),
+                                on_update=lambda: _crowdsec_decisions_updated())
+_CROWDSEC_PANEL_CACHE = _SwrCache("crowdsec-panel", _CROWDSEC_PANEL_TTL,
+                                  lambda: _build_crowdsec_panel())
+_CROWDSEC_BAN_STATE_CACHE = _SwrCache("crowdsec-ban-state", _CROWDSEC_PANEL_TTL,
+                                      lambda: _build_crowdsec_ban_state())
+
+
+def build_crowdsec():
+    """GET /api/crowdsec: the full CrowdSec page payload (cached)."""
+    return _CROWDSEC_PANEL_CACHE.get()
+
+
+def build_crowdsec_ban_state():
+    """Compact Ban/Unban state for Security ▸ Top Attackers.
+
+    One decisions query plus the local permanent blocklist file, returned as
+    a small list of IPs. This replaces fetching the full ~700 KB CrowdSec
+    payload and the full blocklist just to label the action buttons.
+    """
+    return _CROWDSEC_BAN_STATE_CACHE.get()
+
+
+CROWDSEC_SUMMARY_IPS = 25
+
+
+def build_crowdsec_summary():
+    """GET /api/crowdsec/summary: a few KB for integrations (Home Assistant)
+    that only need counts - /api/crowdsec carries every decision (MBs on a
+    busy router). Served from the same cache. "recent" holds the first
+    CROWDSEC_SUMMARY_IPS addresses of /api/crowdsec's decision list, in its
+    order (soonest expiry first)."""
+    cs, stale = _CROWDSEC_PANEL_CACHE.read()
+    if not isinstance(cs, dict) or not cs.get("ok"):
+        return {"ok": False, "error": (cs or {}).get("error") or "CrowdSec unavailable"}
+    cached, at = _CROWDSEC_PANEL_CACHE.peek()
+    decisions = cs.get("decisions") or []
+    return {
+        "ok": True,
+        "active_count": cs.get("active_count", len(decisions)),
+        "bans_count": cs.get("bans_count"),
+        "recent": [d.get("ip") for d in decisions[:CROWDSEC_SUMMARY_IPS]],
+        "enforcement": cs.get("enforcement") or {},
+        "updated_at": int(at if cached is cs else time.time()),
+        "stale": stale,
+    }
 
 
 BAN_DURATION_RE = re.compile(r"^\d+[mhd]$")
 BAN_DURATION_SECONDS = {"m": 60, "h": 3600, "d": 86400}
 
 
-def ban_crowdsec_ip(ip, duration="24h"):
+def ban_crowdsec_ip(ip, duration="24h", soft_invalidate=False):
     """Ban a single IP locally via `cscli decisions add` (timed local ban).
 
     Never reported to tuxwall.org - community data is deception-only
     (canary/honeypot), and manual bans carry contributor judgment (one bad
     ban must never reach every install pulling the community list). Rejects
-    non-global (private/reserved) addresses and durations beyond 90 days."""
+    non-global (private/reserved) addresses and durations beyond 90 days.
+    soft_invalidate: automatic callers (community-auto) keep the decision
+    cache servable, see _invalidate_crowdsec_decisions_cache()."""
     ip = (ip or "").strip()
     try:
         addr = ipaddress.ip_address(ip)
@@ -2735,7 +2868,7 @@ def ban_crowdsec_ip(ip, duration="24h"):
         # cscli refuses allowlisted values without --bypass-allowlist
         return {"ok": False, "allowlisted": True,
                 "error": "%s is in a CrowdSec allowlist - not banned (%s)" % (ip, said.strip()[-200:])}
-    _invalidate_crowdsec_decisions_cache()
+    _invalidate_crowdsec_decisions_cache(soft=soft_invalidate)
     return {
         "ok": True,
         "ip": ip,
@@ -3841,7 +3974,7 @@ class CommunityAutoWorker(threading.Thread):
                 missing.append(b["ip"])
         added = 0
         for ip in missing[:COMMUNITY_AUTO_BATCH]:
-            result = ban_crowdsec_ip(ip, "90d")
+            result = ban_crowdsec_ip(ip, "90d", soft_invalidate=True)
             if result.get("ok"):
                 added += 1
         with COMMUNITY_AUTO_LOCK:
@@ -5914,7 +6047,7 @@ def _deception_cscli_ban(ip, duration, reason):
         msg = (proc.stderr or proc.stdout or "cscli failed").strip().splitlines()
         return False, ("cscli rc=%d: %s" % (proc.returncode, msg[-1] if msg else ""))[:200]
     try:
-        _invalidate_crowdsec_decisions_cache()
+        _invalidate_crowdsec_decisions_cache(soft=True)
     except Exception:
         pass
     return True, None
@@ -12311,6 +12444,7 @@ AGENT_API_READ_PATHS = frozenset({
     "/api/leases",
     "/api/dns",
     "/api/crowdsec",
+    "/api/crowdsec/summary",
     "/api/security",
     "/api/incidents",
     "/api/insights/history",
@@ -15476,7 +15610,42 @@ class AgentError(RuntimeError):
         self.body = body
 
 
+# A client that gives up before the answer is written (Home Assistant's 15 s
+# timeout, a closed browser tab, nginx dropping the upstream) surfaces as a
+# write error. That is not a server fault: one short line per path per
+# CLIENT_ABORT_LOG_INTERVAL instead of socketserver's full traceback.
+CLIENT_ABORT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+CLIENT_ABORT_LOG_INTERVAL = 600
+_CLIENT_ABORT_LOG = {}   # path -> [last logged at, aborts since then]
+_CLIENT_ABORT_LOCK = threading.Lock()
+
+
+def _note_client_abort(method, path, exc):
+    now = time.time()
+    with _CLIENT_ABORT_LOCK:
+        if len(_CLIENT_ABORT_LOG) > 256:
+            _CLIENT_ABORT_LOG.clear()
+        ent = _CLIENT_ABORT_LOG.setdefault(path, [0.0, 0])
+        ent[1] += 1
+        if now - ent[0] < CLIENT_ABORT_LOG_INTERVAL:
+            return False
+        count, ent[0], ent[1] = ent[1], now, 0
+    print("[api] client closed the connection before the answer to %s %s was sent (%s)%s" % (
+        method, path, type(exc).__name__,
+        "; %d times since the last note" % count if count > 1 else ""), flush=True)
+    return True
+
+
 class Handler(BaseHTTPRequestHandler):
+
+    def handle_one_request(self):
+        self.command = None
+        try:
+            super().handle_one_request()
+        except CLIENT_ABORT_ERRORS as exc:
+            self.close_connection = True
+            if self.command:     # not just an idle keep-alive connection reset
+                _note_client_abort(self.command, (self.path or "").split("?")[0][:200], exc)
 
     # ── opencode agent proxy ────────────────────────────────────────────
     AGENT_BASE = "http://127.0.0.1:4096"
@@ -17415,6 +17584,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_wireguard())
         elif path == "/api/crowdsec":
             self._send(200, build_crowdsec())
+        elif path == "/api/crowdsec/summary":
+            self._send(200, build_crowdsec_summary())
         elif path == "/api/crowdsec/blocklist":
             self._send(200, build_custom_blocklist())
         elif path == "/api/crowdsec/ban-state":
@@ -22892,6 +23063,7 @@ def main():
     _report_worker_ensure()       # sends reports queued before a restart (persistent queue)
     threading.Thread(target=_deception_never_ban_ips, name="never-ban", daemon=True).start()
     threading.Thread(target=_allowlist_cached_nets, name="allowlist", daemon=True).start()
+    threading.Thread(target=build_crowdsec, name="crowdsec-warm", daemon=True).start()   # full decision list cached before the first poll
     get_security_monitor()
     get_system_monitor()
     get_latency_monitor()

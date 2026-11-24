@@ -9,7 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import TuxwallApiClient, TuxwallApiError, TuxwallAuthError
+from .api import TuxwallApiClient, TuxwallApiError, TuxwallAuthError, TuxwallNotFound
 from .const import (
     CONF_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
@@ -17,6 +17,10 @@ from .const import (
     EVENT_TYPE,
     LOGGER,
 )
+
+
+SUMMARY_PATH = "/api/crowdsec/summary"
+SUMMARY_RETRY_SECONDS = 3600
 
 
 class TuxwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -30,6 +34,9 @@ class TuxwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self.client = client
         self.prev: dict[str, Any] = {}
+        # monotonic time until which /api/crowdsec/summary is not tried again
+        # (the router answered 404: older TuxWall without the endpoint)
+        self._no_summary_until = 0.0
 
     def _changed(self, key: str, value: Any) -> bool:
         return self.prev.get(key) != value
@@ -46,7 +53,7 @@ class TuxwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "services": (await safe("/api/system/services", {})).get("services", []),
             "security": await safe("/api/security", {}),
             "firewall": await safe("/api/firewall", {}),
-            "crowdsec": await safe("/api/crowdsec", {}),
+            "crowdsec": await self._crowdsec(safe),
             "dns": await safe("/api/dns", {}),
             "system": await safe("/api/system", {}),
             "honeypot": await safe("/api/security/honeypot", {}),
@@ -55,6 +62,20 @@ class TuxwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._fire_security_events(data)
         self.prev = data
         return data
+
+    async def _crowdsec(self, safe) -> dict[str, Any]:
+        """CrowdSec counts: the compact summary (a few KB); routers without
+        it (404) get the full /api/crowdsec list, retried hourly."""
+        if time.monotonic() >= self._no_summary_until:
+            try:
+                return await self.client.get(SUMMARY_PATH)
+            except TuxwallNotFound:
+                LOGGER.info("%s not available on this TuxWall, using /api/crowdsec", SUMMARY_PATH)
+                self._no_summary_until = time.monotonic() + SUMMARY_RETRY_SECONDS
+            except TuxwallApiError as exc:
+                LOGGER.debug("%s unavailable: %s", SUMMARY_PATH, exc)
+                return {}
+        return await safe("/api/crowdsec", {})
 
     def _fire_security_events(self, data: dict[str, Any]) -> None:
         """Fire HA events for security-relevant transitions.

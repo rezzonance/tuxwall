@@ -25,6 +25,10 @@ class TuxwallApiError(Exception):
     """Raised on transport or non-auth API errors."""
 
 
+class TuxwallNotFound(TuxwallApiError):
+    """HTTP 404: the router does not have this API path (older TuxWall)."""
+
+
 class TuxwallSslError(TuxwallApiError):
     """The router's certificate is not trusted (add its CA file)."""
 
@@ -131,6 +135,8 @@ class TuxwallApiClient:
                         continue
                     if resp.status == 401:
                         raise TuxwallAuthError("TuxWall rejected the session after re-login")
+                    if resp.status == 404:
+                        raise TuxwallNotFound(f"GET {path} returned HTTP 404")
                     if resp.status != 200:
                         raise TuxwallApiError(f"GET {path} returned HTTP {resp.status}")
                     return await resp.json(content_type=None)

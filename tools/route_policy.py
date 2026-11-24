@@ -107,6 +107,7 @@ VIEWER_OK = {
     "GET /api/ai/chat/models": "model list for the AI chat picker (chat itself is admin)",
     # CrowdSec / blocklists
     "GET /api/crowdsec": "CrowdSec decisions view",
+    "GET /api/crowdsec/summary": "CrowdSec counts for integrations (Home Assistant)",
     "GET /api/crowdsec/blocklist": "custom banlist view",
     "GET /api/crowdsec/ban-state": "ban state view",
     "GET /api/crowdsec/community-bans": "community ban view",
@@ -133,6 +134,7 @@ AGENT_TOKEN_OK = {
     "GET /api/leases": "MCP: DHCP leases / devices",
     "GET /api/dns": "MCP: DNS overview",
     "GET /api/crowdsec": "MCP: CrowdSec decisions",
+    "GET /api/crowdsec/summary": "MCP: CrowdSec counts",
     "GET /api/security": "MCP: security monitor snapshot",
     "GET /api/incidents": "MCP: incident list",
     "GET /api/insights/history": "MCP: insights history",
