@@ -87,7 +87,8 @@
     return `
       <details class="theme-format-details">
         <summary class="muted">How to trust the CA on your devices</summary>
-        <ul class="muted">
+        <div class="vl-info">
+        <ul>
           <li><b>Windows</b> (Edge, Chrome): open the file → <i>Install Certificate</i> → <i>Local Machine</i> → <i>Place all certificates in</i> <i>Trusted Root Certification Authorities</i>.</li>
           <li><b>macOS</b> (Safari, Chrome): open the file (Keychain Access, <i>System</i> keychain) → double-click <i>${esc((d && d.ca && d.ca.name) || "TuxWall Local CA")}</i> → <i>Trust</i> → <i>Always Trust</i>.</li>
           <li><b>iPhone / iPad</b>: open <code>${esc(url)}</code> in Safari → <i>Allow</i> → Settings → <i>Profile Downloaded</i> → <i>Install</i>; then Settings → General → About → <i>Certificate Trust Settings</i> → switch the CA on.</li>
@@ -95,7 +96,8 @@
           <li><b>Linux</b>: <code>sudo cp tuxwall-ca.crt /usr/local/share/ca-certificates/ &amp;&amp; sudo update-ca-certificates</code>; Chrome/Chromium: Settings → Privacy and security → Security → <i>Manage certificates</i> → <i>Authorities</i> → Import.</li>
           <li><b>Firefox</b> (own certificate store): Settings → Privacy &amp; Security → <i>View Certificates</i> → <i>Authorities</i> → <i>Import</i> → tick <i>Trust this CA to identify websites</i>.</li>
         </ul>
-        <p class="muted">Compare the SHA-256 fingerprint shown above before trusting. This CA can only vouch for private addresses and local names (it is name-constrained), so trusting it cannot be used to impersonate other websites.</p>
+        <p>Compare the SHA-256 fingerprint shown above before trusting. This CA can only vouch for private addresses and local names (it is name-constrained), so trusting it cannot be used to impersonate other websites.</p>
+        </div>
       </details>`;
   }
 
@@ -180,7 +182,7 @@
       own = `
         <details class="theme-format-details"${d.custom ? " open" : ""}>
           <summary class="muted">Use my own certificate</summary>
-          <p class="muted">Files on the router (PEM, unencrypted key), e.g. from your own CA. The pair is checked with openssl and <code>nginx -t</code> before it is used; renewal is up to you.</p>
+          <p class="vl-info">Files on the router (PEM, unencrypted key), e.g. from your own CA. The pair is checked with openssl and <code>nginx -t</code> before it is used; renewal is up to you.</p>
           <div class="alerts-grid">
             <label class="fw-field alerts-wide"><span>Certificate (full chain)</span>
               <input type="text" id="https-own-cert" placeholder="/etc/ssl/certs/router.pem" autocomplete="off" spellcheck="false" value="${esc(cc.path || "")}"></label>

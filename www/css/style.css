@@ -5852,3 +5852,20 @@ body.light-theme .svc-banner {
 }
 .dns-up-pihole-input:focus { border-color: var(--accent); outline: none; }
 
+
+/* Info box: explanatory text in a calm accent panel, normal text colour
+   (muted grey paragraphs were hard to read). Same look as .if-vl-info on the
+   Interfaces page; theme variables only, so every theme follows. */
+.vl-info {
+  margin: 12px 16px; padding: 12px 14px; border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  font-size: 12.5px; line-height: 1.55; color: var(--text);
+}
+.vl-info p, .vl-info ul { margin: 0 0 8px; }
+.vl-info ul { padding-left: 18px; }
+.vl-info li + li { margin-top: 3px; }
+.vl-info > :last-child { margin-bottom: 0; }
+/* card children rules (#totp-card > *, > p.muted) must not reshape the box */
+#totp-card > .vl-info, #https-card > .vl-info { margin: 12px 16px; padding: 12px 14px; }
+#https-body > details > summary { padding: 0 16px; }
