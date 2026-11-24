@@ -35,6 +35,7 @@ The base is stock Ubuntu. `apt`, `systemd`, `journalctl` and every tool you alre
 - [Installation](#installation)
 - [First login](#first-login)
 - [Configuration](#configuration)
+- [HTTPS for the dashboard](#https-for-the-dashboard)
 - [Plugins](#plugins)
 - [AI assistant](#ai-assistant)
 - [Security and community data](#security-and-community-data)
@@ -216,8 +217,10 @@ systemctl status crowdsec
 Then open the dashboard from a device on your LAN or VPN:
 
 ```text
-http://<gateway-lan-ip>/
+https://<gateway-lan-ip>/
 ```
+
+Plain `http://` redirects there. Until your device trusts the router's own certificate authority the browser shows a certificate warning - see [HTTPS for the dashboard](#https-for-the-dashboard).
 
 ### Optional configuration
 
@@ -253,6 +256,7 @@ Most settings are available from the dashboard and are written directly to the u
 | `/etc/wireguard/wg0.conf` | WireGuard interface and peers |
 | `/etc/suricata/suricata.yaml` | IDS/IPS interfaces and HOME_NET |
 | `/etc/nginx/sites-available/tuxwall` | Dashboard vhost and LAN/VPN access lists |
+| `/etc/tuxwall/tls/`, `/etc/tuxwall/https.json` | Dashboard HTTPS certificates and settings (see [HTTPS for the dashboard](#https-for-the-dashboard)) |
 
 Useful service commands:
 
@@ -270,6 +274,27 @@ For traffic shaping, set the WAN interface and rates from **System → Traffic S
 sudo /usr/local/sbin/tuxwall-sqm.sh --dry-run   # print the tc commands, change nothing
 sudo systemctl enable --now tuxwall-sqm
 ```
+
+## HTTPS for the dashboard
+
+The dashboard is served over HTTPS by default (new installs and upgrades). Each router gets its own small certificate authority (CA) and a server certificate signed by it:
+
+| Path | Purpose |
+|---|---|
+| `/etc/tuxwall/tls/ca.crt` | The router's CA - trust this on your devices (also at `http://<router>/tuxwall-ca.crt` and **Settings → Security → HTTPS → Download CA certificate**) |
+| `/etc/tuxwall/tls/ca.key`, `server.key` | Private keys (root only, `0600`) |
+| `/etc/tuxwall/tls/server.crt` | Server certificate: 397 days, names = LAN/VLAN/VPN IPv4 + ULA addresses, host name, `<host>.local`, the router's domain and local DNS names pointing at the router |
+| `/etc/nginx/snippets/tuxwall-tls.conf` | Generated nginx include: port 443 with TLS (`default_server` on the dashboard's LAN/VPN addresses; wildcard sockets so a missing address, e.g. WireGuard down, never stops nginx), the CA download, the http → https redirect on those addresses |
+| `/etc/tuxwall/https.json` | Settings (HTTPS on/off, redirect, HSTS, your own certificate) |
+
+- **Trusting the CA** removes the browser warning. The card under **Settings → Security → HTTPS** shows the CA's SHA-256 fingerprint and short steps for Windows, macOS, iOS, Android, Linux and Firefox. The CA is name-constrained: it can only vouch for private addresses (RFC 1918, `100.64.0.0/10`, ULA) and local names (the host name, `.local`, `.lan`, `.home.arpa`, `.internal`, the router's domain), so trusting it cannot be abused to impersonate other websites.
+- **Renewal** is automatic: `tuxwall-tls-renew.timer` checks daily (and after boot) and re-issues the server certificate 30 days before it expires or when the LAN/VPN addresses or names changed; an interface Apply in the dashboard triggers the same check. Every change runs `nginx -t` first and keeps the previous files when it fails. Manually: `sudo tuxwall-tls status`, `sudo tuxwall-tls refresh --reload` (`--dry-run` shows what would change, `--force-cert` issues a new certificate, `--new-ca` a new CA that every device has to trust again).
+- **HSTS** is off by default and can be switched on in the card. Only do that once every device you use trusts the CA: for a year, browsers that saw the header refuse plain http and certificate warnings for the router.
+- **Your own certificate**: enter the paths of a PEM certificate (full chain) and its unencrypted key under `/etc` in the card (or `sudo tuxwall-tls custom-cert --cert FILE --key FILE`); they are checked with openssl and `nginx -t`. Renewing it is up to you.
+- **Integrations that only speak http** (scripts, older Home Assistant setups): `sudo touch /etc/tuxwall/no-https-redirect && sudo tuxwall-tls refresh --reload` keeps port 80 serving the dashboard without the redirect (HTTPS stays available); or switch the redirect off in the card. The Home Assistant integration supports `https://` with the router's CA (see `integrations/home-assistant/tuxwall/README.md`). Loopback clients (`http://127.0.0.1:8008`, the AI assistant's MCP tools, timers) are not affected.
+- **No TuxWall HTTPS at all**: switch it off in the card, or `sudo touch /etc/tuxwall/no-https && sudo tuxwall-tls refresh --reload`.
+- **Your own HTTPS setup is left alone.** If `sites-enabled/tuxwall` is not the package's symlink, the package site was edited, or another enabled nginx site already listens on port 443 for the dashboard addresses (or on a 443 wildcard), TuxWall adds no listeners and no redirect. The certificates are still generated, the installer/upgrade prints a note, and the HTTPS card shows which site serves HTTPS and when its certificate expires.
+- The firewall: installs and upgrades open TCP 443 on the LAN/VPN interfaces (like port 80, never on the WAN) before the redirect goes live; with the redirect on, the firewall guard treats 443 as the port your session needs.
 
 ## Plugins
 
@@ -306,7 +331,7 @@ opencode merges the local file over the defaults (objects merge, your values win
 TuxWall is a security appliance, so a few defaults matter:
 
 - **No default password.** The first administrator is created interactively; the setup endpoint refuses to run once any user exists.
-- **Dashboard is LAN/VPN only.** nginx allows loopback, RFC1918 and `fd00::/8` clients. Do not expose port 80/443 to the WAN.
+- **Dashboard is LAN/VPN only, over HTTPS.** nginx allows loopback, RFC1918 and `fd00::/8` clients and redirects http to https with the router's own certificate; the session cookie is `Secure` on HTTPS. Do not expose port 80/443 to the WAN.
 - **Use 2FA.** TOTP works with Google Authenticator, Aegis, 1Password and any standard authenticator. Replay protection is built in.
 - **Backups contain secrets.** Full backups include `auth.json`, WireGuard private keys and service credentials. Use the sanitized export when sharing a backup.
 - **The deception layer is deliberate exposure.** The honeypot tarpit and OpenCanary emulators bind WAN-only ports that no legitimate client should use. They can be disabled from the Deception page.

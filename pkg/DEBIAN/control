@@ -3,7 +3,7 @@ Version: 3.3.5
 Section: admin
 Priority: optional
 Architecture: all
-Depends: python3, nginx, unbound, unbound-anchor, kea-dhcp4-server, kea-common, radvd, avahi-daemon, suricata, suricata-update, wireguard-tools, ufw, iptables, nftables, curl, jq, gzip, ieee-data, iproute2, rsync, aide
+Depends: python3, nginx, openssl, unbound, unbound-anchor, kea-dhcp4-server, kea-common, radvd, avahi-daemon, suricata, suricata-update, wireguard-tools, ufw, iptables, nftables, curl, jq, gzip, ieee-data, iproute2, rsync, aide
 Suggests: crowdsec, crowdsec-firewall-bouncer-nftables | crowdsec-firewall-bouncer-iptables, python3-maxminddb, speedtest, zeek
 Maintainer: rezzonance <rezzonance@users.noreply.github.com>
 Description: TuxWall Network Firewall Dashboard

@@ -183,8 +183,31 @@ python3 tools/route_discovery.py                     # just the discovered route
   HEAD -> 501; unknown paths; path spellings (`//`, case, `%xx`, `/./`,
   `..`, `;`) of admin-only GETs; Host/Origin parsing (IPv6 literals);
   JSON-only, traceback-free unauthenticated answers; session cookie flags.
-- HTTPS work: add a `COOKIE_CASES` row (and flip `SAME_HOST_OTHER_PORT`
-  once scheme/port are compared); the request helper takes any headers.
+- HTTPS (3.3.6): `COOKIE_CASES` cover `Secure` over TLS (X-Forwarded-Proto
+  https from the loopback proxy only; a 4th element = another peer address,
+  checked on `_session_cookie_value` directly) and the logout cookie; https
+  Origins are accepted like http ones while `SAME_HOST_OTHER_PORT` is
+  "accept" (flip it once scheme+port are compared).
+
+## https_check.py — dashboard HTTPS (CI)
+
+```bash
+python3 tools/https_check.py
+```
+
+`www/includes/https_tls.py` (the `tuxwall-tls` helper) against scratch trees:
+real openssl for the per-router CA (uniqueness, name constraints - a leaf for
+another website signed by it must not verify), the server certificate (SANs
+from `ip -j addr` fixtures with private/documentation addresses, 0600 keys,
+<= 398 days, re-issue on SAN change / near expiry / CA change / force), the
+nginx snippet render (443 listeners, redirect + exceptions, escape hatch,
+HSTS, http2 syntax per nginx version), the owner-managed decision matrix,
+refresh transactions (nginx -t failure puts certificate + snippet back,
+settings rolled back), sockets (another program on 443, reload that kept
+address-bound sockets -> restart), real `nginx -t` in a scratch prefix with
+loopback stand-ins (incl. the fatal duplicate default_server the detection
+prevents and a missing address), the postinst `https_setup`/`https_fw_allow`
+with fake ufw/helper, package wiring and the firewall guard's 443 rule.
 
 ## custom_blocklist_check.py — custom banlist sync (CI)
 

@@ -24,10 +24,13 @@
      routes never return data to a viewer.
    Refused requests must not have attempted any side effect, and every
    unauthenticated /api/ answer is JSON without tracebacks or file paths.
-   The session cookie attributes are checked per route_policy.COOKIE_CASES.
+   The session cookie attributes are checked per route_policy.COOKIE_CASES
+   (Secure over TLS = X-Forwarded-Proto https from the loopback proxy only;
+   the logout cookie too); Origin parsing incl. https:// origins (3.3.6).
 3. --mutants: the same checks against patched copies of api_server.py (an
    admin GET prefix removed, the CSRF Origin check bypassed, the POST role
-   gate removed, the GET session gate removed); each must be caught.
+   gate removed, the GET session gate removed, X-Forwarded-Proto trusted from
+   any peer, Secure never set); each must be caught.
 """
 import concurrent.futures
 import os
@@ -319,7 +322,7 @@ def run_matrix(h, d, res, dump=None):
         for path in sorted(paths_seen):
             job(check_unimplemented, m, path)
     for fn, a in [(check_unknown, (h, res)), (check_variants, (h, d, res)), (check_cookies, (h, res)),
-                  (check_origin_parsing, (h, res)),
+                  (check_logout_cookie, (h, res)), (check_origin_parsing, (h, res)),
                   (check_gate_lists, (h, d, res))]:
         job(fn, *a)
 
@@ -395,6 +398,22 @@ def check_origin_parsing(h, res):
         ({"Host": "router.lan", "Origin": "http://ROUTER.lan"}, True, "host name case-insensitive"),
         ({"Host": "router.lan", "Origin": "http://router.lan.evil.example.com"}, False, "suffix trick"),
         ({"Host": "router.lan", "Origin": "null"}, False, "Origin: null"),
+        # HTTPS (3.3.6): the dashboard over TLS; http and https pages of the
+        # router both count as same-origin during the transition
+        ({"Host": "router.lan", "Origin": "https://router.lan"}, True, "https Origin, same host"),
+        ({"Host": "router.lan", "Origin": "https://router.lan", "X-Forwarded-Proto": "https"}, True,
+         "https Origin over TLS"),
+        ({"Host": "router.lan", "Origin": "http://router.lan", "X-Forwarded-Proto": "https"}, True,
+         "http Origin while proxied over TLS (transition)"),
+        ({"Host": "router.lan", "Origin": "https://router.lan", "X-Forwarded-Proto": "http"}, True,
+         "https Origin on the http escape hatch"),
+        ({"Host": "192.168.1.1", "Origin": "https://192.168.1.1"}, True, "https Origin, IPv4 literal"),
+        ({"Host": "[fd00:1::1]", "Origin": "https://[fd00:1::1]"}, True, "https Origin, IPv6 literal"),
+        ({"Host": "router.lan", "Referer": "https://router.lan/#settings"}, True, "same-host https Referer"),
+        ({"Host": "router.lan", "Origin": "https://evil.example.com", "X-Forwarded-Proto": "https"}, False,
+         "foreign https Origin over TLS"),
+        ({"Host": "router.lan", "Origin": "https://router.lan.evil.example.com"}, False, "https suffix trick"),
+        ({"Host": "[fd00:1::1]", "Origin": "https://[fd00:1::2]"}, False, "https Origin, other IPv6 host"),
         ({"Host": "router.lan", "Origin": "router.lan"}, False, "Origin without a scheme"),
         ({"Host": "router.lan", "Referer": "http://router.lan/index.html"}, True, "same-host Referer, no Origin"),
         ({"Host": "router.lan", "Origin": "null", "Referer": "http://router.lan/"}, False, "null Origin wins"),
@@ -411,7 +430,17 @@ def check_origin_parsing(h, res):
 
 
 def check_cookies(h, res):
-    for n, (hdrs, need, forbid) in enumerate(P.COOKIE_CASES):
+    for n, case in enumerate(P.COOKIE_CASES):
+        hdrs, need, forbid = case[:3]
+        if len(case) > 3:
+            # a connection from another peer: the cookie builder itself
+            value = h.mod._session_cookie_value(hdrs, "tok", case[3])
+            attrs = [a.strip() for a in value.split(";")[1:]]
+            for a in need:
+                res.ok(a in attrs, "cookie", "session cookie (%s from peer %r) lacks %s" % (hdrs, case[3], a))
+            for a in forbid:
+                res.ok(a not in attrs, "cookie", "session cookie (%s from peer %r) has %s" % (hdrs, case[3], a))
+            continue
         extra = dict(hdrs, **{"X-Real-IP": "198.51.100.%d" % (n + 1)})
         r = h.request("POST", "/api/auth/login", origin=h.SAME, headers=extra,
                       body={"username": "boss", "password": h.passwords["boss"]})
@@ -425,6 +454,22 @@ def check_cookies(h, res):
             res.ok(a in attrs, "cookie", "session cookie (%s) lacks %s" % (hdrs or "plain", a))
         for a in forbid:
             res.ok(a not in attrs, "cookie", "session cookie (%s) has %s" % (hdrs or "plain", a))
+
+
+def check_logout_cookie(h, res):
+    """The cookie that clears the session carries Secure over TLS too."""
+    for hdrs, secure in (({}, False), ({"X-Forwarded-Proto": "https"}, True)):
+        r = h.request("POST", "/api/auth/logout", role="admin", origin=h.SAME, headers=hdrs)
+        cookies = [c for c in r.set_cookies() if c.startswith(h.mod.SESSION_COOKIE + "=")]
+        if not res.ok(r.status == 200 and len(cookies) == 1, "cookie",
+                      "logout with %s -> %s, %d session cookies" % (hdrs or "no extra headers", describe(r),
+                                                                     len(cookies))):
+            continue
+        attrs = [a.strip() for a in cookies[0].split(";")[1:]]
+        res.ok("Max-Age=0" in attrs and "HttpOnly" in attrs, "cookie", "logout cookie (%s) does not clear: %s"
+               % (hdrs or "plain", cookies[0]))
+        res.ok(("Secure" in attrs) == secure, "cookie", "logout cookie (%s): Secure %s, expected %s"
+               % (hdrs or "plain", "Secure" in attrs, secure))
 
 
 def check_gate_lists(h, d, res):
@@ -533,6 +578,10 @@ MUTANTS = [
       ('        if identity.get("role") != "admin":\n            self._send(403, {"ok": False, "error": '
        '"Administrator access required"})', '        if False:\n            self._send(403, {"ok": False, '
        '"error": "Administrator access required"})')]),
+    ("X-Forwarded-Proto trusted from any peer", "cookie",
+     [("    if peer not in _LOOPBACK_PEERS:\n        return False", "    if False:\n        return False")]),
+    ("Secure never set on TLS logins", "cookie",
+     [('        value += "; Secure"', "        pass")]),
     ("GET session gate removed", "no-session",
      [('        if path.startswith("/api/") and identity is None:\n            self._send(401, {"ok": False, '
        '"error": "Authentication required"})\n            return\n        if (path.startswith(ADMIN_GET_PREFIXES)',

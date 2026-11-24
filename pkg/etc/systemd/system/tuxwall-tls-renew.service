@@ -1,0 +1,12 @@
+[Unit]
+Description=TuxWall dashboard certificate check (renew before expiry, follow LAN/VPN address changes)
+After=network-online.target nginx.service
+Wants=network-online.target
+ConditionPathExists=/var/www/html/includes/https_tls.py
+
+[Service]
+Type=oneshot
+# nginx -t before the reload; on failure the previous certificate/snippet stay
+ExecStart=/usr/local/sbin/tuxwall-tls refresh --reload
+Nice=10
+IOSchedulingClass=idle

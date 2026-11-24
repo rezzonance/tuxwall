@@ -176,9 +176,11 @@ ORIGIN_REQUIRED = {
 # on :8744) is accepted: the check compares host names only.
 SAME_HOST_OTHER_PORT = "accept"
 SAME_HOST_OTHER_PORT_REASON = (
-    "REVIEW (HTTPS work): the Origin check ignores scheme and port; cookies are not port-scoped either, "
-    "so any page served from the router's host name counts as same-origin. Compare scheme+port once "
-    "nginx forwards them (X-Forwarded-Proto / port).")
+    "REVIEW: the Origin check compares host names only (scheme and port ignored); cookies are not "
+    "port-scoped either, so any page served from the router's host name counts as same-origin. Kept on "
+    "purpose while the dashboard moves to HTTPS (3.3.6): http:// and https:// pages of the router must both "
+    "work during the transition and behind the escape hatch (/etc/tuxwall/no-https-redirect). Tighten to "
+    "scheme+host once https-only is the norm.")
 
 # ── handler-level refusals that are not gate slips ──────────────────────────
 # With an admin (owner) session and same Origin these routes may still answer
@@ -193,11 +195,26 @@ HANDLER_MAY_REFUSE = {
     "POST /api/security/tripwire/recovery/start": "re-enter the admin password -> 403 when wrong",
 }
 
-# ── session cookie attributes (extend for HTTPS) ────────────────────────────
-# (extra request headers on the login POST, required attributes, forbidden attributes)
+# ── session cookie attributes (HTTPS: 3.3.6) ────────────────────────────────
+# (extra request headers on the login POST, required attributes, forbidden
+# attributes[, peer]). Without a peer the login goes over HTTP to the loopback
+# harness (= the local nginx). With a peer, _session_cookie_value() is called
+# for that connection address directly: X-Forwarded-Proto is only trusted from
+# the local proxy (the API listens on loopback; a header from anyone else must
+# not decide the cookie flags).
+LAX = ("HttpOnly", "SameSite=Lax", "Path=/")
 COOKIE_CASES = [
-    ({}, ("HttpOnly", "SameSite=Lax", "Path=/"), ("Secure",)),
-    ({"X-Forwarded-Proto": "https"}, ("HttpOnly", "SameSite=Lax", "Path=/", "Secure"), ()),
+    ({}, LAX, ("Secure",)),
+    ({"X-Forwarded-Proto": "http"}, LAX, ("Secure",)),
+    ({"X-Forwarded-Proto": "https"}, LAX + ("Secure",), ()),
+    ({"X-Forwarded-Proto": "HTTPS"}, LAX + ("Secure",), ()),
+    ({"X-Forwarded-Proto": "https, http"}, LAX + ("Secure",), ()),      # first hop counts
+    ({"X-Forwarded-Proto": "http, https"}, LAX, ("Secure",)),
+    ({"X-Forwarded-Proto": "https"}, LAX + ("Secure",), (), "::1"),
+    ({"X-Forwarded-Proto": "https"}, LAX + ("Secure",), (), "::ffff:127.0.0.1"),
+    ({"X-Forwarded-Proto": "https"}, LAX, ("Secure",), "192.0.2.50"),     # spoofed, LAN peer
+    ({"X-Forwarded-Proto": "https"}, LAX, ("Secure",), "fd00:1::50"),
+    ({"X-Forwarded-Proto": "https"}, LAX, ("Secure",), ""),
 ]
 
 # ── route discovery coverage ────────────────────────────────────────────────

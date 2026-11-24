@@ -327,6 +327,7 @@ fw_fresh_allow() {          # fw_fresh_allow PORT ssh|dashboard WAN [IFACE...] -
   shift 3
   case $what in
     ssh) lan_c='TuxWall: SSH from LAN'; vpn_c='TuxWall: SSH from VPN'; priv_c='TuxWall: SSH (private networks)' ;;
+    https) lan_c='TuxWall dashboard HTTPS (LAN)'; vpn_c='TuxWall dashboard HTTPS (VPN)'; priv_c='TuxWall dashboard HTTPS (private networks)' ;;
     *)   lan_c='TuxWall dashboard (LAN)'; vpn_c='TuxWall dashboard (VPN)'; priv_c='TuxWall dashboard (private networks)' ;;
   esac
   for i in "$@"; do
@@ -364,6 +365,45 @@ nginx_listen_render() {     # nginx_listen_render [RENDERER] -> one status line,
   else
     echo "nginx: ${out##*$'\n'}"
   fi
+}
+
+# Dashboard HTTPS (3.3.6): tuxwall-tls (www/includes/https_tls.py) keeps a
+# per-router CA + server certificate in /etc/tuxwall/tls and renders
+# /etc/nginx/snippets/tuxwall-tls.conf (443 listeners on the listen
+# include's addresses, CA download, http -> https redirect) - nginx -t
+# first, previous files kept on failure. Only when TuxWall owns the
+# dashboard site: a local copy of sites-enabled/tuxwall, an edited package
+# site, or another enabled server on 443 for those addresses (or a 443
+# wildcard) means the owner runs HTTPS - certificates are generated anyway,
+# nginx is left alone and a note says so. Port 443 is opened on the LAN/VPN
+# interfaces (like 80 on fresh installs, never the WAN) before the redirect
+# goes live, on upgrades too. tools/pkg_scripts_check.py runs these.
+https_fw_allow() {          # https_fw_allow WAN DETECTED_LAN -> status lines, never fails
+  local _i
+  local -a _ifs=()
+  command -v ufw >/dev/null 2>&1 || { echo "https: ufw not installed (no firewall rule needed)"; return 0; }
+  if fw_has_port_rule 443; then
+    echo "https: port 443 already has a firewall rule (left as is)"
+    return 0
+  fi
+  while read -r _i; do [[ -n $_i ]] && _ifs+=("$_i"); done < <(fw_lan_ifaces "$1" "$2")
+  fw_fresh_allow 443 https "$1" "${_ifs[@]}"
+  return 0
+}
+https_setup() {             # https_setup WAN DETECTED_LAN [HELPER] -> status lines, never fails
+  local wan=$1 lan=$2 bin=${3:-/usr/local/sbin/tuxwall-tls} mode out rc=0
+  [[ -f $bin ]] || { echo "https: $bin missing, no certificate"; return 0; }
+  command -v openssl >/dev/null 2>&1 || { echo "https: openssl not installed, no certificate"; return 0; }
+  mode="$(sh "$bin" decide 2>/dev/null)" || mode=""
+  [[ $mode == active ]] && https_fw_allow "$wan" "$lan"
+  out="$(sh "$bin" refresh --reload 2>&1)" || rc=$?
+  out=${out##*$'\n'}
+  if (( rc )); then
+    echo "https: WARNING ${out#tuxwall-tls: } (re-run: sudo tuxwall-tls refresh --reload)"
+  else
+    echo "https: ${out#tuxwall-tls: }"
+  fi
+  return 0
 }
 
 # Plugin code belongs to root (3.3.3): /etc/tuxwall/plugins is set to
@@ -819,6 +859,8 @@ EOF
     # host-specific default_server listen lines -> generated include (see nginx_listen_render)
     chmod 755 /usr/local/sbin/tuxwall-nginx-listen 2>/dev/null || true
     echo "   $(nginx_listen_render)"
+    chmod 755 /usr/local/sbin/tuxwall-tls 2>/dev/null || true
+    https_setup "$WAN_IF_D" "$LAN_IF_D" | sed 's/^/   /'
     if nginx -t >/dev/null 2>&1; then
       systemctl enable --now nginx >/dev/null 2>&1 || true
       systemctl reload nginx || true
@@ -992,6 +1034,8 @@ PY
     systemctl daemon-reload
     systemctl enable tuxwall.service >/dev/null 2>&1 || true
     systemctl enable tuxwall-blocklist-update.timer >/dev/null 2>&1 || true
+    # dashboard certificate: daily renewal/SAN check (harmless without HTTPS)
+    systemctl enable --now tuxwall-tls-renew.timer >/dev/null 2>&1 || true
     # Kea lease mirror (client hostnames for WiFi plugins): enable only when
     # this box actually runs Kea DHCP; the unit is a harmless no-op without it.
     if [[ -f /var/lib/kea/kea-leases4.csv ]]; then
@@ -1040,7 +1084,12 @@ PY
     fi
 
     echo
-    echo "tuxwall installed. Dashboard: http://<this-host>/"
+    if [[ "$(sh /usr/local/sbin/tuxwall-tls decide 2>/dev/null)" == active ]]; then
+      echo "tuxwall installed. Dashboard: https://<this-host>/ (http redirects; trust the router's CA:"
+      echo "    http://<this-host>/tuxwall-ca.crt or Settings -> Security -> HTTPS)"
+    else
+      echo "tuxwall installed. Dashboard: http://<this-host>/"
+    fi
     echo "Watch blocklist progress on the Blocklists page, then verify:"
     echo "    dig adnxs.com @<this-host>   (should return NXDOMAIN)"
     echo

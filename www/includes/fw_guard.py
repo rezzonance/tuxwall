@@ -355,6 +355,21 @@ class Ctx:
         self.client_iface
         return self._client_dst
 
+    def dashboard_ports(self):
+        """Ports the admin's session needs: 443 alone when TuxWall's HTTPS
+        snippet redirects plain http on the address they connected to
+        (port 80 then only answers with a redirect), else 80 or 443."""
+        text = self.read("/etc/nginx/snippets/tuxwall-tls.conf")
+        m = re.search(r'tuxwall_https_redirect ~ "\^http \(([^)"]*)\)\$"', text)
+        if m and self.client_dst:
+            try:
+                dst = str(ipaddress.ip_address(self.client_dst))
+            except ValueError:
+                dst = ""
+            if dst and dst in {a.replace("\\", "") for a in m.group(1).split("|")}:
+                return (443,)
+        return DASHBOARD_PORTS
+
 
 # ── parsing ──────────────────────────────────────────────────────────────────
 
@@ -1082,16 +1097,18 @@ def invariants(rs, ctx, cur=None):
                 if (l.startswith("-A INPUT ") and "-j ACCEPT" in l and "-i %s " % ctx.client_iface in l
                         and "--dport" not in l and "-s " not in l):
                     raw_ok = True
+            ports = ctx.dashboard_ports()
             res = [evaluate_input(rs[fam], rs["defaults"],
                                   {"iface": ctx.client_iface, "src": ctx.client_ip,
                                    "dst": ctx.client_dst, "proto": "tcp", "dport": p})
-                   for p in DASHBOARD_PORTS]
+                   for p in ports]
             if not raw_ok and not any(a for a, _ in res):
                 by = next((r for _, r in res if r), None)
                 v.append(_v("lockout", "critical",
                             "This change would lock you out of the dashboard",
-                            "Your session (%s via %s) could no longer reach ports 80/443%s."
+                            "Your session (%s via %s) could no longer reach %s%s."
                             % (ctx.client_ip, ctx.client_iface,
+                               "port 443 (http redirects to https)" if ports == (443,) else "ports 80/443",
                                (" — blocked by: " + by["text"]) if by else " — no rule allows it"),
                             {"kind": "refuse"}, "management"))
     return v

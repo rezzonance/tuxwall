@@ -3797,6 +3797,14 @@
         </form>
         <p class="login-error" id="totp-msg" hidden></p>
       </div>
+      <div class="card" id="https-card" hidden>
+        <div class="card-head">
+          <h2>HTTPS</h2>
+          <span class="badge" id="https-badge">…</span>
+        </div>
+        <p class="muted">Serves the dashboard over an encrypted connection with a certificate from this router's own certificate authority (CA). Trust the CA once per device and the browser warning goes away.</p>
+        <div id="https-body"></div>
+      </div>
 
       </div>
 
@@ -4140,6 +4148,7 @@
 </div>
 <script src="/scripts/worldmap.js?v=202611210025"></script>
 <script src="/scripts/community-settings.js?v=202611210025"></script>
+<script src="/scripts/https-settings.js?v=202611231900"></script>
 <script src="/scripts/dashboard.js?v=202611221113"></script>
 <script src="/scripts/enhance.js?v=202611210025"></script>
 <script src="/scripts/netmap.js?v=202611210025"></script>

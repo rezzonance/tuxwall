@@ -11833,19 +11833,38 @@ AUTH_FILE = "/etc/tuxwall/auth.json"
 SESSION_COOKIE = "tuxwall_session"
 
 
-def _session_cookie_value(headers, token):
-    """Build the session Set-Cookie value. Adds `; Secure` only when the
-    request came in over HTTPS (X-Forwarded-Proto from nginx) — live
-    patch 2026-09-06, dual-mode so HTTP logins keep working pre-TLS."""
-    value = "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}".format(
-        SESSION_COOKIE, token, SESSION_TTL)
+_LOOPBACK_PEERS = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
+
+def _request_is_tls(headers, peer):
+    """True when the browser reached nginx over HTTPS: X-Forwarded-Proto
+    (nginx sets it from $scheme), trusted only from the local proxy
+    (loopback peer) - a header from anyone else proves nothing."""
+    if peer not in _LOOPBACK_PEERS:
+        return False
     try:
         proto = (headers.get("X-Forwarded-Proto") or "").split(",")[0]
     except Exception:
         proto = ""
-    if proto.strip().lower() == "https":
+    return proto.strip().lower() == "https"
+
+
+def _session_cookie_value(headers, token, peer="127.0.0.1"):
+    """Build the session Set-Cookie value. Adds `; Secure` whenever the
+    request came in over HTTPS (_request_is_tls); plain-http logins (the
+    escape hatch, owner-managed setups without TLS) keep working."""
+    value = "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}".format(
+        SESSION_COOKIE, token, SESSION_TTL)
+    if _request_is_tls(headers, peer):
         value += "; Secure"
     return value
+
+
+def _peer(handler):
+    try:
+        return handler.client_address[0]
+    except Exception:
+        return ""
 SESSION_TTL = 12 * 3600
 SESSION_IDLE_TIMEOUT = 120 * 60  # raised 2026-09-11: dashboard polls pause when tab hidden
 PBKDF2_ITERATIONS = 200000
@@ -12042,6 +12061,7 @@ ADMIN_GET_PREFIXES = (
     "/api/system/unbound-form",
     "/api/community",
     "/api/crowdsec/allowlists",
+    "/api/https",
 )
 
 
@@ -16946,7 +16966,8 @@ class Handler(BaseHTTPRequestHandler):
         if clear_cookie:
             self.send_header(
                 "Set-Cookie",
-                "{}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0".format(SESSION_COOKIE),
+                "{}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{}".format(
+                    SESSION_COOKIE, "; Secure" if _request_is_tls(self.headers, _peer(self)) else ""),
             )
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -17313,6 +17334,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_community_bans())
         elif path == "/api/crowdsec/reporting/status":
             self._send(200, community_reporting_status())
+        elif path == "/api/https/status":
+            self._send(200, https_status())
+        elif path == "/api/https/ca.crt":
+            try:
+                m = _https_mod()
+                ca = m.Env().p("ca.crt")
+            except Exception:
+                ca = ""
+            if ca and os.path.isfile(ca):
+                self._send_file(ca, "tuxwall-ca.crt", "application/x-x509-ca-cert")
+            else:
+                self._send(404, {"ok": False, "error": "No TuxWall CA certificate yet"})
         elif path == "/api/community/settings":
             qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             try:
@@ -17594,6 +17627,7 @@ class Handler(BaseHTTPRequestHandler):
             cookie = _session_cookie_value(
                 self.headers,
                 _create_session(result["username"], result.get("role", "viewer")),
+                _peer(self),
             )
             self._send_auth(200, result, cookie=cookie)
             return
@@ -17619,6 +17653,7 @@ class Handler(BaseHTTPRequestHandler):
             cookie = _session_cookie_value(
                 self.headers,
                 _create_session(result["username"], "admin"),
+                _peer(self),
             )
             self._send_auth(200, result, cookie=cookie)
             return
@@ -18837,6 +18872,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/interfaces/plan":
             self._send(*interfaces_plan(body, _client_key(self)))
 
+        elif path in ("/api/https/settings", "/api/https/regenerate", "/api/https/custom-cert"):
+            self._send(*https_post(path.rsplit("/", 1)[1], body, identity, _client_key(self)))
         elif path in ("/api/interfaces/apply", "/api/interfaces/confirm", "/api/interfaces/rollback"):
             self._send(*interfaces_apply(path.rsplit("/", 1)[1], body, identity, _client_key(self)))
 
@@ -19782,6 +19819,97 @@ def _assign_fw_guard(res, client_ip=""):
     return 409, {"ok": False, "error": g["summary"], "guard": g}
 
 
+# ---- Dashboard HTTPS (Settings -> Security -> HTTPS) ----
+# The certificate/nginx logic lives in includes/https_tls.py, shared with
+# the package's /usr/local/sbin/tuxwall-tls wrapper (postinst, renewal
+# timer). Status is read-only and works everywhere (also with an
+# owner-managed HTTPS site); changes need the packaged wrapper.
+def _https_mod():
+    import https_tls
+    return https_tls
+
+
+def https_status():
+    try:
+        m = _https_mod()
+        return m.status(m.Env())
+    except Exception as exc:
+        return {"ok": False, "error": "HTTPS status unavailable: %s" % str(exc)[:200]}
+
+
+def https_post(action, body, identity, client=""):
+    """POST /api/https/{settings,regenerate,custom-cert} (admin)."""
+    body = body if isinstance(body, dict) else {}
+    try:
+        m = _https_mod()
+    except Exception as exc:
+        return 503, {"ok": False, "error": "HTTPS module missing: %s" % exc}
+    env = m.Env()
+    if not os.path.exists(env.wrapper):
+        return 409, {"ok": False, "error": "TuxWall's own HTTPS arrives with the package upgrade "
+                                           "(tuxwall-tls is not installed yet)."}
+    who = "%s@%s" % ((identity or {}).get("username") or "?", client or "?")
+    if action == "settings":
+        changes = {}
+        for k in ("enabled", "redirect", "hsts"):
+            if k in body:
+                if not isinstance(body[k], bool):
+                    return 400, {"ok": False, "error": "%s must be true or false" % k}
+                changes[k] = body[k]
+        if not changes:
+            return 400, {"ok": False, "error": "nothing to change (enabled, redirect, hsts)"}
+        if changes.get("enabled") or changes.get("hsts") or "redirect" in changes:
+            st = m.status(env)
+            if st.get("mode") == "owner-managed":
+                return 409, {"ok": False, "error": "HTTPS is set up outside TuxWall (%s) - change it there."
+                                                   % "; ".join(st.get("reasons") or [])}
+        m._log(env, "settings by %s: %s" % (who, json.dumps(changes)))
+        ok, res = m.apply_settings(env, changes)
+    elif action == "regenerate":
+        m._log(env, "regenerate by %s" % who)
+        res = m.refresh(env, reload=True, force_cert=True)
+        ok = bool(res.get("ok"))
+    elif action == "custom-cert":
+        if body.get("clear") is True:
+            changes = {"custom_cert": "", "custom_key": ""}
+        else:
+            cert, key = body.get("cert"), body.get("key")
+            if not (isinstance(cert, str) and isinstance(key, str) and cert.strip() and key.strip()):
+                return 400, {"ok": False, "error": "give the certificate and key file paths"}
+            changes = {"custom_cert": cert.strip(), "custom_key": key.strip()}
+        m._log(env, "custom certificate by %s: %s" % (who, changes.get("custom_cert") or "cleared"))
+        ok, res = m.apply_settings(env, changes)
+    else:
+        return 404, {"ok": False, "error": "Not found"}
+    out = {"ok": ok, "message": res.get("message", ""), "result": res, "status": m.status(env)}
+    if not ok:
+        out["error"] = res.get("message") or "HTTPS change failed"
+    return (200 if ok else 409), out
+
+
+def _https_refresh_later(reason, delay=8.0):
+    """After an interface Apply/confirm/rollback: new addresses -> new SANs
+    and listeners (certificate re-issued, nginx -t, reload). Background,
+    after the network settled; a no-op until the package installed
+    tuxwall-tls."""
+    try:
+        m = _https_mod()
+        env = m.Env()
+    except Exception:
+        return
+    if not os.path.exists(env.wrapper):
+        return
+
+    def run():
+        time.sleep(delay)
+        try:
+            res = m.refresh(env, reload=True)
+            print("[https] refresh after %s: %s" % (reason, res.get("message")), flush=True)
+        except Exception as exc:
+            print("[https] refresh after %s failed: %r" % (reason, exc), flush=True)
+    threading.Thread(target=run, name="https-refresh", daemon=True).start()
+
+
 def interfaces_apply(action, body, identity, session_ip=""):
     """POST /api/interfaces/apply|confirm|rollback (admin).
 
@@ -19797,19 +19925,30 @@ def interfaces_apply(action, body, identity, session_ip=""):
         if assign_apply.is_locked() and not (action != "apply" and assign_apply.pending()):
             return assign_apply.locked_response()
         if action == "apply":
+            def timeout_rollback(aid):
+                out = assign_apply.rollback(aid, "timeout")
+                _https_refresh_later("interface rollback (timeout)")
+                return out
+
             def schedule(aid, ttl):
                 _fw_schedule_revert("assign:" + aid, "interface assignment " + aid,
-                                    lambda: assign_apply.rollback(aid, "timeout"), ttl)
+                                    lambda: timeout_rollback(aid), ttl)
             _fw_autosnap("interfaces apply", identity)
-            return assign_apply.apply(body, session_ip=session_ip,
-                                      user=(identity or {}).get("username", ""), schedule=schedule,
-                                      guard=lambda res: _assign_fw_guard(res, session_ip))
-        aid = str(body.get("id") or "")
-        with _FW_CONFIRM_LOCK:
-            _FW_PENDING.pop("assign:" + aid, None)
-        if action == "confirm":
-            return assign_apply.confirm(aid)
-        return assign_apply.rollback(aid or None, "manual")
+            code, res = assign_apply.apply(body, session_ip=session_ip,
+                                           user=(identity or {}).get("username", ""), schedule=schedule,
+                                           guard=lambda res: _assign_fw_guard(res, session_ip))
+        else:
+            aid = str(body.get("id") or "")
+            with _FW_CONFIRM_LOCK:
+                _FW_PENDING.pop("assign:" + aid, None)
+            if action == "confirm":
+                code, res = assign_apply.confirm(aid)
+            else:
+                code, res = assign_apply.rollback(aid or None, "manual")
+        if code == 200 and not (isinstance(res, dict) and res.get("after_reboot")):
+            # addresses may have changed: dashboard certificate SANs + listeners
+            _https_refresh_later("interface " + action)
+        return code, res
     except Exception as exc:
         return 500, {"ok": False, "error": str(exc)}
 

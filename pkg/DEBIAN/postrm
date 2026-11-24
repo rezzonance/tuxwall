@@ -24,6 +24,10 @@ case "$1" in
     rm -f /etc/unbound/unbound.conf.d/99-blocklists.conf
     rm -f /etc/unbound/unbound.conf.d/router-dns.conf
     rm -f /etc/nginx/sites-enabled/tuxwall
+    # generated HTTPS include (the CA/certificates in /etc/tuxwall/tls stay,
+    # like the rest of /etc/tuxwall: devices that trust the CA keep working
+    # after a reinstall)
+    rm -f /etc/nginx/snippets/tuxwall-tls.conf
     rm -f /var/lib/unbound/blocklist.conf
     rm -f /var/lib/unbound/client-bans.conf
     rm -rf /var/lib/tuxwall

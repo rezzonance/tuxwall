@@ -1,0 +1,9 @@
+#!/bin/sh
+# tuxwall-tls - the dashboard's HTTPS certificate (per-router CA, /etc/tuxwall/tls)
+# and nginx snippet (/etc/nginx/snippets/tuxwall-tls.conf). The logic is shared
+# with the dashboard API (Settings -> Security -> HTTPS):
+#   /var/www/html/includes/https_tls.py
+# Usage: tuxwall-tls status [--json] | refresh [--reload] [--dry-run] [--force-cert] [--new-ca]
+#        | set [--enabled on|off] [--redirect on|off] [--hsts on|off]
+#        | custom-cert --cert FILE --key FILE | custom-cert --clear
+exec /usr/bin/python3 -B /var/www/html/includes/https_tls.py "$@"

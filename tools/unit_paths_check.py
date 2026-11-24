@@ -126,6 +126,10 @@ WRITES = [
     ("api alerts.json", "api:ALERT_CONFIG_FILE"),
     ("api _ensure_service_reload (legacy unit rewrite)", "api:TUXWALL_SERVICE_FILE"),
     ("tripwire CLI (run by the API): config/state", "dir:/etc/tuxwall"),
+    # dashboard HTTPS (Settings -> Security -> HTTPS, interface Apply hook)
+    ("https_tls: CA + server certificate (work dir + rename inside it), lock", "dir:/etc/tuxwall/tls"),
+    ("https_tls: settings", "/etc/tuxwall/https.json"),
+    ("https_tls: nginx snippet (temp + rename, .tuxwall-prev backup)", "dir:/etc/nginx/snippets"),
 ]
 
 # Backups catalog: which items are single files (restored by temp + rename
@@ -173,6 +177,7 @@ READ_ONLY = {
     "/usr/bin/ssh", "/usr/bin/sshpass", "/usr/sbin/nft", "/usr/share/ieee-data/oui.csv",
     "/usr/bin:/bin", "/usr/bin:/bin:/usr/local/bin", "/usr/sbin:/usr/bin:/sbin:/bin",
     "/usr/lib/systemd/system/tuxwall-agent.service.d/20-local-config.conf",
+    "/etc",  # https_tls._path_ok: an owner-provided certificate must live under /etc (prefix test only)
 }
 
 PASS = FAIL = 0

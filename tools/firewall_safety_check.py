@@ -1290,9 +1290,11 @@ def t_installer_defaults():
     for fam_src in ("192.168.1.50", "fd00:1::50"):
         check(allowed(rs, LAN, fam_src, "tcp", 22), "installer: SSH from the LAN (%s)" % fam_src)
         check(allowed(rs, LAN, fam_src, "tcp", 80), "installer: dashboard from the LAN (%s)" % fam_src)
+        check(allowed(rs, LAN, fam_src, "tcp", 443), "installer: dashboard HTTPS from the LAN (%s)" % fam_src)
     for src in ("198.51.100.7", "2001:db8::7"):
         check(not allowed(rs, WAN, src, "tcp", 22), "installer: no SSH on the WAN (%s)" % src)
         check(not allowed(rs, WAN, src, "tcp", 80), "installer: no dashboard on the WAN (%s)" % src)
+        check(not allowed(rs, WAN, src, "tcp", 443), "installer: no dashboard HTTPS on the WAN (%s)" % src)
         check(not allowed(rs, WAN, src, "udp", 51820), "installer: no 51820/udp on the WAN (%s)" % src)
     check(not [v for v in G.invariants(rs, ctx, rs) if v["id"] == "lockout"],
           "installer: the LAN admin keeps the dashboard (guard lockout check)")

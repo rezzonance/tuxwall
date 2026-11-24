@@ -14,3 +14,5 @@
 /etc/systemd/system/tuxwall-kea-mirror.timer
 /etc/systemd/system/tuxwall-tripwire.service
 /etc/logrotate.d/tuxwall-tripwire
+/etc/systemd/system/tuxwall-tls-renew.service
+/etc/systemd/system/tuxwall-tls-renew.timer
