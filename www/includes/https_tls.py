@@ -831,7 +831,9 @@ def render_snippet(env, dec, settings):
     out.append("\n# The CA certificate, also over plain http (fetch it before trusting it).\n"
                "location = /tuxwall-ca.crt {\n")
     out += ["    allow %s;\n" % a for a in LAN_ALLOW]
-    out.append("    deny all;\n    alias %s;\n    add_header Cache-Control \"no-cache\" always;\n}\n" % env.p("ca.crt"))
+    # expires, not add_header: a location with its own add_header loses the
+    # server-level security headers (and HSTS).
+    out.append("    deny all;\n    alias %s;\n    expires epoch;\n}\n" % env.p("ca.crt"))
     if dec["redirect"]:
         alts = "|".join(re.escape(a) for a in dec["listen"])
         out.append("\n# http -> https on the addresses above, except ACME and the CA download.\n"

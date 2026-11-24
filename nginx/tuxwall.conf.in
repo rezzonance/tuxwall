@@ -12,7 +12,9 @@ server {
     server_name _;
     server_tokens off;
 
-    # Clickjacking / sniffing backstop (live patch 2026-09-06).
+    # Clickjacking / sniffing backstop (live patch 2026-09-06). Only inherited by
+    # locations that set no add_header of their own (nginx rule): use `expires`
+    # for caching there, or repeat these lines.
     add_header X-Frame-Options "DENY" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "same-origin" always;
@@ -110,7 +112,9 @@ server {
         allow fd00::/8;
         # Never heuristic-cache index.html: browsers must revalidate on every
         # load so the deploy's asset-version bump (style.css?v=…) is picked up.
-        add_header Cache-Control "no-cache" always;
+        # `expires epoch` = Cache-Control: no-cache. Not add_header: a location
+        # with its own add_header drops the server-level security headers.
+        expires epoch;
         error_page 403 =200 @empty_response;
         deny all;
         try_files $uri $uri/ =404;

@@ -208,6 +208,12 @@ address-bound sockets -> restart), real `nginx -t` in a scratch prefix with
 loopback stand-ins (incl. the fatal duplicate default_server the detection
 prevents and a missing address), the postinst `https_setup`/`https_fw_allow`
 with fake ufw/helper, package wiring and the firewall guard's 443 rule.
+Security headers: no `location` in the package site, the `nginx/` templates
+or the rendered snippet sets an `add_header` that would drop the server-level
+X-Frame-Options / X-Content-Type-Options / Referrer-Policy / HSTS (nginx does
+not inherit them then), and a real nginx on loopback serving the site +
+snippet sends them on `/`, `/index.html`, static files, 404s and the CA
+download over http and https (HSTS on https only); the 3.3.5 site fails it.
 
 ## custom_blocklist_check.py — custom banlist sync (CI)
 

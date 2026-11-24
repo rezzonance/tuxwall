@@ -36,6 +36,11 @@
   firewall, failures are warnings; package wiring (site include, timer,
   conffiles, Depends: openssl).
 - fw_guard: with the redirect on, the admin's session needs 443.
+- security headers: no location in the package site / nginx templates /
+  rendered snippet drops the server-level add_header set (nginx
+  inheritance); a real nginx on loopback serves them on /, /index.html,
+  static files, 404 and the CA download over http + https (HSTS https
+  only); the 3.3.5 `add_header Cache-Control` location fails both.
 """
 import importlib.machinery
 import importlib.util
@@ -736,6 +741,178 @@ def t_real_nginx():
         b.close()
 
 
+# ── security headers (nginx add_header inheritance) ──────────────────────────
+
+SEC_HEADERS = {"x-frame-options", "x-content-type-options", "referrer-policy"}
+TEMPLATES = [os.path.join(ROOT, "nginx", n) for n in ("tuxwall.conf", "tuxwall.conf.in", "tuxwall-https.conf",
+                                                      "tuxwall-https.conf.in")]
+TLS_INCLUDE = "include /etc/nginx/snippets/tuxwall-tls[.]conf;"
+
+
+def header_blocks(text):
+    """[(block, add_header names)] per server/location block; add_header
+    outside any block (the TLS snippet) counts as server level."""
+    text = re.sub(r"#[^\n]*", "", text)
+    out, stack, top = [], [], set()
+    for m in re.finditer(r"([^;{}]*)\{|\}|([^;{}]*);", text):
+        if m.group(1) is not None:
+            stack.append([" ".join(m.group(1).split()), set()])
+        elif m.group(0) == "}":
+            out.append(tuple(stack.pop()))
+        else:
+            words = m.group(2).split()
+            if len(words) > 1 and words[0] == "add_header":
+                (stack[-1][1] if stack else top).add(words[1].lower())
+    return out, top
+
+
+def header_gaps(text):
+    """Locations that set their own add_header but miss a server-level one
+    (nginx then sends none of the server's headers there)."""
+    blocks, top = header_blocks(text)
+    server = set(top)
+    for name, hs in blocks:
+        if name.startswith("server"):
+            server |= hs
+    return ["%s: %s" % (name, ", ".join(sorted(server - hs))) for name, hs in blocks
+            if name.startswith("location") and hs and not server <= hs]
+
+
+def t_headers_static():
+    site = open(SITE).read()
+    snippets = {"default": dict(H.SETTINGS_DEFAULT), "HSTS on": dict(H.SETTINGS_DEFAULT, hsts=True, hsts_ever=True),
+                "escape hatch": dict(H.SETTINGS_DEFAULT, redirect=False)}
+    blocks, _top = header_blocks(site)
+    srv = [hs for n, hs in blocks if n.startswith("server")]
+    check(srv and SEC_HEADERS <= srv[0], "package site: server-level security headers declared")
+    check(not header_gaps(site), "package site: no location drops the security headers (%s)" % header_gaps(site))
+    for label, settings in snippets.items():
+        snip = H.render_snippet(H.Env(tls_dir="/etc/tuxwall/tls", nginx_version="1.28.0"), dec(), settings)
+        both = site.replace(TLS_INCLUDE, snip)
+        check(not header_gaps(both), "package site + TLS snippet (%s): no location drops a header (%s)"
+              % (label, header_gaps(both)))
+    hsts = H.render_snippet(H.Env(tls_dir="/etc/tuxwall/tls", nginx_version="1.28.0"), dec(), snippets["HSTS on"])
+    check("strict-transport-security" in header_blocks(hsts)[1], "TLS snippet: HSTS at server level")
+    for p in TEMPLATES:
+        text = open(p).read()
+        check(not header_gaps(text), "%s: no location drops the security headers (%s)"
+              % (os.path.relpath(p, ROOT), header_gaps(text)))
+    # self-test: the 3.3.5 site (add_header Cache-Control in `location /`) is caught
+    old = site.replace("        expires epoch;\n", '        add_header Cache-Control "no-cache" always;\n')
+    check(old != site and any(g.startswith("location /:") for g in header_gaps(old)),
+          "header check catches a location add_header that drops the server headers")
+
+
+def t_headers_served():
+    """Serve the package site + TLS snippet from a real nginx on loopback and
+    read the headers of /, /index.html, the CA download (http + https)."""
+    if not NGINX or not OPENSSL or not os.path.exists("/etc/nginx/mime.types"):
+        print("SKIP: nginx/openssl/mime.types missing - served header cases")
+        return
+    import http.client
+    import ssl
+    import time
+    port = 18700 + os.getpid() % 500
+    d = tempfile.mkdtemp(prefix="https-headers-")
+    os.chmod(d, 0o755)
+    procs = []
+    try:
+        write(d + "/www/index.html", "<html>TuxWall</html>\n")
+        write(d + "/www/app.js", "1;\n")
+        tls = d + "/tls"
+        os.makedirs(tls)
+        p = subprocess.run([OPENSSL, "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+                            "-keyout", tls + "/server.key", "-out", tls + "/server.crt", "-days", "2",
+                            "-subj", "/CN=scratch"], capture_output=True)
+        check(p.returncode == 0, "served headers: scratch certificate")
+        shutil.copy(tls + "/server.crt", tls + "/ca.crt")
+        os.chmod(tls + "/server.key", 0o644)
+        snip = H.render_snippet(H.Env(tls_dir=tls, nginx_version=H._nginx_version(H.Env()) or "1.24.0"),
+                                dec(), dict(H.SETTINGS_DEFAULT, hsts=True, hsts_ever=True))
+        snip = re.sub(r"(?m)^listen \S+:443 ssl( http2)? default_server;\n", "", snip)
+        snip = re.sub(r"(?m)^listen 443 ", "listen 127.0.0.1:%d " % (port + 443), snip)
+        snip = re.sub(r"(?m)^listen \[::\]:443 .*\n", "", snip)
+
+        def site_text(src):
+            t = src.replace("listen 80 default_server;", "listen 127.0.0.1:%d default_server;" % port)
+            t = t.replace("listen [::]:80 default_server;", "")
+            t = t.replace("include /etc/nginx/snippets/tuxwall-listen[.]conf;", "")
+            t = t.replace(TLS_INCLUDE, snip).replace("root /var/www/html;", "root %s/www;" % d)
+            return t
+
+        def serve(name, src):
+            base = os.path.join(d, name)
+            os.makedirs(base)
+            temps = "".join("  %s_temp_path %s/%s;\n" % (k, base, k) for k in ("client_body", "proxy", "fastcgi",
+                                                                               "uwsgi", "scgi"))
+            write(base + "/site", site_text(src))
+            write(base + "/nginx.conf", "pid %s/nginx.pid;\nerror_log %s/error.log;\nevents {}\nhttp {\n"
+                                        "  access_log off;\n%s  include /etc/nginx/mime.types;\n  include %s;\n"
+                                        "  include %s/site;\n}\n" % (base, base, temps, LIMITS, base))
+            proc = subprocess.Popen([NGINX, "-p", base + "/", "-c", base + "/nginx.conf", "-g", "daemon off;"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            procs.append(proc)
+            for _ in range(50):
+                try:
+                    http.client.HTTPConnection("127.0.0.1", port, timeout=1).request("HEAD", "/nope")
+                    return proc
+                except OSError:
+                    if proc.poll() is not None:
+                        break
+                    time.sleep(0.1)
+            err = open(base + "/error.log").read() if os.path.exists(base + "/error.log") else ""
+            check(False, "served headers: nginx started (%s)" % err[-200:])
+            return None
+
+        def stop(proc):
+            proc.terminate()
+            proc.wait(timeout=10)
+
+        def get(path, tls_=False):
+            if tls_:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                c = http.client.HTTPSConnection("127.0.0.1", port + 443, timeout=5, context=ctx)
+            else:
+                c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            c.request("GET", path)
+            r = c.getresponse()
+            r.read()
+            c.close()
+            return r.status, {k.lower(): v for k, v in r.getheaders()}
+
+        proc = serve("current", open(SITE).read())
+        if proc is None:
+            return
+        for path in ("/", "/index.html", "/app.js", "/tuxwall-ca.crt"):
+            for over_tls in (False, True):
+                st, h = get(path, over_tls)
+                label = "%s %s" % ("https" if over_tls else "http", path)
+                check(st == 200 and SEC_HEADERS <= set(h), "served %s: 200 + %s (got %s %s)"
+                      % (label, "/".join(sorted(SEC_HEADERS)), st, sorted(h)))
+                check(h.get("cache-control") == "no-cache", "served %s: Cache-Control no-cache" % label)
+                check(("strict-transport-security" in h) == over_tls, "served %s: HSTS %s"
+                      % (label, "sent" if over_tls else "not sent over http"))
+        st, h = get("/nope")
+        check(st == 404 and SEC_HEADERS <= set(h), "served http 404: security headers too")
+        stop(proc)
+        # the 3.3.5 location (add_header Cache-Control) really loses them
+        old = open(SITE).read().replace("        expires epoch;\n", '        add_header Cache-Control "no-cache" always;\n')
+        proc = serve("old", old)
+        if proc is not None:
+            st, h = get("/index.html")
+            check(st == 200 and not (SEC_HEADERS & set(h)) and h.get("cache-control") == "no-cache",
+                  "served: the 3.3.5 location drops the headers (test is sensitive)")
+            stop(proc)
+    finally:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+        shutil.rmtree(d, ignore_errors=True)
+
+
 # ── postinst ─────────────────────────────────────────────────────────────────
 
 SRC = open(POSTINST).read()
@@ -914,6 +1091,8 @@ t_owner_managed_refresh()
 t_transactions()
 t_sockets()
 t_real_nginx()
+t_headers_static()
+t_headers_served()
 t_postinst()
 t_package()
 t_fw_guard()
