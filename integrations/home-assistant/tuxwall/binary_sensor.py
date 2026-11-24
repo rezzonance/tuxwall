@@ -1,4 +1,5 @@
-"""Binary sensors: per-core-service health plus an aggregate."""
+"""Binary sensors: per-core-service health plus an aggregate, Tripwire and
+WAN / IPv6 connectivity."""
 from __future__ import annotations
 
 from typing import Any
@@ -6,14 +7,17 @@ from typing import Any
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
+    BinarySensorEntityDescription,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, EntityCategory
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import TuxwallCoordinator
+from . import summary_data
 from .const import ATTR_DOWN_SERVICES, CORE_SERVICES, DOMAIN
+from .coordinator import TuxwallCoordinator
+from .entity import TuxwallEntity, iso_attributes
 
 FRIENDLY = {
     "unbound.service": "Unbound DNS",
@@ -31,6 +35,15 @@ FRIENDLY = {
     "tuxwall-sqm.service": "tuxwall-sqm",
 }
 
+BINARY_SENSORS: tuple[BinarySensorEntityDescription, ...] = (
+    BinarySensorEntityDescription(key="tripwire", translation_key="tripwire", has_entity_name=True,
+                                  device_class=BinarySensorDeviceClass.PROBLEM),
+    BinarySensorEntityDescription(key="wan_connectivity", translation_key="wan_connectivity",
+                                  has_entity_name=True, device_class=BinarySensorDeviceClass.CONNECTIVITY),
+    BinarySensorEntityDescription(key="ipv6_connectivity", translation_key="ipv6_connectivity",
+                                  has_entity_name=True, device_class=BinarySensorDeviceClass.CONNECTIVITY),
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -42,78 +55,97 @@ async def async_setup_entry(
     entities.extend(
         ServiceBinarySensor(coordinator, entry, unit)
         for unit in CORE_SERVICES
-        if _present(coordinator, unit)
+        if _service(coordinator, unit) is not None
     )
+    entities.extend(TuxwallBinarySensor(coordinator, entry, desc) for desc in BINARY_SENSORS)
     async_add_entities(entities)
 
 
-def _present(coordinator: TuxwallCoordinator, unit: str) -> bool:
-    return any(s.get("unit") == unit for s in coordinator.data.get("services", []))
+def _services(coordinator: TuxwallCoordinator) -> list[dict[str, Any]]:
+    return (coordinator.data or {}).get("services") or []
 
 
-def _active(coordinator: TuxwallCoordinator, unit: str) -> bool:
-    return next(
-        (s.get("active") == "active" for s in coordinator.data.get("services", [])
-         if s.get("unit") == unit),
-        False,
-    )
+def _service(coordinator: TuxwallCoordinator, unit: str) -> dict[str, Any] | None:
+    return next((s for s in _services(coordinator) if s.get("unit") == unit), None)
 
 
-class ServiceBinarySensor(BinarySensorEntity):
+def _services_known(coordinator: TuxwallCoordinator) -> bool:
+    return summary_data.section(coordinator.data, "services") is not None
+
+
+class ServiceBinarySensor(TuxwallEntity, BinarySensorEntity):
     _attr_device_class = BinarySensorDeviceClass.RUNNING
 
     def __init__(self, coordinator: TuxwallCoordinator, entry: ConfigEntry, unit: str) -> None:
-        self.coordinator = coordinator
+        super().__init__(coordinator, entry)
         self.unit = unit
         self._attr_name = f"TuxWall {FRIENDLY.get(unit, unit)}"
         self._attr_unique_id = f"{entry.entry_id}_svc_{unit.replace('@', '_')}"
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, entry.data[CONF_HOST])},
-            "name": "TuxWall Gateway",
-            "manufacturer": "rezzonance",
-            "model": "TuxWall",
-        }
 
     @property
     def available(self) -> bool:
-        return self.coordinator.last_update_success and _present(self.coordinator, self.unit)
+        return super().available and _service(self.coordinator, self.unit) is not None
 
     @property
     def is_on(self) -> bool:
-        return _active(self.coordinator, self.unit)
+        return (_service(self.coordinator, self.unit) or {}).get("active") == "active"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        svc = next(
-            (s for s in self.coordinator.data.get("services", []) if s.get("unit") == self.unit),
-            {},
-        )
+        svc = _service(self.coordinator, self.unit) or {}
         return {"sub": svc.get("sub"), "description": svc.get("desc")}
 
-    async def async_added_to_hass(self) -> None:
-        self.async_on_remove(self.coordinator.async_add_listener(self.async_write_ha_state))
 
+class CoreServicesHealthy(TuxwallEntity, BinarySensorEntity):
+    _attr_device_class = BinarySensorDeviceClass.RUNNING
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
-class CoreServicesHealthy(ServiceBinarySensor):
     def __init__(self, coordinator: TuxwallCoordinator, entry: ConfigEntry) -> None:
-        super().__init__(coordinator, entry, "__core__")
+        super().__init__(coordinator, entry)
         self._attr_name = "TuxWall core services healthy"
         self._attr_unique_id = f"{entry.entry_id}_core_healthy"
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def _down(self) -> list[str]:
+        return [
+            s.get("unit")
+            for s in _services(self.coordinator)
+            if s.get("unit") in CORE_SERVICES and s.get("active") != "active"
+        ]
+
+    @property
+    def available(self) -> bool:
+        return super().available and _services_known(self.coordinator)
 
     @property
     def is_on(self) -> bool:
-        return not any(
-            s.get("active") != "active"
-            for s in self.coordinator.data.get("services", [])
-            if s.get("unit") in CORE_SERVICES
-        )
+        return not self._down()
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        down = [
-            s.get("unit")
-            for s in self.coordinator.data.get("services", [])
-            if s.get("unit") in CORE_SERVICES and s.get("active") != "active"
-        ]
-        return {ATTR_DOWN_SERVICES: down}
+        return {ATTR_DOWN_SERVICES: self._down()}
+
+
+class TuxwallBinarySensor(TuxwallEntity, BinarySensorEntity):
+    def __init__(
+        self,
+        coordinator: TuxwallCoordinator,
+        entry: ConfigEntry,
+        description: BinarySensorEntityDescription,
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self.entity_description = description
+        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+
+    @property
+    def available(self) -> bool:
+        return super().available and summary_data.available(
+            self.coordinator.data, self.entity_description.key)
+
+    @property
+    def is_on(self) -> bool | None:
+        value = summary_data.value(self.coordinator.data, self.entity_description.key)
+        return None if value is None else bool(value)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return iso_attributes(summary_data.attributes(self.coordinator.data, self.entity_description.key))

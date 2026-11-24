@@ -29,14 +29,96 @@
       "name": "Ban device",
       "description": "Cuts a client's internet access (UFW deny + Unbound DNS block). Requires an admin tuxwall user.",
       "fields": {
-        "ip": { "name": "IP", "description": "The IPv4 address to ban." }
+        "ip": {
+          "name": "IP",
+          "description": "The IPv4 address to ban."
+        }
       }
     },
     "unban_device": {
       "name": "Unban device",
       "description": "Restores internet access for a banned client.",
       "fields": {
-        "ip": { "name": "IP", "description": "The IPv4 address to unban." }
+        "ip": {
+          "name": "IP",
+          "description": "The IPv4 address to unban."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "tarpit_active": {
+        "name": "Tarpit active connections"
+      },
+      "canary_hits_24h": {
+        "name": "Canary hits (24 h)"
+      },
+      "top_attack_country": {
+        "name": "Top attacking country (24 h)"
+      },
+      "community_reporting": {
+        "name": "Community reporting",
+        "state": {
+          "ok": "OK",
+          "queued": "Queued",
+          "error": "Error",
+          "off": "Off"
+        }
+      },
+      "internet_latency": {
+        "name": "Internet latency"
+      },
+      "dhcp_clients": {
+        "name": "DHCP clients"
+      },
+      "blocked_domains": {
+        "name": "Blocked domains"
+      },
+      "cpu_usage": {
+        "name": "CPU usage"
+      },
+      "memory_usage": {
+        "name": "Memory usage"
+      },
+      "disk_usage": {
+        "name": "Root disk usage"
+      },
+      "temperature": {
+        "name": "CPU temperature"
+      },
+      "last_boot": {
+        "name": "Last boot"
+      },
+      "tuxwall_version": {
+        "name": "TuxWall version"
+      },
+      "last_backup": {
+        "name": "Last successful backup"
+      },
+      "certificate_expiry": {
+        "name": "Certificate expiry"
+      }
+    },
+    "binary_sensor": {
+      "tripwire": {
+        "name": "Tripwire"
+      },
+      "wan_connectivity": {
+        "name": "WAN connectivity"
+      },
+      "ipv6_connectivity": {
+        "name": "IPv6 connectivity"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "TuxWall options",
+        "data": {
+          "scan_interval": "Poll interval (seconds, 10-3600)"
+        }
       }
     }
   }

@@ -1,7 +1,8 @@
 """The TuxWall integration: coordinator, services and event bridging.
 
-Polls the gateway's dashboard API (services, security, firewall, DNS,
-CrowdSec, honeypot, WAN) and exposes it as sensors. Fires Home Assistant
+Polls the gateway's dashboard API (one compact summary per poll; the
+per-page endpoints on older routers) and exposes services, security,
+network, system and maintenance state as entities. Fires Home Assistant
 events (``tuxwall_event``) when security-relevant things change so
 automations can react - e.g. a core service dropping, the WAN IP
 changing, or a tarpit catch. Also watches Home Assistant's own failed
@@ -34,7 +35,7 @@ from .const import (
 )
 from .coordinator import TuxwallCoordinator
 
-PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.SENSOR, Platform.UPDATE]
 
 SERVICE_BAN_DEVICE: str = "ban_device"
 SERVICE_UNBAN_DEVICE: str = "unban_device"
@@ -139,6 +140,6 @@ def _watch_ha_login_failures(hass: HomeAssistant) -> None:
 
 def down_services(coordinator: TuxwallCoordinator) -> list[str]:
     """Core service units currently not active (for attributes/events)."""
-    services = coordinator.data.get("services", [])
+    services = (coordinator.data or {}).get("services", [])
     present = {s.get("unit"): s.get("active") for s in services}
     return [u for u in CORE_SERVICES if u in present and present[u] != "active"]

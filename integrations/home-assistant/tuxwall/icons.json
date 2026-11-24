@@ -1,0 +1,70 @@
+{
+  "entity": {
+    "sensor": {
+      "tarpit_active": {
+        "default": "mdi:spider-web"
+      },
+      "canary_hits_24h": {
+        "default": "mdi:bird"
+      },
+      "top_attack_country": {
+        "default": "mdi:earth"
+      },
+      "community_reporting": {
+        "default": "mdi:cloud-upload",
+        "state": {
+          "error": "mdi:cloud-alert",
+          "queued": "mdi:cloud-clock",
+          "off": "mdi:cloud-off-outline"
+        }
+      },
+      "internet_latency": {
+        "default": "mdi:timer-outline"
+      },
+      "dhcp_clients": {
+        "default": "mdi:lan-connect"
+      },
+      "blocked_domains": {
+        "default": "mdi:shield-off"
+      },
+      "cpu_usage": {
+        "default": "mdi:cpu-64-bit"
+      },
+      "memory_usage": {
+        "default": "mdi:memory"
+      },
+      "disk_usage": {
+        "default": "mdi:harddisk"
+      },
+      "last_boot": {
+        "default": "mdi:restart"
+      },
+      "tuxwall_version": {
+        "default": "mdi:tag-outline"
+      },
+      "last_backup": {
+        "default": "mdi:backup-restore"
+      },
+      "certificate_expiry": {
+        "default": "mdi:certificate"
+      }
+    },
+    "binary_sensor": {
+      "tripwire": {
+        "default": "mdi:shield-check",
+        "state": {
+          "on": "mdi:shield-alert"
+        }
+      },
+      "wan_connectivity": {
+        "default": "mdi:web-off",
+        "state": {
+          "on": "mdi:web"
+        }
+      },
+      "ipv6_connectivity": {
+        "default": "mdi:numeric-6-box-outline"
+      }
+    }
+  }
+}

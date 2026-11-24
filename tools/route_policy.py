@@ -108,6 +108,8 @@ VIEWER_OK = {
     # CrowdSec / blocklists
     "GET /api/crowdsec": "CrowdSec decisions view",
     "GET /api/crowdsec/summary": "CrowdSec counts for integrations (Home Assistant)",
+    "GET /api/integration/summary": "Home Assistant: counts/states of the viewer pages plus backup age, "
+                                    "certificate expiry and update state (no logs, paths or keys)",
     "GET /api/crowdsec/blocklist": "custom banlist view",
     "GET /api/crowdsec/ban-state": "ban state view",
     "GET /api/crowdsec/community-bans": "community ban view",

@@ -19,6 +19,18 @@ CONF_SCAN_INTERVAL: Final = "scan_interval"
 
 EVENT_TYPE: Final = "tuxwall_event"
 
+# TuxWall after 3.3.6: one compact payload per poll; older routers answer 404 and
+# the per-page endpoints are polled instead (the summary is retried hourly)
+INTEGRATION_SUMMARY_PATH: Final = "/api/integration/summary"
+SUMMARY_RETRY_SECONDS: Final = 3600
+
+# latest version when the router does not report one: the apt repository
+# index, fetched by Home Assistant at most every 6 h
+APT_PACKAGES_URL: Final = "https://rezzonance.github.io/tuxwall/dists/stable/main/binary-all/Packages"
+APT_CHECK_SECONDS: Final = 6 * 3600
+RELEASE_URL: Final = "https://github.com/rezzonance/tuxwall/releases/tag/v{version}"
+RELEASES_URL: Final = "https://github.com/rezzonance/tuxwall/releases"
+
 ATTR_DOWN_SERVICES: Final = "down_services"
 ATTR_IFNAME: Final = "ifname"
 ATTR_IPV6: Final = "ipv6"

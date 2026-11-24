@@ -1415,6 +1415,59 @@ def _parse_rule_side(text):
             "proto": proto, "v6": v6}
 
 
+def _ufw_log_traffic():
+    """Allow/block counts, top sources/ports and recent events from the
+    last 512 KB of ufw.log (Firewall page; block count for integrations)."""
+    traffic = {"allow": 0, "block": 0, "top_sources": [], "top_ports": [], "recent": []}
+    sources = {}
+    ports = {}
+    events = []
+    try:
+        with open("/var/log/ufw.log", "r", errors="replace") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 524288))
+            text = f.read()
+    except Exception:
+        text = ""
+
+    for line in text.splitlines():
+        m = EVENT_RE.match(line.strip())
+        if not m:
+            continue
+        g = m.groupdict()
+        action = g["action"]
+        if action == "ALLOW":
+            traffic["allow"] += 1
+        else:
+            traffic["block"] += 1
+        if action == "BLOCK" and g["proto"] != "2":
+            sources[g["src"]] = sources.get(g["src"], 0) + 1
+            if g["dpt"]:
+                port = g["dpt"] + "/" + (g["proto"] or "")
+            elif g["proto"]:
+                port = g["proto"]
+            else:
+                port = "?"
+            ports[port] = ports.get(port, 0) + 1
+        events.append({
+            "ts": g["ts"], "action": action, "in": g["in"], "out": g["out"],
+            "src": g["src"], "dst": g["dst"], "proto": g["proto"],
+            "spt": g["spt"], "dpt": g["dpt"],
+        })
+
+    traffic["top_sources"] = [
+        {"ip": k, "count": v}
+        for k, v in sorted(sources.items(), key=lambda x: -x[1])[:10]
+    ]
+    traffic["top_ports"] = [
+        {"port": k, "count": v}
+        for k, v in sorted(ports.items(), key=lambda x: -x[1])[:10]
+    ]
+    traffic["recent"] = events[-25:]
+    return traffic
+
+
 def build_firewall():
     try:
         proc = subprocess.run(
@@ -1497,53 +1550,7 @@ def build_firewall():
             "v6": src["v6"] or dst["v6"],
         })
 
-    traffic = {"allow": 0, "block": 0, "top_sources": [], "top_ports": [], "recent": []}
-    sources = {}
-    ports = {}
-    events = []
-    try:
-        with open("/var/log/ufw.log", "r", errors="replace") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            f.seek(max(0, size - 524288))
-            text = f.read()
-    except Exception:
-        text = ""
-
-    for line in text.splitlines():
-        m = EVENT_RE.match(line.strip())
-        if not m:
-            continue
-        g = m.groupdict()
-        action = g["action"]
-        if action == "ALLOW":
-            traffic["allow"] += 1
-        else:
-            traffic["block"] += 1
-        if action == "BLOCK" and g["proto"] != "2":
-            sources[g["src"]] = sources.get(g["src"], 0) + 1
-            if g["dpt"]:
-                port = g["dpt"] + "/" + (g["proto"] or "")
-            elif g["proto"]:
-                port = g["proto"]
-            else:
-                port = "?"
-            ports[port] = ports.get(port, 0) + 1
-        events.append({
-            "ts": g["ts"], "action": action, "in": g["in"], "out": g["out"],
-            "src": g["src"], "dst": g["dst"], "proto": g["proto"],
-            "spt": g["spt"], "dpt": g["dpt"],
-        })
-
-    traffic["top_sources"] = [
-        {"ip": k, "count": v}
-        for k, v in sorted(sources.items(), key=lambda x: -x[1])[:10]
-    ]
-    traffic["top_ports"] = [
-        {"port": k, "count": v}
-        for k, v in sorted(ports.items(), key=lambda x: -x[1])[:10]
-    ]
-    traffic["recent"] = events[-25:]
+    traffic = _ufw_log_traffic()
     _fw_annotate_rules(rules)
 
     return {
@@ -2502,6 +2509,7 @@ class _SwrCache:
         self._ok = ok or (lambda v: isinstance(v, dict) and bool(v.get("ok")))
         self._on_update = on_update
         self._lock = threading.Lock()
+        self._done = threading.Condition(self._lock)   # a background refresh ended
         self._cold = threading.Lock()
         self.data = None
         self.at = 0.0          # when the stored value's build started; 0 = stale
@@ -2509,6 +2517,7 @@ class _SwrCache:
         self.soft_gen = 0      # bumped by mark_stale()
         self.refreshing = False
         self._again = False
+        self.error = None      # why the last background build was not stored
 
     def _store(self, out, t0, gen, soft_gen):
         """Under the lock: keep a build's result unless a drop() overlapped it."""
@@ -2550,12 +2559,42 @@ class _SwrCache:
         with self._lock:
             return self.data, self.at
 
+    def kick(self):
+        """Start a background refresh when the value is missing or stale;
+        never builds in the caller's thread (cold included). True when this
+        call started one (wait() for it); False when the value is fresh or a
+        refresh was already running."""
+        with self._lock:
+            if self.data is not None and time.time() - self.at < self.ttl:
+                return False
+            if self.refreshing:
+                return False
+            self.refreshing = True
+        self._spawn()
+        return True
+
+    def wait(self, deadline, ref=None):
+        """Wait for a running background refresh until the time.time()
+        deadline, then (value, stale): value None when nothing was built yet
+        (self.error tells why when a build failed). Staleness is judged at
+        ref (default: now), e.g. when the caller started waiting."""
+        with self._lock:
+            while self.refreshing:
+                left = deadline - time.time()
+                if left <= 0:
+                    break
+                self._done.wait(left)
+            if self.data is None:
+                return None, True
+            return self.data, (time.time() if ref is None else ref) - self.at >= self.ttl
+
     def _spawn(self):
         try:
             threading.Thread(target=self._refresh, name=self.name, daemon=True).start()
         except RuntimeError:
             with self._lock:
                 self.refreshing = False
+                self._done.notify_all()
 
     def _refresh(self):
         try:
@@ -2564,16 +2603,23 @@ class _SwrCache:
                     gen, soft_gen = self.gen, self.soft_gen
                     self._again = False
                 t0 = time.time()
+                err = None
                 try:
                     out = self._build()
                 except Exception as exc:
                     print("[%s] background refresh failed: %r" % (self.name, exc), flush=True)
-                    out = None
+                    out, err = None, str(exc)
                 with self._lock:
                     stored = out is not None and self._store(out, t0, gen, soft_gen)
+                    if stored:
+                        self.error = None
+                    elif err is not None or (out is not None and not self._ok(out)):
+                        res = out if isinstance(out, dict) else {}
+                        self.error = str(err or res.get("error") or "build failed")[:200]
                     again = self._again and self.gen == gen
                     if not again:
                         self.refreshing = False
+                        self._done.notify_all()
                 if stored and self._on_update:
                     self._on_update()
                 if not again:
@@ -2581,6 +2627,7 @@ class _SwrCache:
         except BaseException:
             with self._lock:
                 self.refreshing = False
+                self._done.notify_all()
             raise
 
     def mark_stale(self, kick=False):
@@ -4226,6 +4273,21 @@ class SecurityMonitor:
                 with self.geo_lock:
                     self._save_cache()
                     self._cache_dirty = False
+
+    def top_countries(self, since, limit=3):
+        """Countries of the sources last seen after `since`, ranked by those
+        sources' hits (counted since the monitor started); unknown geo
+        ("??") is left out."""
+        agg = {}
+        with self.lock:
+            for e in self.by_ip.values():
+                if e["last"] < since or not e.get("iso") or e["iso"] == "??":
+                    continue
+                a = agg.setdefault(e["iso"], {"iso": e["iso"], "name": e.get("country") or e["iso"],
+                                              "hits": 0, "sources": 0})
+                a["hits"] += e["count"]
+                a["sources"] += 1
+        return sorted(agg.values(), key=lambda a: (-a["hits"], a["iso"]))[:limit]
 
     def snapshot(self):
         with self.lock:
@@ -11774,6 +11836,14 @@ class LatencyMonitor:
             "samples": len(hist),
         }
 
+    def latest(self):
+        """The newest sample as a dict (None before the first one)."""
+        with self.lock:
+            s = self.history[-1] if self.history else None
+        if s is None:
+            return None
+        return {"ts": s[0], "avg_ms": s[1], "max_ms": s[2], "loss_pct": s[3], "jitter_ms": s[4]}
+
     def history_series(self, hours=24, max_points=720):
         """Return [ts, avg_ms, max_ms, jitter_mdev] points for a chart window."""
         with self.lock:
@@ -17586,6 +17656,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_crowdsec())
         elif path == "/api/crowdsec/summary":
             self._send(200, build_crowdsec_summary())
+        elif path == "/api/integration/summary":
+            self._send(200, build_integration_summary())
         elif path == "/api/crowdsec/blocklist":
             self._send(200, build_custom_blocklist())
         elif path == "/api/crowdsec/ban-state":
@@ -20152,6 +20224,331 @@ def https_status():
         return m.status(m.Env())
     except Exception as exc:
         return {"ok": False, "error": "HTTPS status unavailable: %s" % str(exc)[:200]}
+
+
+# --- Integration summary (Home Assistant) -----------------------------------
+# GET /api/integration/summary: everything the Home Assistant integration
+# shows, in a few KB - instead of eight endpoints per poll (~100 KB, and
+# /api/crowdsec alone was MBs). Each section has its own stale-while-
+# revalidate cache (_SwrCache) built in the background: a request starts the
+# refreshes it needs, waits at most INTEGRATION_WAIT seconds, and answers
+# with what it has - a slow or failing source is flagged (ok false, or
+# stale true with its last good value) instead of delaying or failing the
+# whole response. Counts and states only: no logs, paths or keys.
+INTEGRATION_SUMMARY_SCHEMA = 1
+INTEGRATION_WAIT = 2.0
+# mirrors CORE_SERVICES in integrations/home-assistant/tuxwall/const.py
+INTEGRATION_CORE_UNITS = (
+    "unbound.service", "kea-dhcp4-server.service", "radvd.service", "nginx.service",
+    "suricata.service", "crowdsec.service", "crowdsec-firewall-bouncer.service",
+    "wg-quick@wg0.service", "tuxwall.service", "tuxwall-agent.service",
+    "tuxwall-collector.service", "tuxwall-nat.service", "tuxwall-sqm.service",
+)
+INTEGRATION_WAN_SAMPLE_MAX_AGE = 90     # latency samples arrive every ~11-15 s
+INTEGRATION_PEER_ONLINE = 180           # WireGuard handshake younger than this
+APT_LISTS_DIR = "/var/lib/apt/lists"
+
+
+def _integ_services():
+    res = list_system_services()
+    services = res.get("services") or []
+    by_unit = {s.get("unit"): s for s in services}
+    return {"ok": True,
+            "units": [{"unit": u, "active": by_unit[u].get("active"), "sub": by_unit[u].get("sub"),
+                       "desc": by_unit[u].get("desc")}
+                      for u in INTEGRATION_CORE_UNITS if u in by_unit],
+            "failed": sum(1 for s in services if s.get("active") == "failed")}
+
+
+def _integ_security():
+    mon = get_security_monitor()
+    st = mon.snapshot().get("stats") or {}
+    top = mon.top_countries(time.time() - 86400, 3)
+    return {"ok": True, "hits_1m": st.get("hits_1m"), "hits_10m": st.get("hits_10m"),
+            "hits": st.get("hits"), "unique_ips": st.get("unique_ips"), "countries": st.get("countries"),
+            "top_countries_24h": top}
+
+
+def _integ_firewall():
+    t = _ufw_log_traffic()
+    return {"ok": True, "block": t.get("block"), "allow": t.get("allow")}
+
+
+def _integ_crowdsec():
+    # the panel cache flags itself stale after 30 s (and refreshes in the
+    # background); for the summary only a snapshot older than the decision
+    # list's own TTL counts as stale
+    out = build_crowdsec_summary()
+    if out.get("ok"):
+        out["stale"] = bool(out.get("stale")) and \
+            time.time() - (out.get("updated_at") or 0) > _CROWDSEC_DEC_TTL
+    return out
+
+
+def _integ_dns():
+    d = build_dns()
+    if not d.get("ok"):
+        return {"ok": False, "error": d.get("error") or "unbound unavailable"}
+    t = d.get("totals") or {}
+    return {"ok": True, "queries": t.get("queries"), "nxdomain": t.get("nxdomain"),
+            "hitrate": t.get("hitrate"), "extended": bool(d.get("extended"))}
+
+
+def _integ_blocklist():
+    return {"ok": True, "domains": count_blocked_domains(), "updated_at": last_blocklist_update(),
+            "status": BLOCKLIST_STATE.get("status")}
+
+
+def _boot_time():
+    try:
+        with open("/proc/stat") as f:
+            for line in f:
+                if line.startswith("btime "):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _integ_system():
+    s = build_system()
+    usage = s.get("usage") or {}
+    wan = s.get("wan") or {}
+    return {"ok": True,
+            "system": {"hostname": s.get("hostname"), "cpu_pct": usage.get("cpu_pct"),
+                       "mem_pct": usage.get("mem_pct"), "disk_pct": usage.get("disk_pct"),
+                       "swap_pct": usage.get("swap_pct"), "load": usage.get("load"),
+                       "temp_c": (s.get("cpu") or {}).get("temp"), "uptime": s.get("uptime"),
+                       "boot_time": _boot_time(), "kernel": s.get("kernel")},
+            "wan": {"ifname": wan.get("ifname"), "state": wan.get("state"), "ipv4": wan.get("ipv4"),
+                    "ipv6": (wan.get("ipv6") or [])[:2], "gateway6": bool(wan.get("gateway6"))}}
+
+
+def _integ_tarpit():
+    hp = build_honeypot()
+    conf, st = hp.get("conf") or {}, hp.get("state") or {}
+    stats = st.get("stats") or {}
+    return {"ok": True, "enabled": bool(conf.get("enabled")), "listening": bool(st.get("listening")),
+            "active": int(st.get("active_count") or 0), "total": int(stats.get("total") or 0),
+            "unique": int(stats.get("unique") or 0), "banned": int(stats.get("banned") or 0),
+            "sources_24h": int(st.get("sources_24h") or 0), "started_at": st.get("started_at"),
+            "log": [str(x)[:200] for x in (st.get("log") or [])[-5:]]}
+
+
+def _integ_canary():
+    c = build_canary()
+    return {"ok": True, "active": bool(c.get("active")), "events_24h": c.get("events_24h"),
+            "sources_24h": c.get("sources_24h"), "creds_24h": c.get("creds_24h"),
+            "bans_active": c.get("bans_active")}
+
+
+def _integ_tripwire():
+    t = tripwire_status()
+    tripped = bool(t.get("tripped"))
+    return {"ok": True, "mode": t.get("mode"), "enabled": bool(t.get("enabled")), "tripped": tripped,
+            "phase": t.get("phase"),
+            "level": (t.get("trip_mode") if tripped else t.get("strength")) or None,
+            "reason": t.get("reason") if tripped else None,
+            "since": t.get("since") if tripped else None,
+            "trips": t.get("trips") or 0, "resolved_at": t.get("resolved_at")}
+
+
+def _integ_community():
+    rs = reporting_status()
+    last_ok, last_err = rs.get("last_report"), rs.get("last_error_at")
+    if not rs.get("enabled"):
+        status = "off"
+    elif last_err and (not last_ok or last_err > last_ok):
+        status = "error"
+    elif rs.get("queue_length"):
+        status = "queued"
+    else:
+        status = "ok"
+    return {"ok": True, "status": status, "enabled": bool(rs.get("enabled")), "last_report": last_ok,
+            "last_error_at": last_err, "queue": rs.get("queue_length"), "sent_24h": rs.get("sent_24h"),
+            "paused": bool(rs.get("paused")), "held": bool(rs.get("held"))}
+
+
+def _integ_wireguard():
+    w = build_wireguard()
+    peers = w.get("peers") or []
+    now = time.time()
+    return {"ok": True, "configured": bool(w.get("configured")),
+            "up": bool((w.get("interface") or {}).get("up")), "peers": len(peers),
+            "online": sum(1 for p in peers if (p.get("last_handshake") or 0) > now - INTEGRATION_PEER_ONLINE)}
+
+
+def _integ_dhcp():
+    d = build_leases()
+    if not d.get("ok"):
+        return {"ok": False, "error": d.get("error") or "Kea unavailable"}
+    leases = d.get("leases") or []
+    active = [x for x in leases if x.get("expires") is not None]
+    return {"ok": True, "leases": len(active), "online": sum(1 for x in active if x.get("online")),
+            "reserved": sum(1 for x in leases if x.get("static"))}
+
+
+def _integ_backup():
+    if _bk is None:
+        return {"ok": False, "error": "Backup module unavailable"}
+    st = _bk.load_state()
+    ok, fail = st.get("last_success") or {}, st.get("last_failure") or {}
+    try:
+        stale_days = _bk.load_settings().get("stale_days")
+    except Exception:
+        stale_days = None
+    return {"ok": True, "last_success": ok.get("finished"), "last_failure": fail.get("finished"),
+            "failed": bool(fail.get("finished")) and (fail.get("finished") or 0) > (ok.get("finished") or 0),
+            "running": bool((st.get("last_run") or {}).get("running")), "stale_days": stale_days}
+
+
+def _integ_https():
+    h = https_status()
+    if not h.get("ok"):
+        return {"ok": False, "error": h.get("error") or "HTTPS status unavailable"}
+    mode, cert, source = h.get("mode"), None, None
+    if mode == "owner-managed":
+        certs = [s.get("cert") for s in h.get("owner_sites") or []]
+        certs = [c for c in certs if isinstance(c, dict) and not c.get("error") and c.get("not_after")]
+        if certs:
+            cert, source = min(certs, key=lambda c: c["not_after"]), "owner"
+    elif mode == "active":
+        if h.get("in_use") == "custom":
+            cert, source = h.get("custom"), "custom"
+        elif h.get("in_use") == "tuxwall":
+            cert, source = h.get("cert"), "tuxwall"
+    if not isinstance(cert, dict) or cert.get("error"):
+        cert = None
+    ca = h.get("ca") if isinstance(h.get("ca"), dict) and not h["ca"].get("error") else {}
+    return {"ok": True, "mode": mode, "source": source if cert else None,
+            "expires": (cert or {}).get("not_after"), "days_left": (cert or {}).get("days_left"),
+            "ca_expires": ca.get("not_after") if source == "tuxwall" else None}
+
+
+def _version_key(v):
+    return tuple(int(x) for x in re.findall(r"\d+", str(v or "")))
+
+
+def _apt_candidate(pkg="tuxwall", lists_dir=None):
+    """(newest version, index mtime) of pkg in apt's downloaded TuxWall
+    indexes (what `apt policy` sees after the last apt update)."""
+    best, at = None, None
+    for path in glob.glob(os.path.join(lists_dir or APT_LISTS_DIR, "*tuxwall*_Packages")):
+        try:
+            with open(path, errors="replace") as f:
+                text = f.read(4 << 20)
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        for stanza in text.split("\n\n"):
+            fields = dict(re.findall(r"^([A-Za-z-]+):[ \t]*(.*)$", stanza, re.M))
+            if fields.get("Package") != pkg or not fields.get("Version"):
+                continue
+            v = fields["Version"].strip()
+            if best is None or _version_key(v) > _version_key(best):
+                best = v
+            at = max(at or 0, mtime)
+    return best, (int(at) if at else None)
+
+
+def _integ_update():
+    installed = _dpkg_version("tuxwall") or TUXWALL_VERSION
+    latest, checked = _apt_candidate()
+    if latest and _version_key(installed) > _version_key(latest):
+        latest = installed          # a build newer than the repository's
+    return {"ok": True, "installed": installed, "latest": latest, "checked_at": checked,
+            "source": "apt" if latest else None}
+
+
+_INTEG_SECTIONS = (
+    # (name, ttl seconds, builder name) - builders are looked up at call
+    # time, so tests can stub them
+    ("services", 10, "_integ_services"),
+    ("security", 5, "_integ_security"),
+    ("firewall", 15, "_integ_firewall"),
+    ("crowdsec", 10, "_integ_crowdsec"),
+    ("dns", 15, "_integ_dns"),
+    ("blocklist", 60, "_integ_blocklist"),
+    ("system", 10, "_integ_system"),
+    ("tarpit", 5, "_integ_tarpit"),
+    ("canary", 60, "_integ_canary"),
+    ("tripwire", 10, "_integ_tripwire"),
+    ("community", 10, "_integ_community"),
+    ("wireguard", 15, "_integ_wireguard"),
+    ("dhcp", 60, "_integ_dhcp"),
+    ("backup", 60, "_integ_backup"),
+    ("https", 600, "_integ_https"),
+    ("update", 600, "_integ_update"),
+)
+
+
+def _integ_safe(builder):
+    try:
+        out = globals()[builder]()
+    except Exception as exc:
+        print("[integration] %s failed: %r" % (builder, exc), flush=True)
+        return {"ok": False, "error": str(exc)[:200]}
+    return out if isinstance(out, dict) else {"ok": False, "error": "no data"}
+
+
+_INTEG_CACHES = {name: _SwrCache("integ-" + name, ttl, (lambda b=builder: _integ_safe(b)))
+                 for name, ttl, builder in _INTEG_SECTIONS}
+
+
+def _integ_wan(system, stale):
+    """WAN section: addresses from the system section, connectivity from the
+    latency monitor's newest ping batch (read live)."""
+    wan = {"ifname": None, "state": None, "ipv4": None, "ipv6": [], "gateway6": False}
+    wan.update((system or {}).get("wan") or {})
+    try:
+        lat = get_latency_monitor().latest()
+    except Exception:
+        lat = None
+    now = time.time()
+    online = None
+    if lat is not None:
+        age = now - lat["ts"]
+        online = age <= INTEGRATION_WAN_SAMPLE_MAX_AGE and lat["loss_pct"] < 100
+    if system is not None and not wan.get("ifname"):
+        online = False                       # no default route
+    wan.update({"ok": system is not None or lat is not None, "stale": stale,
+                "online": online,
+                "ipv6_ready": bool(wan.get("ipv6")) and bool(wan.get("gateway6")),
+                "latency_ms": lat["avg_ms"] if lat and lat["loss_pct"] < 100 else None,
+                "loss_pct": lat["loss_pct"] if lat else None,
+                "jitter_ms": lat["jitter_ms"] if lat else None,
+                "sample_at": int(lat["ts"]) if lat else None,
+                "target": LATENCY_TARGET})
+    return wan
+
+
+def build_integration_summary(wait=None):
+    """Waits (up to `wait` s) for the refreshes this call started and for
+    sections with no value yet; a refresh already running from an earlier
+    call (a slow source) is not waited for - its last value is served."""
+    now = time.time()
+    deadline = now + (INTEGRATION_WAIT if wait is None else wait)
+    started = {name: cache.kick() for name, cache in _INTEG_CACHES.items()}
+    out = {"ok": True, "schema": INTEGRATION_SUMMARY_SCHEMA}
+    for name, _ttl, _b in _INTEG_SECTIONS:
+        cache = _INTEG_CACHES[name]
+        data, stale = cache.wait(deadline if started[name] or cache.peek()[0] is None else 0, ref=now)
+        if data is None:
+            out[name] = {"ok": False, "stale": True, "error": cache.error or "not ready yet"}
+            continue
+        sec = {k: v for k, v in data.items() if k != "ok"}
+        sec["stale"] = bool(stale or sec.get("stale"))
+        out[name] = dict(sec, ok=True)
+    system = out["system"] if out["system"].get("ok") else None
+    out["wan"] = _integ_wan(system, bool(system and system["stale"]))
+    if system is not None:
+        out["system"] = dict({k: v for k, v in system["system"].items()}, ok=True, stale=system["stale"])
+    else:
+        out["system"] = {k: v for k, v in out["system"].items() if k != "wan"}
+    upd = out["update"]
+    out["tuxwall_version"] = (upd.get("installed") if upd.get("ok") else None) or TUXWALL_VERSION
+    out["generated_at"] = int(time.time())
+    return out
 
 
 def https_post(action, body, identity, client=""):

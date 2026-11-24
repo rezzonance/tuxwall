@@ -1,26 +1,43 @@
 """DataUpdateCoordinator pulling the security-relevant TuxWall state."""
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 import time
 from typing import Any
 
+import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import TuxwallApiClient, TuxwallApiError, TuxwallAuthError, TuxwallNotFound
 from .const import (
+    APT_CHECK_SECONDS,
+    APT_PACKAGES_URL,
     CONF_SCAN_INTERVAL,
+    CORE_SERVICES,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     EVENT_TYPE,
+    INTEGRATION_SUMMARY_PATH,
     LOGGER,
+    SUMMARY_RETRY_SECONDS,
 )
+from .summary_data import normalize_legacy, normalize_summary, packages_latest, router_latest, section
 
-
+# legacy (routers without /api/integration/summary): CrowdSec counts
 SUMMARY_PATH = "/api/crowdsec/summary"
-SUMMARY_RETRY_SECONDS = 3600
+LEGACY_PATHS = {
+    "services": "/api/system/services",
+    "security": "/api/security",
+    "firewall": "/api/firewall",
+    "dns": "/api/dns",
+    "system": "/api/system",
+    "honeypot": "/api/security/honeypot",
+    "wireguard": "/api/wireguard",
+}
 
 
 class TuxwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -34,36 +51,57 @@ class TuxwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self.client = client
         self.prev: dict[str, Any] = {}
-        # monotonic time until which /api/crowdsec/summary is not tried again
-        # (the router answered 404: older TuxWall without the endpoint)
+        # monotonic times until which the summaries are not tried again (the
+        # router answered 404: older TuxWall without the endpoint)
+        self._no_integration_until = 0.0
         self._no_summary_until = 0.0
-
-    def _changed(self, key: str, value: Any) -> bool:
-        return self.prev.get(key) != value
+        # newest TuxWall version in the apt repository (when the router
+        # does not report one): (version, monotonic time of the fetch)
+        self.repo_latest: str | None = None
+        self._repo_checked = -APT_CHECK_SECONDS
 
     async def _async_update_data(self) -> dict[str, Any]:
-        async def safe(path: str, default):
-            try:
-                return await self.client.get(path)
-            except TuxwallApiError as exc:
-                LOGGER.debug("%s unavailable: %s", path, exc)
-                return default
-
-        data: dict[str, Any] = {
-            "services": (await safe("/api/system/services", {})).get("services", []),
-            "security": await safe("/api/security", {}),
-            "firewall": await safe("/api/firewall", {}),
-            "crowdsec": await self._crowdsec(safe),
-            "dns": await safe("/api/dns", {}),
-            "system": await safe("/api/system", {}),
-            "honeypot": await safe("/api/security/honeypot", {}),
-            "wireguard": await safe("/api/wireguard", {}),
-        }
+        try:
+            data = None
+            if time.monotonic() >= self._no_integration_until:
+                try:
+                    data = normalize_summary(await self.client.get(INTEGRATION_SUMMARY_PATH))
+                except TuxwallNotFound:
+                    LOGGER.info("%s not available on this TuxWall, polling the per-page endpoints",
+                                INTEGRATION_SUMMARY_PATH)
+                    self._no_integration_until = time.monotonic() + SUMMARY_RETRY_SECONDS
+            if data is None:
+                data = await self._legacy()
+        except TuxwallAuthError as exc:
+            raise UpdateFailed(f"TuxWall login failed: {exc}") from exc
+        except TuxwallApiError as exc:
+            raise UpdateFailed(str(exc)) from exc
+        if router_latest(data) is None:
+            await self._check_repo()
         self._fire_security_events(data)
         self.prev = data
         return data
 
-    async def _crowdsec(self, safe) -> dict[str, Any]:
+    async def _legacy(self) -> dict[str, Any]:
+        """1.1.0's per-endpoint polling; a failing endpoint leaves its
+        sections empty, all of them failing fails the update."""
+        failures: list[str] = []
+
+        async def safe(path: str) -> Any:
+            try:
+                return await self.client.get(path)
+            except TuxwallApiError as exc:
+                LOGGER.debug("%s unavailable: %s", path, exc)
+                failures.append(f"{path}: {exc}")
+                return {}
+
+        parts: dict[str, Any] = {key: await safe(path) for key, path in LEGACY_PATHS.items()}
+        if len(failures) == len(LEGACY_PATHS):
+            raise TuxwallApiError(failures[0])
+        parts["crowdsec"] = await self._crowdsec(safe)
+        return normalize_legacy(parts)
+
+    async def _crowdsec(self, safe) -> Any:
         """CrowdSec counts: the compact summary (a few KB); routers without
         it (404) get the full /api/crowdsec list, retried hourly."""
         if time.monotonic() >= self._no_summary_until:
@@ -75,15 +113,30 @@ class TuxwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except TuxwallApiError as exc:
                 LOGGER.debug("%s unavailable: %s", SUMMARY_PATH, exc)
                 return {}
-        return await safe("/api/crowdsec", {})
+        return await safe("/api/crowdsec")
+
+    async def _check_repo(self) -> None:
+        """Newest TuxWall in the apt repository's Packages index, at most
+        every APT_CHECK_SECONDS (failures wait for the next window too)."""
+        if time.monotonic() - self._repo_checked < APT_CHECK_SECONDS:
+            return
+        self._repo_checked = time.monotonic()
+        try:
+            session = async_get_clientsession(self.hass)
+            async with session.get(APT_PACKAGES_URL, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                if resp.status != 200:
+                    raise aiohttp.ClientError(f"HTTP {resp.status}")
+                text = await resp.text()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            LOGGER.debug("TuxWall apt index unavailable: %s", exc)
+            return
+        latest = packages_latest(text)
+        if latest:
+            self.repo_latest = latest
 
     def _fire_security_events(self, data: dict[str, Any]) -> None:
-        """Fire HA events for security-relevant transitions.
-
-        Events are fired on the coordinator thread's behalf; bus fire is
-        thread-safe to call from async context only, so guard with
-        hass.is_running and use hass.async_create_task for safety.
-        """
+        """Fire HA events for security-relevant transitions (bus fire is
+        only safe from the event loop, where the coordinator runs)."""
 
         def fire(payload: dict[str, Any]) -> None:
             if self.hass.is_running:
@@ -98,8 +151,8 @@ class TuxwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             fire({"type": "service_up", "service": unit})
 
         # WAN address change (dynamic WANs + IoT VLAN automations key on this)
-        wan_now = ((data.get("system") or {}).get("wan") or {})
-        wan_prev = ((self.prev.get("system") or {}).get("wan") or {})
+        wan_now = section(data, "wan") or {}
+        wan_prev = section(self.prev, "wan") or {} if self.prev else {}
         if wan_now.get("ipv4") and wan_prev.get("ipv4") and \
                 wan_now.get("ipv4") != wan_prev.get("ipv4"):
             fire({
@@ -108,18 +161,15 @@ class TuxwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "new": wan_now.get("ipv4"),
             })
 
-        # honeypot activity: log grows when a trap fires
-        hp_now = ((data.get("honeypot") or {}).get("log") or [])
-        hp_prev = ((self.prev.get("honeypot") or {}).get("log") or [])
-        if len(hp_now) > len(hp_prev) and hp_now:
-            new_lines = hp_now[len(hp_prev):] if hp_prev else hp_now[-1:]
-            for line in new_lines[-3:]:
-                if "auto-banned" in line or "trapped" in line.lower():
-                    fire({"type": "tarpit_catch", "message": line[:200]})
+        # tarpit activity: new lines in the tarpit log (the newest five)
+        hp_now = (section(data, "tarpit") or {}).get("log") or []
+        hp_prev = (section(self.prev, "tarpit") or {}).get("log") or [] if self.prev else hp_now
+        new_lines = [line for line in hp_now if line not in hp_prev]
+        for line in new_lines[-3:]:
+            if "auto-banned" in line or "trapped" in line.lower():
+                fire({"type": "tarpit_catch", "message": str(line)[:200]})
 
     def _down_list(self, data: dict[str, Any]) -> list[str]:
-        from . import CORE_SERVICES
-
         services = data.get("services", [])
         present = {s.get("unit"): s.get("active") for s in services}
         return [u for u in CORE_SERVICES if u in present and present[u] != "active"]
