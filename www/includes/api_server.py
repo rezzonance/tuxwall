@@ -2761,6 +2761,8 @@ def unban_crowdsec_ip(ip):
     if proc.returncode != 0:
         return {"ok": False, "error": (proc.stderr or proc.stdout or "cscli failed").strip()}
     _invalidate_crowdsec_decisions_cache()
+    # a deception catch of this IP is no longer "handled": its next hit counts
+    _deception_forget(ip)
     return {
         "ok": True,
         "ip": ip,
@@ -3016,6 +3018,7 @@ def _remove_custom_blocklist_entry_locked(value):
     if proc.returncode != 0:
         return {"ok": True, "warning": (proc.stderr or proc.stdout or "").strip(),
                 "message": "Removed %s from the list, but the CrowdSec ban cleanup failed." % value}
+    _deception_forget(value)
     return {"ok": True, "message": "Removed %s from the blocklist." % value}
 
 
@@ -4508,8 +4511,10 @@ def deception_category(source, port=None, logtype=None, logdata=None):
         if lt in (9001, 9002, 12001):
             return "bruteforce"
         if lt == 17001:
-            cmd = str((logdata or {}).get("CMD") or "").strip().lower()
-            return "malware" if cmd in _REDIS_EXPLOIT_CMDS else "scan"
+            # OpenCanary logs the command words as sent ("CONFIG SET",
+            # "config get"): the verb is the first token
+            words = str((logdata or {}).get("CMD") or "").split()
+            return "malware" if words and words[0].lower() in _REDIS_EXPLOIT_CMDS else "scan"
     return _DECEPTION_PORT_CATEGORY.get(port, "scan")
 
 
@@ -4819,6 +4824,10 @@ def _report_q_process(now=None, limit=REPORT_BATCH):
                 st["last_report"] = t
                 st["sent_total"] = int(st.get("sent_total") or 0) + 1
                 st.setdefault("sent_recent", []).append(t)
+                # a delivery resolves an earlier transient ("will retry")
+                # error; refusals and drops stay visible
+                if str(st.get("last_error") or "").endswith("(will retry)"):
+                    st["last_error"] = st["last_error_at"] = None
                 if live is not None:
                     REPORT_Q["items"].remove(live)
             elif result == "refused":
@@ -5341,9 +5350,12 @@ def _allowlist_nets_from(lists):
 
 
 def _allowlist_store(lists):
+    changed = False
     with _ALLOWLIST_CACHE_LOCK:
         if lists is not None:
-            _ALLOWLIST_CACHE.update(ts=time.time(), nets=_allowlist_nets_from(lists), ok=True)
+            nets = _allowlist_nets_from(lists)
+            changed = _ALLOWLIST_CACHE["nets"] is not None and nets != _ALLOWLIST_CACHE["nets"]
+            _ALLOWLIST_CACHE.update(ts=time.time(), nets=nets, ok=True)
         else:
             # keep the last good set; retry after ALLOWLIST_RETRY
             _ALLOWLIST_CACHE.update(
@@ -5351,6 +5363,8 @@ def _allowlist_store(lists):
                 nets=_ALLOWLIST_CACHE["nets"] if _ALLOWLIST_CACHE["nets"] is not None else (),
                 ok=_ALLOWLIST_CACHE["ok"])
         _ALLOWLIST_CACHE["refreshing"] = False
+    if changed:
+        _deception_guard_changed()
 
 
 def _allowlist_refresh():
@@ -5636,6 +5650,8 @@ def allowlist_add(body, identity=None, client_ip=None):
             return 502, {"ok": False, "error": "cscli did not add %s to %s (%s)"
                          % (value, name, ferr or (out + cerr).strip()[:200] or "not listed afterwards")}
         lift = _allowlist_lift_bans(net)
+    # bans inside it were lifted: should the entry go again, the next hit counts
+    _deception_forget(net)
     _allowlist_audit(identity, "added", "to " + name, value,
                      "expires=%s lifted=%d" % (expiry or "never", lift.get("lifted_count", 0)))
     msg = "Added %s to %s" % (value, name)
@@ -5738,9 +5754,12 @@ def _never_ban_refresh():
         print("[deception] never-ban refresh failed: %r" % (exc,), flush=True)
         ips = None
     with _NEVER_BAN_LOCK:
+        changed = ips is not None and _NEVER_BAN["ips"] is not None and ips != _NEVER_BAN["ips"]
         if ips is not None:
             _NEVER_BAN.update(ts=time.time(), ips=ips)
         _NEVER_BAN["refreshing"] = False
+    if changed:
+        _deception_guard_changed()
     return ips
 
 
@@ -5778,6 +5797,76 @@ def _community_published_protected():
         except ValueError:
             continue
     return nets
+
+
+# 2026-11-23 (campaign 3, C3-1): a spared source used to stay spared until
+# the next restart - the honeypot marked it actioned before the guard ran
+# and the canary dedupe swallowed it for an hour, so removing its allowlist
+# entry never let the next hit through. The per-IP dedupe maps now remember
+# a spared source only as a guard memo {"gen", "at", "why"}: valid while the
+# guard generation is unchanged (bumped whenever the allowlist set or the
+# never-ban set changes) and for at most DECEPTION_GUARD_RECHECK seconds
+# (LAN, WAN and protected-range inputs change without a generation bump).
+# An unban or an allowlist add forgets the source's state altogether.
+DECEPTION_GUARD_RECHECK = 600
+_DECEPTION_GUARD_GEN = {"gen": 0}
+_DECEPTION_GUARD_GEN_LOCK = threading.Lock()
+
+
+def _deception_guard_gen():
+    return _DECEPTION_GUARD_GEN["gen"]
+
+
+def _deception_guard_changed():
+    """The allowlist or never-ban set changed: every guard memo is stale."""
+    with _DECEPTION_GUARD_GEN_LOCK:
+        _DECEPTION_GUARD_GEN["gen"] += 1
+
+
+def _deception_guard_memo(why, gen, now):
+    return {"gen": gen, "at": now, "why": why}
+
+
+def _deception_guard_memo_fresh(memo, now=None):
+    if not isinstance(memo, dict):
+        return False
+    now = time.time() if now is None else now
+    return (memo.get("gen") == _deception_guard_gen()
+            and 0 <= now - float(memo.get("at") or 0) < DECEPTION_GUARD_RECHECK)
+
+
+def _deception_forget(target):
+    """Drop the honeypot/canary dedupe state (caught or spared) of every
+    source inside `target` (an IP or a network) so its next hit is judged
+    afresh. Called after an unban and when an allowlist entry lifts bans.
+    -> number of sources forgotten."""
+    try:
+        net = ipaddress.ip_network(str(target).strip(), strict=False)
+        if net.version == 6 and net.prefixlen == 128:
+            net = ipaddress.ip_network(_plain_ip(net.network_address))
+    except ValueError:
+        return 0
+
+    def inside(key):
+        try:
+            a = _plain_ip(ipaddress.ip_address(str(key).split("%")[0]))
+        except ValueError:
+            return False
+        return a.version == net.version and a in net
+
+    n = 0
+    with HONEY_APPLY_LOCK:
+        hits = HONEY_STATE["hits"]
+        for k, e in hits.items():
+            if inside(k) and isinstance(e, dict) and (e.get("actioned") or e.get("guard")):
+                hits.set(k, dict(e, actioned=False, guard=None))
+                n += 1
+    with CANARY_LOCK:
+        for k, _ in CANARY_RECENT.items():
+            if inside(k):
+                CANARY_RECENT.pop(k)
+                n += 1
+    return n
 
 
 def _deception_guard(ip):
@@ -6152,11 +6241,19 @@ def handle_canary_hit(body):
     with CANARY_LOCK:
         now = time.time()
         last = CANARY_RECENT.get(ip, now)
-        if last and now - last < CANARY_RECENT_TTL:
+        if isinstance(last, dict):
+            # spared earlier: same answer while the guard inputs are unchanged
+            if _deception_guard_memo_fresh(last, now):
+                return {"ok": True, "ignored": True, "ip": ip, "guard": last.get("why"),
+                        "message": "never banned: %s" % last.get("why")}
+        elif last and now - last < CANARY_RECENT_TTL:
             return {"ok": True, "ignored": True, "message": "recently handled"}
         CANARY_RECENT.set(ip, now, now)
+    gen = _deception_guard_gen()
     why = _deception_guard(ip)
     if why:
+        with CANARY_LOCK:
+            CANARY_RECENT.set(ip, _deception_guard_memo(why, gen, now), now)
         with HONEY_APPLY_LOCK:
             HONEY_STATE["stats"]["guarded"] = HONEY_STATE["stats"].get("guarded", 0) + 1
         _honey_log("canary: {} NOT banned/reported ({}) - {}".format(ip, what, why))
@@ -6752,6 +6849,41 @@ def _canary_conf_ports(conf=None):
     return out
 
 
+def _canary_wan_ip_pick(ip_json):
+    """The IPv4 OpenCanary binds, from `ip -j -4 addr show <wan>` output:
+    the first global, non-private IPv4 - exactly the rule of
+    scripts/opencanary/opencanary-render-conf::wan_ip (tools/deception_check.py
+    runs both on the same fixtures). 2026-11-23 (C3-4): the firewall
+    watchdog used the default-route source address instead; with several
+    IPv4s on the WAN it looked for twistd on the wrong one, closed the
+    canary's rules and restarted it."""
+    try:
+        data = json.loads(ip_json or "[]")
+    except ValueError:
+        return None
+    for iface in data if isinstance(data, list) else []:
+        for a in (iface.get("addr_info") or []) if isinstance(iface, dict) else []:
+            try:
+                addr = ipaddress.ip_address(a.get("local", ""))
+            except (ValueError, AttributeError):
+                continue
+            if addr.version == 4 and addr.is_global and not addr.is_private:
+                return str(addr)
+    return None
+
+
+def _canary_wan_ip(wan=None):
+    wan = wan or _honey_wan_iface()
+    if not wan:
+        return None
+    try:
+        out = subprocess.run(["ip", "-j", "-4", "addr", "show", wan],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None
+    return _canary_wan_ip_pick(out)
+
+
 def _canary_bound_tcp(wan_ip, ss_out):
     """TCP ports twistd listens on at the WAN IPv4 (from `ss -Htlnp`)."""
     ports = set()
@@ -6807,7 +6939,7 @@ def _canary_fw_reconcile(force=False):
         if _fw_guard is None or not _canary_can_manage():
             return {"ok": True, "skipped": "canary not managed here"}
         wan = _honey_wan_iface()
-        wan_ip = _honey_wan_ip()
+        wan_ip = _canary_wan_ip(wan)
         try:
             active = subprocess.run(["systemctl", "is-active", CANARY_SERVICE],
                                     capture_output=True, text=True,
@@ -7653,11 +7785,17 @@ def _honey_catch(ip, port, auto_ban):
     """Threshold reached for `ip` (once per IP): guard, then the optional
     local ban and the community report (unconditional: enabling the
     deception layer IS the opt-in to share trap catches; reporting.json
-    "enabled" is the off switch)."""
+    "enabled" is the off switch). A spared source is not consumed: it keeps
+    a guard memo and is judged again once the guard inputs change."""
+    gen = _deception_guard_gen()
     why = _deception_guard(ip)
     if why:
         with HONEY_APPLY_LOCK:
             HONEY_STATE["stats"]["guarded"] += 1
+            cur = HONEY_STATE["hits"].get(ip)
+            if isinstance(cur, dict):
+                HONEY_STATE["hits"].set(ip, dict(cur, actioned=False,
+                                                 guard=_deception_guard_memo(why, gen, time.time())))
         _honey_log("guard: {} not banned/reported ({})".format(ip, why))
         return
     if auto_ban:
@@ -7674,16 +7812,19 @@ def _honey_count_hit(ip, threshold, now=None):
     """Count one connection from ip. -> (hits, act): act is True exactly
     once per remembered source, on the first connection with
     hits >= threshold (>=, not ==: a connection dropped over capacity still
-    counts, so the threshold can never be skipped)."""
+    counts, so the threshold can never be skipped). A source the guard
+    spared acts again once its guard memo is stale."""
     now = time.time() if now is None else now
     with HONEY_APPLY_LOCK:
         cur = HONEY_STATE["hits"].get(ip, now)
         e = dict(cur) if cur else {"hits": 0, "first": now, "actioned": False}
         e["hits"] = int(e.get("hits") or 0) + 1
         e["last"] = now
-        act = (not e.get("actioned")) and e["hits"] >= max(1, int(threshold or 1))
+        act = (not e.get("actioned") and not _deception_guard_memo_fresh(e.get("guard"), now)
+               and e["hits"] >= max(1, int(threshold or 1)))
         if act:
             e["actioned"] = True
+            e["guard"] = None
         HONEY_STATE["hits"].set(ip, e, now)
         HONEY_STATE["stats"]["total"] += 1
         if cur is None:

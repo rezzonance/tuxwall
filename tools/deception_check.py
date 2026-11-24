@@ -17,14 +17,20 @@ over capacity); accept() errors never kill a listener; the LAN guard
 (LAN/VLAN/WG + the delegated global IPv6 prefix, loopback, ULA); the
 never-ban guard on every ban/report path (honeypot catch, canary webhook,
 the cscli helper, _spawn_report) incl. own/recent WAN, Cloudflare/protected,
-collector-published ranges and infrastructure IPs; cscli return codes; the
+collector-published ranges and infrastructure IPs; a spared source judged
+afresh after an allowlist add/remove (through the API), a never-ban change,
+an unban or the recheck age while real catches stay deduplicated (honeypot
+and canary, campaign 3 C3-1); cscli return codes; the
 retired SNMP/UDP evidence; reporting "enabled" (absent = on; off holds the
 queue, on resumes it) and the persistent queue (no key on disk, 0600 atomic
 writes, retry/backoff on network/429/5xx, refusal on 4xx, survives a
 restart); the community settings view/update (strict input, audit, cached
-key status, no-op re-saves) and the 24 h deception-ban count; report categories
-with port/service; the canary firewall plan (IPv4 only, grace before
-closing, leftovers removed) and the cached tail read of opencanary.log.
+key status, no-op re-saves), a delivery clearing a transient last error, and
+the 24 h deception-ban count; report categories with port/service (multi-word
+Redis commands); the canary firewall plan (IPv4 only, grace before closing,
+leftovers removed), the canary WAN IPv4 picked exactly like
+opencanary-render-conf on multi-address fixtures (documentation ranges
+treated as public inside the test) and the cached tail read of opencanary.log.
 The load test binds a sandboxed listener on 127.0.0.2 (never the WAN) and
 shows one client can no longer exceed the per-IP cap and fds stay bounded.
 """
@@ -113,14 +119,28 @@ class FakeRun:
         self.cscli_rc = 0
         self.ss = ""
         self.active = "active"
+        self.ip4 = "[]"            # `ip -j -4 addr show <wan>` answer
+        self.allow = {}            # allowlist name -> [values] (cscli allowlists ...)
 
     def __call__(self, cmd, *a, **kw):
         cmd = list(cmd)
         self.calls.append(cmd)
         exe = os.path.basename(cmd[0])
+        if exe == "cscli" and cmd[1:2] == ["allowlists"]:
+            if cmd[2] == "list":
+                return Proc(0, json.dumps([
+                    {"name": n, "items": [{"value": v, "expiration": "0001-01-01T00:00:00Z"} for v in vals]}
+                    for n, vals in self.allow.items()]))
+            if cmd[2] == "add":
+                self.allow.setdefault(cmd[3], []).append(cmd[4])
+            elif cmd[2] == "remove":
+                self.allow[cmd[3]] = [v for v in self.allow.get(cmd[3], []) if v != cmd[4]]
+            return Proc(0, "", "")
         if exe == "cscli":
             return Proc(self.cscli_rc, "" if not self.cscli_rc else "",
                         "" if not self.cscli_rc else "level=fatal msg=\"boom\"")
+        if cmd[:4] == ["ip", "-j", "-4", "addr"]:
+            return Proc(0, self.ip4)
         if cmd[:3] == ["ip", "-o", "addr"]:
             return Proc(0, IP_ADDR)
         if cmd[:2] == ["ss", "-Htlnp"]:
@@ -493,6 +513,130 @@ def canary_body(ip, logtype, port, logdata=None):
     return {"attachments": [{"fields": fields}]}
 
 
+def hp_hit(ip, port=445, auto_ban=True, now=None):
+    """One honeypot connection as the accept loop handles it (catch inline)."""
+    _, act = A._honey_count_hit(ip, 1, now)
+    if act:
+        A._honey_catch(ip, port, auto_ban)
+    return act
+
+
+def bans_of(ip):
+    return len([c for c in RUN.cscli() if c[1:3] == ["decisions", "add"] and ip in c])
+
+
+def queued(ip):
+    return len([i for i in A.REPORT_Q["items"] if i["payload"]["ip"] == ip])
+
+
+def t_guard_recheck():
+    """C3-1: a spared source is judged afresh after the allowlist / never-ban
+    set changes and after an unban; real catches stay deduplicated."""
+    reset_queue()
+    reset_honey()
+    write_reporting({"enabled": True, "url": "https://collector.invalid/report", "key": "k" * 32})
+    A._NEVER_BAN.update(ts=0.0, ips=None, refreshing=False)
+    A.CANARY_RECENT.clear()
+    RUN.calls.clear()
+    RUN.allow = {"lab": []}
+    real = (A._csfw, A._allowlist_lockout_live, A._community_never_ban_ips)
+    A._csfw = None
+    A._allowlist_lockout_live = lambda net, client_ip: []
+    with A._ALLOWLIST_CACHE_LOCK:
+        A._ALLOWLIST_CACHE.update(ts=time.time(), nets=(), refreshing=False, ok=True)
+    X, Y, Z, W = "45.95.147.20", "45.95.147.21", "45.95.147.22", "45.95.147.23"
+    admin = {"username": "boss", "role": "admin"}
+
+    def allow(ip, add=True):
+        st, res = (A.allowlist_add if add else A.allowlist_remove)({"list": "lab", "value": ip}, admin)
+        return st == 200 and res.get("ok")
+
+    try:
+        # honeypot: allowlisted -> spared; removed -> caught on the next hit
+        check(allow(X), "allowlist add (API)")
+        g0 = A.HONEY_STATE["stats"]["guarded"]
+        check(hp_hit(X) and bans_of(X) == 0 and not queued(X), "honeypot: allowlisted source spared")
+        check("allowlist lab" in A.HONEY_STATE["log"][-1], "honeypot: guard reason logged")
+        check(not hp_hit(X) and not hp_hit(X) and A.HONEY_STATE["stats"]["guarded"] == g0 + 1,
+              "honeypot: spared source not re-judged on every hit (guard memo)")
+        gen = A._deception_guard_gen()
+        check(allow(X, add=False) and A._deception_guard_gen() > gen,
+              "allowlist remove (API) bumps the guard generation")
+        check(hp_hit(X) and bans_of(X) == 1 and queued(X) == 1,
+              "honeypot: caught (ban + report) on the first hit after the removal")
+        check(not any(hp_hit(X) for _ in range(5)) and bans_of(X) == 1,
+              "honeypot: a real catch stays deduplicated (no re-ban per hit)")
+        # admin unban -> the next hit counts again
+        check(A.unban_crowdsec_ip(X)["ok"], "unban")
+        check(hp_hit(X) and bans_of(X) == 2, "honeypot: unban -> next hit caught again")
+        # caught, then allowlisted (ban lifted), then removed again -> caught again
+        check(allow(X) and hp_hit(X) and bans_of(X) == 2, "allowlist add after a catch: spared")
+        check(allow(X, add=False) and hp_hit(X) and bans_of(X) == 3,
+              "honeypot: removed again -> caught again")
+
+        # canary: same sequence
+        check(allow(Y), "allowlist add Y")
+        r = A.handle_canary_hit(canary_body(Y, 17001, 6379, {"CMD": "INFO"}))
+        check(r.get("guard") == "CrowdSec allowlist lab" and not r.get("banned") and bans_of(Y) == 0,
+              "canary: allowlisted source spared")
+        r = A.handle_canary_hit(canary_body(Y, 17001, 6379, {"CMD": "INFO"}))
+        check(r.get("guard") == "CrowdSec allowlist lab" and bans_of(Y) == 0,
+              "canary: still spared (memo answers with the reason)")
+        check(allow(Y, add=False), "allowlist remove Y")
+        r = A.handle_canary_hit(canary_body(Y, 17001, 6379, {"CMD": "CONFIG SET"}))
+        check(r.get("banned") is True and bans_of(Y) == 1 and queued(Y) == 1,
+              "canary: caught on the first hit after the removal (not 'recently handled')")
+        check(A.REPORT_Q["items"][-1]["payload"]["category"] == "malware",
+              "canary: CONFIG SET reported as malware (C3-2)")
+        r = A.handle_canary_hit(canary_body(Y, 17001, 6379))
+        check(r.get("message") == "recently handled" and bans_of(Y) == 1, "canary: catch deduplicated")
+        check(A.unban_crowdsec_ip(Y)["ok"], "unban Y")
+        r = A.handle_canary_hit(canary_body(Y, 4002, 22))
+        check(r.get("banned") is True and bans_of(Y) == 2, "canary: unban -> next hit caught again")
+
+        # the never-ban set changes (e.g. an old NTP/DNS address goes away)
+        A._community_never_ban_ips = lambda: {NTP, "192.168.1.1", WAN4, Z}
+        A._NEVER_BAN.update(ts=0.0, ips=None, refreshing=False)
+        check(hp_hit(Z) and bans_of(Z) == 0, "honeypot: never-ban source spared")
+        r = A.handle_canary_hit(canary_body(Z, 4002, 22))
+        check(r.get("guard") and bans_of(Z) == 0, "canary: never-ban source spared")
+        A._community_never_ban_ips = lambda: {NTP, "192.168.1.1", WAN4}
+        gen = A._deception_guard_gen()
+        A._never_ban_refresh()
+        check(A._deception_guard_gen() > gen, "never-ban change bumps the guard generation")
+        check(hp_hit(Z) and bans_of(Z) == 1, "honeypot: caught once it left the never-ban set")
+        r = A.handle_canary_hit(canary_body(Z, 4002, 22))
+        check(r.get("banned") is True and bans_of(Z) == 2, "canary: caught once it left the never-ban set")
+        gen = A._deception_guard_gen()
+        A._never_ban_refresh()
+        check(A._deception_guard_gen() == gen, "unchanged never-ban set: no bump")
+
+        # memo expiry without a generation change (LAN/WAN/protected inputs)
+        A._community_never_ban_ips = lambda: {NTP, "192.168.1.1", WAN4, W}
+        A._NEVER_BAN.update(ts=0.0, ips=None, refreshing=False)
+        check(hp_hit(W) and bans_of(W) == 0, "spared W")
+        check(not hp_hit(W, now=time.time() + 5), "memo fresh within the recheck window")
+        A._community_never_ban_ips = lambda: {NTP, "192.168.1.1", WAN4}
+        gen = A._deception_guard_gen()
+        # swapped in without a refresh: no bump, only the memo's age expires it
+        A._NEVER_BAN.update(ts=time.time(), ips=frozenset({NTP, "192.168.1.1", WAN4}))
+        check(not hp_hit(W, now=time.time() + 10) and A._deception_guard_gen() == gen,
+              "same generation, fresh memo: still spared")
+        check(hp_hit(W, now=time.time() + A.DECEPTION_GUARD_RECHECK + 1) and bans_of(W) == 1,
+              "stale memo re-judged after DECEPTION_GUARD_RECHECK")
+        check(A._deception_forget("bogus") == 0 and A._deception_forget("45.95.147.0/24") >= 1,
+              "_deception_forget: invalid ignored, network form works")
+    finally:
+        A._csfw, A._allowlist_lockout_live, A._community_never_ban_ips = real
+        A._NEVER_BAN.update(ts=0.0, ips=None, refreshing=False)
+        with A._ALLOWLIST_CACHE_LOCK:
+            A._ALLOWLIST_CACHE.update(ts=time.time() + 10 ** 9, nets=(), refreshing=False, ok=True)
+        RUN.allow = {}
+        A.CANARY_RECENT.clear()
+        reset_honey()
+        reset_queue()
+
+
 def t_categories():
     dc = A.deception_category
     check(dc("honeypot", 3389) == "rdp" and dc("honeypot", 22) == "ssh", "honeypot rdp/ssh")
@@ -504,6 +648,13 @@ def t_categories():
           "canary mssql/vnc logins")
     check(dc("canary", 6379, 17001, {"CMD": "CONFIG"}) == "malware"
           and dc("canary", 6379, 17001, {"CMD": "INFO"}) == "scan", "canary redis")
+    # C3-2: OpenCanary logs multi-word commands ("CONFIG GET"); the verb decides
+    for cmd in ("CONFIG GET", "CONFIG SET", "config set dir", " SLAVEOF 192.0.2.9 6379",
+                "replicaof no one", "MODULE LOAD /tmp/x.so", "Eval", "FLUSHALL", "SCRIPT LOAD"):
+        check(dc("canary", 6379, 17001, {"CMD": cmd}) == "malware", "redis %r -> malware" % cmd)
+    for cmd in ("INFO server", "PING", "", "   ", "CONFIGX GET", "GET config", None, 7):
+        check(dc("canary", 6379, 17001, {"CMD": cmd}) == "scan", "redis %r -> scan" % (cmd,))
+    check(dc("canary", 6379, 17001, None) == "scan", "redis without logdata -> scan")
     check(all(dc("honeypot", p) in A.REPORT_CATEGORIES for p in range(1, 70000, 97)),
           "always a collector category")
     check(A.deception_service(445) == "SMB" and A.deception_service(4444) == "port 4444",
@@ -610,9 +761,13 @@ def t_reporting():
     check(it["attempts"] == 3, "503 / 429 retried")
     check(A._report_backoff(1) >= 30 and A._report_backoff(20) <= A.REPORT_RETRY_MAX * 1.25,
           "backoff doubles, capped")
+    check("will retry" in (A.reporting_status()["last_error"] or ""), "outage shown as last error")
     TRANSPORT["mode"] = "ok"
     out = A._report_q_process(now=t0 + 20000)
     check(out["sent"] == 1 and not A.REPORT_Q["items"], "delivered after the outage")
+    st = A.reporting_status()
+    check(st["last_error"] is None and st["last_error_at"] is None,
+          "C3-5: the delivery clears the transient 'will retry' error")
     # refusals are final
     reset_queue()
     TRANSPORT["mode"] = "400"
@@ -621,6 +776,10 @@ def t_reporting():
     check(out["refused"] == 1 and not A.REPORT_Q["items"]
           and "not retried" in A.reporting_status()["last_error"], "4xx refusal dropped")
     TRANSPORT["mode"] = "ok"
+    A.report_ban_to_org(ATTACKER2, 1, "x", "canary", "ssh")
+    A._report_q_process()
+    check("not retried" in (A.reporting_status()["last_error"] or ""),
+          "a later delivery does not hide a refusal (that report was lost)")
     # caps + age
     reset_queue()
     old_max = A.REPORT_QUEUE_MAX
@@ -801,6 +960,97 @@ def t_community_pages():
         A._fetch_community_bans_page = real
 
 
+class doc_global:
+    """Treat the documentation ranges as public IPv4 inside the block, so
+    the "global WAN IPv4" rule can be exercised with documentation fixtures
+    (both api_server and opencanary-render-conf use the ipaddress module)."""
+    DOC = [A.ipaddress.ip_network(n) for n in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")]
+
+    def __enter__(self):
+        cls = A.ipaddress.IPv4Address
+        self.g, self.p = cls.is_global, cls.is_private
+        doc = self.DOC
+        g, p = self.g, self.p
+        cls.is_global = property(lambda s: any(s in n for n in doc) or g.fget(s))
+        cls.is_private = property(lambda s: not any(s in n for n in doc) and p.fget(s))
+        return self
+
+    def __exit__(self, *exc):
+        A.ipaddress.IPv4Address.is_global = self.g
+        A.ipaddress.IPv4Address.is_private = self.p
+
+
+def ip4_json(*addrs, ifname="wan0"):
+    return json.dumps([{"ifindex": 2, "ifname": ifname, "addr_info": [
+        {"family": "inet6" if ":" in a else "inet", "local": a, "prefixlen": 24, "scope": "global"}
+        for a in addrs]}])
+
+
+def load_render_conf():
+    from importlib.machinery import SourceFileLoader
+    path = os.path.join(ROOT_DIR, "scripts", "opencanary", "opencanary-render-conf")
+    loader = SourceFileLoader("opencanary_render_conf", path)
+    spec_r = importlib.util.spec_from_loader("opencanary_render_conf", loader)
+    mod = importlib.util.module_from_spec(spec_r)
+    loader.exec_module(mod)
+    mod.WAN_IFACE = "wan0"
+    return mod
+
+
+def t_canary_wan():
+    """C3-4: the firewall watchdog and opencanary-render-conf pick the same
+    WAN IPv4 (several IPv4s on the WAN: static block + DHCP, an alias)."""
+    R = load_render_conf()
+    fixtures = [
+        ("192.168.1.43", "203.0.113.43", "198.51.100.9"),     # private primary + aliases
+        ("198.51.100.9", "203.0.113.43"),                      # two public
+        ("203.0.113.43", "198.51.100.9", "192.0.2.77"),
+        ("100.64.3.4", "10.0.0.2"),                            # CGNAT / private only
+        ("2001:db8::5", "203.0.113.43"),                       # v6 entries ignored
+        (),
+    ]
+    with doc_global():
+        for fx in fixtures:
+            RUN.ip4 = ip4_json(*fx)
+            mine, theirs = A._canary_wan_ip("wan0"), R.wan_ip()
+            want = next((a for a in fx if ":" not in a and not a.startswith(("192.168.", "10.", "100.64."))), None)
+            check(mine == theirs == want, "same WAN IPv4 as render-conf for %s (%r / %r)" % (fx, mine, theirs))
+        for bad in ("", "not json", "{}", "[1, 2]", '[{"addr_info": [{"local": 5}]}]'):
+            RUN.ip4 = bad
+            check(A._canary_wan_ip("wan0") is None, "malformed ip output -> None (%r)" % bad)
+        check(A._canary_wan_ip_pick(ip4_json("192.168.1.43", "203.0.113.43")) == "203.0.113.43",
+              "pure picker")
+    # reconcile with several IPv4s: the default-route source differs from the
+    # canary's address; rules stay, no restart
+    CAN, SRC = "203.0.113.43", "198.51.100.9"
+    ss = ("LISTEN 0 50 %s:6379 0.0.0.0:* users:((\"twistd\",pid=9,fd=5))\n"
+          "LISTEN 0 50 %s:22 0.0.0.0:* users:((\"twistd\",pid=9,fd=6))\n" % (CAN, CAN))
+    with open(A.CANARY_CONF, "w") as f:
+        json.dump({"device.listen_addr": CAN, "ssh.enabled": True, "ssh.port": 22,
+                   "redis.enabled": True, "redis.port": 6379}, f)
+    current = {("v4", 22, "tcp"), ("v4", 6379, "tcp")}
+    real = (A._canary_fw_rules, A._canary_can_manage, A._fw_guard, A._honey_wan_ip)
+    A._canary_fw_rules = lambda wan: set(current)
+    A._canary_can_manage = lambda: True
+    A._fw_guard = A._fw_guard or object()
+    A._honey_wan_ip = lambda: SRC
+    RUN.ss, RUN.active = ss, "active"
+    A.CANARY_FW_STATE.update(pending=None, restart_at=0.0)
+    try:
+        with doc_global():
+            RUN.ip4 = ip4_json("192.168.1.43", CAN, SRC)
+            RUN.calls.clear()
+            rs = [A._canary_fw_reconcile() for _ in range(3)]
+        check(all(r["ok"] and not r["removed"] and not r["pending"] and not r["added"] for r in rs),
+              "multi-address WAN: canary rules kept (%r)" % (rs[-1],))
+        check(not RUN.ufw() and not any(c[:2] == ["systemctl", "restart"] for c in RUN.calls),
+              "multi-address WAN: no ufw change, no canary restart")
+        check(rs[-1]["open_ports"] == [22, 6379], "open ports reported")
+    finally:
+        A._canary_fw_rules, A._canary_can_manage, A._fw_guard, A._honey_wan_ip = real
+        RUN.ip4, RUN.ss = "[]", ""
+
+
 def t_canary_fw():
     plan = A._canary_fw_plan
     conf = {(22, "tcp"), (5900, "tcp"), (1433, "tcp"), (6379, "tcp")}
@@ -832,7 +1082,9 @@ def t_canary_fw():
     A._canary_can_manage = lambda: True
     A._fw_guard = A._fw_guard or object()
     RUN.ss, RUN.active = ss, "active"
+    RUN.ip4 = ip4_json(WAN4)
     A.CANARY_FW_STATE.update(pending=None, restart_at=time.time())
+    dg = doc_global().__enter__()
     try:
         RUN.calls.clear()
         r1 = A._canary_fw_reconcile()
@@ -872,8 +1124,10 @@ def t_canary_fw():
         r7 = A._canary_fw_reconcile()
         check(sorted(r7["added"]) == [("v4", 22, "tcp"), ("v4", 5900, "tcp")], "reopened when back")
     finally:
+        dg.__exit__()
         A._canary_fw_rules, A._canary_can_manage, A._fw_guard = real_rules, real_manage, real_guard
         RUN.active = "active"
+        RUN.ip4 = "[]"
 
 
 def t_canary_log():
@@ -991,7 +1245,8 @@ def _peer_alive(c):
 def main():
     try:
         for t in (t_ttl_map, t_slots, t_threshold, t_listener, t_lan_guard, t_guard_paths,
-                  t_categories, t_reporting, t_community_settings, t_community_pages, t_canary_fw, t_canary_log, t_load):
+                  t_guard_recheck, t_categories, t_reporting, t_community_settings, t_community_pages,
+                  t_canary_fw, t_canary_wan, t_canary_log, t_load):
             t()
         bad = [c for c in RUN.calls if os.path.basename(c[0]) == "cscli"
                and any(x in c for x in ("192.168.1.50", WAN4, WAN6, CF, NTP))]

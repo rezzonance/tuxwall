@@ -27,6 +27,8 @@ except Exception:
 
 
 def wan_ip():
+    # The dashboard's canary firewall watchdog uses the same rule
+    # (api_server._canary_wan_ip_pick; tools/deception_check.py runs both).
     try:
         import subprocess
         out = subprocess.run(["ip", "-j", "-4", "addr", "show", WAN_IFACE],

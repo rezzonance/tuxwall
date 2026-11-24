@@ -64,6 +64,42 @@ SITE=$(/opt/opencanary/bin/python3 -c 'import sysconfig; print(sysconfig.get_pat
 install -o root -g root -m 0644 "$HERE/tuxwall_canary_handler.py" "$SITE/tuxwall_canary_handler.py"
 install -o root -g root -m 0644 "$HERE/opencanary.logrotate" /etc/logrotate.d/opencanary
 
+echo "== preflight: public WAN IPv4 + free decoy ports =="
+WANIF=$(python3 -c 'import json;print((json.load(open("/etc/tuxwall/interfaces.json")).get("wan") or {}).get("device") or "enp5s0")' 2>/dev/null || echo enp5s0)
+# the renderer's own rule decides the address (first global IPv4 on the WAN)
+if ! /usr/local/sbin/opencanary-render-conf >/dev/null; then
+    echo "ERROR: no public (global) IPv4 on the WAN interface $WANIF." >&2
+    echo "       The canary binds the WAN IPv4 only; behind CGNAT / double NAT (a private" >&2
+    echo "       100.64.x / 10.x / 172.16-31.x / 192.168.x WAN address) it cannot run." >&2
+    echo "       Nothing was started and no firewall rule was opened." >&2
+    exit 1
+fi
+WANIP=$(python3 -c 'import json;print(json.load(open("/etc/opencanaryd/opencanary.conf"))["device.listen_addr"])')
+PORTS=$(python3 -c '
+import json
+c = json.load(open("/etc/opencanaryd/opencanary.conf"))
+print(" ".join(str(c[k[:-8] + ".port"]) for k in sorted(c)
+               if k.endswith(".enabled") and c[k] is True and k[:-8] + ".port" in c and k != "snmp.enabled"))')
+CONFLICT=""
+for P in $PORTS; do
+    # anything but the canary itself on 0.0.0.0 / [::] / * / the WAN IPv4 blocks its bind
+    WHO=$(ss -Htlnp | awk -v ip="$WANIP" -v p="$P" '
+        { n = split($4, a, ":"); if (a[n] != p) next
+          addr = substr($4, 1, length($4) - length(p) - 1)
+          if ((addr == "0.0.0.0" || addr == "[::]" || addr == "*" || addr == ip) && $0 !~ /twistd/) {
+              match($0, /\(\("[^"]+"/); print (RSTART ? substr($0, RSTART + 3, RLENGTH - 4) : "a service") ; exit } }')
+    [ -n "$WHO" ] && CONFLICT="$CONFLICT
+       port $P/tcp: $WHO listens on every address (or on $WANIP)"
+done
+if [ -n "$CONFLICT" ]; then
+    echo "ERROR: the canary cannot bind its decoy ports on $WANIP:$CONFLICT" >&2
+    echo "       A fresh install's sshd listens on 0.0.0.0:22 (LAN-only through ufw). Bind it to" >&2
+    echo "       the LAN address(es) instead (ListenAddress in /etc/ssh/sshd_config.d/, then" >&2
+    echo "       'systemctl restart ssh'), or set \"ssh.enabled\": false in" >&2
+    echo "       $HERE/opencanary.conf.tmpl, then re-run. Nothing was started." >&2
+    exit 1
+fi
+
 echo "== 4/6 dashboard receiver (canary hits -> CrowdSec ban + community report) =="
 # The canary webhook route (/api/canary/hit) ships with tuxwall v2.9.x.
 systemctl is-active --quiet tuxwall.service || {
@@ -78,12 +114,20 @@ echo "== 5/6 start the canary =="
 systemctl daemon-reload
 systemctl enable --now opencanary.service
 sleep 5
-systemctl is-active opencanary.service
-/usr/local/sbin/opencanary-render-conf
+if ! systemctl is-active --quiet opencanary.service; then
+    echo "ERROR: opencanary.service did not stay up ($(systemctl is-active opencanary.service))." >&2
+    echo "       Last log lines:" >&2
+    journalctl -u opencanary.service -n 15 --no-pager >&2 || true
+    echo "       The unit restarts itself (Restart=always); stop it with" >&2
+    echo "       'systemctl disable --now opencanary.service' until the cause is fixed." >&2
+    echo "       No firewall rule was opened." >&2
+    exit 1
+fi
+echo "active"
 
 echo "== 6/6 firewall: open WAN IPv4 rules ONLY for ports the canary actually bound =="
-WANIF=$(python3 -c 'import json;print((json.load(open("/etc/tuxwall/interfaces.json")).get("wan") or {}).get("device") or "enp5s0")' 2>/dev/null || echo enp5s0)
-WANIP=$(ip -j -4 addr show "$WANIF" | python3 -c 'import sys,json;print(next(a["local"] for i in json.load(sys.stdin) for a in i["addr_info"]))')
+# the address twistd was given (the renderer's choice), not the first one on the WAN
+WANIP=$(python3 -c 'import json;print(json.load(open("/etc/opencanaryd/opencanary.conf"))["device.listen_addr"])')
 for P in $(ss -Htlnp | awk -v ip="$WANIP" '$4 ~ "^"ip":" && /twistd/ {split($4,a,":"); print a[length(a)]}' | sort -u); do
     case "$P" in
         22|5900|1433|6379)  # canary ports only - the tarpit owns its own rules
