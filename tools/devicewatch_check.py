@@ -885,6 +885,18 @@ def t_small_batch():
           "DW-13: a single lease is never stale")
     check(isinstance(a.get("ip_seen"), dict) and set(a["ip_seen"]) >= {CUR, OLD} and all(
           isinstance(t, int) for t in a["ip_seen"].values()), "DW-14: devices.json carries ip_seen {ip: ts}")
+    # a long lease renewed more than 24 h ago and a VPN peer: the viewer list still has the current address
+    r2 = make_root("sb2")
+    w(r2 + "/var/lib/kea/kea-leases4.csv", leases_csv([]) + "192.0.2.12,%s,,345600,%d,1,0,0,tv,0,,0\n"
+      % (MAC_B, NOW + 3600))
+    w(r2 + "/var/lib/tuxwall/shared/wg-peers.json", json.dumps({"schema": 1, "iface": "wg0", "peers": [
+        {"public_key": WG_PK, "name": "", "allowed_ips": ["192.0.2.131/32"], "last_handshake": 0}]}))
+    e2 = dw.Engine(dw.Config(r2), FakeSources(), Clock(NOW))
+    e2.cycle()
+    o2 = {d["id"]: d for d in json.load(open(r2 + "/var/lib/tuxwall/devices/devices.json"))["devices"]}
+    check(o2[dw.mac_id(MAC_B)]["ips"] == ["192.0.2.12"] and o2[dw.wg_id(WG_PK)]["ips"] == ["192.0.2.131"],
+          "DW-13: current addresses are in the viewer list even when last touched more than 24 h ago (%r)"
+          % {k: v["ips"] for k, v in o2.items()})
     # INFO-1: a suricata.yaml change is re-read within a cycle (not with the 10-min topology)
     y = r + "/etc/suricata/suricata.yaml"
     w(y, "%YAML 1.1\n---\naf-packet:\n  - interface: wan0\n    cluster-id: 99\n  - interface: default\n")

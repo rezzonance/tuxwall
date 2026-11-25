@@ -2439,8 +2439,8 @@ class Engine:
         # recent; never one that another device holds now (reused by DHCP)
         mine = {ip: i for i, ip in enumerate(current)}
         seen = d.get("ips") or {}
-        cur = sorted((ip for ip, t in seen.items() if t >= now - 86400
-                      and (ip in mine or not ((holders or {}).get(ip, set()) - {did}))),
+        cur = sorted({ip for ip, t in seen.items() if t >= now - 86400
+                      and not ((holders or {}).get(ip, set()) - {did})} | {ip for ip in current if "/" not in ip},
                      key=lambda ip: (mine.get(ip, len(mine)), -(seen.get(ip) or 0), ip))
         online = False
         nstate = self.neigh_state.get(mac) if mac else None
