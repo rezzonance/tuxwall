@@ -371,7 +371,7 @@
         ${q && q.supported ? (q.active
           ? `<button class="btn btn-sm btn-primary" type="button" data-dev-act="release">Release</button>
              <button class="btn btn-sm" type="button" data-dev-act="quarantine">Change quarantine</button>`
-          : `<button class="btn btn-sm btn-danger" type="button" data-dev-act="quarantine">Quarantine…</button>`) : ""}
+          : `<button class="btn btn-sm btn-danger" type="button" data-dev-act="quarantine">Quarantine</button>`) : ""}
         <button class="btn btn-sm" type="button" data-dev-act="rename">Rename</button>
         ${lease ? `<button class="btn btn-sm btn-ghost" type="button" data-dev-act="reserve">Reserve IP</button>` : ""}
         <span class="muted" id="dev-msg" role="status" aria-live="polite"></span>
