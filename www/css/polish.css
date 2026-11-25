@@ -1904,6 +1904,8 @@ html:not(#_tw#_x) #view-backups .act-btn.act-pin.is-on {
   .dev-table, .dev-table tbody, .dev-table tr, .dev-table td { display: block; width: 100%; }
   .dev-table tr { padding: 8px 0; border-bottom: 1px solid var(--border); }
   .dev-table td { padding: 2px 0; border: 0; text-align: left; }
+  /* Honour the 25-row cap in the stacked layout. */
+  #dev-threat-table tbody tr.tw-row-capped { display: none; }
 }
 
 .modal-box.dev-q-box { max-width: 560px; }
@@ -1950,6 +1952,7 @@ html:not(#_tw#_x) #view-backups .act-btn.act-pin.is-on {
 .dev-threat-recent { margin-top: 12px; }
 .dev-threat-recent > p { margin: 0; }
 .dev-threat-recent .table-wrap { margin-bottom: 10px; }
+#dev-threat-recent { margin-top: 0; padding: 0 16px 14px; }
 @media (max-width: 760px) {
   #dev-src-body .ov-kv-row { flex-direction: column; gap: 2px; }
   #dev-src-body .ov-kv-row .ov-kv-value { text-align: left; }

@@ -13289,6 +13289,7 @@
     avatar: '<circle cx="11" cy="9" r="3.4"/><path d="M4.8 20a6.2 6.2 0 0 1 12.4 0"/><path d="M19 3.5v5M16.5 6h5"/>',
     security: '<rect x="4" y="10" width="16" height="11" rx="2.2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 15v2.5"/>',
     threat: '<path d="M12 3 5 6v6c0 4 3 7 7 9 4-2 7-5 7-9V6z"/><path d="M12 8.5v4.2M12 15.8h.01"/>',
+    local: '<rect x="2.5" y="4" width="14" height="10" rx="1.6"/><path d="M6.5 18.5h6M9.5 14v4.5"/><path d="M19.2 8a4.2 4.2 0 0 1 0 6M21.6 5.6a7.6 7.6 0 0 1 0 10.8"/>',
     alerts: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/>',
     archives: '<rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9"/><path d="M10 13h4"/>',
     schedule: '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.6 1.6M9.5 2.5h5M12 2.5V5"/>',
@@ -16888,6 +16889,7 @@
     "sec-aide-table",
     "sec-honey-table",
     "sec-canary-table",
+    "dev-threat-table",
   ];
 
   const expanded = new Map();   // tableId -> bool

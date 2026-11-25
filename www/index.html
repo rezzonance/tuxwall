@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
   <link rel="stylesheet" href="/css/style.css?v=202611210025">
-  <link rel="stylesheet" href="/css/polish.css?v=202611251400">
+  <link rel="stylesheet" href="/css/polish.css?v=202611251721">
   <link rel="stylesheet" href="/css/firewall.css?v=202611210025">
   <link rel="stylesheet" href="/css/bento.css?v=202611210025">
   <link rel="stylesheet" href="/css/heroes.css?v=202611210025">
@@ -1630,18 +1630,10 @@
       </div>
 
       <!-- Last 10 device threats popup (scripts/devices.js; data: GET /api/devices/findings/recent) -->
-      <div class="modal" id="dev-thr-modal" hidden>
-        <div class="modal-box modal-box-wide dev-box" role="dialog" aria-modal="true" aria-labelledby="dev-thr-title">
-          <button type="button" class="modal-close" id="dev-thr-close" aria-label="Close">&times;</button>
-          <div class="dev-head"><h3 id="dev-thr-title">Last 10 threats</h3></div>
-          <div id="dev-thr-body"></div>
-        </div>
-      </div>
-
       <!-- OPNsense-style sub-tabs -->
       <div class="fw-subtabs" id="sec-subtabs">
-        <button class="fw-subtab" type="button" data-sec-pane="local">Local</button>
         <button class="fw-subtab active" type="button" data-sec-pane="attacks">Attacks</button>
+        <button class="fw-subtab" type="button" data-sec-pane="local">Local</button>
         <button class="fw-subtab" type="button" data-sec-pane="timeline">Timeline</button>
         <button class="fw-subtab" type="button" data-sec-pane="tripwire">Tripwire</button>
         <button class="fw-subtab" type="button" data-sec-pane="sensors">Sensors</button>
@@ -1660,6 +1652,17 @@
           <span class="muted" id="dev-threat-hint">LAN devices matched against threat intelligence and IDS alerts</span>
         </div>
         <div class="dev-threat-body" id="dev-threat-body"></div>
+        <!-- Recent threats (admin): 25 rows, then the shared row-cap "Show all" bar -->
+        <div class="dev-threat-recent" id="dev-threat-recent" hidden>
+          <div class="table-wrap">
+            <table class="dev-table" id="dev-threat-table">
+              <thead><tr><th>Severity</th><th>Feed</th><th>Blocked Host</th><th>Client</th><th>Time</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p class="muted" id="dev-threat-empty" hidden>No threats in the last 30 days</p>
+          <p class="muted dev-small" id="dev-thr-msg" role="status" aria-live="polite"></p>
+        </div>
       </div>
       </div>
 
@@ -4240,8 +4243,8 @@
 <script src="/scripts/worldmap.js?v=202611210025"></script>
 <script src="/scripts/community-settings.js?v=202611210025"></script>
 <script src="/scripts/https-settings.js?v=202611231900"></script>
-<script src="/scripts/devices.js?v=202611251530"></script>
-<script src="/scripts/dashboard.js?v=202611251400"></script>
+<script src="/scripts/devices.js?v=202611251721"></script>
+<script src="/scripts/dashboard.js?v=202611251721"></script>
 <script src="/scripts/enhance.js?v=202611210025"></script>
 <script src="/scripts/netmap.js?v=202611210025"></script>
 <script src="/scripts/insights.js?v=202611210025"></script>
