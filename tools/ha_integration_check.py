@@ -204,8 +204,18 @@ def t_metadata():
                "documentation", "integration_type", "iot_class", "issue_tracker", "loggers", "requirements",
                "version", "quality_scale", "single_config_entry"}
     check(set(man) <= allowed, "manifest keys known (%s)" % sorted(set(man) - allowed))
-    check(man["domain"] == "tuxwall" and man["version"] == "1.2.0" and man["iot_class"] == "local_polling"
+    check(man["domain"] == "tuxwall" and man["version"] == "1.2.1" and man["iot_class"] == "local_polling"
           and re.fullmatch(r"\d+\.\d+\.\d+", man["version"]), "manifest domain/version/iot_class")
+    for name, size in (("icon.png", 256), ("icon@2x.png", 512)):
+        path = os.path.join(HA_DIR, "brand", name)
+        try:
+            with open(path, "rb") as f:
+                head = f.read(26)
+            w, h = int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+            ok = head[:8] == b"\x89PNG\r\n\x1a\n" and (w, h) == (size, size) and head[25] == 6
+        except OSError:
+            ok = False
+        check(ok, "brand/%s is a %dx%d RGBA PNG" % (name, size, size))
     strings = json.load(open(os.path.join(HA_DIR, "strings.json")))
     en = json.load(open(os.path.join(HA_DIR, "translations", "en.json")))
     check(strings == en, "strings.json == translations/en.json")

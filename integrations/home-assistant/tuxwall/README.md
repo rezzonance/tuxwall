@@ -120,6 +120,8 @@ Unbound DNS block; requires an **admin** tuxwall user).
 
 ## Changelog
 
+- **1.2.1** — Integration icon: `brand/icon.png` and `brand/icon@2x.png` (the
+  TuxWall logo), shown by Home Assistant 2026.3 and later.
 - **1.2.0** — One request per poll: `GET /api/integration/summary` (about
   5 KB, every section flagged `ok`/`stale`; a slow or failing source on the
   router no longer delays or fails the poll) instead of eight endpoints
