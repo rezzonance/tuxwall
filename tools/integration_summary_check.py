@@ -187,6 +187,12 @@ A.https_status = lambda: json.loads(json.dumps(HTTPS["value"]))
 A._dpkg_version = lambda pkg: "3.3.6"
 A.APT_LISTS_DIR = APT_DIR
 A._boot_time = lambda: int(NOW) - 5000
+A.build_devices_summary = lambda: {
+    "ok": True, "available": True, "running": True, "generated_at": int(NOW), "devices": 12, "online": 9,
+    "new_24h": 1, "flagged": 2, "critical": 1, "warning": 1, "quarantined": 0, "findings_active": 3,
+    "worst": {"severity": "critical", "reason": "Connected to a known botnet C2 server (Feodo Tracker)",
+              "device": "m020000000001", "device_name": "Example laptop", "last": int(NOW) - 60},
+    "feeds_ok": 1, "feeds_total": 3}
 
 
 def reset():
@@ -202,7 +208,9 @@ def summary(role="viewer"):
 
 
 SECTIONS = ("services", "security", "firewall", "crowdsec", "dns", "blocklist", "system", "wan", "tarpit",
-            "canary", "tripwire", "community", "wireguard", "dhcp", "backup", "https", "update")
+            "canary", "tripwire", "community", "wireguard", "dhcp", "backup", "https", "update", "devices")
+# server sections the Home Assistant integration does not read yet (HA 1.3.0, 3.3.7 session 2)
+NOT_IN_HA_YET = {"devices"}
 
 
 def t_swr_kick_wait():
@@ -310,6 +318,10 @@ def t_values(j):
     check(u["installed"] == "3.3.6" and u["latest"] == "3.3.10" and u["source"] == "apt"
           and isinstance(u["checked_at"], int), "update: newest TuxWall in the TuxWall apt index (%r)" % u)
     check(j["tuxwall_version"] == "3.3.6", "tuxwall_version")
+    d = j["devices"]
+    check(d["flagged"] == 2 and d["quarantined"] == 0 and d["worst"]["severity"] == "critical"
+          and set(d["worst"]) == {"severity", "reason", "device_name", "last"} and "findings" not in d,
+          "devices: flagged/quarantined/worst only, no indicator or address (%r)" % d)
 
 
 def t_derived():
@@ -474,7 +486,7 @@ def t_ha_reads_payload():
     data = sd.normalize_summary(j)
     check(data["mode"] == "summary" and all(data["sections"][s] is not None for s in sd.SECTIONS),
           "HA: every section read")
-    check(set(sd.SECTIONS) == set(SECTIONS), "HA section list == server sections")
+    check(set(sd.SECTIONS) == set(SECTIONS) - NOT_IN_HA_YET, "HA section list == server sections")
     missing = [k for k in sd.VALUES if sd.value(data, k) is None]
     check(not missing, "HA: every entity has a value from the real payload (missing %s)" % missing)
     check(sd.value(data, "crowdsec_bans") == 1234 and sd.value(data, "dns_blocked_pct") == 25.0

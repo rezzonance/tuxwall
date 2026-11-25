@@ -18,6 +18,12 @@ case "$1" in
       fi
       systemctl stop tuxwall-tripwire.service 2>/dev/null || true
       systemctl disable tuxwall-tripwire.service 2>/dev/null || true
+      # device monitoring: same "enabled once" marker rule as the tripwire
+      if systemctl is-enabled --quiet tuxwall-devicewatch.service 2>/dev/null; then
+        rm -f /var/lib/tuxwall/.devicewatch-enabled-once
+      fi
+      systemctl stop tuxwall-devicewatch-feeds.timer tuxwall-devicewatch.service 2>/dev/null || true
+      systemctl disable tuxwall-devicewatch-feeds.timer tuxwall-devicewatch.service 2>/dev/null || true
     fi
     ;;
 esac

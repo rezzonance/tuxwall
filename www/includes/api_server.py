@@ -67,6 +67,11 @@ try:
 except Exception as _exc:  # strict JSON only (no Kea comments) without it
     print("tuxwall: kea_conf module unavailable: %r" % _exc, flush=True)
     _kea_conf = None
+try:
+    import devicewatch as _dw
+except Exception as _exc:  # device monitoring views answer "unavailable" without it
+    print("tuxwall: devicewatch module unavailable: %r" % _exc, flush=True)
+    _dw = None
 
 
 def _topo(fn, default=""):
@@ -12410,6 +12415,9 @@ ADMIN_GET_PREFIXES = (
     # config view shows the API key's first/last 4 characters (3.3.6).
     "/api/security/ai-summary",
     "/api/security/ai-config",
+    # device monitoring: the local indicator list (3.3.7; device detail is
+    # admin-only in devices_get)
+    "/api/devices/indicators",
 )
 
 
@@ -17658,6 +17666,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_crowdsec_summary())
         elif path == "/api/integration/summary":
             self._send(200, build_integration_summary())
+        elif path in ("/api/devices", "/api/devices/summary", "/api/devices/feeds", "/api/devices/indicators") \
+                or re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})$", path):
+            self._send(*devices_get(path, identity))
         elif path == "/api/crowdsec/blocklist":
             self._send(200, build_custom_blocklist())
         elif path == "/api/crowdsec/ban-state":
@@ -19260,6 +19271,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/interfaces/plan":
             self._send(*interfaces_plan(body, _client_key(self)))
 
+        elif path in ("/api/devices/feeds/update", "/api/devices/feeds/key", "/api/devices/indicators") \
+                or re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})/(rename|expected)$", path):
+            self._send(*devices_post(path, body, identity))
         elif path in ("/api/https/settings", "/api/https/regenerate", "/api/https/custom-cert",
                       "/api/https/dismiss-announce"):
             self._send(*https_post(path.rsplit("/", 1)[1], body, identity, _client_key(self)))
@@ -20227,6 +20241,411 @@ def https_status():
 
 
 # --- Integration summary (Home Assistant) -----------------------------------
+# --- Device monitoring (3.3.7) ------------------------------------------------
+# tuxwall-devicewatch.service (unprivileged, sandboxed; www/includes/
+# devicewatch.py) analyses Zeek/Suricata/DNS/DHCP/neighbour data and writes
+# DEVICES_STATE_DIR. The API only reads that state, applies the admin
+# overlays (names, "expected" marks) and serves role-filtered views:
+# viewers get the list + health + a generic reason and today's traffic
+# totals; findings, indicators and destinations are admin-only. The state
+# directory belongs to the service user, so every read is O_NOFOLLOW,
+# regular-file-only and size-capped. Admin edits go to DEVICES_CONF_DIR
+# (root-owned, read by the service on its next cycle).
+DEVICES_STATE_DIR = "/var/lib/tuxwall/devices"
+DEVICES_CONF_DIR = "/etc/tuxwall/devices"
+DEVICES_WG_SNAPSHOT = os.path.join(BLOCKLIST_DIR, "wg-peers.json")
+DEVICES_FEEDS_UNIT = "tuxwall-devicewatch-feeds.service"
+DEVICES_MAX_READ = 64 << 20
+DEVICES_ENGINE_STALE = 300        # outputs older than this: the engine is not running
+DEVICES_WG_INTERVAL = 60
+DEVICE_NAME_MAX = 64
+DEVICE_VIEWER_FIELDS = ("id", "kind", "name", "mac", "private_mac", "vendor", "type", "ips", "ipv6",
+                        "iface", "zone", "zone_name", "vlan", "first_seen", "last_seen", "online",
+                        "health", "risk", "reason", "activity")
+DEVICE_LIST_EXTRA = ("name_source", "type_reason", "current_ips", "neighbour_state", "findings",
+                     "worst_finding", "baseline")
+_DEVICES_CACHE = {}
+_DEVICES_LOCK = threading.Lock()
+_DEVICES_CONF_LOCK = threading.Lock()
+
+
+def _dw_read(name, base=None):
+    """Parsed JSON of an engine output (cached by inode/mtime/size), or None."""
+    path = os.path.join(base or DEVICES_STATE_DIR, name)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if (st.st_mode & 0o170000) != 0o100000 or st.st_size > DEVICES_MAX_READ:
+            return None
+        key = (st.st_ino, st.st_mtime_ns, st.st_size)
+        with _DEVICES_LOCK:
+            hit = _DEVICES_CACHE.get(path)
+            if hit and hit[0] == key:
+                return hit[1]
+        chunks, total = [], 0
+        while True:
+            b = os.read(fd, 1 << 20)
+            if not b:
+                break
+            total += len(b)
+            if total > DEVICES_MAX_READ:
+                return None
+            chunks.append(b)
+        try:
+            data = json.loads(b"".join(chunks).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None
+        with _DEVICES_LOCK:
+            _DEVICES_CACHE[path] = (key, data)
+        return data
+    finally:
+        os.close(fd)
+
+
+def _dw_conf_read(name):
+    try:
+        with open(os.path.join(DEVICES_CONF_DIR, name), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _dw_conf_write(name, obj, mode=0o644):
+    os.makedirs(DEVICES_CONF_DIR, mode=0o755, exist_ok=True)
+    path = os.path.join(DEVICES_CONF_DIR, name)
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=DEVICES_CONF_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=1, sort_keys=True)
+            f.write("\n")
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _devices_state():
+    """(devices, findings, generated_at, running) with the admin overlays
+    applied (names, expected marks -> risk/health recomputed at once)."""
+    raw = _dw_read("devices.json")
+    if not isinstance(raw, dict) or not isinstance(raw.get("devices"), list) or _dw is None:
+        return None, [], None, False
+    fraw = _dw_read("findings.json")
+    findings = fraw.get("findings") if isinstance(fraw, dict) and isinstance(fraw.get("findings"), list) else []
+    gen = raw.get("generated_at") or 0
+    now = time.time()
+    names = (_dw_conf_read("names.json").get("names") or {})
+    expected = [e for e in (_dw_conf_read("expected.json").get("entries") or [])
+                if isinstance(e, dict) and e.get("indicator")]
+    by_dev = {}
+    flist = []
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+        f2 = dict(f, expected=_dw.is_expected(f, expected))
+        flist.append(f2)
+        by_dev.setdefault(f2.get("device"), []).append(f2)
+    out = []
+    for d in raw["devices"]:
+        if not isinstance(d, dict) or not isinstance(d.get("id"), str):
+            continue
+        d2 = dict(d)
+        user = names.get(d2["id"])
+        if isinstance(user, str) and user:
+            d2["name"], d2["name_source"] = user, "user"
+        fl = by_dev.get(d2["id"], [])
+        risk, health, reason, worst = _dw.score_device(d2, fl, now)
+        active = sum(1 for f in fl if not f["expected"])
+        d2.update(risk=risk, health=health, reason=reason, worst_finding=worst["id"] if worst else None,
+                  findings={"total": len(fl), "active": active, "expected": len(fl) - active})
+        out.append(d2)
+    rank = {"critical": 3, "warning": 2, "new": 1}
+    out.sort(key=lambda x: (-rank.get(x["health"], 0), -x["risk"], str(x.get("name") or "").lower()))
+    return out, flist, gen, now - gen < DEVICES_ENGINE_STALE
+
+
+def _devices_unavailable():
+    return {"ok": True, "available": False, "devices": [],
+            "error": "Device monitoring has no data yet (tuxwall-devicewatch.service not running?)"}
+
+
+def build_devices(identity):
+    devices, _f, gen, running = _devices_state()
+    if devices is None:
+        return _devices_unavailable()
+    admin = _is_admin(identity)
+    fields = DEVICE_VIEWER_FIELDS + (DEVICE_LIST_EXTRA if admin else ())
+    return {"ok": True, "available": True, "running": running, "generated_at": gen, "admin": admin,
+            "devices": [{k: d.get(k) for k in fields} for d in devices]}
+
+
+def build_device_detail(did):
+    devices, findings, gen, running = _devices_state()
+    if devices is None:
+        return 404, dict(_devices_unavailable(), ok=False)
+    dev = next((d for d in devices if d["id"] == did), None)
+    if dev is None:
+        return 404, {"ok": False, "error": "Unknown device"}
+    fl = sorted((f for f in findings if f.get("device") == did),
+                key=lambda f: (bool(f.get("expected")), -_dw.SEV_RANK.get(f.get("severity"), 0), -(f.get("last") or 0)))
+    return 200, {"ok": True, "running": running, "generated_at": gen, "device": dev, "findings": fl,
+                 "quarantine": {"supported": False, "active": False}}
+
+
+def build_devices_summary():
+    devices, findings, gen, running = _devices_state()
+    feeds_ok = feeds_total = 0
+    if _dw is not None:
+        st = _dw.feeds.load_state(os.path.join(DEVICES_STATE_DIR, "feeds"))
+        for name in _dw.feeds.FEEDS:
+            feeds_total += 1
+            feeds_ok += 1 if (st.get(name) or {}).get("status") == "ok" else 0
+    if devices is None:
+        return {"ok": True, "available": False, "running": False, "devices": 0, "online": 0, "new_24h": 0,
+                "flagged": 0, "critical": 0, "warning": 0, "quarantined": 0, "worst": None,
+                "feeds_ok": feeds_ok, "feeds_total": feeds_total}
+    s = _dw.summarize(devices, findings, time.time())
+    return {"ok": True, "available": True, "running": running, "generated_at": gen,
+            "devices": s["devices"], "online": s["online"], "new_24h": s["new_24h"], "flagged": s["flagged"],
+            "critical": s["critical"], "warning": s["warning"], "quarantined": 0,
+            "findings_active": s["findings_active"], "worst": s["worst"],
+            "feeds_ok": feeds_ok, "feeds_total": feeds_total}
+
+
+def _devices_key_set():
+    try:
+        return os.path.getsize(os.path.join(DEVICES_CONF_DIR, "abuse-ch.key")) > 0
+    except OSError:
+        return False
+
+
+def build_devices_feeds():
+    if _dw is None:
+        return {"ok": False, "error": "devicewatch module unavailable", "feeds": []}
+    feeds_dir = os.path.join(DEVICES_STATE_DIR, "feeds")
+    key_set = _devices_key_set()
+    rows = _dw.feeds.feed_status(feeds_dir, config=_dw_conf_read("devicewatch.json"), key_set=key_set)
+    st = _dw.feeds.load_state(feeds_dir)
+    return {"ok": True, "key_set": key_set, "updated_at": st.get("_updated"), "feeds": rows,
+            "note": "Threat-intel data: abuse.ch (CC0). Only feed downloads leave the router."}
+
+
+def build_devices_indicators():
+    items = _dw_conf_read("local-indicators.json").get("indicators")
+    return {"ok": True, "indicators": items if isinstance(items, list) else [],
+            "max": _dw.feeds.LOCAL_MAX if _dw is not None else 0}
+
+
+def devices_get(path, identity):
+    """GET /api/devices[/...]. Detail and indicators are admin-only
+    (indicators also via ADMIN_GET_PREFIXES)."""
+    if path == "/api/devices":
+        return 200, build_devices(identity)
+    if path == "/api/devices/summary":
+        return 200, build_devices_summary()
+    if path == "/api/devices/feeds":
+        return 200, build_devices_feeds()
+    if path == "/api/devices/indicators":
+        if not _is_admin(identity):
+            return 403, {"ok": False, "error": "Administrator role required"}
+        return 200, build_devices_indicators()
+    m = re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})$", path)
+    if m:
+        if not _is_admin(identity):
+            return 403, {"ok": False, "error": "Administrator role required"}
+        return build_device_detail(m.group(1))
+    return 404, {"ok": False, "error": "Not found"}
+
+
+def _devices_request_feed_update():
+    """Mark a forced refresh (the feed unit honours a request newer than its
+    last run) and start the oneshot unit without waiting."""
+    os.makedirs(DEVICES_CONF_DIR, mode=0o755, exist_ok=True)
+    marker = os.path.join(DEVICES_CONF_DIR, "feeds-update.request")
+    with open(marker, "w") as f:
+        f.write("%d\n" % int(time.time()))
+    os.chmod(marker, 0o644)
+    subprocess.run(["systemctl", "start", "--no-block", DEVICES_FEEDS_UNIT],
+                   capture_output=True, text=True, timeout=15, check=False)
+
+
+def devices_post(path, body, identity):
+    """POST /api/devices/... (admin; the CSRF/role gates ran before)."""
+    if _dw is None:
+        return 503, {"ok": False, "error": "devicewatch module unavailable"}
+    who = (identity or {}).get("username") or "?"
+    if path == "/api/devices/feeds/update":
+        try:
+            _devices_request_feed_update()
+        except Exception as exc:
+            return 500, {"ok": False, "error": "could not start the feed update: %s" % exc.__class__.__name__}
+        return 200, {"ok": True, "started": True}
+    if path == "/api/devices/feeds/key":
+        key = str(body.get("key") or "").strip()
+        if key and not _dw.feeds.KEY_RE.match(key):
+            return 400, {"ok": False, "error": "That does not look like an abuse.ch Auth-Key"}
+        with _DEVICES_CONF_LOCK:
+            os.makedirs(DEVICES_CONF_DIR, mode=0o755, exist_ok=True)
+            kpath = os.path.join(DEVICES_CONF_DIR, "abuse-ch.key")
+            if key:
+                fd = os.open(kpath + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, "w") as f:
+                    f.write(key + "\n")
+                os.chmod(kpath + ".tmp", 0o600)
+                os.replace(kpath + ".tmp", kpath)
+            else:
+                try:
+                    os.unlink(kpath)
+                except FileNotFoundError:
+                    pass
+        print("[devices] abuse.ch key %s by %s" % ("set" if key else "cleared", who), flush=True)
+        try:
+            _devices_request_feed_update()
+        except Exception:
+            pass
+        return 200, {"ok": True, "key_set": bool(key)}
+    if path == "/api/devices/indicators":
+        action = str(body.get("action") or "")
+        with _DEVICES_CONF_LOCK:
+            data = _dw_conf_read("local-indicators.json")
+            items = [x for x in (data.get("indicators") or []) if isinstance(x, dict)]
+            if action == "add":
+                try:
+                    item = _dw.feeds.validate_local_indicator(body.get("indicator") or {})
+                except ValueError as exc:
+                    return 400, {"ok": False, "error": str(exc)}
+                items = [x for x in items if x.get("value") != item["value"]]
+                if len(items) >= _dw.feeds.LOCAL_MAX:
+                    return 400, {"ok": False, "error": "Too many local indicators (max %d)" % _dw.feeds.LOCAL_MAX}
+                item.update(added=int(time.time()), added_by=who)
+                items.append(item)
+            elif action == "remove":
+                value = str(body.get("value") or "").strip().lower()
+                before = len(items)
+                items = [x for x in items if str(x.get("value") or "").lower() != value]
+                if len(items) == before:
+                    return 404, {"ok": False, "error": "No such indicator"}
+            else:
+                return 400, {"ok": False, "error": "action must be add or remove"}
+            _dw_conf_write("local-indicators.json", {"version": 1, "indicators": items})
+        return 200, {"ok": True, "indicators": items}
+    m = re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})/(rename|expected)$", path)
+    if not m:
+        return 404, {"ok": False, "error": "Not found"}
+    did, action = m.group(1), m.group(2)
+    devices, findings, _gen, _run = _devices_state()
+    if devices is None or not any(d["id"] == did for d in devices):
+        return 404, {"ok": False, "error": "Unknown device"}
+    if action == "rename":
+        name = " ".join(str(body.get("name") or "").split())
+        name = "".join(ch for ch in name if ch.isprintable())
+        if len(name) > DEVICE_NAME_MAX:
+            return 400, {"ok": False, "error": "Name too long (max %d characters)" % DEVICE_NAME_MAX}
+        with _DEVICES_CONF_LOCK:
+            data = _dw_conf_read("names.json")
+            names = {k: v for k, v in (data.get("names") or {}).items()
+                     if isinstance(k, str) and isinstance(v, str)}
+            if name:
+                names[did] = name
+            else:
+                names.pop(did, None)
+            _dw_conf_write("names.json", {"version": 1, "names": names})
+        return 200, {"ok": True, "id": did, "name": name or None}
+    fid = str(body.get("finding") or "")
+    f = next((x for x in findings if x.get("id") == fid and x.get("device") == did), None)
+    if f is None:
+        return 404, {"ok": False, "error": "Unknown finding for this device"}
+    mark = bool(body.get("expected", True))
+    scope = "*" if body.get("all_devices") else did
+    with _DEVICES_CONF_LOCK:
+        data = _dw_conf_read("expected.json")
+        entries = [e for e in (data.get("entries") or []) if isinstance(e, dict) and e.get("indicator")]
+        scopes = (scope,) if mark else (did, "*")
+        entries = [e for e in entries if not (e.get("indicator") == f["indicator"] and e.get("kind") == f["kind"]
+                                              and e.get("device") in scopes)]
+        if mark:
+            entries.append({"device": scope, "kind": f["kind"], "indicator": f["indicator"],
+                            "at": int(time.time()), "by": who, "note": str(body.get("note") or "")[:200]})
+        _dw_conf_write("expected.json", {"version": 1, "entries": entries})
+    devices, _f, _g, _r = _devices_state()
+    dev = next((d for d in devices or [] if d["id"] == did), {})
+    return 200, {"ok": True, "id": did, "finding": fid, "expected": mark,
+                 "health": dev.get("health"), "risk": dev.get("risk"), "reason": dev.get("reason")}
+
+
+def _devices_wg_snapshot():
+    """WireGuard peers for the device engine (public keys, names, allowed
+    IPs, handshake time - never a private or preshared key). Written only
+    when it changed; root-owned in /var/lib/tuxwall, read-only for the
+    service."""
+    peers = {}
+    if os.path.exists(WG_CONF):
+        try:
+            for p in parse_wg_dump(_wg(["show", WG_IFACE, "dump"]))["peers"]:
+                if is_wg_key(p["public_key"]):
+                    peers[p["public_key"]] = {
+                        "public_key": p["public_key"], "name": "",
+                        "allowed_ips": [x.strip() for x in (p.get("allowed_ips") or "").split(",") if x.strip()],
+                        "last_handshake": int(p.get("last_handshake") or 0)}
+        except Exception:
+            pass
+        for sp in load_wg_state().get("peers") or []:
+            pk = sp.get("public_key")
+            if not is_wg_key(pk or ""):
+                continue
+            e = peers.setdefault(pk, {"public_key": pk, "name": "", "last_handshake": 0,
+                                      "allowed_ips": [sp["address"]] if sp.get("address") else []})
+            e["name"] = str(sp.get("name") or "")[:64]
+    obj = {"schema": 1, "iface": WG_IFACE, "peers": sorted(peers.values(), key=lambda p: p["public_key"])}
+    try:
+        with open(DEVICES_WG_SNAPSHOT, encoding="utf-8") as f:
+            old = json.load(f)
+        if isinstance(old, dict) and old.get("peers") == obj["peers"]:
+            return False
+    except (OSError, ValueError):
+        pass
+    obj["generated_at"] = int(time.time())
+    tmp = DEVICES_WG_SNAPSHOT + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, DEVICES_WG_SNAPSHOT)
+    return True
+
+
+def _devices_wg_loop():
+    while True:
+        try:
+            _devices_wg_snapshot()
+        except Exception as exc:
+            print("[devices] WireGuard snapshot failed: %r" % (exc,), flush=True)
+        time.sleep(DEVICES_WG_INTERVAL)
+
+
+def start_devices_wg_snapshot():
+    threading.Thread(target=_devices_wg_loop, name="devices-wg", daemon=True).start()
+
+
+def _integ_devices():
+    s = build_devices_summary()
+    if not s.get("available"):
+        return {"ok": False, "error": "device monitoring has no data yet"}
+    w = s.get("worst")
+    return {"ok": True, "running": s["running"], "devices": s["devices"], "online": s["online"],
+            "new_24h": s["new_24h"], "flagged": s["flagged"], "critical": s["critical"], "warning": s["warning"],
+            "quarantined": 0,
+            "worst": {"severity": w["severity"], "reason": w["reason"], "device_name": w["device_name"],
+                      "last": w["last"]} if w else None}
+
+
 # GET /api/integration/summary: everything the Home Assistant integration
 # shows, in a few KB - instead of eight endpoints per poll (~100 KB, and
 # /api/crowdsec alone was MBs). Each section has its own stale-while-
@@ -20479,6 +20898,7 @@ _INTEG_SECTIONS = (
     ("backup", 60, "_integ_backup"),
     ("https", 600, "_integ_https"),
     ("update", 600, "_integ_update"),
+    ("devices", 30, "_integ_devices"),
 )
 
 
@@ -23474,6 +23894,7 @@ def main():
     start_agent_facts_writer()    # /var/lib/tuxwall/agent/facts.md for the AI agent (5 min)
     _ensure_agent_api_token()     # /etc/tuxwall/agent/api.token for the agent's read-only MCP tool
     _plugin_pins_startup()        # plugin secrets 0600, pins (TOFU once for pre-3.3.3 installs)
+    start_devices_wg_snapshot()   # WireGuard peers (public data) for tuxwall-devicewatch (60 s)
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     server.daemon_threads = True
     print(f"tuxwall API listening on http://{LISTEN_HOST}:{LISTEN_PORT}", flush=True)

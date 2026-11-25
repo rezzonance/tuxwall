@@ -1,0 +1,59 @@
+[Unit]
+Description=TuxWall device monitoring: threat-intel feed update (abuse.ch)
+Documentation=file:///var/www/html/includes/devicewatch_feeds.py
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/var/www/html/includes/devicewatch.py
+
+[Service]
+Type=oneshot
+# HTTPS only, size caps, parse check, last good copy kept on any failure
+# (no internet, Tripwire egress block, HTTP error) - exits 0 either way.
+ExecStart=/usr/bin/python3 -B /var/www/html/includes/devicewatch.py feeds-update
+TimeoutStartSec=10min
+
+User=tuxwall-devicewatch
+Group=tuxwall-devicewatch
+UMask=0027
+
+# Optional abuse.ch Auth-Key (URLhaus / ThreatFox): root-only file, handed in
+# as a credential; SetCredential= is the default ("unset" = no key) when the file is absent.
+LoadCredential=abusech-key:/etc/tuxwall/devices/abuse-ch.key
+SetCredential=abusech-key:unset
+
+StateDirectory=tuxwall/devices
+StateDirectoryMode=0750
+TemporaryFileSystem=/var/lib/tuxwall:ro
+BindPaths=/var/lib/tuxwall/devices
+InaccessiblePaths=-/run/kea -/etc/wireguard -/etc/tuxwall/agent
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+Nice=10
+CPUWeight=20
+IOSchedulingClass=idle
+MemoryMax=512M
+TasksMax=16

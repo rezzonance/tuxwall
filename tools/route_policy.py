@@ -117,6 +117,12 @@ VIEWER_OK = {
     "GET /api/blocklists": "blocklist subscriptions",
     "GET /api/blocklists/catalog": "blocklist catalog",
     "GET /api/rpz": "DNS firewall (RPZ) view",
+    # device monitoring (3.3.7): detail (findings, destinations, countries) and the
+    # local indicator list stay admin-only; every POST is admin
+    "GET /api/devices": "device list: identity, health, generic reason, today's traffic totals "
+                        "(no findings, indicators or destinations for viewers)",
+    "GET /api/devices/summary": "device-threat counts for the Security card / Overview / Home Assistant",
+    "GET /api/devices/feeds": "threat-feed status (name, licence, counts, last update; never the Auth-Key)",
 }
 
 # ── the AI assistant's read-only MCP token (X-TuxWall-Agent-Token) ──────────

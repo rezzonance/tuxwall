@@ -106,6 +106,8 @@ WRITES = [
     ("api RPZ include", "api:RPZ_INCLUDE"),
     ("api RPZ feeds conf + .bak", "api:RPZ_FEEDS_CONF"),
     ("api ui.json", "api:UI_CONF_FILE"),
+    ("api device monitoring: names/expected/local indicators/abuse.ch key (mkstemp in dir)",
+     "dir:api:DEVICES_CONF_DIR"),
     ("api auth.json", "api:AUTH_FILE"),
     ("api internal token", "api:INTERNAL_TOKEN_FILE"),
     ("api agent api.token (mkstemp in dir)", "api:AGENT_API_TOKEN_FILE"),
@@ -175,6 +177,7 @@ READ_ONLY = {
     "/boot", "/boot/efi", "/usr",
     "/usr/bin/aide", "/usr/bin/avahi-browse", "/usr/bin/cscli", "/usr/bin/dig", "/usr/bin/fastfetch",
     "/usr/bin/ssh", "/usr/bin/sshpass", "/usr/sbin/nft", "/usr/share/ieee-data/oui.csv",
+    "/usr/share/ieee-data/oui.txt",  # devicewatch.py vendor lookup (the engine's own unit, read-only)
     "/usr/bin:/bin", "/usr/bin:/bin:/usr/local/bin", "/usr/sbin:/usr/bin:/sbin:/bin",
     "/usr/lib/systemd/system/tuxwall-agent.service.d/20-local-config.conf",
     "/etc",  # https_tls._path_ok: an owner-provided certificate must live under /etc (prefix test only)

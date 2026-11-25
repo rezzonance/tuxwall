@@ -39,6 +39,7 @@ The base is stock Ubuntu. `apt`, `systemd`, `journalctl` and every tool you alre
 - [Plugins](#plugins)
 - [AI assistant](#ai-assistant)
 - [Security and community data](#security-and-community-data)
+- [Device monitoring](#device-monitoring)
 - [Updating and removing](#updating-and-removing)
 - [Troubleshooting](#troubleshooting)
 - [Support the project](#support-the-project)
@@ -104,6 +105,7 @@ The base is stock Ubuntu. `apt`, `systemd`, `journalctl` and every tool you alre
 | **Honeypot tarpit** | WAN-only port garden that holds scanners open and auto-bans completed handshakes. | Built into the dashboard |
 | **Deception canaries** | SSH, VNC, MSSQL and Redis emulators (WAN IPv4) that capture credential sprays. | OpenCanary |
 | **File integrity** | Baseline and nightly AIDE checks with section-aware change reporting. | AIDE |
+| **Device monitoring** | Every LAN/VLAN/VPN device with health, risk score and findings: known C2 / malware contacts, Suricata alerts per device, new devices. | Zeek, Suricata, abuse.ch feeds |
 | **Attack map and bandwidth** | Live attacker geography, per-client traffic and top talkers. | Leaflet, nftables counters |
 | **Community bans** | Trap catches are shared as verified threat evidence and consumed as a public ban list. | tuxwall.org collector |
 
@@ -341,6 +343,36 @@ TuxWall is a security appliance, so a few defaults matter:
 Read-only viewers cannot change firewall rules, restart services, read backups or drive the AI agent; admin rights are required for every destructive action, and the check is enforced server-side.
 
 **Found a vulnerability?** Please report it privately, not in a public issue — see [SECURITY.md](SECURITY.md) for how, what is in scope, and how to verify packages (APT signing key `5D79 B908 2DCA EB9C CB73 1382 F5D8 2357 16BD BDD1`, signed `SHA256SUMS` on every release).
+
+## Device monitoring
+
+Agentless: nothing is installed on your devices. `tuxwall-devicewatch.service` reads what the router already sees and keeps a per-device picture that the dashboard (Clients page, Security card, Home Assistant) shows.
+
+**What is monitored**
+
+- **Inventory**: every device from Kea DHCP leases (IPv4/IPv6), the ARP/NDP neighbour table (static IPs, VLANs, IPv6 privacy addresses mapped to the MAC), Zeek's DHCP log and WireGuard peers (keyed by public key). Vendor from the IEEE OUI list; randomised addresses show as "Private MAC"; a simple rule-based type guess (phone, computer, TV, IoT, ...). A device seen for the first time raises a *new device* event.
+- **Known-bad contacts**: connections (Zeek `conn.log`) and DNS lookups (Zeek `dns.log`, unbound's block log) of LAN devices are matched against threat-intel feeds and your own indicator list. A completed connection to a botnet C2 server is *critical*, an answered lookup of a malware domain *high*, a lookup that DNS blocked only *attempted* (low).
+- **IDS alerts per device**: Suricata alerts of the malware/exploit classes are attributed to the device that held the address at that moment (decoder, INFO, POLICY and scan noise is ignored).
+- **Activity**: per device today's traffic, number of destinations, top 10 destinations and countries and hourly traffic for the last 24 h - aggregates only.
+- **Risk score** 0-100 from the findings (critical 60, high 35, medium 15, low 4, fading with age) and a health state: normal / new / warning / critical. A finding you know is fine can be marked *expected* per device.
+
+**Threat-intel feeds** (downloaded over HTTPS by `tuxwall-devicewatch-feeds.timer`, hourly check, every 6 h per feed; the last good copy is kept when a download fails, e.g. while Tripwire restricts egress):
+
+| Feed | Data | Key |
+|---|---|---|
+| [abuse.ch Feodo Tracker](https://feodotracker.abuse.ch/) | botnet C2 IP addresses | none |
+| [abuse.ch URLhaus](https://urlhaus.abuse.ch/) | malware-distribution hosts | free abuse.ch Auth-Key |
+| [abuse.ch ThreatFox](https://threatfox.abuse.ch/) | C2 / payload IPs and domains (6 months) | free abuse.ch Auth-Key |
+
+abuse.ch data is CC0 (attribution: abuse.ch). Since 21 October 2026 URLhaus and ThreatFox exports need a free Auth-Key from [auth.abuse.ch](https://auth.abuse.ch/); without one only Feodo Tracker and your local indicators are used. The key is stored root-only in `/etc/tuxwall/devices/abuse-ch.key` and handed to the feed unit as a systemd credential. Local indicators (IP, CIDR, domain, `*.domain`) live in `/etc/tuxwall/devices/local-indicators.json`.
+
+**Privacy and safety**
+
+- Nothing leaves the router except the feed downloads. The analysis service runs as its own unprivileged user without capabilities or network access (`IPAddressDeny=any`), reads logs through group membership and writes only `/var/lib/tuxwall/devices`.
+- Only aggregates are stored (no browsing history); findings expire after 30 days.
+- Viewers see the device list and health; findings, destinations and indicators are admin-only.
+
+**Limits**: only traffic that passes the router is seen (two devices on the same switch talking directly are invisible), encrypted traffic is metadata only (who, when, how much - not content), Zeek and Suricata must be running for connection and IDS data, and threat-intel matching only finds *known* bad infrastructure.
 
 ## Updating and removing
 

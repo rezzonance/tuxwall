@@ -1,0 +1,68 @@
+[Unit]
+Description=TuxWall device monitoring (inventory, threat-intel matching, per-device activity)
+Documentation=file:///var/www/html/includes/devicewatch.py
+After=network.target kea-dhcp4-server.service suricata.service
+ConditionPathExists=/var/www/html/includes/devicewatch.py
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -B /var/www/html/includes/devicewatch.py run
+Restart=on-failure
+RestartSec=30
+
+# Unprivileged service user (created by the postinst). Read access comes from
+# its groups, added only when they exist: zeek (/opt/zeek/logs, 2770
+# root:zeek), _kea (lease files in /var/lib/kea), systemd-journal (unbound's
+# log-local-actions / RPZ lines). Suricata's eve.json and everything else it
+# reads are world-readable.
+User=tuxwall-devicewatch
+Group=tuxwall-devicewatch
+UMask=0027
+
+# Writes only its state directory (/var/lib/tuxwall/devices, 0750). The rest of
+# /var/lib/tuxwall is hidden; the GeoIP database and the API's WireGuard
+# snapshot (public keys/names only) are mapped in read-only.
+StateDirectory=tuxwall/devices
+StateDirectoryMode=0750
+TemporaryFileSystem=/var/lib/tuxwall:ro
+BindPaths=/var/lib/tuxwall/devices
+BindReadOnlyPaths=-/var/lib/tuxwall/dbip-city-lite.mmdb -/var/lib/tuxwall/wg-peers.json
+# _kea membership must not reach Kea's control socket
+InaccessiblePaths=-/run/kea -/etc/wireguard -/etc/tuxwall/agent
+
+# Sandbox: no network (netlink for the neighbour table only), no capabilities
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+IPAddressDeny=any
+
+# Background work: never compete with routing, DNS or the dashboard
+Nice=10
+CPUWeight=20
+IOSchedulingClass=idle
+MemoryHigh=192M
+MemoryMax=256M
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

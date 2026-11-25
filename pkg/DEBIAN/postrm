@@ -31,6 +31,12 @@ case "$1" in
     rm -f /var/lib/unbound/blocklist.conf
     rm -f /var/lib/unbound/client-bans.conf
     rm -rf /var/lib/tuxwall
+    # device monitoring: admin overlays + the optional abuse.ch key, service user
+    rm -rf /etc/tuxwall/devices
+    if getent passwd tuxwall-devicewatch >/dev/null 2>&1; then
+      userdel tuxwall-devicewatch >/dev/null 2>&1 || true
+    fi
+    getent group tuxwall-devicewatch >/dev/null 2>&1 && groupdel tuxwall-devicewatch >/dev/null 2>&1 || true
     systemctl daemon-reload 2>/dev/null || true
     ;;
 esac

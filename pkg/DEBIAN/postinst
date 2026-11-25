@@ -52,6 +52,47 @@ tripwire_unit_setup() {   # tripwire_unit_setup MARKER
   esac
 }
 
+# Device monitoring (3.3.7): tuxwall-devicewatch.service (unprivileged,
+# sandboxed analysis) + tuxwall-devicewatch-feeds.timer (hourly threat-intel
+# check). The service user reads Zeek logs, Kea leases and unbound's journal
+# lines through group membership - added only for groups that exist (Zeek is
+# optional). Enabled ONCE (marker, like the tripwire); an owner who disabled
+# the units later keeps that choice, upgrades only restart a running engine.
+# tools/pkg_scripts_check.py runs this function against fake commands.
+devicewatch_setup() {       # devicewatch_setup MARKER [CONF_DIR] -> one status line, never fails
+  local marker=$1 conf=${2:-/etc/tuxwall/devices} user=tuxwall-devicewatch g groups=""
+  if ! getent passwd "$user" >/dev/null 2>&1; then
+    if ! useradd --system --user-group --no-create-home --home-dir /nonexistent \
+         --shell /usr/sbin/nologin "$user" >/dev/null 2>&1; then
+      echo "device monitoring: could not create the $user user - not started"
+      return 0
+    fi
+  fi
+  for g in zeek _kea systemd-journal; do
+    if getent group "$g" >/dev/null 2>&1 && usermod -a -G "$g" "$user" >/dev/null 2>&1; then
+      groups="$groups $g"
+    fi
+  done
+  mkdir -p "$conf" 2>/dev/null || true
+  chmod 0755 "$conf" 2>/dev/null || true
+  [[ -f "$conf/abuse-ch.key" ]] && chmod 0600 "$conf/abuse-ch.key" 2>/dev/null
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  if [[ ! -e $marker ]]; then
+    if systemctl enable tuxwall-devicewatch.service tuxwall-devicewatch-feeds.timer >/dev/null 2>&1; then
+      touch "$marker"
+      systemctl restart tuxwall-devicewatch.service >/dev/null 2>&1 || true
+      systemctl start tuxwall-devicewatch-feeds.timer >/dev/null 2>&1 || true
+      # first feed download in the background: never hold the dpkg lock on the network
+      systemctl start --no-block tuxwall-devicewatch-feeds.service >/dev/null 2>&1 || true
+    fi
+  else
+    # group changes (a later Zeek install) take effect on the restart
+    systemctl try-restart tuxwall-devicewatch.service >/dev/null 2>&1 || true
+  fi
+  echo "device monitoring: $(systemctl is-active tuxwall-devicewatch.service 2>/dev/null || echo inactive)" \
+       "(reads via groups:${groups:- none})"
+}
+
 # CrowdSec bouncer iptables -> nftables (full ban durations), upgrades only:
 # fresh installs get nftables from tuxwall-install.sh. The helper decides
 # (installed? iptables mode? opt-out /etc/tuxwall/no-bouncer-migration? nft
@@ -1086,6 +1127,9 @@ PY
     chmod 750 /usr/local/sbin/tuxwall-tripwire 2>/dev/null || true
     chmod 750 /usr/local/sbin/tuxwall-tripwire-restore 2>/dev/null || true
     tripwire_unit_setup "$STATE_DIR/.tripwire-enabled-once"
+
+    # Device monitoring: read-only analysis service + hourly feed timer (3.3.7)
+    echo "   $(devicewatch_setup "$STATE_DIR/.devicewatch-enabled-once")"
 
     step 8 "Triggering initial blocklist download (background)..."
     sleep 2

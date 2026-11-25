@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly TuxWall threat-intel feed check (a feed is fetched every 6 h, retried hourly after a failure)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

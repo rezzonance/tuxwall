@@ -47,6 +47,10 @@ a fake `systemctl` (first in PATH, records its calls) and a temp marker:
 - agent_config_split (3.3.5): runs opencode_config.py migrate; restarts the
   agent only after a move (rc 10); a left-alone config is a note, a helper
   failure a warning; never fails the postinst.
+- devicewatch_setup (3.3.7): system user created once, added only to the
+  groups that exist (zeek, _kea, systemd-journal), units enabled ONCE
+  (marker) and the first feed download started without blocking; upgrades
+  only try-restart; a failed useradd/enable never fails the postinst.
 """
 import json
 import os
@@ -1115,6 +1119,69 @@ def t_agent_config_split():
         shutil.rmtree(d)
 
 
+DW_FAKES = {
+    # getent: users/groups listed in $FAKE_DB ("passwd NAME" / "group NAME" lines)
+    "getent": '#!/bin/sh\ngrep -qx "$1 $2" "$FAKE_DB"\n',
+    "useradd": '#!/bin/sh\necho "useradd $*" >> "$FAKE_LOG"\n[ -n "$FAKE_USERADD_FAIL" ] && exit 1\n'
+               'for a; do last=$a; done; echo "passwd $last" >> "$FAKE_DB"\n',
+    "usermod": '#!/bin/sh\necho "usermod $*" >> "$FAKE_LOG"\n',
+    "systemctl": '#!/bin/sh\necho "systemctl $*" >> "$FAKE_LOG"\n'
+                 '[ "$1" = is-active ] && { echo active; exit 0; }\n'
+                 '[ "$1" = enable ] && [ -n "$FAKE_ENABLE_FAIL" ] && exit 1\nexit 0\n',
+}
+
+
+def t_devicewatch_setup():
+    fn = func("devicewatch_setup")
+    check("devicewatch_setup()" in fn, "postinst defines devicewatch_setup")
+    body = SRC[SRC.index('step 7 "'):]
+    check('devicewatch_setup "$STATE_DIR/.devicewatch-enabled-once"' in body,
+          "configure runs devicewatch_setup with the enable-once marker")
+
+    def go(db, marker_exists=False, env=None):
+        d = tempfile.mkdtemp(prefix="pkg-dw-")
+        fakebin(d, DW_FAKES)
+        with open(d + "/db", "w") as f:
+            f.write("".join(x + "\n" for x in db))
+        marker = d + "/marker"
+        if marker_exists:
+            open(marker, "w").close()
+        os.makedirs(d + "/conf")
+        with open(d + "/conf/abuse-ch.key", "w") as f:
+            f.write("k\n")
+        os.chmod(d + "/conf/abuse-ch.key", 0o644)
+        rc, calls, out, err = bash_run(d, fn + 'devicewatch_setup "%s" "%s/conf"\n' % (marker, d),
+                                       env=dict({"FAKE_DB": d + "/db"}, **(env or {})))
+        res = (rc, calls, out, os.path.exists(marker), os.stat(d + "/conf/abuse-ch.key").st_mode & 0o777)
+        shutil.rmtree(d)
+        return res
+
+    rc, calls, out, marked, kmode = go(["group zeek", "group systemd-journal"])
+    check(rc == 0 and any(c.startswith("useradd --system --user-group") and c.endswith("tuxwall-devicewatch")
+                          for c in calls), "fresh: system user created (%s)" % calls)
+    check("usermod -a -G zeek tuxwall-devicewatch" in calls and "usermod -a -G systemd-journal tuxwall-devicewatch" in calls
+          and not any("_kea" in c for c in calls), "groups added only where they exist (%s)" % calls)
+    check("systemctl enable tuxwall-devicewatch.service tuxwall-devicewatch-feeds.timer" in calls and marked
+          and "systemctl start --no-block tuxwall-devicewatch-feeds.service" in calls
+          and "systemctl restart tuxwall-devicewatch.service" in calls, "fresh: enabled once, started, feeds in background")
+    check(kmode == 0o600 and "zeek systemd-journal" in out, "key file tightened to 0600; status line names the groups (%r)" % out)
+    rc, calls, out, marked, _k = go(["passwd tuxwall-devicewatch", "group _kea"], marker_exists=True)
+    check(rc == 0 and not any(c.startswith(("useradd", "systemctl enable", "systemctl restart")) for c in calls)
+          and "systemctl try-restart tuxwall-devicewatch.service" in calls,
+          "upgrade (marker set): never re-enabled (owner choice kept), running engine restarted (%s)" % calls)
+    rc, calls, out, marked, _k = go([], env={"FAKE_USERADD_FAIL": "1"})
+    check(rc == 0 and not any(c.startswith("systemctl") for c in calls) and "not started" in out,
+          "useradd failure: no units touched, postinst continues")
+    rc, calls, out, marked, _k = go(["passwd tuxwall-devicewatch"], env={"FAKE_ENABLE_FAIL": "1"})
+    check(rc == 0 and not marked and "systemctl restart tuxwall-devicewatch.service" not in calls,
+          "failed enable: no marker (retried on the next upgrade)")
+    prerm = open(PRERM).read()
+    check("tuxwall-devicewatch.service" in prerm and ".devicewatch-enabled-once" in prerm, "prerm stops/disables device monitoring")
+    postrm = open(os.path.join(ROOT_DIR, "pkg", "DEBIAN", "postrm")).read()
+    check("rm -rf /etc/tuxwall/devices" in postrm and "userdel tuxwall-devicewatch" in postrm,
+          "postrm purge: overlays/key and the service user removed")
+
+
 def main():
     for p in (POSTINST, PRERM, os.path.join(ROOT_DIR, "pkg", "DEBIAN", "postrm")):
         r = subprocess.run(["bash", "-n", p], capture_output=True, text=True)
@@ -1133,6 +1200,7 @@ def main():
     t_agents_md_install()
     t_rsyslog_rule()
     t_agent_config_split()
+    t_devicewatch_setup()
     print("pkg_scripts_check: %d passed, %d failed" % (PASS, FAIL))
     sys.exit(1 if FAIL else 0)
 
