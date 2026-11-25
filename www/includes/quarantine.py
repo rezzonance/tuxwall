@@ -15,13 +15,17 @@ Modes
             subnets, VLANs, VPN, WAN), and of the router itself it can only
             reach DNS (53), DHCP (67, DHCPv6 547) and ICMP/ICMPv6 (ping,
             neighbour discovery) - it stays diagnosable and can be released.
+            Connections the router itself opens to it (SSH from the router,
+            a ping) still get their answers (ct direction reply).
   Devices on the same switch / Wi-Fi segment talk to each other directly; the
   router cannot block traffic it does not route.
 
 Matching: the device's MAC (`ether saddr`, every address it uses, including
 new IPv6 privacy addresses) plus its current IPv4/IPv6 addresses (both
-directions; the dashboard API refreshes them every minute from the device
-inventory), WireGuard peers by their allowed IPs (host prefixes only).
+directions; the dashboard API refreshes them from the device inventory and,
+while something is quarantined, from the neighbour table every 15 s - a new
+DHCP lease or IPv6 address is blocked within seconds), WireGuard peers by
+their allowed IPs (host prefixes only).
 
 nftables: own table `inet tuxwall_quarantine` (forward + input hooks at
 priority -5, policy accept, drops only). ufw (iptables-nft), firewall
@@ -314,25 +318,39 @@ def router_context(env, wan=None):
 
 # ── targets + decision ────────────────────────────────────────────────────────
 
-def device_targets(device, devices=(), wg_peers=None):
-    """{"kind", "mac", "ips", "ipv6", "nets"} for a device of the inventory.
-    Addresses another device currently holds are left out (a DHCP address
-    handed on must not stay quarantined); the MAC rule still catches the
-    device itself on any address."""
+def device_targets(device, devices=(), wg_peers=None, neigh=None):
+    """{"kind", "mac", "ips", "ipv6", "nets"} for a device of the inventory:
+    its current addresses (and those of the last 24 h). Addresses another
+    device CURRENTLY holds are left out (a DHCP address handed on must not
+    stay quarantined) - an address another device merely held before does
+    not count; the MAC rule still catches the device itself on any address.
+    neigh ({ip: mac}, the router's neighbour table now) adds what the MAC
+    uses at this moment - quicker than the inventory's next pass."""
     did = device.get("id") or ""
     kind = {"m": "mac", "w": "wg", "i": "ip"}.get(did[:1], "ip")
     others = set()
     for d in devices or ():
         if isinstance(d, dict) and d.get("id") != did:
-            for k in ("current_ips", "ips", "ipv6"):
-                others.update(norm_ip(x) for x in (d.get(k) or []) if isinstance(x, str))
-    addrs = set()
+            others.update(norm_ip(x) for x in (d.get("current_ips") or []) if isinstance(x, str) and "/" not in x)
+    mac = norm_mac(device.get("mac")) if kind == "mac" else ""
+    if mac and neigh:
+        for ip, m in neigh.items():
+            if m != mac:
+                others.add(norm_ip(ip))
+    addrs = []                      # current first: the cap below keeps those
+    if mac and neigh:
+        for ip, m in sorted(neigh.items()):
+            v = norm_ip(ip)
+            if m == mac and v and _usable_host(v) and v not in addrs:
+                addrs.append(v)
     for k in ("current_ips", "ips", "ipv6"):
         for x in device.get(k) or []:
             if isinstance(x, str) and "/" not in x:
                 v = norm_ip(x)
-                if v and _usable_host(v) and v not in others:
-                    addrs.add(v)
+                if v and _usable_host(v) and v not in others and v not in addrs:
+                    addrs.append(v)
+    v4 = sorted([a for a in addrs if ":" not in a][:MAX_ADDRS])
+    v6 = sorted([a for a in addrs if ":" in a][:MAX_ADDRS])
     nets = []
     if kind == "wg":
         allowed = []
@@ -345,9 +363,7 @@ def device_targets(device, devices=(), wg_peers=None):
             n = norm_net(x)
             if n is not None and str(n) not in nets:
                 nets.append(str(n))
-    return {"kind": kind, "mac": norm_mac(device.get("mac")) if kind == "mac" else "",
-            "ips": sorted(a for a in addrs if ":" not in a)[:MAX_ADDRS],
-            "ipv6": sorted(a for a in addrs if ":" in a)[:MAX_ADDRS], "nets": nets[:MAX_ADDRS]}
+    return {"kind": kind, "mac": mac, "ips": v4, "ipv6": v6, "nets": nets[:MAX_ADDRS]}
 
 
 def _covers(nets, ip):
@@ -422,7 +438,7 @@ def warnings_for(device, targets, mode):
                    "no longer matches; its current addresses stay blocked until they change.")
     if targets.get("kind") == "ip":
         out.append("No MAC address is known: only the listed addresses are blocked.")
-    if mode == "isolate":
+    if mode == "isolate" and targets.get("kind") != "wg":
         out.append("Devices on the same switch or Wi-Fi network still reach it directly - the router only "
                    "controls traffic it forwards.")
     return out
@@ -521,6 +537,9 @@ def render(p):
                 "add rule %s input ether saddr @%s jump iso_in" % (t, s["mac"]),
                 "add rule %s input ip saddr @%s jump iso_in" % (t, s["v4"]),
                 "add rule %s input ip6 saddr @%s jump iso_in" % (t, s["v6"]),
+                # answers to connections the router opened (an admin's SSH or
+                # ping from the router, ...); the device opens nothing new
+                "add rule %s iso_in ct direction reply return" % t,
                 "add rule %s iso_in meta l4proto { icmp, ipv6-icmp } return" % t,
                 "add rule %s iso_in udp dport { %s } return" % (t, ", ".join(str(x) for x in ISOLATE_UDP)),
                 "add rule %s iso_in tcp dport { %s } return" % (t, ", ".join(str(x) for x in ISOLATE_TCP)),
@@ -613,11 +632,12 @@ def ensure_table(env, state, ctx, now):
     return apply(env, plan(state, ctx, now))
 
 
-# ── periodic sync (the API calls this every minute) ───────────────────────────
+# ── periodic sync (the API: every minute, every 15 s while a device is quarantined)
 
-def sync(state, devices, now, wan=None, wg_peers=None):
-    """Refresh every entry's addresses from the inventory and split off the
-    expired ones. -> (new state, expired entries, changed?)."""
+def sync(state, devices, now, wan=None, wg_peers=None, neigh=None):
+    """Refresh every entry's addresses from the inventory (and, for a MAC
+    entry, from the neighbour table neigh {ip: mac} right now) and split off
+    the expired ones. -> (new state, expired entries, changed?)."""
     by_id = {d.get("id"): d for d in devices or () if isinstance(d, dict)}
     kept, expired, changed = [], [], False
     for e in state.get("entries") or []:
@@ -626,8 +646,11 @@ def sync(state, devices, now, wan=None, wg_peers=None):
             changed = True
             continue
         dev = by_id.get(e["device"])
+        if dev is None and e.get("kind") == "mac" and e.get("mac") and neigh:
+            # not in the inventory (engine down): keep the entry, add what the MAC uses now
+            dev = {"id": e["device"], "mac": e["mac"], "current_ips": list(e.get("ips") or []) + list(e.get("ipv6") or [])}
         if dev is not None:
-            t = device_targets(dev, devices, wg_peers)
+            t = device_targets(dev, devices, wg_peers, neigh)
             new = dict(e, ips=t["ips"], ipv6=t["ipv6"])
             if e.get("kind") == "mac" and t["mac"]:
                 new["mac"] = t["mac"]

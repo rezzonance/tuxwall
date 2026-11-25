@@ -149,9 +149,19 @@ def public_ip(ip):
     return a.is_global or any(a.version == n.version and a in n for n in DOC_NETS)
 
 
-def validate_local_indicator(item):
+def _never_matched(a):
+    """Addresses no LAN device's flow to the internet can have as its peer."""
+    return a.is_unspecified or a.is_loopback or a.is_multicast or a.is_link_local or \
+        (a.version == 4 and a == ipaddress.IPv4Address("255.255.255.255"))
+
+
+def validate_local_indicator(item, router_ips=(), lan_nets=()):
     """Normalise one admin-entered indicator; raises ValueError with a
-    user-facing message. Returns {"type", "value", "severity", "note"}."""
+    user-facing message. Returns {"type", "value", "severity", "note"}.
+    router_ips / lan_nets (the API passes them when an admin adds one): the
+    router's own addresses and its LAN/VLAN networks are refused - device
+    monitoring only looks at traffic between a device and the outside, so
+    such an entry could never match."""
     if not isinstance(item, dict):
         raise ValueError("indicator must be an object")
     raw = str(item.get("value") or "").strip()
@@ -162,10 +172,28 @@ def validate_local_indicator(item):
         typ = "cidr" if "/" in raw else ("ip" if norm_ip(raw) else "domain")
     if typ not in LOCAL_TYPES:
         raise ValueError("type must be ip, cidr or domain")
+    nets = []
+    for n in lan_nets or ():
+        try:
+            nets.append(ipaddress.ip_network(str(n), strict=False))
+        except ValueError:
+            continue
+    own = {norm_ip(x) for x in router_ips or ()} - {None}
     if typ == "ip":
         v = norm_ip(raw)
         if not v:
             raise ValueError("not an IP address")
+        a = ipaddress.ip_address(v)
+        if _never_matched(a):
+            raise ValueError("%s is not an internet address (unspecified, loopback, multicast or link-local) "
+                             "- it can never match" % v)
+        if v in own:
+            raise ValueError("%s is one of the router's own addresses - device monitoring only checks traffic "
+                             "between a device and the outside, so it can never match" % v)
+        lan = next((n for n in nets if n.version == a.version and a in n), None)
+        if lan is not None:
+            raise ValueError("%s is inside your own network %s - traffic between local devices is not checked, "
+                             "so it can never match" % (v, lan))
     elif typ == "cidr":
         try:
             net = ipaddress.ip_network(raw, strict=False)
@@ -174,6 +202,14 @@ def validate_local_indicator(item):
         if net.prefixlen < (8 if net.version == 4 else 16):
             raise ValueError("network too broad (at least /8 for IPv4, /16 for IPv6)")
         v = net.compressed
+        if _never_matched(net.network_address) or net.is_loopback or net.is_multicast or net.is_link_local:
+            raise ValueError("%s is not an internet network (unspecified, loopback, multicast or link-local) "
+                             "- it can never match" % v)
+        if any(ipaddress.ip_address(x) in net for x in own if ipaddress.ip_address(x).version == net.version):
+            raise ValueError("%s contains one of the router's own addresses - pick a narrower network" % v)
+        lan = next((n for n in nets if n.version == net.version and n.overlaps(net)), None)
+        if lan is not None:
+            raise ValueError("%s overlaps your own network %s - traffic between local devices is not checked" % (v, lan))
     else:
         wild = raw.startswith("*.")
         d = norm_domain(raw[2:] if wild else raw)

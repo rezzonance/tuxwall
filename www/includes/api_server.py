@@ -20261,7 +20261,11 @@ def https_status():
 # (root-owned, read by the service on its next cycle).
 DEVICES_STATE_DIR = "/var/lib/tuxwall/devices"
 DEVICES_CONF_DIR = "/etc/tuxwall/devices"
-DEVICES_WG_SNAPSHOT = os.path.join(BLOCKLIST_DIR, "wg-peers.json")
+# in a directory of its own: tuxwall-devicewatch.service maps the directory,
+# so each atomic rewrite (a new inode) is visible to the running engine
+DEVICES_SHARED_DIR = os.path.join(BLOCKLIST_DIR, "shared")
+DEVICES_WG_SNAPSHOT = os.path.join(DEVICES_SHARED_DIR, "wg-peers.json")
+DEVICES_WG_SNAPSHOT_LEGACY = os.path.join(BLOCKLIST_DIR, "wg-peers.json")
 DEVICES_FEEDS_UNIT = "tuxwall-devicewatch-feeds.service"
 DEVICES_MAX_READ = 64 << 20
 DEVICES_ENGINE_STALE = 300        # outputs older than this: the engine is not running
@@ -20412,7 +20416,7 @@ def build_device_detail(did):
     fl = sorted((f for f in findings if f.get("device") == did),
                 key=lambda f: (bool(f.get("expected")), -_dw.SEV_RANK.get(f.get("severity"), 0), -(f.get("last") or 0)))
     return 200, {"ok": True, "running": running, "generated_at": gen, "device": dev, "findings": fl,
-                 "quarantine": _quar_detail(dev)}
+                 "quarantine": _quar_detail(dev, devices)}
 
 
 def build_devices_summary():
@@ -20426,13 +20430,13 @@ def build_devices_summary():
     if devices is None:
         return {"ok": True, "available": False, "running": False, "devices": 0, "online": 0, "new_24h": 0,
                 "flagged": 0, "critical": 0, "warning": 0, "quarantined": len(_quar_map()), "worst": None,
-                "feeds_ok": feeds_ok, "feeds_total": feeds_total}
+                "feeds_ok": feeds_ok, "feeds_total": feeds_total, "warnings": []}
     s = _dw.summarize(devices, findings, time.time())
     return {"ok": True, "available": True, "running": running, "generated_at": gen,
             "devices": s["devices"], "online": s["online"], "new_24h": s["new_24h"], "flagged": s["flagged"],
             "critical": s["critical"], "warning": s["warning"], "quarantined": len(_quar_map()),
             "findings_active": s["findings_active"], "worst": s["worst"],
-            "feeds_ok": feeds_ok, "feeds_total": feeds_total}
+            "feeds_ok": feeds_ok, "feeds_total": feeds_total, "warnings": _devices_engine_status()[0]}
 
 
 def _devices_key_set():
@@ -20442,6 +20446,32 @@ def _devices_key_set():
         return False
 
 
+def _devices_engine_status():
+    """Source health from the engine's status.json: (warnings, sources).
+    Warnings ({code, text, hint}) name what makes detections incomplete
+    (Suricata without a LAN interface, Zeek without MACs or with bad
+    checksums); nothing device-specific."""
+    st = _dw_read("status.json")
+    if not isinstance(st, dict):
+        return [], None
+    warn = [{k: str(w.get(k) or "")[:300] for k in ("code", "text", "hint")}
+            for w in (st.get("warnings") or []) if isinstance(w, dict) and w.get("code")]
+    src = st.get("sources") if isinstance(st.get("sources"), dict) else {}
+    su, zk, jn = src.get("suricata") or {}, src.get("zeek") or {}, st.get("journal") or {}
+    gen = st.get("generated_at") or 0
+    sources = {
+        "engine_running": bool(gen and time.time() - gen < DEVICES_ENGINE_STALE),
+        "suricata": {"capture": [str(x)[:32] for x in (su.get("capture") or [])][:16],
+                     "lan_capture": su.get("lan_capture"), "captured_lan": [str(x)[:32] for x in (su.get("captured_lan") or [])][:16]},
+        "zeek": {"lines": int(zk.get("lines") or 0), "mac_logging": zk.get("mac_logging"),
+                 "conn_ok": not ((st.get("logs") or {}).get("conn") or {}).get("error")},
+        "unbound_journal": bool(jn.get("active")),
+        "kea": bool((src.get("kea") or {}).get("ok")),
+        "unattributed_addresses_1h": int(st.get("unattributed_addresses_1h") or 0),
+    }
+    return warn, sources
+
+
 def build_devices_feeds():
     if _dw is None:
         return {"ok": False, "error": "devicewatch module unavailable", "feeds": []}
@@ -20449,8 +20479,39 @@ def build_devices_feeds():
     key_set = _devices_key_set()
     rows = _dw.feeds.feed_status(feeds_dir, config=_dw_conf_read("devicewatch.json"), key_set=key_set)
     st = _dw.feeds.load_state(feeds_dir)
+    warnings, sources = _devices_engine_status()
     return {"ok": True, "key_set": key_set, "updated_at": st.get("_updated"), "feeds": rows,
+            "warnings": warnings, "sources": sources,
             "note": "Threat-intel data: abuse.ch (CC0). Only feed downloads leave the router."}
+
+
+def _devices_local_context():
+    """(router addresses, networks of every non-WAN interface) - a local
+    indicator there could never match (only device <-> outside traffic is
+    checked), so adding one is refused with an explanation."""
+    wan = _detect_wan_iface()
+    ips, nets = set(), []
+    try:
+        data = json.loads(subprocess.run(["ip", "-j", "addr"], capture_output=True, text=True,
+                                         timeout=5).stdout or "[]")
+    except Exception:
+        data = []
+    for ifc in data if isinstance(data, list) else []:
+        name = ifc.get("ifname") or ""
+        for a in ifc.get("addr_info") or []:
+            loc = a.get("local")
+            if not loc:
+                continue
+            ips.add(loc)
+            if name in ("lo", wan) or a.get("scope") in ("link", "host"):
+                continue
+            try:
+                n = str(ipaddress.ip_network("%s/%s" % (loc, a.get("prefixlen")), strict=False))
+            except ValueError:
+                continue
+            if n not in nets:
+                nets.append(n)
+    return sorted(ips), nets
 
 
 def build_devices_indicators():
@@ -20540,12 +20601,14 @@ def devices_post(path, body, identity, client_ip=""):
         return 200, {"ok": True, "key_set": bool(key)}
     if path == "/api/devices/indicators":
         action = str(body.get("action") or "")
+        local = _devices_local_context() if action == "add" else ((), ())
         with _DEVICES_CONF_LOCK:
             data = _dw_conf_read("local-indicators.json")
             items = [x for x in (data.get("indicators") or []) if isinstance(x, dict)]
             if action == "add":
                 try:
-                    item = _dw.feeds.validate_local_indicator(body.get("indicator") or {})
+                    item = _dw.feeds.validate_local_indicator(body.get("indicator") or {}, router_ips=local[0],
+                                                              lan_nets=local[1])
                 except ValueError as exc:
                     return 400, {"ok": False, "error": str(exc)}
                 items = [x for x in items if x.get("value") != item["value"]]
@@ -20643,11 +20706,20 @@ def _devices_wg_snapshot():
     except (OSError, ValueError):
         pass
     obj["generated_at"] = int(time.time())
+    d = os.path.dirname(DEVICES_WG_SNAPSHOT)
+    if not os.path.isdir(d):
+        os.makedirs(d, mode=0o755, exist_ok=True)
+        os.chmod(d, 0o755)            # the engine (another user) reads it
     tmp = DEVICES_WG_SNAPSHOT + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f)
     os.chmod(tmp, 0o644)
     os.replace(tmp, DEVICES_WG_SNAPSHOT)
+    if DEVICES_WG_SNAPSHOT_LEGACY != DEVICES_WG_SNAPSHOT:
+        try:                          # the pre-3.3.7-fix location (a single-file bind mount)
+            os.unlink(DEVICES_WG_SNAPSHOT_LEGACY)
+        except OSError:
+            pass
     return True
 
 
@@ -20671,10 +20743,12 @@ def start_devices_wg_snapshot():
 # The API takes the requests (admin + CSRF; the safety decision refuses the
 # router, its upstream gateway, wide VPN peers and - unless confirm_self -
 # the requesting admin's own device), and the device monitor below keeps the
-# addresses in step with the inventory and expires entries every minute.
+# addresses in step with the inventory and the neighbour table (every 15 s
+# while a device is quarantined) and expires entries.
 # Separate from the Clients "Access" ban (/api/leases/ban: ufw deny + unbound
 # refuse for one IPv4 address): both can be on; the device panel shows both.
 DEVICES_MONITOR_INTERVAL = 60
+DEVICES_QUAR_TICK = 15
 DEVICES_MONITOR_START_DELAY = 5
 _QUAR_LOCK = threading.Lock()
 _QUAR = {"env": None, "last_error": "", "last_sync": 0}
@@ -20705,20 +20779,27 @@ def _quar_wan():
 
 
 def _devices_wg_peers():
-    try:
-        with open(DEVICES_WG_SNAPSHOT, encoding="utf-8") as f:
-            peers = (json.load(f) or {}).get("peers")
-        return peers if isinstance(peers, list) else []
-    except (OSError, ValueError, AttributeError):
-        return []
+    for path in (DEVICES_WG_SNAPSHOT, DEVICES_WG_SNAPSHOT_LEGACY):
+        try:
+            with open(path, encoding="utf-8") as f:
+                peers = (json.load(f) or {}).get("peers")
+            return peers if isinstance(peers, list) else []
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, AttributeError):
+            return []
+    return []
 
 
-def _quar_detail(dev):
+def _quar_detail(dev, devices=()):
     env = _quar_env()
     if env is None:
         return {"supported": False, "active": False}
     e = _quar_map().get(dev["id"])
-    banned = sorted({b["ip"] for b in load_bans()} & set(dev.get("ips") or []))
+    # an Access ban is per IPv4 address: only this device's addresses count,
+    # not one it held before that another device has now
+    mine = _qm.device_targets(dev, devices)["ips"]
+    banned = sorted({b["ip"] for b in load_bans()} & set(mine))
     out = {"supported": True, "active": e is not None, "lease_banned": banned,
            "modes": list(_qm.MODES), "expires_options": list(_qm.EXPIRES),
            "actions": [{k: a.get(k) for k in ("ts", "action", "mode", "by", "code", "expires")}
@@ -20748,7 +20829,7 @@ def _quar_request(dev, devices, body, who, client_ip):
     note = " ".join(str(body.get("note") or "").split())[:200]
     wan = _quar_wan()
     ctx = _qm.router_context(env, wan)
-    targets = _qm.device_targets(dev, devices, _devices_wg_peers())
+    targets = _qm.device_targets(dev, devices, _devices_wg_peers(), ctx.get("neigh"))
     refused = _qm.check_request(dev, targets, mode, expires, ctx, client_ip, confirm_self)
     if refused:
         _qm.log_action(env, {"action": "refused", "device": dev["id"], "mode": mode,
@@ -20818,13 +20899,16 @@ def devices_quarantine_sync(origin="periodic"):
     with _QUAR_LOCK:
         st = _qm.load_state(env)
         wan = _quar_wan()
-        st2, expired, changed = _qm.sync(st, devices if running else [], time.time(), wan, _devices_wg_peers())
+        ctx = _qm.router_context(env, wan or st["wan"])
+        st2, expired, changed = _qm.sync(st, devices if running else [], time.time(), wan, _devices_wg_peers(),
+                                         ctx.get("neigh"))
         if changed:
             try:
                 _qm.save_state(env, st2)
             except OSError as exc:
                 print("[devices] quarantine state not saved: %r" % (exc,), flush=True)
-        ctx = _qm.router_context(env, st2["wan"])
+        if st2["wan"] != ctx.get("wan"):
+            ctx = dict(ctx, wan=list(st2["wan"]))
         rewritten, err = _quar_apply_locked(env, st2, ctx)
     _QUAR["last_sync"] = int(time.time())
     for e in expired:
@@ -20920,6 +21004,34 @@ def _device_alert_quarantine(action, entry, who):
                                "Quarantine (%s) lifted by %s." % (mode, who), priority="default")
     except Exception as exc:
         print("[devices] quarantine alert failed: %r" % (exc,), flush=True)
+
+
+def _device_alert_what(f, ev=None):
+    """One finding for a push alert: what happened, from which source, and
+    what tells it apart from the device's other findings (the indicator,
+    port, signature id) - several alerts for one device must not read alike."""
+    ev = ev or {}
+    title = f.get("title") or _dw.KIND_TEXT.get(f.get("kind") or ev.get("kind"), "Suspicious activity")
+    src = _dw.SOURCE_TITLES.get(f.get("source") or ev.get("source"), "")
+    if src and src.lower() not in title.lower():
+        title += " (%s)" % src
+    det = f.get("details") if isinstance(f.get("details"), dict) else {}
+    bits = []
+    ind = str(f.get("indicator") or "")
+    if f.get("kind") == "ids_alert":
+        if ind:
+            bits.append(ind.replace("sid:", "signature "))
+        if det.get("peer"):
+            bits.append("peer %s" % det["peer"])
+    elif ind:
+        bits.append(ind)
+    if det.get("port") and f.get("kind") != "ids_alert":
+        bits.append("port %s%s" % (det["port"], "/" + det["proto"] if det.get("proto") else ""))
+    if det.get("malware"):
+        bits.append(str(det["malware"])[:60])
+    if int(f.get("count") or 1) > 1:
+        bits.append("seen %d times" % int(f["count"]))
+    return title + (": " + ", ".join(bits) if bits else "")
 
 
 def _device_alert_state():
@@ -21019,11 +21131,14 @@ def devices_alert_pass():
                 key = "n:%s" % ev.get("device")
                 if key in sent_keys:
                     continue
+                private = dev.get("private_mac") or ev.get("private_mac")
+                vendor = dev.get("vendor") or ""
+                if private:
+                    vendor = "Private (randomised) MAC address" if vendor in ("", "Private MAC") \
+                        else vendor + ", private MAC"
                 msg = ("New device on %s: %s" % (dev.get("zone_name") or dev.get("zone") or "the network", name),
-                       "%s%s. First seen %s. Review it on the Clients page." % (
-                           dev.get("vendor") or "Unknown vendor",
-                           " (private MAC)" if dev.get("private_mac") or ev.get("private_mac") else "",
-                           time.strftime("%H:%M", time.localtime(ev.get("ts") or now))),
+                       "%s. First seen %s. Review it on the Clients page." % (
+                           vendor or "Unknown vendor", time.strftime("%H:%M", time.localtime(ev.get("ts") or now))),
                        "info")
             elif typ == "finding":
                 if not cfg["findings"]:
@@ -21035,11 +21150,8 @@ def devices_alert_pass():
                 key = "f:%s" % ev.get("finding")
                 if key in sent_keys and not ev.get("escalated") and now - float(sent_keys[key]) < FINDING_REALERT:
                     continue
-                src = _dw.SOURCE_TITLES.get(f.get("source") or ev.get("source"), "")
                 msg = ("Device flagged: %s" % name,
-                       "%s%s. Review it on the Clients page (Health)." % (
-                           f.get("title") or _dw.KIND_TEXT.get(ev.get("kind"), "Suspicious activity"),
-                           " - " + src if src else ""),
+                       "%s. Review it on the Clients page (Health)." % _device_alert_what(f, ev),
                        "critical" if sev == "critical" else "warning")
             else:
                 continue
@@ -21065,20 +21177,35 @@ def devices_alert_pass():
     return sent
 
 
+def _quar_active():
+    env = _quar_env()
+    return bool(env is not None and _qm.load_state(env)["entries"])
+
+
 def _devices_monitor_loop():
+    """Every minute: quarantine sync + device alerts. While a device is
+    quarantined the sync runs every DEVICES_QUAR_TICK seconds, so a new
+    address (DHCP renewal, IPv6 privacy address) is blocked within about
+    that long - the neighbour table is read directly."""
     time.sleep(DEVICES_MONITOR_START_DELAY)
     origin = "startup"
+    last_full = 0.0
     while True:
+        now = time.monotonic()
+        full = now - last_full >= DEVICES_MONITOR_INTERVAL
         try:
-            devices_quarantine_sync(origin)
+            if full or _quar_active():
+                devices_quarantine_sync(origin)
         except Exception as exc:
             print("[devices] quarantine sync failed: %r" % (exc,), flush=True)
-        try:
-            devices_alert_pass()
-        except Exception as exc:
-            print("[devices] alert pass failed: %r" % (exc,), flush=True)
+        if full:
+            last_full = now
+            try:
+                devices_alert_pass()
+            except Exception as exc:
+                print("[devices] alert pass failed: %r" % (exc,), flush=True)
         origin = "periodic"
-        time.sleep(DEVICES_MONITOR_INTERVAL)
+        time.sleep(DEVICES_QUAR_TICK)
 
 
 def start_devices_monitor():
@@ -23010,7 +23137,11 @@ def _dispatch_alert(cfg, incident, transition, force=False, priority=None):
     if transition == "resolved" and not cfg.get("notify_resolved", True):
         return errors
 
-    title = ("[%s] %s" % (incident.get("severity", "info").upper(), incident.get("title", "TuxWall incident")))
+    if transition == "resolved":     # the incident title still names the problem: say it is over
+        title = "[RESOLVED] %s" % incident.get("title", "TuxWall incident")
+        priority = priority or "default"
+    else:
+        title = ("[%s] %s" % (incident.get("severity", "info").upper(), incident.get("title", "TuxWall incident")))
     detail = incident.get("detail", "")
     text = "%s\n%s\n%s" % (title, detail, time.strftime("%Y-%m-%d %H:%M:%S"))
 

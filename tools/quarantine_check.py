@@ -58,6 +58,9 @@ class FakeNet:
         self.scripts = []
         self.nft_fail = nft_fail
         self.table = None           # plan last applied
+        self.neigh = [{"dst": "198.51.100.1", "lladdr": GW_MAC},
+                      {"dst": "192.0.2.50", "lladdr": MAC_A},
+                      {"dst": "192.0.2.60", "lladdr": MAC_B}]
 
     def __call__(self, cmd, text=None, timeout=20):
         prog = os.path.basename(cmd[0])
@@ -75,9 +78,7 @@ class FakeNet:
             if a[:4] == ["-6", "-j", "route", "show"]:
                 return 0, json.dumps([])
             if a[:3] == ["-j", "neigh", "show"]:
-                return 0, json.dumps([{"dst": "198.51.100.1", "lladdr": GW_MAC},
-                                      {"dst": "192.0.2.50", "lladdr": MAC_A},
-                                      {"dst": "192.0.2.60", "lladdr": MAC_B}])
+                return 0, json.dumps(self.neigh)
             return 1, ""
         if prog == "nft":
             if cmd[1:3] == ["-f", "-"]:
@@ -335,6 +336,7 @@ def t_api():
         os.makedirs(st)
         A.DEVICES_STATE_DIR, A.DEVICES_CONF_DIR = st, conf
         A.DEVICES_WG_SNAPSHOT = os.path.join(H.scratch, "wg-peers.json")
+        A.DEVICES_WG_SNAPSHOT_LEGACY = os.path.join(H.scratch, "legacy-wg-peers.json")
         A.ALERT_CONFIG_FILE = os.path.join(H.scratch, "alerts.json")
         A.DEVICE_ALERT_STATE = os.path.join(H.scratch, "device-alerts.json")
         A.CLIENT_BANS_FILE = os.path.join(H.scratch, "bans.json")
@@ -408,9 +410,17 @@ def t_api():
         A.devices_quarantine_sync()
         check(len(net.scripts) == n0, "sync: nothing changed -> no rewrite")
         write_devices([dict(da, ips=["192.0.2.52"], current_ips=["192.0.2.52"], ipv6=[]), db])
+        net.neigh = [n for n in net.neigh if n["dst"] != "192.0.2.50"]
         A.devices_quarantine_sync()
         check(len(net.scripts) == n0 + 1 and "192.0.2.52" in net.table and "192.0.2.50" not in net.table,
               "sync: new address -> table rewritten")
+        # the neighbour table is read directly: a new address of the MAC is
+        # blocked before the inventory knows it (DW-7)
+        net.neigh.append({"dst": "192.0.2.53", "lladdr": MAC_A})
+        net.neigh.append({"dst": "2001:db8::53", "lladdr": MAC_A})
+        A.devices_quarantine_sync()
+        check(len(net.scripts) == n0 + 2 and "192.0.2.53" in net.table and "2001:db8::53" in net.table
+              and "192.0.2.52" in net.table, "sync: new neighbour address of the MAC blocked at once (DW-7)")
         r = H.request("POST", "/api/devices/%s/quarantine" % db["id"], role="admin", origin=H.SAME,
                       body={"mode": "isolate", "expires": "1h"})
         check(r.status == 200 and "iso_in" in net.table and r.json["warnings"], "API: isolate + warnings")
@@ -480,6 +490,20 @@ def t_api():
         titles = [s[0]["title"] for s in sent]
         check(titles == ["New device on LAN: newbie", "Device flagged: laptop"] and sent[0][3] == "default"
               and sent[1][0]["severity"] == "critical", "alerts: IoT new device and low finding skipped (%r)" % titles)
+        det = sent[1][0]["detail"]
+        check("Connected to a known botnet C2 server (Feodo Tracker): 203.0.113.9" in det and det.count("Feodo") == 1,
+              "DW-10: finding alert names the source once and what differs (the indicator) (%r)" % det)
+        f_loc = {"title": "Connected to a known malware host (local indicator list)", "source": "local",
+                 "kind": "intel_connection", "indicator": "203.0.113.10", "count": 4,
+                 "details": {"port": 443, "proto": "tcp"}}
+        txt = A._device_alert_what(f_loc)
+        check(txt.count("local indicator list") == 1 and "203.0.113.10" in txt and "port 443/tcp" in txt
+              and "seen 4 times" in txt, "DW-10: no '(local indicator list) - local indicator list' (%r)" % txt)
+        t2 = A._device_alert_what({"title": "ET MALWARE Example", "source": "suricata", "kind": "ids_alert",
+                                   "indicator": "sid:2024897", "details": {"peer": "203.0.113.11"}})
+        check("signature 2024897" in t2 and "203.0.113.11" in t2 and "(Suricata)" in t2, "DW-10: IDS alert text (%r)" % t2)
+        check("Example Corp." in sent[0][0]["detail"] and "private" not in sent[0][0]["detail"].lower(),
+              "new device alert: vendor (%r)" % sent[0][0]["detail"])
         with open(ev, "a") as f:
             f.write('"}\n')
             f.write(json.dumps({"type": "finding", "device": da["id"], "finding": f_hi["id"], "severity": "critical",
@@ -516,6 +540,16 @@ def t_api():
         check(any("held back" in s[0]["detail"] or "held back" in s[0]["title"] for s in sent),
               "alerts: held-back count reported once the window has room")
         check(os.stat(A.DEVICE_ALERT_STATE).st_mode & 0o777 == 0o600, "alert state 0600")
+        priv = dict(base, **dev("m02005e005305", "02:00:5e:00:53:05", ["192.0.2.72"], name="02:00:5e:00:53:05"))
+        priv.update(baseline=False, first_seen=int(now), vendor="Private MAC", private_mac=True)
+        write_devices([da, db, newlan, priv], [])
+        with open(ev, "a") as f:
+            f.write(json.dumps({"type": "new_device", "device": priv["id"], "private_mac": True, "ts": int(now)}) + "\n")
+        sent.clear()
+        A.devices_alert_pass()
+        d0 = [s[0]["detail"] for s in sent if priv["name"] in s[0]["title"]]
+        check(d0 and d0[0].startswith("Private (randomised) MAC address.") and "(private MAC)" not in d0[0],
+              "DW-10: new-device alert says 'private MAC' once (%r)" % d0)
         # integration section
         A._INTEG_CACHES["devices"].drop()
         write_devices([da, db, newlan], [f_hi])
@@ -527,8 +561,57 @@ def t_api():
         H.close()
 
 
+def t_campaign4():
+    """Lab campaign 4 findings DW-3 / DW-6 / DW-7 / DW-10 (documentation addresses)."""
+    ctx = {"macs": set(), "ips": set(), "gateways": set(), "gateway_macs": set(), "wan": ["wan0"]}
+    # DW-3: after an address overlap A's current .101 is in B's history and
+    # B's only address .77 in A's: each device keeps its CURRENT addresses
+    # (only the other devices' current_ips are excluded)
+    a = dev("m02005e005301", MAC_A, ["192.0.2.101", "192.0.2.100", "192.0.2.77"], ["2001:db8::a1"],
+            ["192.0.2.101", "192.0.2.100"], name="client")
+    b = dev("m02005e005302", MAC_B, ["192.0.2.101", "192.0.2.77"], [], ["192.0.2.77"], name="macvlan")
+    ta, tb = Q.device_targets(a, [a, b]), Q.device_targets(b, [a, b])
+    check(ta["ips"] == ["192.0.2.100", "192.0.2.101"] and tb["ips"] == ["192.0.2.77"],
+          "DW-3: current addresses kept although another device once held them (%r / %r)" % (ta["ips"], tb["ips"]))
+    p = Q.plan({"wan": ["wan0"], "entries": [Q.make_entry(a, ta, "isolate", "none", NOW)]}, ctx, NOW)
+    s = Q.render(p)
+    check("192.0.2.101" in p["isolate"]["v4"] and "forward ip daddr @iso_v4 counter drop" in s,
+          "DW-3: forwarded traffic TO the isolated device's current address dropped (VLAN ping repro)")
+    pi = Q.plan({"wan": ["wan0"], "entries": [Q.make_entry(a, ta, "internet", "none", NOW)]}, ctx, NOW)
+    check("192.0.2.101" in pi["internet"]["v4"] and 'iifname { "wan0" } ip daddr @inet_v4' in Q.render(pi),
+          "DW-3: inbound (port-forward) rule covers the current address")
+    # an address both claim right now stays out of both (the MAC rule still applies)
+    b2 = dict(b, current_ips=["192.0.2.77", "192.0.2.101"])
+    check("192.0.2.101" not in Q.device_targets(a, [a, b2])["ips"], "DW-3: an address another device holds NOW is left out")
+    # neighbour table: what the MAC uses right now, before the inventory
+    tn = Q.device_targets(a, [a, b], neigh={"192.0.2.150": MAC_A, "2001:db8::a2": MAC_A, "192.0.2.100": MAC_B})
+    check("192.0.2.150" in tn["ips"] and "2001:db8::a2" in tn["ipv6"] and "192.0.2.100" not in tn["ips"],
+          "DW-7: neighbour addresses of the MAC added, an address the neighbour table gives to another MAC dropped (%r)" % tn)
+    many = dev("m02005e005301", MAC_A, ["192.0.2.%d" % i for i in range(2, 60)], [], ["192.0.2.59"])
+    check("192.0.2.59" in Q.device_targets(many, [many])["ips"], "targets: the cap keeps the current address")
+    # DW-6: answers to router-initiated connections pass iso_in
+    rules = [ln for ln in s.splitlines() if " iso_in " in ln and ln.startswith("add rule")]
+    check(rules and rules[0].endswith("iso_in ct direction reply return") and rules[-1].split(" iso_in ")[1].startswith("counter drop"),
+          "DW-6: iso_in returns replies to router-initiated connections first, still ends in a drop (%r)" % rules)
+    live = nft_json(s)
+    check(Q.matches({"sets": {x["set"]["name"]: [str(e) for e in x["set"].get("elem", [])] for x in live if "set" in x},
+                     "rules": sum(1 for x in live if "rule" in x),
+                     "chains": {x["chain"]["name"]: x["chain"].get("hook") for x in live if "chain" in x}}, p),
+          "matches(): rule count follows the render (no rewrite loop)")
+    # DW-7: sync refreshes a MAC entry from the neighbour table even with the engine down
+    st = {"wan": ["wan0"], "entries": [Q.make_entry(a, ta, "internet", "none", NOW)]}
+    st2, _e, ch = Q.sync(st, [], NOW + 10, ["wan0"], None, {"192.0.2.150": MAC_A})
+    check(ch and "192.0.2.150" in st2["entries"][0]["ips"] and "192.0.2.101" in st2["entries"][0]["ips"],
+          "DW-7: sync without inventory adds the neighbour address, keeps the stored ones")
+    # DW-10: the same-switch note is not for VPN peers
+    tw = Q.device_targets(DW, [DW], [{"public_key": WG_PK, "allowed_ips": ["198.18.0.7/32"]}])
+    check(not any("same switch" in w for w in Q.warnings_for(DW, tw, "isolate"))
+          and any("same switch" in w for w in Q.warnings_for(a, ta, "isolate")),
+          "DW-10: 'same switch or Wi-Fi' warning only for LAN devices")
+
+
 def main():
-    for t in (t_render, t_plan_filter, t_refusals, t_sync_expiry, t_persistence_restore, t_api):
+    for t in (t_render, t_plan_filter, t_refusals, t_sync_expiry, t_campaign4, t_persistence_restore, t_api):
         try:
             t()
         except Exception:

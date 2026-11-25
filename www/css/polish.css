@@ -1938,3 +1938,16 @@ html:not(#_tw#_x) #view-backups .act-btn.act-pin.is-on {
 }
 .ti-add input[type="text"] { flex: 1 1 180px; }
 .ti-msg { font-size: 12px; min-height: 1em; margin-bottom: 12px; }
+
+/* Settings > Threat: monitoring sources (layout only; shared components) */
+#dev-src-body { padding: 0 16px 14px; }
+#dev-src-body .vl-info { margin: 0 0 10px; }
+#dev-src-body .ov-kv { padding: 0; }
+#dev-src-body .badge { vertical-align: 1px; }
+.dev-src-cmd { overflow-wrap: anywhere; font-size: 11.5px; }
+#dev-src-card a, #dev-src-hint a, #dev-threat-body a { color: var(--accent); }
+.dev-threat-stats + .vl-info { margin-top: 10px; }
+@media (max-width: 760px) {
+  #dev-src-body .ov-kv-row { flex-direction: column; gap: 2px; }
+  #dev-src-body .ov-kv-row .ov-kv-value { text-align: left; }
+}

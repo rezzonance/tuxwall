@@ -1138,6 +1138,8 @@ def t_devicewatch_setup():
     check('devicewatch_setup "$STATE_DIR/.devicewatch-enabled-once"' in body,
           "configure runs devicewatch_setup with the enable-once marker")
 
+    shared = []
+
     def go(db, marker_exists=False, env=None):
         d = tempfile.mkdtemp(prefix="pkg-dw-")
         fakebin(d, DW_FAKES)
@@ -1150,8 +1152,13 @@ def t_devicewatch_setup():
         with open(d + "/conf/abuse-ch.key", "w") as f:
             f.write("k\n")
         os.chmod(d + "/conf/abuse-ch.key", 0o644)
-        rc, calls, out, err = bash_run(d, fn + 'devicewatch_setup "%s" "%s/conf"\n' % (marker, d),
+        os.makedirs(d + "/lib")
+        with open(d + "/lib/wg-peers.json", "w") as f:
+            f.write("{}")
+        rc, calls, out, err = bash_run(d, fn + 'devicewatch_setup "%s" "%s/conf" "%s/lib/shared"\n' % (marker, d, d),
                                        env=dict({"FAKE_DB": d + "/db"}, **(env or {})))
+        shared.append((os.path.isdir(d + "/lib/shared") and os.stat(d + "/lib/shared").st_mode & 0o777,
+                       os.path.exists(d + "/lib/shared/wg-peers.json") and not os.path.exists(d + "/lib/wg-peers.json")))
         res = (rc, calls, out, os.path.exists(marker), os.stat(d + "/conf/abuse-ch.key").st_mode & 0o777)
         shutil.rmtree(d)
         return res
@@ -1165,6 +1172,7 @@ def t_devicewatch_setup():
           and "systemctl start --no-block tuxwall-devicewatch-feeds.service" in calls
           and "systemctl restart tuxwall-devicewatch.service" in calls, "fresh: enabled once, started, feeds in background")
     check(kmode == 0o600 and "zeek systemd-journal" in out, "key file tightened to 0600; status line names the groups (%r)" % out)
+    check(shared[-1] == (0o755, True), "WireGuard snapshot directory 0755 created, the old single file moved in (%r)" % shared)
     rc, calls, out, marked, _k = go(["passwd tuxwall-devicewatch", "group _kea"], marker_exists=True)
     check(rc == 0 and not any(c.startswith(("useradd", "systemctl enable", "systemctl restart")) for c in calls)
           and "systemctl try-restart tuxwall-devicewatch.service" in calls,

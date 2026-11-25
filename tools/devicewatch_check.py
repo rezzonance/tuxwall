@@ -636,6 +636,137 @@ def t_engine():
     check(modes.get("engine.json") == 0o600 and modes.get("devices.json") == 0o640, "state file modes (%r)" % modes)
 
 
+def t_campaign4():
+    """Lab campaign 4 (deed9c7) findings: DW-1 attribution, DW-2 Suricata
+    without LAN capture, DW-5 address lists, DW-8 indicators, DW-9 new_24h,
+    DW-10 WireGuard zone, DW-11 blocked-lookup count, DW-12 checksums."""
+    r = make_root("c4")
+    src = FakeSources()
+    clock = Clock(NOW)
+    IP, IP_B = "192.0.2.10", "192.0.2.20"
+    A, B = dw.mac_id(MAC_A), dw.mac_id(MAC_B)
+    w(r + "/var/lib/kea/kea-leases4.csv", leases_csv([(IP, MAC_A, "client-a", NOW + 86400)]))
+    w(r + "/etc/tuxwall/devices/local-indicators.json", json.dumps({"version": 1, "indicators": [
+        {"type": "ip", "value": "203.0.113.90", "severity": "high"},
+        {"type": "ip", "value": "203.0.113.91", "severity": "high"},
+        {"type": "domain", "value": "blocked.example", "severity": "high"}]}))
+    w(r + "/var/lib/tuxwall/shared/wg-peers.json", json.dumps({"schema": 1, "iface": "wg1", "peers": [
+        {"public_key": WG_PK, "name": "", "allowed_ips": ["192.0.2.131/32"], "last_handshake": NOW - 30}]}))
+    w(r + "/etc/suricata/suricata.yaml", "%YAML 1.1\n---\nvars:\n  x: 1\naf-packet:\n  - interface: wan0\n"
+      "    cluster-id: 99\n  - interface: default\n#  - interface: lan0\npcap:\n  - interface: default\nlogging:\n  x: 1\n")
+    src.neigh = [{"dst": IP, "dev": "lan0", "lladdr": MAC_A, "state": ["REACHABLE"]}]
+    eng = dw.Engine(dw.Config(r), src, clock)
+    eng.cycle()                                                       # baseline: A only
+    # ARP flux: B answers for A's address for a minute (and uses its own .20)
+    clock.t = NOW + 60
+    src.neigh = [{"dst": IP, "dev": "lan0", "lladdr": MAC_B, "state": ["REACHABLE"]},
+                 {"dst": IP_B, "dev": "lan0", "lladdr": MAC_B, "state": ["REACHABLE"]}]
+    eng.cycle()
+    out = {d["id"]: d for d in json.load(open(r + "/var/lib/tuxwall/devices/devices.json"))["devices"]}
+    check(IP not in out[A]["current_ips"] and IP in out[B]["current_ips"],
+          "DW-1: a lease the neighbour table contradicts is not 'current' (%r / %r)" % (out[A]["current_ips"], out[B]["current_ips"]))
+    for t in (NOW + 120, NOW + 180):
+        clock.t = t
+        src.neigh = [{"dst": IP, "dev": "lan0", "lladdr": MAC_A, "state": ["REACHABLE"]},
+                     {"dst": IP_B, "dev": "lan0", "lladdr": MAC_B, "state": ["REACHABLE"]}]
+        eng.cycle()
+    check(eng.who(IP, NOW + 60) == B and eng.who(IP, NOW + 150) == A and eng.who(IP, NOW + 175) == A
+          and eng.who(IP, NOW + 30) == A, "DW-1: ownership history by time (%r)" % eng.ip_hist.get(IP))
+    check(sum(1 for e in eng.ip_hist[IP] if e[0] == A and e[1] <= NOW + 60 <= e[2]) == 0,
+          "DW-1: A's interval never bridges B's claim (%r)" % eng.ip_hist[IP])
+    zeek(r, "conn", conn(NOW + 170, IP, "203.0.113.90"))              # A, after the flux, no L2 info
+    clock.t = NOW + 240
+    eng.cycle()
+    fa = [f for f in eng.findings.values() if f["indicator"] == "203.0.113.90"]
+    check(len(fa) == 1 and fa[0]["device"] == A, "DW-1: A's connection after the flux lands on A (%r)"
+          % [(f["device"], f["indicator"]) for f in fa])
+    # the MAC on the flow wins over the history; the earlier finding stays where it is
+    l2 = json.loads(conn(NOW + 230, IP, "203.0.113.91"))
+    l2.update(orig_l2_addr=MAC_B, resp_l2_addr="00:00:5e:00:53:fe")
+    zeek(r, "conn", jl(l2))
+    clock.t = NOW + 300
+    eng.cycle()
+    fb = [f for f in eng.findings.values() if f["indicator"] == "203.0.113.91"]
+    check(len(fb) == 1 and fb[0]["device"] == B and eng.stats["l2_attributed"] >= 1,
+          "DW-1: Zeek orig_l2_addr decides (the flow came from B's MAC)")
+    check(fa[0]["device"] == A and eng.findings[fa[0]["id"]]["device"] == A, "DW-1: existing findings never move")
+    check(eng.who(IP, NOW + 240) == A, "DW-1: one L2 sighting of B inside A's interval does not take the address over later")
+    # DW-5: B's address list never shows A's current address; current first
+    out = {d["id"]: d for d in json.load(open(r + "/var/lib/tuxwall/devices/devices.json"))["devices"]}
+    check(out[B]["ips"] == [IP_B] and out[A]["ips"][0] == IP,
+          "DW-5: no address another device holds now; current first (%r / %r)" % (out[B]["ips"], out[A]["ips"]))
+    # DW-9: B is new (first seen after the baseline) although its health is warning
+    summ = json.load(open(r + "/var/lib/tuxwall/devices/summary.json"))
+    check(out[B]["health"] == "warning" and summ["new_24h"] == 1,
+          "DW-9: new_24h counts a new device whatever its health (B; the rest are baseline: %r)" % summ["new_24h"])
+    # DW-10: a WireGuard interface without a role is still the VPN zone
+    g = out[dw.wg_id(WG_PK)]
+    check(g["zone"] == "vpn" and g["zone_name"].startswith("WireGuard") and g["iface"] == "wg1",
+          "DW-10: WireGuard peer zone 'vpn' without an interfaces.json role (%r)" % {k: g[k] for k in ("zone", "zone_name")})
+    # DW-4 (engine side): the snapshot in the shared directory is re-read every cycle
+    w(r + "/var/lib/tuxwall/shared/wg-peers.json", json.dumps({"schema": 1, "iface": "wg1", "peers": []}))
+    eng.cycle()
+    check(eng.source_status["wireguard"]["peers"] == 0, "DW-4: a rewritten snapshot is picked up on the next cycle")
+    # DW-2: Suricata captures only the WAN -> status warning; a LAN capture clears it
+    st = json.load(open(r + "/var/lib/tuxwall/devices/status.json"))
+    wn = {x["code"]: x for x in st["warnings"]}
+    check("suricata_no_lan" in wn and "only watches the WAN" in wn["suricata_no_lan"]["text"]
+          and "--add-lan" in wn["suricata_no_lan"]["hint"] and "lan0" in wn["suricata_no_lan"]["hint"]
+          and st["sources"]["suricata"]["capture"] == ["wan0"] and st["sources"]["suricata"]["lan_capture"] is False,
+          "DW-2: Suricata without a LAN interface -> warning with the fix (%r)" % st.get("warnings"))
+    w(r + "/etc/suricata/suricata.yaml", "af-packet:\n  - interface: wan0\n  - interface: \"lan0\"\nlogging:\n  x: 1\n")
+    eng.refresh_topology(force=True)
+    su = eng.suricata_status()
+    check(su["lan_capture"] is True and set(su["captured_lan"]) == {"lan0", "lan0.10"}
+          and not any(x["code"] == "suricata_no_lan" for x in eng.warnings(clock.t)),
+          "DW-2: capture on the LAN parent covers its VLAN; warning gone (%r)" % su)
+    os.unlink(r + "/etc/suricata/suricata.yaml")
+    eng.refresh_topology(force=True)
+    check(eng.suricata_status()["lan_capture"] is None and not eng.warnings(clock.t),
+          "DW-2: no suricata.yaml -> unknown, no warning")
+    # DW-11: A + AAAA lookups a few seconds apart, plus unbound's line -> one blocked lookup
+    T = NOW + 400
+    zeek(r, "dns", dns(T, IP_B, "blocked.example", None, "NXDOMAIN", tid=7) + dns(T + 4, IP_B, "blocked.example", None,
+                                                                                  "NXDOMAIN", tid=8))
+    src.journal_lines = [(T + 6, "unbound[1:0] info: always_nxdomain %s@5353 blocked.example. A IN" % IP_B)]
+    clock.t = NOW + 460
+    eng.cycle()
+    fd = [f for f in eng.findings.values() if f["kind"] == "dns_blocked" and f["indicator"] == "blocked.example"]
+    check(len(fd) == 1 and fd[0]["count"] == 1 and fd[0]["device"] == B,
+          "DW-11: one blocked lookup counted once (%r)" % [(f["device"], f["count"]) for f in fd])
+    # DW-12: Zeek on a VM with checksum offload: every TCP flow 'C', and no MAC fields
+    rz = make_root("c4z")
+    ez = dw.Engine(dw.Config(rz), FakeSources(), Clock(NOW))
+    zeek(rz, "conn", "".join(conn(NOW - 300 + i, "192.0.2.%d" % (10 + i % 5), EXT, state="OTH", rb=0, hist="C")
+                             for i in range(250)))
+    ez.cycle()
+    codes = {x["code"] for x in ez.warnings(NOW)}
+    check({"zeek_bad_checksums", "zeek_no_mac"} <= codes, "DW-12: bad checksums + no MAC logging -> warnings (%r)" % codes)
+    zs = json.load(open(rz + "/var/lib/tuxwall/devices/status.json"))
+    check(zs["sources"]["zeek"]["bad_checksum"] == 250 and zs["sources"]["zeek"]["mac_logging"] is False
+          and zs["unattributed_addresses_1h"] == 0, "DW-12: status counters (%r)" % zs["sources"]["zeek"])
+    # DW-8: never-matchable local indicators refused (base check; the API adds the router + LAN context)
+    bad = [("0.0.0.0", None), ("::", None), ("224.0.0.251", None), ("127.0.0.1", None), ("fe80::1", None),
+           ("0.0.0.0/8", None), ("192.0.2.1", "router"), ("192.0.2.40", "lan"), ("192.0.2.32/28", "lan"), ("192.0.2.0/25", "router"),
+           ("192.0.0.0/16", "router")]
+    for value, why in bad:
+        try:
+            feeds.validate_local_indicator({"value": value}, router_ips=["192.0.2.1", "198.51.100.2"],
+                                           lan_nets=["192.0.2.0/26", "2001:db8:1::/64"])
+            check(False, "DW-8: %s accepted" % value)
+        except ValueError as exc:
+            msg = str(exc)
+            check(("router" in msg if why == "router" else "own network" in msg if why == "lan" else "never match" in msg),
+                  "DW-8: %s refused with a clear message (%s)" % (value, msg))
+    check(feeds.validate_local_indicator({"value": "198.51.100.77"}, router_ips=["192.0.2.1"],
+                                         lan_nets=["192.0.2.0/26"])["value"] == "198.51.100.77"
+          and feeds.validate_local_indicator({"value": "10.20.0.0/16"}, lan_nets=["192.0.2.0/26"])["type"] == "cidr",
+          "DW-8: internet / other private networks still accepted")
+    w(r + "/etc/tuxwall/devices/li.json", json.dumps({"indicators": [{"value": "0.0.0.0"}, {"value": "198.51.100.5"}]}))
+    check([x["value"] for x in feeds.load_local_indicators(r + "/etc/tuxwall/devices/li.json")] == ["198.51.100.5"],
+          "DW-8: an old never-matchable entry is skipped on load")
+
+
 def t_score():
     dev = {"first_seen": NOW - 10 * 86400, "baseline": False}
     f = lambda sev, age, exp=False: {"id": sev + str(age), "severity": sev, "last": NOW - age, "kind": "dns_lookup",  # noqa: E731
@@ -671,7 +802,8 @@ def t_api():
         conf = os.path.join(H.scratch, "dw-conf")
         os.makedirs(st)
         A.DEVICES_STATE_DIR, A.DEVICES_CONF_DIR = st, conf
-        A.DEVICES_WG_SNAPSHOT = os.path.join(H.scratch, "wg-peers.json")
+        A.DEVICES_WG_SNAPSHOT = os.path.join(H.scratch, "shared", "wg-peers.json")
+        A.DEVICES_WG_SNAPSHOT_LEGACY = os.path.join(H.scratch, "wg-peers.json")
         if A._qm is not None:      # never the router's real quarantine list
             A._QUAR["env"] = A._qm.Env(state_file=os.path.join(H.scratch, "quarantine.json"),
                                        log_file=os.path.join(H.scratch, "device-actions.jsonl"))
@@ -756,6 +888,38 @@ def t_api():
                         body={"key": "bad key!"}).status == 400, "key: invalid -> 400")
         H.request("POST", "/api/devices/feeds/key", role="admin", origin=H.SAME, body={"key": ""})
         check(not os.path.exists(kp), "key: cleared")
+        # DW-8 through the API: the router's own addresses and LAN networks refused
+        A._devices_local_context = lambda: (["192.0.2.1", "198.51.100.2"], ["192.0.2.0/26", "2001:db8:1::/64"])
+        for v in ("192.0.2.1", "192.0.2.30", "2001:db8:1::99", "0.0.0.0"):
+            r = H.request("POST", "/api/devices/indicators", role="admin", origin=H.SAME,
+                          body={"action": "add", "indicator": {"value": v}})
+            check(r.status == 400 and ("never match" in r.json["error"] or "not checked" in r.json["error"]),
+                  "DW-8 API: %s refused (%r)" % (v, r.json))
+        check(H.request("POST", "/api/devices/indicators", role="admin", origin=H.SAME,
+                        body={"action": "add", "indicator": {"value": "198.51.100.200"}}).status == 200,
+              "DW-8 API: an internet address is accepted")
+        H.request("POST", "/api/devices/indicators", role="admin", origin=H.SAME,
+                  body={"action": "remove", "value": "198.51.100.200"})
+        # DW-2 / DW-12: engine warnings reach the Threat settings and the summary
+        w(st + "/status.json", json.dumps({"generated_at": int(time.time()), "warnings": [
+            {"code": "suricata_no_lan", "text": "IDS alerts can't be attributed to devices — Suricata only watches the WAN",
+             "hint": "sudo python3 /usr/local/share/tuxwall/scripts/tune-suricata.py --add-lan ..."}],
+            "sources": {"suricata": {"capture": ["wan0"], "lan_capture": False}, "zeek": {"lines": 500, "mac_logging": True},
+                        "kea": {"ok": True}}, "journal": {"active": True}, "unattributed_addresses_1h": 3}))
+        r = H.request("GET", "/api/devices/feeds", role="viewer")
+        check(r.json["warnings"][0]["code"] == "suricata_no_lan" and r.json["sources"]["suricata"]["lan_capture"] is False
+              and r.json["sources"]["engine_running"] and r.json["sources"]["unattributed_addresses_1h"] == 3,
+              "DW-2: feeds status carries the source warnings (%r)" % r.json.get("sources"))
+        r = H.request("GET", "/api/devices/summary", role="viewer")
+        check([x["code"] for x in r.json["warnings"]] == ["suricata_no_lan"], "DW-2: summary carries the warnings")
+        # DW-5: an Access ban on an address the device only held before is not shown on it
+        other = dict(dev, id=dw.mac_id(MAC_B), mac=MAC_B, ips=["192.0.2.77"], current_ips=["192.0.2.77"])
+        mine = dict(dev, ips=["192.0.2.10", "192.0.2.77"], current_ips=["192.0.2.10"])
+        A.load_bans = lambda: [{"ip": "192.0.2.77"}, {"ip": "192.0.2.10"}]
+        if A._qm is not None:
+            check(A._quar_detail(mine, [mine, other])["lease_banned"] == ["192.0.2.10"]
+                  and A._quar_detail(other, [mine, other])["lease_banned"] == ["192.0.2.77"],
+                  "DW-5: the ban note names only the device's own current address")
         # integration summary section
         A.build_devices_summary.__globals__["_INTEG_CACHES"]["devices"].drop()
         j = A._integ_devices()
@@ -770,7 +934,12 @@ def t_api():
             WG_PK, pre, int(time.time()) - 30)
         A.load_wg_state = lambda: {"peers": [{"public_key": WG_PK, "name": "Laptop VPN", "address": "192.0.2.130/24",
                                               "private_key": "c2VjcmV0"}]}
+        w(A.DEVICES_WG_SNAPSHOT_LEGACY, "{}")
         check(A._devices_wg_snapshot() is True and A._devices_wg_snapshot() is False, "WG snapshot: written once, unchanged -> no write")
+        check(os.path.dirname(A.DEVICES_WG_SNAPSHOT).endswith("/shared") and not os.path.exists(A.DEVICES_WG_SNAPSHOT_LEGACY)
+              and os.stat(os.path.dirname(A.DEVICES_WG_SNAPSHOT)).st_mode & 0o777 == 0o755,
+              "DW-4: snapshot in its own directory (mapped by the unit), the old single file removed")
+        check(A._devices_wg_peers()[0]["public_key"] == WG_PK, "DW-4: quarantine reads the new snapshot")
         snap = open(A.DEVICES_WG_SNAPSHOT).read()
         sj = json.loads(snap)
         check(pre not in snap and "c2VjcmV0" not in snap and "privkeyAAA" not in snap and "203.0.113.9" not in snap
@@ -832,6 +1001,12 @@ def t_units():
           "analysis service: syscall allow-list (+ capset for ip(8), harmless without capabilities)")
     check(main[("Service", "MemoryMax")][-1] == "256M" and main[("Install", "WantedBy")][-1] == "multi-user.target",
           "analysis service: MemoryMax 256M, enabled at boot")
+    ro = " ".join(main.get(("Service", "BindReadOnlyPaths")) or []).split()
+    check("-/var/lib/tuxwall/shared" in ro and not any(x.endswith("wg-peers.json") for x in ro)
+          and dw.Config("").wg_snapshot == "/var/lib/tuxwall/shared/wg-peers.json",
+          "DW-4: the WireGuard snapshot is mapped as its directory (atomic rewrites stay visible) (%r)" % ro)
+    geo = open(os.path.join(ROOT, "www", "scripts", "geoip-setup.sh")).read()
+    check("try-restart tuxwall-devicewatch" in geo, "DW-4: geoip-setup.sh restarts the engine after replacing the mapped database")
     fu = unit("tuxwall-devicewatch-feeds.service")
     check(fu[("Service", "Type")][-1] == "oneshot"
           and fu[("Service", "LoadCredential")][-1] == "abusech-key:/etc/tuxwall/devices/abuse-ch.key"
@@ -854,7 +1029,7 @@ def t_units():
           "analysis engine opens no network connection (feeds are a separate unit)")
 
 
-for t in (t_follower, t_feeds, t_engine, t_score, t_units, t_api):
+for t in (t_follower, t_feeds, t_engine, t_campaign4, t_score, t_units, t_api):
     try:
         t()
     except Exception:

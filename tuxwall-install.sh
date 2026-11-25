@@ -1704,6 +1704,14 @@ step_services() {
             fi
         done
     fi
+    # The LAN has its address and role now (the package's postinst may have
+    # run before the network was applied): make Suricata capture it too, so
+    # device monitoring can attribute IDS alerts to LAN devices. Untouched
+    # when it already does, for IPS setups, or when no LAN is known.
+    local tune=/usr/local/share/tuxwall/scripts/tune-suricata.py
+    if [[ -f /etc/suricata/suricata.yaml && -f $tune ]] && q python3 "$tune" --add-lan /etc/suricata/suricata.yaml; then
+        ok "Suricata also captures the LAN interface (device monitoring)"
+    fi
     q systemctl enable suricata || true
     q systemctl restart suricata || info "Suricata is not running yet (it starts once rules are downloaded)"
     if command -v cscli >/dev/null 2>&1; then

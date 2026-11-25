@@ -27,9 +27,12 @@ Inputs (all read-only)
   /etc/kea/kea-dhcp4.conf         reservation host names
   ip -j neigh / ip -j addr        ARP/NDP neighbours, LAN prefixes (netlink)
   /etc/tuxwall/interfaces.json    interface roles (lan / opt (VLAN) / vpn / wan)
-  /var/lib/tuxwall/wg-peers.json  WireGuard peers (public keys, allowed IPs,
-                                  names) - written by the API, which runs as
-                                  root; private keys never leave the API
+  /var/lib/tuxwall/shared/wg-peers.json  WireGuard peers (public keys,
+                                  allowed IPs, names) - written by the API,
+                                  which runs as root; private keys never
+                                  leave the API
+  /etc/suricata/suricata.yaml     capture interfaces (does Suricata see the
+                                  LAN at all? - status warning otherwise)
   /usr/share/ieee-data/oui.txt    vendor names
   /var/lib/tuxwall/dbip-city-lite.mmdb  countries (python3-maxminddb, optional)
   /var/lib/tuxwall/devices/feeds/*.json  parsed threat-intel feeds
@@ -46,6 +49,16 @@ Outputs (/var/lib/tuxwall/devices/, 0640, schema 1)
 
 Device ids: "m" + 12 hex (MAC), "w" + 16 hex (sha256 of a WireGuard public
 key), "i" + 16 hex (sha256 of an address with no known MAC).
+
+Attribution (event -> device): the MAC seen with the event wins - Zeek's
+mac-logging policy (conn.log orig_l2_addr / resp_l2_addr) or Suricata's
+"ether" block; otherwise the address ownership history (per IP a few
+[device, first, last] intervals from leases, neighbours, DHCP and those
+MACs): the most recent holder whose interval contains the event time, else
+the last holder before it (up to 1 h), else the next one. A holder never
+extends its interval across another device's claim, and a lease does not
+count while the neighbour table shows another MAC on the address. Findings
+already recorded never move to another device.
 
 Severity (finding kinds)
   c2_connection      completed outbound connection to a C2 address      critical
@@ -132,7 +145,14 @@ ONLINE_SECONDS = 600
 WG_ONLINE_SECONDS = 180
 IP_HISTORY_SECONDS = 7 * 86400
 IP_HISTORY_MAX = 20000
-IP_HISTORY_PER_IP = 4
+IP_HISTORY_PER_IP = 8
+IP_MERGE_SECONDS = 3600         # an observation this close extends the holder's interval
+IP_TAIL_SECONDS = 3600          # the last holder keeps an address this long after its last sighting
+IP_LEAD_SECONDS = 600
+ZEEK_WINDOW_CYCLES = 60         # source-health counters: about the last hour
+ZEEK_MIN_LINES = 200
+BAD_CHECKSUM_SHARE = 0.5
+UNATTR_MAX = 10000
 MAX_FINDINGS = 10000
 MAX_DEVICES = 2000
 EVENTS_MAX_BYTES = 1 << 20
@@ -254,8 +274,12 @@ class Config:
         self.kea_conf = p("/etc/kea/kea-dhcp4.conf")
         self.interfaces = p("/etc/tuxwall/interfaces.json")
         self.oui = p("/usr/share/ieee-data/oui.txt")
-        self.wg_snapshot = p("/var/lib/tuxwall/wg-peers.json")
+        # in a directory: the unit maps the directory, so the API's atomic
+        # rewrites (a new inode each time) stay visible to the running engine
+        self.wg_snapshot = p("/var/lib/tuxwall/shared/wg-peers.json")
+        self.wg_snapshot_legacy = p("/var/lib/tuxwall/wg-peers.json")
         self.geo_db = p("/var/lib/tuxwall/dbip-city-lite.mmdb")
+        self.suricata_conf = p("/etc/suricata/suricata.yaml")
 
     def conf(self, name):
         return os.path.join(self.conf_dir, name)
@@ -780,6 +804,26 @@ def read_kea_reservations(path):
     return out
 
 
+def suricata_capture(path):
+    """Interfaces Suricata captures (the af-packet section of suricata.yaml
+    - TuxWall's capture mode - without the "default" template), or None if
+    unreadable."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read(8 << 20)
+    except OSError:
+        return None
+    out = []
+    for sec in ("af-packet",):
+        m = re.search(r"^%s:[ \t]*\n(.*?)(?=^\S)" % sec, text + "\n~:\n", re.M | re.S)
+        if m:
+            for x in re.findall(r"^\s*-\s*interface:\s*(\S+)", m.group(1), re.M):
+                x = x.strip("\"'")
+                if x and x != "default" and x not in out:
+                    out.append(x)
+    return out
+
+
 def run_json_cmd(args, timeout=10):
     try:
         p = subprocess.run(args, capture_output=True, timeout=timeout)
@@ -960,8 +1004,9 @@ class IntelDetector(Detector):
                 kind = "dns_lookup"
                 eng.dns_hot_add(ev.device, ev.answers, feed, meta, matched, ev.ts)
             else:
-                # Zeek and the unbound journal both see a blocked lookup: count it once
-                if eng._dup(("q", ev.dev_ip, ev.query), ev.ts, 3.0):
+                # Zeek and the unbound journal both see a blocked lookup (and a
+                # client asks A + AAAA, often with a retry): count it once
+                if eng._dup(("q", ev.dev_ip, ev.query), ev.ts, 10.0):
                     continue
                 kind = "dns_blocked"
             sev = KIND_DEFAULT_SEV[kind]
@@ -1240,8 +1285,13 @@ class Engine:
         self.last_save = 0
         self.started = clock()
         self.stats = {"unattributed": 0, "dup_flows": 0, "suricata_ignored": 0, "suricata_used": 0,
-                      "cycles": 0, "last_cycle_s": 0.0}
+                      "l2_attributed": 0, "cycles": 0, "last_cycle_s": 0.0}
         self.source_status = {}
+        self.suricata_ifaces = None     # capture interfaces from suricata.yaml (None: unknown)
+        self.role_parents = {}
+        self.zeek_cyc = [0, 0, 0, 0]    # this cycle: conn lines, with MACs, TCP lines, TCP with bad checksums
+        self.zeek_win = []              # per-cycle counters, about the last hour
+        self.unattr = {}                # LAN address with no device -> last time (status: count per hour)
         self.day_cache = {}
         z = self.cfg.zeek_current
         self.followers = {
@@ -1353,11 +1403,12 @@ class Engine:
         if not force and now - self.topology_at < TOPOLOGY_SECONDS and self.prefixes:
             return
         self.topology_at = now
-        roles, wan = {}, set()
+        roles, wan, parents = {}, set(), {}
         conf = read_json(self.cfg.interfaces, {}) or {}
         if isinstance(conf, dict) and conf.get("lan"):
-            w = (conf.get("wan") or {}).get("device")
-            if w:
+            w = conf.get("wan")
+            w = w.get("device") if isinstance(w, dict) else w
+            if isinstance(w, str) and w:
                 wan.add(w)
             lan = conf.get("lan") or {}
             if lan.get("device"):
@@ -1366,6 +1417,8 @@ class Engine:
                 if isinstance(o, dict) and o.get("device"):
                     roles[o["device"]] = {"zone": o.get("id") or "opt", "name": o.get("name") or o["device"],
                                           "vlan": o.get("vlan")}
+                    if isinstance(o.get("parent"), str) and o["parent"]:
+                        parents[o["device"]] = o["parent"]
             for v in conf.get("vpn") or []:
                 if isinstance(v, dict) and v.get("device"):
                     roles[v["device"]] = {"zone": "vpn", "name": v.get("name") or v["device"], "vlan": None}
@@ -1406,6 +1459,63 @@ class Engine:
             self.cls_cache.clear()
         self.prefixes, self.own_ips, self.roles, self.wan_devs = prefixes, own, roles, wan
         self.own_macs = own_macs
+        self.role_parents = parents
+        self.suricata_ifaces = suricata_capture(self.cfg.suricata_conf)
+
+    def suricata_status(self):
+        """Does Suricata capture a LAN/VLAN interface? Alerts seen only on
+        the WAN carry the router's own (NAT) address and can never be
+        attributed to a device."""
+        cap = self.suricata_ifaces
+        lan = sorted(d for d, r in self.roles.items() if r.get("zone") != "vpn")
+        if cap is None:
+            return {"config": False, "capture": [], "lan_capture": None, "lan_ifaces": lan}
+
+        def covered(dev):
+            return dev in cap or self.role_parents.get(dev) in cap or dev.split(".")[0] in cap
+        seen = [d for d in lan if covered(d)]
+        return {"config": True, "capture": list(cap), "lan_capture": bool(seen) if lan else None,
+                "lan_ifaces": lan, "captured_lan": seen,
+                "wan_only": bool(cap) and all(c in self.wan_devs for c in cap)}
+
+    def warnings(self, now):
+        """Source problems that make detections incomplete: [{code, text,
+        hint}] for status.json, the Threat settings and the Clients page."""
+        out = []
+        su = self.suricata_status()
+        if su["lan_capture"] is False and self.config.get("suricata", True):
+            lan = next((d for d, r in self.roles.items() if r.get("zone") == "lan"), "")
+            out.append({
+                "code": "suricata_no_lan",
+                "text": "IDS alerts can't be attributed to devices — Suricata only watches the WAN"
+                        if su.get("wan_only") else
+                        "IDS alerts can't be attributed to devices — Suricata watches no LAN or VLAN interface",
+                "hint": "Add the LAN interface%s to Suricata's capture: sudo python3 /usr/local/share/tuxwall/scripts/"
+                        "tune-suricata.py --add-lan /etc/suricata/suricata.yaml && sudo systemctl restart suricata"
+                        % (" (%s)" % lan if lan else "")})
+        z = self.zeek_window()
+        if z["lines"] >= ZEEK_MIN_LINES and z["tcp"] and z["bad_checksum"] >= BAD_CHECKSUM_SHARE * z["tcp"]:
+            out.append({
+                "code": "zeek_bad_checksums",
+                "text": "Zeek sees bad checksums on most connections (checksum offloading on a virtual network card?) "
+                        "— completed connections count only as attempts",
+                "hint": "sudo /usr/local/share/tuxwall/scripts/zeek-site-setup.sh --ignore-checksums"})
+        if z["lines"] >= ZEEK_MIN_LINES and not z["l2"]:
+            out.append({
+                "code": "zeek_no_mac",
+                "text": "Zeek does not log MAC addresses — events on IPv6 privacy addresses and reused IPs are "
+                        "attributed from the neighbour table only",
+                "hint": "sudo /usr/local/share/tuxwall/scripts/zeek-site-setup.sh"})
+        return out
+
+    def zeek_window(self):
+        lines = l2 = tcp = bad = 0
+        for a, b, c, d in self.zeek_win:
+            lines += a
+            l2 += b
+            tcp += c
+            bad += d
+        return {"lines": lines, "l2": l2, "tcp": tcp, "bad_checksum": bad}
 
     def classify(self, ip):
         """(class, interface) of an address: EXT, LAN (a device), OWN (the
@@ -1479,38 +1589,64 @@ class Engine:
                         del ips[k]
 
     def observe(self, ip, did, ts):
+        """Record that device did held ip at time ts (observations arrive
+        out of order: inventory at 'now', log lines from the past). An
+        interval of the same device absorbs ts unless that would stretch it
+        over another device's claim; otherwise a new interval starts."""
         h = self.ip_hist.get(ip)
         if h is None:
             if len(self.ip_hist) >= IP_HISTORY_MAX:
                 self._prune_ip_hist(force=True)
             h = self.ip_hist[ip] = []
-        if h and h[-1][0] == did:
-            if ts > h[-1][2]:
-                h[-1][2] = ts
-            if ts < h[-1][1]:
-                h[-1][1] = ts
-            return
+        grow = None
         for e in h:
-            if e[0] == did and e[1] - 600 <= ts <= e[2] + 600:
-                e[2] = max(e[2], ts)
+            if e[0] != did:
+                continue
+            if e[1] <= ts <= e[2]:
                 return
-        h.append([did, ts, ts])
+            if e[1] - IP_MERGE_SECONDS <= ts <= e[2] + IP_MERGE_SECONDS:
+                lo, hi = (e[2], ts) if ts > e[2] else (ts, e[1])
+                if not any(o[0] != did and o[1] < hi and o[2] > lo for o in h):
+                    grow = e
+                    break
+        if grow is not None:
+            grow[1] = min(grow[1], ts)
+            grow[2] = max(grow[2], ts)
+        else:
+            h.append([did, ts, ts])
         h.sort(key=lambda e: e[2])
         del h[:-IP_HISTORY_PER_IP]
 
     def who(self, ip, ts):
+        """The device that held ip at time ts (see the module docstring)."""
         h = self.ip_hist.get(ip)
         if not h:
             return None
-        if len(h) == 1:
-            return h[0][0] if ts <= h[0][2] + IP_HISTORY_SECONDS else None
-        for did, first, last in reversed(h):
-            if first - 600 <= ts <= last + 3600:
-                return did
-        for did, first, last in reversed(h):
-            if first <= ts:
-                return did
-        return h[0][0]
+        inside = before = after = None
+        for e in h:
+            if e[1] <= ts <= e[2]:
+                if inside is None or e[1] > inside[1]:
+                    inside = e
+            elif e[2] < ts:
+                if before is None or e[2] > before[2]:
+                    before = e
+            elif after is None or e[1] < after[1]:
+                after = e
+        if inside is not None:
+            return inside[0]
+        gap_b = ts - before[2] if before is not None else None
+        gap_a = after[1] - ts if after is not None else None
+        near_b = gap_b is not None and gap_b <= IP_TAIL_SECONDS
+        near_a = gap_a is not None and gap_a <= IP_LEAD_SECONDS
+        if near_b and near_a:
+            return before[0] if gap_b <= gap_a else after[0]
+        if near_b:
+            return before[0]
+        if near_a:
+            return after[0]
+        if before is not None:
+            return before[0] if gap_b <= IP_HISTORY_SECONDS else None
+        return after[0]        # older than every sighting (the first backlog after a start)
 
     def _prune_ip_hist(self, force=False):
         cut = self.clock() - IP_HISTORY_SECONDS
@@ -1532,6 +1668,8 @@ class Engine:
                     self.observe(ip, d["id"], ts)
                     return d["id"]
             self.stats["unattributed"] += 1
+            if ip in self.unattr or len(self.unattr) < UNATTR_MAX:
+                self.unattr[ip] = max(ts, self.unattr.get(ip) or 0)
             return None
         if not create:
             return None
@@ -1544,8 +1682,24 @@ class Engine:
             self._set_iface(d, iface)
         return did
 
+    def attribute_mac(self, ip, mac, ts, iface=None):
+        """Device of the MAC that carried an event (Zeek L2 / Suricata ether),
+        recorded as a holder of ip at ts; None for the router's own MACs."""
+        if not mac or mac in self.own_macs:
+            return None
+        d = self.ensure_device(mac_id(mac), "mac", ts, mac=mac)
+        if d is None:
+            return None
+        self.observe(ip, d["id"], ts)
+        if iface:
+            self._set_iface(d, iface)
+        self.stats["l2_attributed"] += 1
+        return d["id"]
+
     def _set_iface(self, d, iface):
         r = self.roles.get(iface) or {}
+        if not r and d.get("kind") == "wg":
+            r = {"zone": "vpn", "name": "WireGuard (%s)" % iface}
         d["iface"] = iface
         d["zone"] = r.get("zone") or ""
         d["zone_name"] = r.get("name") or iface
@@ -1553,6 +1707,22 @@ class Engine:
 
     def refresh_inventory(self):
         now = self.clock()
+        # neighbours first: who answers for an address right now
+        neigh = self.src.neighbours()
+        usable = []
+        for n in neigh or []:
+            if not isinstance(n, dict):
+                continue
+            dev = n.get("dev")
+            mac = norm_mac(n.get("lladdr"))
+            ip = feeds.norm_ip(n.get("dst"))
+            if not mac or not ip or dev in self.wan_devs or dev not in self.roles:
+                continue
+            st = (n.get("state") or ["?"])[0] if isinstance(n.get("state"), list) else str(n.get("state") or "?")
+            if st in ("FAILED", "INCOMPLETE", "NOARP"):
+                continue
+            usable.append((dev, mac, ip, st))
+        neigh_mac = {ip: mac for _dev, mac, ip, _st in usable}
         # Kea leases (v4 + v6) and reservations
         cur_ips = {}
         for v6, paths in ((False, self.cfg.kea4), (True, self.cfg.kea6)):
@@ -1567,9 +1737,13 @@ class Engine:
                     continue
                 if le["hostname"]:
                     d["names"]["kea"] = le["hostname"]
-                self.touch(d, min(now, le["cltt"] or now), "lease", le["ip"])
-                self.observe(le["ip"], d["id"], now)
-                cur_ips.setdefault(d["id"], set()).add(le["ip"])
+                # a lease the neighbour table contradicts (another MAC uses the
+                # address now) is not evidence of who holds it
+                held = neigh_mac.get(le["ip"]) in (None, mac)
+                self.touch(d, min(now, le["cltt"] or now), "lease", le["ip"] if held else None)
+                if held:
+                    self.observe(le["ip"], d["id"], now)
+                    cur_ips.setdefault(d["id"], set()).add(le["ip"])
                 c, dev = self.classify(le["ip"])
                 if dev:
                     self._set_iface(d, dev)
@@ -1578,20 +1752,9 @@ class Engine:
             if d is not None and r["hostname"]:
                 d["names"]["reservation"] = r["hostname"]
         # neighbours (ARP / NDP)
-        neigh = self.src.neighbours()
         states = {}
         n_ok = 0
-        for n in neigh or []:
-            if not isinstance(n, dict):
-                continue
-            dev = n.get("dev")
-            mac = norm_mac(n.get("lladdr"))
-            ip = feeds.norm_ip(n.get("dst"))
-            if not mac or not ip or dev in self.wan_devs or dev not in self.roles:
-                continue
-            st = (n.get("state") or ["?"])[0] if isinstance(n.get("state"), list) else str(n.get("state") or "?")
-            if st in ("FAILED", "INCOMPLETE", "NOARP"):
-                continue
+        for dev, mac, ip, st in usable:
             n_ok += 1
             c, _ = self.classify(ip)
             if c != LAN and not ip.startswith("fe80:"):
@@ -1614,6 +1777,8 @@ class Engine:
         self.source_status["neighbours"] = {"ok": neigh is not None, "entries": n_ok}
         # WireGuard peers (snapshot written by the API)
         snap = read_json(self.cfg.wg_snapshot, None, 4 << 20)
+        if snap is None and not os.path.exists(self.cfg.wg_snapshot):
+            snap = read_json(self.cfg.wg_snapshot_legacy, None, 4 << 20)   # API older than the shared dir
         peers, nets = {}, []
         if isinstance(snap, dict):
             iface = snap.get("iface") or "wg0"
@@ -1793,6 +1958,14 @@ class Engine:
         ev = self._loads(line)
         if not ev:
             return
+        zc = self.zeek_cyc
+        zc[0] += 1
+        if "orig_l2_addr" in ev or "resp_l2_addr" in ev:
+            zc[1] += 1
+        if ev.get("proto") == "tcp":
+            zc[2] += 1
+            if "c" in str(ev.get("history") or "").lower():     # Zeek: a packet with a bad checksum
+                zc[3] += 1
         o = ev.get("id.orig_h") or ""
         r = ev.get("id.resp_h") or ""
         co, oif = self.classify(o)
@@ -1817,16 +1990,13 @@ class Engine:
         if not isinstance(rb, int):
             rb = 0
         b_out, b_in = (ob, rb) if outbound else (rb, ob)
-        # Zeek's optional mac-logging policy adds the link-layer addresses: the
-        # LAN side's MAC settles addresses the neighbour table no longer holds
+        # Zeek's mac-logging policy adds the link-layer addresses: the LAN
+        # side's MAC at the time of the flow decides (IP reuse, IPv6 privacy
+        # addresses the neighbour table no longer holds)
         l2 = norm_mac(ev.get("orig_l2_addr" if outbound else "resp_l2_addr"))
-        if l2 and l2 not in self.own_macs and not self.who(dev_ip, ts):
-            d = self.ensure_device(mac_id(l2), "mac", ts, mac=l2)
-            if d is not None:
-                self.observe(dev_ip, d["id"], ts)
-                if iface:
-                    self._set_iface(d, iface)
-        did = self.attribute(dev_ip, ts, iface)
+        did = self.attribute_mac(dev_ip, l2, ts, iface) if l2 else None
+        if did is None:
+            did = self.attribute(dev_ip, ts, iface)
         if did:
             self._traffic(did, ts, peer, b_in, b_out)
         state = ev.get("conn_state") or ""
@@ -1863,10 +2033,14 @@ class Engine:
             return
         client = dst if ev.get("direction") == "to_client" else src
         self.stats["suricata_used"] += 1
+        # eve-log "ethernet: yes" adds the frame's MACs (useless on the WAN side)
+        ether = ev.get("ether") if ev.get("in_iface") not in self.wan_devs else None
+        ether = ether if isinstance(ether, dict) else {}
         for ip, other in ((src, dst), (dst, src)):
             c, iface = self.classify(ip)
             if c != LAN:
                 continue
+            mac = norm_mac(ether.get("src_mac" if ip == src else "dest_mac")) if ether else None
             ae = AlertEvent()
             ae.ts, ae.dev_ip, ae.peer, ae.outbound = ts, ip, other, ip == client
             ae.device_sent = ip == src
@@ -1876,7 +2050,7 @@ class Engine:
             ae.proto = ev.get("proto") or ""
             ae.dest_port = ev.get("dest_port")
             ae.action = a.get("action") or ""
-            ae.device = self.attribute(ip, ts, iface)
+            ae.device = (self.attribute_mac(ip, mac, ts, iface) if mac else None) or self.attribute(ip, ts, iface)
             self._run_detectors("on_alert", ae, ip, iface)
 
     def _run_detectors(self, method, ev, dev_ip, iface):
@@ -2052,8 +2226,11 @@ class Engine:
     def poll_logs(self):
         handlers = {"dhcp": self.on_dhcp, "software": self.on_software, "known_hosts": self.on_known_host,
                     "dns": self.on_dns, "conn": self.on_conn}
+        self.zeek_cyc = [0, 0, 0, 0]
         for name in ("dhcp", "software", "known_hosts", "dns", "conn"):
             self.followers[name].poll(handlers[name])
+        self.zeek_win.append(tuple(self.zeek_cyc))
+        del self.zeek_win[:-ZEEK_WINDOW_CYCLES]
         if self.config.get("suricata", True):
             self.followers["eve"].poll(self.on_eve)
         if self.config.get("unbound_journal", True):
@@ -2086,6 +2263,8 @@ class Engine:
             self.agg.pop(did, None)
         if self.dns_hot:
             self.dns_hot = {k: v for k, v in self.dns_hot.items() if v[3] > now}
+        if self.unattr:
+            self.unattr = {k: v for k, v in self.unattr.items() if v > now - 3600 and not self.who(k, v)}
 
     def cycle(self):
         t0 = time.monotonic()
@@ -2127,7 +2306,7 @@ class Engine:
             return "%s device" % vendor.split(",")[0][:32], "vendor"
         return (d.get("mac") or "Unknown device"), "mac"
 
-    def build_device(self, d, flist, now):
+    def build_device(self, d, flist, now, holders=None):
         did = d["id"]
         mac = d.get("mac")
         vendor = self.oui.vendor(mac) if mac else ""
@@ -2143,8 +2322,14 @@ class Engine:
         risk, health, reason, worst = score_device(d, flist, now)
         a = self.agg.get(did)
         today = self._day(now)
-        cur = sorted(ip for ip, t in (d.get("ips") or {}).items() if t >= now - 86400)
         current = sorted(self.lease_ips.get(did, ()))
+        # addresses of the last 24 h: current ones first, then the most
+        # recent; never one that another device holds now (reused by DHCP)
+        mine = set(current)
+        seen = d.get("ips") or {}
+        cur = sorted((ip for ip, t in seen.items() if t >= now - 86400
+                      and (ip in mine or not ((holders or {}).get(ip, set()) - {did}))),
+                     key=lambda ip: (ip not in mine, -(seen.get(ip) or 0), ip))
         online = False
         nstate = self.neigh_state.get(mac) if mac else None
         if nstate in ("REACHABLE", "DELAY", "PROBE", "PERMANENT"):
@@ -2213,7 +2398,11 @@ class Engine:
         by_dev = {}
         for f in self.findings.values():
             by_dev.setdefault(f["device"], []).append(f)
-        devices = [self.build_device(d, by_dev.get(did, []), now) for did, d in self.devices.items()]
+        holders = {}
+        for did, ips in self.lease_ips.items():
+            for ip in ips:
+                holders.setdefault(ip, set()).add(did)
+        devices = [self.build_device(d, by_dev.get(did, []), now, holders) for did, d in self.devices.items()]
         rank = {"critical": 3, "warning": 2, "new": 1}
         devices.sort(key=lambda x: (-rank.get(x["health"], 0), -x["risk"], x["name"].lower()))
         findings = sorted(self.findings.values(), key=lambda f: (-SEV_RANK.get(f["severity"], 0), -f["last"]))
@@ -2239,9 +2428,15 @@ class Engine:
         logs = {}
         for n, f in self.followers.items():
             logs[n] = dict(f.stats)
+        z = self.zeek_window()
+        sources = dict(self.source_status)
+        sources["suricata"] = self.suricata_status()
+        sources["zeek"] = dict(z, mac_logging=bool(z["l2"]) if z["lines"] else None)
         return {"schema": SCHEMA, "version": ENGINE_VERSION, "generated_at": int(now), "started_at": int(self.started),
                 "cycle_seconds": CYCLE_SECONDS, "stats": dict(self.stats), "logs": logs,
-                "sources": self.source_status, "indicators": self.intel.counts(),
+                "unattributed_addresses_1h": sum(1 for v in self.unattr.values() if v > now - 3600),
+                "warnings": self.warnings(now),
+                "sources": sources, "indicators": self.intel.counts(),
                 "geoip": self.geo.available, "devices": len(self.devices), "findings": len(self.findings),
                 "cpu_seconds": cpu, "max_rss_kb": rss, "rss_kb": rss_now,
                 "journal": {"active": self.journal_active, "error": self.journal_error},
@@ -2271,7 +2466,9 @@ def summarize(devices, findings, now):
     return {
         "schema": SCHEMA, "generated_at": int(now),
         "devices": len(devices), "online": sum(1 for d in devices if d["online"]),
-        "new_24h": sum(1 for d in devices if d["health"] == "new"),
+        # first seen in the last 24 h - whatever its health (a new device with
+        # a finding is "warning", still new); not the devices of the first pass
+        "new_24h": sum(1 for d in devices if not d.get("baseline") and now - (d.get("first_seen") or 0) < NEW_DEVICE_SECONDS),
         "flagged": len(flagged), "critical": sum(1 for d in devices if d["health"] == "critical"),
         "warning": sum(1 for d in devices if d["health"] == "warning"),
         "findings_active": len(active),

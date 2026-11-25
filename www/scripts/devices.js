@@ -2,17 +2,20 @@
    Clients (rows of the device table open it - dashboard.js merges the
    inventory into the lease table and calls twDevices.open), the "Device
    threats" card on Security, the "Flagged devices" figure on the Overview
-   Security monitor, and the admin settings: Settings > Security > Threat
-   intelligence (feeds, abuse.ch Auth-Key, local indicators) and Settings >
-   Alerts > Device alerts.
-   Data: GET /api/devices/summary (everyone), /api/devices/<id>, /feeds,
+   Security monitor, and Settings > Threat: monitoring sources and their
+   warnings (Suricata without a LAN interface, Zeek without MACs / with bad
+   checksums), threat intelligence (feeds, abuse.ch Auth-Key, local
+   indicators); Settings > Alerts > Device alerts. The same source warnings
+   show on Clients and on the Security card, with a link to Settings > Threat
+   (links: [data-tw-settings="<pane>"] -> window.twSettings.open).
+   Data: GET /api/devices/summary, /feeds (everyone), /api/devices/<id>,
    /indicators, /alerts (admin); POST /api/devices/<id>/{quarantine,
    unquarantine,rename,expected}, /api/devices/feeds/{update,key},
    /api/devices/indicators, /api/devices/alerts (admin + same Origin).
    The per-device outbound profile ("LAN Device Activity", formerly a
    Security card) comes from GET /api/security/zeek. Markup: index.html
-   (#dev-modal, #dev-q-modal, #dev-threat-card, #ti-card, #dev-alerts-card,
-   #ov-dev-flagged); shared classes only (card, modal, badge, dot, btn,
+   (#dev-modal, #dev-q-modal, #dev-threat-card, #dev-src-card, #dev-src-hint,
+   #ti-card, #ti-viewer-card, #dev-alerts-card, #ov-dev-flagged); shared classes only (card, modal, badge, dot, btn,
    vl-info, alerts-grid, ov-kv, chart-legend, bw-canvas). */
 (() => {
   "use strict";
@@ -108,6 +111,21 @@
         : "Device monitoring has no data yet";
     }
     renderThreatCard(s);
+    renderSourceHint(s.warnings || []);
+  }
+
+  const settingsLink = (pane, text) => `<a href="#settings/${pane}" data-tw-settings="${pane}">${esc(text)}</a>`;
+
+  function warningLines(list) {
+    return list.map((w) => `<p>${esc(w.text)}.</p>`).join("");
+  }
+
+  // Clients page: why some detections are missing (DW-2 / DW-12)
+  function renderSourceHint(list) {
+    const el = $("dev-src-hint");
+    if (!el) return;
+    el.hidden = !list.length;
+    el.innerHTML = list.length ? `${warningLines(list)}<p>How to fix it: ${settingsLink("threat", "Settings → Threat")}.</p>` : "";
   }
 
   function renderThreatCard(s) {
@@ -126,7 +144,11 @@
     const worst = w
       ? `<div class="dev-threat-worst">${sevBadge(w.severity)} <span>${esc(w.reason)}</span>
            <span class="muted">— ${esc(w.device_name || "device")}, ${esc(ago(w.last))}</span></div>`
-      : `<div class="dev-threat-worst muted">No device flagged. ${s.feeds_total ? `${num(s.feeds_ok)} of ${num(s.feeds_total)} threat feeds current.` : ""}</div>`;
+      : `<div class="dev-threat-worst muted">No device flagged. ${s.feeds_total ? (s.feeds_ok < s.feeds_total
+          ? settingsLink("threat", `${num(s.feeds_ok)} of ${num(s.feeds_total)} threat feeds current`) + "."
+          : `${num(s.feeds_ok)} of ${num(s.feeds_total)} threat feeds current.`) : ""}</div>`;
+    const warn = (s.warnings || []).length
+      ? `<div class="vl-info">${warningLines(s.warnings)}<p>How to fix it: ${settingsLink("threat", "Settings → Threat")}.</p></div>` : "";
     body.innerHTML = `
       <div class="dev-threat-stats">
         <div class="dev-threat-stat${s.flagged ? " is-bad" : ""}"><b>${num(s.flagged)}</b><small>flagged</small></div>
@@ -134,7 +156,8 @@
         <div class="dev-threat-stat"><b>${num(s.new_24h)}</b><small>new (24 h)</small></div>
         ${worst}
         <button class="btn btn-sm" type="button" id="dev-threat-review">Review devices</button>
-      </div>`;
+        ${isAdmin ? `<button class="btn btn-sm btn-ghost" type="button" data-tw-settings="threat">Threat settings</button>` : ""}
+      </div>${warn}`;
     $("dev-threat-review").addEventListener("click", () => {
       if (window.twClients) window.twClients.showFlagged(!!(s.flagged || s.quarantined));
     });
@@ -143,7 +166,7 @@
   function schedulePoll() {
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = null;
-    if (activeView === "security" || activeView === "overview") {
+    if (activeView === "security" || activeView === "overview" || activeView === "clients") {
       loadSummary();
       pollTimer = setInterval(() => { if (!document.hidden) loadSummary(); }, POLL_MS);
     }
@@ -182,7 +205,7 @@
   }
 
   function leaseFor(dev) {
-    const v4 = (dev.ips || []).find((ip) => !ip.includes(":"));
+    const v4 = [...(dev.current_ips || []), ...(dev.ips || [])].find((ip) => !ip.includes(":") && !ip.includes("/"));
     return dev.mac && v4 ? { ip: v4, mac: dev.mac } : null;
   }
 
@@ -190,7 +213,9 @@
     const { device: d, findings, quarantine: q } = current.detail;
     const f = findings || [];
     const name = d.name || d.mac || d.id;
-    const addrs = [...(d.ips || []), ...(d.ipv6 || [])];
+    // current addresses first; the others were seen in the last 24 h (DW-5)
+    const cur = new Set(d.current_ips || []);
+    const addrs = [...new Set([...(d.current_ips || []).filter((a) => !a.includes("/")), ...(d.ips || []), ...(d.ipv6 || [])])];
     const zone = [d.zone_name || d.zone, d.vlan != null ? `VLAN ${d.vlan}` : "", d.iface].filter(Boolean).join(" · ");
     const qBox = q && q.active ? `
       <div class="vl-info dev-q-status">
@@ -203,7 +228,7 @@
       kv("Vendor", d.vendor || "unknown"),
       kv("Type (guess)", (d.type && d.type !== "unknown" ? d.type : "unknown") + (d.type_reason ? ` — from ${d.type_reason}` : "")),
       kv("MAC", d.mac ? esc(d.mac) + (d.private_mac ? ` <span class="badge badge-static" title="A randomised (locally administered) address: the phone or laptop may show a different one on another network or after a reset">private MAC</span>` : "") : "— (VPN peer)", true),
-      kv("Addresses", addrs.length ? addrs.map((a) => `<span class="mono">${esc(a)}</span>`).join("<br>") : "—", true),
+      kv("Addresses", addrs.length ? addrs.map((a) => `<span class="mono">${esc(a)}</span>${cur.size && !cur.has(a) ? ` <span class="muted" title="Used by this device in the last 24 hours, not now">(earlier)</span>` : ""}`).join("<br>") : "—", true),
       kv("Network", zone || "—"),
       kv("First seen", when(d.first_seen)),
       kv("Last seen", `${when(d.last_seen)}${d.online ? " · online" : ""}`),
@@ -272,7 +297,7 @@
       <section class="dev-sec">
         <h4>Findings <span class="muted">(${num((d.findings || {}).active)} active, ${num((d.findings || {}).expected)} expected)</span></h4>
         ${f.length ? `<div class="table-wrap"><table class="dev-table"><thead><tr><th>When</th><th>Severity</th><th>What</th><th>Why (indicator, feed)</th><th></th></tr></thead><tbody>${fRows}</tbody></table></div>`
-          : `<p class="muted">No findings — nothing this device did matched a threat feed, a local indicator or an IDS signature.</p>`}
+          : `<p class="muted">No findings — nothing this device did matched a threat feed, a local indicator or an IDS signature (feeds, indicators and monitoring sources: ${settingsLink("threat", "Settings → Threat")}).</p>`}
       </section>
       <div class="dev-grid">
         <section class="dev-sec">
@@ -432,7 +457,7 @@
         <label class="fw-field"><span>Ends</span><select id="dev-q-exp">${opts}</select></label>
         <label class="fw-field"><span>Note (optional)</span><input type="text" id="dev-q-note" maxlength="200" autocomplete="off"></label>
       </div>
-      <p class="vl-info">Matched by ${d.mac ? `its MAC address (<span class="mono">${esc(d.mac)}</span>) and ` : ""}its current addresses; the router keeps them up to date every minute. It survives reboots${d.private_mac ? ". This device uses a <b>private MAC</b>: if it picks a new one, only its current addresses stay blocked" : ""}. Devices on the same switch or Wi-Fi network still reach it directly.</p>
+      <p class="vl-info">Matched by ${d.mac ? `its MAC address (<span class="mono">${esc(d.mac)}</span>) and ` : ""}its current addresses; the router keeps them up to date as they change. It survives reboots${d.private_mac ? ". This device uses a <b>private MAC</b>: if it picks a new one, only its current addresses stay blocked" : ""}.${d.kind === "wg" ? "" : " Devices on the same switch or Wi-Fi network still reach it directly."}</p>
       <div class="login-error dev-q-err" id="dev-q-err" hidden></div>
       <div class="vlan-modal-actions dev-q-actions">
         <button class="btn btn-danger" type="button" id="dev-q-go">Quarantine</button>
@@ -473,22 +498,62 @@
     loadSummary();
   }
 
-  // ── Settings > Security > Threat intelligence ───────────────────────────
+  // ── Settings > Threat: monitoring sources + threat intelligence ────────
   const FEED_STATUS = {
     ok: ["Current", "badge-ok"], needs_key: ["Needs Auth-Key", "badge-static"], disabled: ["Off", "badge-static"],
     pending: ["Waiting", ""], error: ["Failed", "badge-err"], stale: ["Old", "sev-MEDIUM"],
   };
 
   async function loadFeeds() {
-    const card = $("ti-card");
-    if (!card || !isAdmin) return;
+    if (!$("dev-src-card") || !roleKnown) return;
     try {
-      const [feeds, ind] = await Promise.all([getJSON("/api/devices/feeds"), getJSON("/api/devices/indicators")]);
+      const [feeds, ind] = await Promise.all([getJSON("/api/devices/feeds"),
+        isAdmin ? getJSON("/api/devices/indicators") : Promise.resolve(null)]);
       tiData = { feeds, ind };
     } catch (err) {
       tiData = { error: err.message };
     }
-    renderFeeds();
+    renderSources();
+    if (isAdmin) renderFeeds();
+  }
+
+  function renderSources() {
+    const body = $("dev-src-body");
+    const badge = $("dev-src-badge");
+    if (!body || !tiData) return;
+    if (tiData.error) {
+      body.innerHTML = `<p class="login-error">${esc(tiData.error)}</p>`;
+      return;
+    }
+    const src = tiData.feeds.sources;
+    const warns = tiData.feeds.warnings || [];
+    if (!src) {
+      if (badge) { badge.textContent = "no data"; badge.className = "badge"; }
+      body.innerHTML = `<p class="vl-info">Device monitoring has no data yet — tuxwall-devicewatch.service is not running or has not finished its first pass.</p>`;
+      return;
+    }
+    if (badge) {
+      badge.textContent = !src.engine_running ? "engine stalled" : warns.length ? `${warns.length} to fix` : "sources OK";
+      badge.className = "badge " + (!src.engine_running ? "badge-err" : warns.length ? "sev-MEDIUM" : "badge-ok");
+    }
+    const z = src.zeek || {};
+    const su = src.suricata || {};
+    const cap = (su.capture || []).join(", ");
+    const rows = [
+      kv("Analysis engine", src.engine_running ? "running" : "not running or stalled — data may be old"),
+      kv("Zeek connections", z.lines ? `${num(z.lines)} in the last hour · MAC addresses ${z.mac_logging ? "logged" : "not logged"}`
+        : (z.conn_ok ? "no connections seen yet" : "no Zeek connection log")),
+      kv("Suricata capture", cap ? `${cap}${su.lan_capture === false ? " — no LAN interface" : su.lan_capture ? ` — LAN: ${(su.captured_lan || []).join(", ")}` : ""}` : "unknown"),
+      kv("DNS block log", src.unbound_journal ? "read" : "not readable"),
+      kv("DHCP leases", src.kea ? "read" : "not readable"),
+      kv("Unmatched addresses", `${num(src.unattributed_addresses_1h)} in the last hour`),
+    ];
+    const wl = warns.map((w) => `<div class="vl-info">
+        <p><span class="badge sev-MEDIUM">Fix</span> ${esc(w.text)}.</p>
+        ${w.hint ? `<p>On the router: <span class="mono dev-src-cmd">${esc(w.hint)}</span></p>` : ""}
+      </div>`).join("");
+    body.innerHTML = `${wl}<div class="ov-kv">${rows.join("")}</div>
+      <p class="muted dev-small">Unmatched addresses: LAN addresses seen in traffic that could not be tied to a device (typically IPv6 privacy addresses when Zeek logs no MAC addresses).</p>`;
   }
 
   function renderFeeds(msg) {
@@ -626,6 +691,8 @@
     roleKnown = true;
     const ti = $("ti-card");
     if (ti) ti.hidden = !isAdmin;
+    const tv = $("ti-viewer-card");
+    if (tv) tv.hidden = isAdmin;
     const al = $("dev-alerts-card");
     if (al) al.hidden = !isAdmin;
     const card = $("dev-threat-card");
@@ -661,16 +728,24 @@
   document.addEventListener("tw:view", (e) => {
     activeView = (e.detail && e.detail.view) || "";
     schedulePoll();
-    if (activeView === "settings" && isAdmin) {
+    if (activeView === "settings") {
       loadFeeds();
-      loadAlerts();
+      if (isAdmin) loadAlerts();
     }
   });
   document.addEventListener("click", (e) => {
     const t = e.target.closest && e.target.closest("#settings-subtabs [data-settings-pane]");
-    if (!t || !isAdmin) return;
-    if (t.dataset.settingsPane === "security") loadFeeds();
-    if (t.dataset.settingsPane === "alerts") loadAlerts();
+    if (!t) return;
+    if (t.dataset.settingsPane === "threat") loadFeeds();
+    if (t.dataset.settingsPane === "alerts" && isAdmin) loadAlerts();
+  });
+  // "Settings → Threat" links (Clients hint, Security card, the device panel)
+  document.addEventListener("click", (e) => {
+    const a = e.target.closest && e.target.closest("[data-tw-settings]");
+    if (!a || !window.twSettings) return;
+    e.preventDefault();
+    closePanel();
+    window.twSettings.open(a.dataset.twSettings);
   });
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();

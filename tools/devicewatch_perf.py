@@ -116,7 +116,8 @@ def main():
                "orig_bytes": rnd.randrange(0, 5000), "resp_bytes": rnd.randrange(0, 200000), "conn_state": st,
                "local_orig": False, "local_resp": False, "missed_bytes": 0, "history": "ShADadFf",
                "orig_pkts": 12, "orig_ip_bytes": rnd.randrange(100, 9000), "resp_pkts": 20,
-               "resp_ip_bytes": rnd.randrange(100, 250000), "ip_proto": 6}
+               "resp_ip_bytes": rnd.randrange(100, 250000), "ip_proto": 6,
+               "orig_l2_addr": mac, "resp_l2_addr": "00:00:5e:00:53:fe"}      # Zeek mac-logging (live since 3.3.7)
         line = json.dumps(rec, separators=(",", ":")) + "\n"
         lines.append(line)
         size += len(line)

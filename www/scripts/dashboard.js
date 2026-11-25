@@ -759,22 +759,44 @@
     return "Static IP";
   }
 
+  // A device's address now: current_ips (admins) first, else the list the
+  // engine orders current-first; never an address another device holds now.
+  function devCurrentV4(d) {
+    const cur = (d.current_ips || []).filter((ip) => !ip.includes("/") && !ip.includes(":"));
+    return cur[0] || (d.ips || [])[0] || "";
+  }
+
   function mergeDevices(leases, devices) {
     const byMac = new Map();
     const byIp = new Map();
-    devices.forEach((d) => {
-      if (d.mac) byMac.set(String(d.mac).toLowerCase(), d);
-      [...(d.ips || []), ...(d.current_ips || [])].forEach((ip) => { if (!byIp.has(ip)) byIp.set(ip, d); });
-    });
+    devices.forEach((d) => { if (d.mac) byMac.set(String(d.mac).toLowerCase(), d); });
+    // current holders claim an address before any device that only held it earlier
+    devices.forEach((d) => (d.current_ips || []).forEach((ip) => { if (!byIp.has(ip)) byIp.set(ip, d); }));
+    devices.forEach((d) => (d.ips || []).forEach((ip) => { if (!byIp.has(ip)) byIp.set(ip, d); }));
     const used = new Set();
-    const rows = leases.map((l) => {
+    let rows = leases.map((l) => {
       const d = (l.mac && byMac.get(String(l.mac).toLowerCase())) || byIp.get(l.ip) || null;
       if (d) used.add(d.id);
       return { ...l, dev: d };
     });
+    // one row per device: a second, stale lease of the same MAC (a new client
+    // id got a new address; the old lease runs out later) is folded in -
+    // unless it carries an Access ban, which must stay visible
+    const perDev = new Map();
+    rows.forEach((r) => { if (r.dev) perDev.set(r.dev.id, [...(perDev.get(r.dev.id) || []), r]); });
+    const drop = new Set();
+    perDev.forEach((list) => {
+      if (list.length < 2) return;
+      const d = list[0].dev;
+      const now = devCurrentV4(d);
+      const keep = list.find((r) => r.ip === now) ||
+        list.slice().sort((a, b) => (b.last_seen || b.expires || 0) - (a.last_seen || a.expires || 0))[0];
+      list.forEach((r) => { if (r !== keep && !r.banned) drop.add(r); });
+    });
+    if (drop.size) rows = rows.filter((r) => !drop.has(r));
     devices.forEach((d) => {
       if (used.has(d.id)) return;
-      const v4 = (d.ips || [])[0] || "";
+      const v4 = devCurrentV4(d);
       rows.push({
         ip: v4 || (d.ipv6 || [])[0] || ((d.current_ips || [])[0] || "").split("/")[0],
         hostname: d.name || "", mac: d.mac || "", vendor: d.vendor || "",
@@ -12981,6 +13003,21 @@
   document.querySelectorAll("#settings-subtabs .fw-subtab").forEach((btn) => {
     btn.addEventListener("click", () => setSettingsTab(btn.dataset.settingsPane));
   });
+  // Deep link into a Settings sub-tab (devices.js: "Settings → Threat" links;
+  // also #settings/threat). The click runs after switchView's restore of the
+  // remembered sub-tab, and is remembered itself.
+  function openSettingsPane(pane) {
+    switchView("settings");
+    if (history.replaceState) history.replaceState(null, "", "#settings");
+    setTimeout(() => {
+      const tab = document.querySelector(`#settings-subtabs .fw-subtab[data-settings-pane="${pane}"]`);
+      if (tab) {
+        tab.click();
+        tab.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }
+    }, 0);
+  }
+  window.twSettings = { open: openSettingsPane };
 
   function bindSettings() {
     bindAvatarSettings();
@@ -13246,6 +13283,7 @@
     users: '<circle cx="12" cy="8" r="3.5"/><path d="M5.2 20a6.8 6.8 0 0 1 13.6 0"/>',
     avatar: '<circle cx="11" cy="9" r="3.4"/><path d="M4.8 20a6.2 6.2 0 0 1 12.4 0"/><path d="M19 3.5v5M16.5 6h5"/>',
     security: '<rect x="4" y="10" width="16" height="11" rx="2.2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 15v2.5"/>',
+    threat: '<path d="M12 3 5 6v6c0 4 3 7 7 9 4-2 7-5 7-9V6z"/><path d="M12 8.5v4.2M12 15.8h.01"/>',
     alerts: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/>',
     archives: '<rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9"/><path d="M10 13h4"/>',
     schedule: '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.6 1.6M9.5 2.5h5M12 2.5V5"/>',
@@ -15859,7 +15897,9 @@
     try { storedView = localStorage.getItem("tuxwall.view") || ""; } catch (_) { }
     if (!initial) initial = storedView || "overview";
     const viewKnown = (name) => !!name && (VIEW_TITLES[name] || name.startsWith("plugin:"));
-    switchView(viewKnown(initial) ? initial : (viewKnown(storedView) ? storedView : "overview"));
+    const settingsPane = /^settings\/([a-z]+)$/.exec(initial);
+    if (settingsPane) openSettingsPane(settingsPane[1]);
+    else switchView(viewKnown(initial) ? initial : (viewKnown(storedView) ? storedView : "overview"));
 
     bindBlocklistActions();
     bindRpzActions();

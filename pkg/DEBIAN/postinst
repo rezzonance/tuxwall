@@ -59,8 +59,9 @@ tripwire_unit_setup() {   # tripwire_unit_setup MARKER
 # optional). Enabled ONCE (marker, like the tripwire); an owner who disabled
 # the units later keeps that choice, upgrades only restart a running engine.
 # tools/pkg_scripts_check.py runs this function against fake commands.
-devicewatch_setup() {       # devicewatch_setup MARKER [CONF_DIR] -> one status line, never fails
-  local marker=$1 conf=${2:-/etc/tuxwall/devices} user=tuxwall-devicewatch g groups=""
+devicewatch_setup() {       # devicewatch_setup MARKER [CONF_DIR] [SHARED_DIR] -> one status line, never fails
+  local marker=$1 conf=${2:-/etc/tuxwall/devices} shared=${3:-/var/lib/tuxwall/shared}
+  local user=tuxwall-devicewatch g groups=""
   if ! getent passwd "$user" >/dev/null 2>&1; then
     if ! useradd --system --user-group --no-create-home --home-dir /nonexistent \
          --shell /usr/sbin/nologin "$user" >/dev/null 2>&1; then
@@ -75,6 +76,12 @@ devicewatch_setup() {       # devicewatch_setup MARKER [CONF_DIR] -> one status 
   done
   mkdir -p "$conf" 2>/dev/null || true
   chmod 0755 "$conf" 2>/dev/null || true
+  # the API's WireGuard snapshot: the unit maps this directory (it must exist
+  # when the service starts); the pre-fix single file goes
+  mkdir -p "$shared" 2>/dev/null && chmod 0755 "$shared" 2>/dev/null || true
+  if [[ -f "$shared/../wg-peers.json" && ! -L "$shared/../wg-peers.json" ]]; then
+    mv -f "$shared/../wg-peers.json" "$shared/wg-peers.json" 2>/dev/null || true
+  fi
   [[ -f "$conf/abuse-ch.key" ]] && chmod 0600 "$conf/abuse-ch.key" 2>/dev/null
   systemctl daemon-reload >/dev/null 2>&1 || true
   if [[ ! -e $marker ]]; then
@@ -634,6 +641,7 @@ agents_md_install() {       # agents_md_install [SRC] [HOME] [USER]
 
 case "$1" in
   configure)
+    FRESH_INSTALL=0; [[ -z ${2:-} ]] && FRESH_INSTALL=1     # no previously configured version
 
     step 1 "Creating state directory ($STATE_DIR)..."
     mkdir -p "$STATE_DIR"
@@ -1079,6 +1087,15 @@ PY
       else
         echo "   Suricata config already valid (af-packet interfaces exist) - untouched."
       fi
+      # Fresh installs also capture the LAN: device monitoring attributes IDS
+      # alerts by LAN address (on the WAN every IPv4 alert carries the NAT
+      # address). Upgrades keep a hand-tuned config; the dashboard
+      # (Settings > Threat) shows the command when the LAN is missing.
+      if (( FRESH_INSTALL )) && \
+         python3 /usr/local/share/tuxwall/scripts/tune-suricata.py --add-lan /etc/suricata/suricata.yaml >/dev/null 2>&1; then
+        echo "   Suricata also captures the LAN interface (device monitoring)."
+        systemctl try-restart suricata >/dev/null 2>&1 || true
+      fi
     fi
 
     step 6d "Enabling daily Suricata rule updates (suricata-update)..."
@@ -1145,6 +1162,12 @@ PY
 
     # Device monitoring: read-only analysis service + hourly feed timer (3.3.7)
     echo "   $(devicewatch_setup "$STATE_DIR/.devicewatch-enabled-once")"
+    # Zeek (optional; TuxWall does not install it): MAC addresses in conn.log
+    # (+ ignore_checksums on a VM) - fresh installs only; later the dashboard
+    # (Settings > Threat) shows the command when Zeek logs no MACs
+    if (( FRESH_INSTALL )) && [[ -x /usr/local/share/tuxwall/scripts/zeek-site-setup.sh ]]; then
+      echo "   $(timeout 300 /usr/local/share/tuxwall/scripts/zeek-site-setup.sh 2>&1 | tail -n 1)"
+    fi
     echo "   $(quarantine_unit_setup)"
 
     step 8 "Triggering initial blocklist download (background)..."

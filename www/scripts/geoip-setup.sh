@@ -60,8 +60,11 @@ fetch_one "$ASN_DEST" dbip-asn-lite || exit 1
 
 echo "[3/4] Restarting the dashboard API..."
 systemctl try-restart tuxwall 2>/dev/null || systemctl start tuxwall 2>/dev/null || true
-echo "[4/4] Restarting the tuxwall-collector service (if present)..."
+echo "[4/4] Restarting the tuxwall-collector and device monitoring services (if present)..."
 systemctl try-restart tuxwall-collector 2>/dev/null || true
+# both map the database file into their sandbox: a bind mount keeps the old
+# inode, so the new copy is only seen after a restart
+systemctl try-restart tuxwall-devicewatch 2>/dev/null || true
 
 echo
 echo "Done. The Security page will now show attacker locations and ISP/ASN on the map."

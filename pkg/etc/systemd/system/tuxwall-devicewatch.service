@@ -21,12 +21,18 @@ UMask=0027
 
 # Writes only its state directory (/var/lib/tuxwall/devices, 0750). The rest of
 # /var/lib/tuxwall is hidden; the GeoIP database and the API's WireGuard
-# snapshot (public keys/names only) are mapped in read-only.
+# snapshot (public keys/names only) are mapped in read-only. The snapshot is
+# mapped as its DIRECTORY (/var/lib/tuxwall/shared, created by the postinst
+# and the API): a bind mount of a single file pins the inode present at
+# start, and the API replaces the file atomically (a new inode) - new peers
+# would stay invisible until a restart. The GeoIP database is a single file
+# for the same reason only because geoip-setup.sh, its one writer, restarts
+# this service after installing a new copy.
 StateDirectory=tuxwall/devices
 StateDirectoryMode=0750
 TemporaryFileSystem=/var/lib/tuxwall:ro
 BindPaths=/var/lib/tuxwall/devices
-BindReadOnlyPaths=-/var/lib/tuxwall/dbip-city-lite.mmdb -/var/lib/tuxwall/wg-peers.json
+BindReadOnlyPaths=-/var/lib/tuxwall/shared -/var/lib/tuxwall/dbip-city-lite.mmdb
 # _kea membership must not reach Kea's control socket
 InaccessiblePaths=-/run/kea -/etc/wireguard -/etc/tuxwall/agent
 

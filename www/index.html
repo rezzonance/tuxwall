@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
   <link rel="stylesheet" href="/css/style.css?v=202611210025">
-  <link rel="stylesheet" href="/css/polish.css?v=202611242150">
+  <link rel="stylesheet" href="/css/polish.css?v=202611251200">
   <link rel="stylesheet" href="/css/firewall.css?v=202611210025">
   <link rel="stylesheet" href="/css/bento.css?v=202611210025">
   <link rel="stylesheet" href="/css/heroes.css?v=202611210025">
@@ -471,6 +471,7 @@
           <h2>Devices</h2>
           <span class="muted" id="dev-list-hint">DHCP leases plus every device the router has seen</span>
         </div>
+        <div class="vl-info" id="dev-src-hint" hidden></div>
         <div class="card-toolbar">
           <input type="search" id="search" placeholder="Filter by name, IP, MAC or vendor..." autocomplete="off">
           <label class="alerts-check" id="dev-flagged-wrap" hidden><input type="checkbox" id="dev-flagged-only"> Flagged only</label>
@@ -3679,6 +3680,7 @@
         <button class="fw-subtab" type="button" data-settings-pane="map">Map</button>
         <button class="fw-subtab" type="button" data-settings-pane="users">Users</button>
         <button class="fw-subtab" type="button" data-settings-pane="security">Security</button>
+        <button class="fw-subtab" type="button" data-settings-pane="threat">Threat</button>
         <button class="fw-subtab" type="button" data-settings-pane="alerts">Alerts</button>
         <span class="fw-subtabs-fill"></span>
       </div>
@@ -3819,6 +3821,22 @@
         <p class="vl-info">Serves the dashboard over an encrypted connection with a certificate from this router's own certificate authority (CA). Trust the CA once per device and the browser warning goes away.</p>
         <div id="https-body"></div>
       </div>
+
+      </div>
+
+      <!-- ── Pane: Threat (device monitoring; scripts/devices.js) ──── -->
+      <div class="fw-pane" data-settings-pane="threat" hidden>
+      <div class="card" id="dev-src-card">
+        <div class="card-head">
+          <h2>Device monitoring</h2>
+          <span class="badge" id="dev-src-badge">…</span>
+        </div>
+        <div class="vl-info">
+          <p>The router watches what every LAN, VLAN and VPN device does through it — nothing is installed on the devices. Connections (Zeek) and DNS lookups are matched against the threat intelligence below, and Suricata IDS alerts are attributed to the device involved. Results show on the Clients page (Health column, device panel) and on Security (Device threats); push notifications are set under <a href="#settings" data-tw-settings="alerts">Alerts → Device alerts</a>.</p>
+          <p>The sources below decide what can be seen: without a LAN interface in Suricata's capture its alerts carry only the router's own address, and without MAC addresses in Zeek's log a reused or IPv6 privacy address is matched from the neighbour table alone.</p>
+        </div>
+        <div id="dev-src-body"></div>
+      </div>
       <div class="card" id="ti-card" hidden>
         <div class="card-head">
           <h2>Threat intelligence</h2>
@@ -3830,7 +3848,10 @@
         </div>
         <div id="ti-body"></div>
       </div>
-
+      <div class="card" id="ti-viewer-card" hidden>
+        <div class="card-head"><h2>Threat intelligence</h2></div>
+        <p class="vl-info">Feeds, the abuse.ch Auth-Key and the local indicator list are managed by administrators.</p>
+      </div>
       </div>
 
       <!-- ── Pane: Alerts ─────────────────────────────────────────── -->
@@ -4206,8 +4227,8 @@
 <script src="/scripts/worldmap.js?v=202611210025"></script>
 <script src="/scripts/community-settings.js?v=202611210025"></script>
 <script src="/scripts/https-settings.js?v=202611231900"></script>
-<script src="/scripts/devices.js?v=202611242150"></script>
-<script src="/scripts/dashboard.js?v=202611242150"></script>
+<script src="/scripts/devices.js?v=202611251200"></script>
+<script src="/scripts/dashboard.js?v=202611251200"></script>
 <script src="/scripts/enhance.js?v=202611210025"></script>
 <script src="/scripts/netmap.js?v=202611210025"></script>
 <script src="/scripts/insights.js?v=202611210025"></script>

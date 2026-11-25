@@ -51,6 +51,9 @@ REQUIRED = {
     "./var/www/html/includes/quarantine.py": None,
     "./etc/systemd/system/tuxwall-quarantine.service": "-rw-r--r--",
     "./var/www/html/scripts/devices.js": None,
+    # device monitoring fixes (3.3.7): Zeek MAC logging, Suricata LAN capture
+    "./usr/local/share/tuxwall/scripts/zeek-site-setup.sh": "-rwxr-xr-x",
+    "./usr/local/share/tuxwall/scripts/tune-suricata.py": "-rw-r--r--",
 }
 ABSENT = (
     "./etc/rsyslog.d/45-tuxwall-unbound.conf",   # postinst-owned since 3.3.5
