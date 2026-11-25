@@ -120,6 +120,8 @@ VIEWER_OK = {
     # device monitoring (3.3.7): detail (findings, destinations, countries) and the
     # local indicator list stay admin-only (also GET /api/devices/findings/recent: destinations and
     # indicators, gated by ADMIN_GET_PREFIXES, so it needs no entry here); every POST is admin
+    # (default: admin + same Origin), incl. POST /api/devices/<id>/new-ack (dismiss a new-device row
+    # of Security > Local; writes the expected-marks overlay) - deliberately not listed here
     "GET /api/devices": "device list: identity, health, generic reason, today's traffic totals "
                         "(no findings, indicators or destinations for viewers)",
     "GET /api/devices/summary": "device-threat counts for the Security card / Overview / Home Assistant",

@@ -19284,7 +19284,7 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path in ("/api/devices/feeds/update", "/api/devices/feeds/key", "/api/devices/indicators",
                       "/api/devices/alerts") \
-                or re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})/(rename|expected|quarantine|unquarantine)$", path):
+                or re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})/(rename|expected|new-ack|quarantine|unquarantine)$", path):
             self._send(*devices_post(path, body, identity, _client_key(self)))
         elif path in ("/api/https/settings", "/api/https/regenerate", "/api/https/custom-cert",
                       "/api/https/dismiss-announce"):
@@ -20429,10 +20429,64 @@ DEVICES_FEED_LABELS = {"feodo": "Feodo Tracker", "urlhaus": "URLhaus", "threatfo
                        "local": "Local list"}
 
 
+DEVICES_NEW_ROWS_DAYS = 30
+_DEVICES_NEW_CACHE = {}
+
+
+def _devices_new_events():
+    """{device id: ts} of the engine's new_device events (events.jsonl and
+    its rotated .1, at most 1 MB each; cached by inode/mtime/size)."""
+    out = {}
+    for path in (os.path.join(DEVICES_STATE_DIR, "events.jsonl.1"), os.path.join(DEVICES_STATE_DIR, "events.jsonl")):
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        key = (st.st_ino, st.st_mtime_ns, st.st_size)
+        with _DEVICES_LOCK:
+            hit = _DEVICES_NEW_CACHE.get(path)
+        if hit and hit[0] == key:
+            found = hit[1]
+        else:
+            found = {}
+            evs, _o = _device_events_read(path, max(0, st.st_size - DEVICE_ALERT_READ_MAX))
+            for ev in evs:
+                did = ev.get("device")
+                if ev.get("type") == "new_device" and isinstance(did, str) and isinstance(ev.get("ts"), (int, float)):
+                    found[did] = max(found.get(did, 0), int(ev["ts"]))
+            with _DEVICES_LOCK:
+                _DEVICES_NEW_CACHE[path] = (key, found)
+        for did, ts in found.items():
+            out[did] = max(out.get(did, 0), ts)
+    return out
+
+
+def _devices_new_rows(devices, now):
+    """Security > Local rows for devices first seen in the last 30 days
+    (new_device events) that no admin dismissed (expected.json entries of
+    kind new_device)."""
+    dismissed = {e.get("device"): e.get("at") or 0 for e in (_dw_conf_read("expected.json").get("entries") or [])
+                 if isinstance(e, dict) and e.get("kind") == "new_device"}
+    by_id = {d["id"]: d for d in devices}
+    rows = []
+    for did, ts in _devices_new_events().items():
+        d = by_id.get(did)
+        if d is None or dismissed.get(did, -1) >= ts or ts < now - DEVICES_NEW_ROWS_DAYS * 86400:
+            continue
+        what = [x for x in (d.get("vendor"), d.get("type") if d.get("type") not in (None, "", "unknown") else "") if x]
+        rows.append({
+            "id": "new:" + did, "severity": "info", "feed": "Inventory", "kind": "new_device",
+            "indicator": "", "detail": " · ".join(str(x) for x in what)[:80], "action": "new",
+            "device": did, "device_name": d.get("name") or d.get("mac") or did,
+            "ts": ts, "iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(), "count": 1})
+    return rows
+
+
 def build_devices_findings_recent(limit_raw):
     """GET /api/devices/findings/recent?limit=N (admin: ADMIN_GET_PREFIXES).
-    Newest not-expected findings from the engine's findings.json; nothing is
-    parsed or computed beyond the already-written state."""
+    Newest not-expected findings from the engine's findings.json plus the
+    not-dismissed new devices of the last 30 days (events.jsonl), newest
+    first; nothing is computed beyond the already-written state."""
     try:
         limit = int(limit_raw)
     except (TypeError, ValueError):
@@ -20471,7 +20525,12 @@ def build_devices_findings_recent(limit_raw):
             "device": f.get("device"), "device_name": names.get(f.get("device")) or f.get("device"),
             "ts": last, "iso": datetime.fromtimestamp(last, timezone.utc).isoformat(),
             "count": f.get("count") or 1})
-    return 200, {"ok": True, "available": True, "running": running, "generated_at": gen, "findings": rows}
+    try:
+        rows += _devices_new_rows(devices, time.time())
+    except Exception as exc:
+        print("[devices] new-device rows: %r" % (exc,), flush=True)
+    rows.sort(key=lambda r: -(r.get("ts") or 0))
+    return 200, {"ok": True, "available": True, "running": running, "generated_at": gen, "findings": rows[:limit]}
 
 
 def build_devices_summary():
@@ -20569,6 +20628,41 @@ def _devices_local_context():
     return sorted(ips), nets
 
 
+def _devices_router_names(router_ips=()):
+    """The router's own host names: the system hostname (+ .local and the
+    DHCP domain) and every Local domain / unbound local-data name that
+    points at one of its addresses (e.g. gateway.home.arpa)."""
+    names = set()
+    try:
+        host = socket.gethostname().strip().lower().rstrip(".")
+    except OSError:
+        host = ""
+    domain = ""
+    try:
+        d4 = _read_kea().get("Dhcp4", {})
+        opts = [o for o in d4.get("option-data", []) if isinstance(o, dict)]
+        for sn in d4.get("subnet4", []):
+            opts += [o for o in sn.get("option-data", []) if isinstance(o, dict)]
+        domain = next((str(o.get("data") or "") for o in opts if o.get("name") == "domain-name" and o.get("data")), "")
+        domain = domain.split(",")[0].strip().lower().strip(".")
+    except Exception:
+        pass
+    if host:
+        short = host.split(".")[0]
+        names.update((host, short, short + ".local"))
+        if domain:
+            names.add("%s.%s" % (short, domain))
+    own = set(router_ips or ())
+    try:
+        recs = list(load_domains()) + list(discover_local_domains())
+    except Exception:
+        recs = []
+    for r in recs:
+        if isinstance(r, dict) and str(r.get("ip") or "").strip() in own and r.get("domain"):
+            names.add(str(r["domain"]).strip().lower().rstrip("."))
+    return sorted(n for n in names if n)
+
+
 def build_devices_indicators():
     items = _dw_conf_read("local-indicators.json").get("indicators")
     return {"ok": True, "indicators": items if isinstance(items, list) else [],
@@ -20663,7 +20757,8 @@ def devices_post(path, body, identity, client_ip=""):
             if action == "add":
                 try:
                     item = _dw.feeds.validate_local_indicator(body.get("indicator") or {}, router_ips=local[0],
-                                                              lan_nets=local[1])
+                                                              lan_nets=local[1],
+                                                              router_names=_devices_router_names(local[0]))
                 except ValueError as exc:
                     return 400, {"ok": False, "error": str(exc)}
                 items = [x for x in items if x.get("value") != item["value"]]
@@ -20681,7 +20776,7 @@ def devices_post(path, body, identity, client_ip=""):
                 return 400, {"ok": False, "error": "action must be add or remove"}
             _dw_conf_write("local-indicators.json", {"version": 1, "indicators": items})
         return 200, {"ok": True, "indicators": items}
-    m = re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})/(rename|expected|quarantine|unquarantine)$", path)
+    m = re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})/(rename|expected|new-ack|quarantine|unquarantine)$", path)
     if not m:
         return 404, {"ok": False, "error": "Not found"}
     did, action = m.group(1), m.group(2)
@@ -20707,6 +20802,18 @@ def devices_post(path, body, identity, client_ip=""):
                 names.pop(did, None)
             _dw_conf_write("names.json", {"version": 1, "names": names})
         return 200, {"ok": True, "id": did, "name": name or None}
+    if action == "new-ack":
+        # dismiss the "new device" row of Security > Local: an entry of kind
+        # new_device in the expected-marks overlay (never matches a finding)
+        with _DEVICES_CONF_LOCK:
+            data = _dw_conf_read("expected.json")
+            entries = [e for e in (data.get("entries") or []) if isinstance(e, dict) and e.get("indicator")
+                       and not (e.get("kind") == "new_device" and e.get("device") == did)]
+            entries.append({"device": did, "kind": "new_device", "indicator": "new_device",
+                            "at": int(time.time()), "by": who, "note": ""})
+            _dw_conf_write("expected.json", {"version": 1, "entries": entries})
+        print("[devices] new device %s dismissed by %s" % (did, who), flush=True)
+        return 200, {"ok": True, "id": did, "dismissed": True}
     fid = str(body.get("finding") or "")
     f = next((x for x in findings if x.get("id") == fid and x.get("device") == did), None)
     if f is None:
@@ -20729,6 +20836,46 @@ def devices_post(path, body, identity, client_ip=""):
                  "health": dev.get("health"), "risk": dev.get("risk"), "reason": dev.get("reason")}
 
 
+def _wg_conf_peer_allowed():
+    """{public key: [AllowedIPs]} of the [Peer] sections of the WireGuard
+    config (read-only; keys other than PublicKey/AllowedIPs are skipped)."""
+    out, pk, allowed, in_peer = {}, None, [], False
+
+    def flush():
+        if in_peer and pk and is_wg_key(pk):
+            out[pk] = allowed
+    try:
+        with open(WG_CONF, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                ls = line.split("#", 1)[0].strip()
+                if ls.startswith("["):
+                    flush()
+                    in_peer, pk, allowed = ls.lower() == "[peer]", None, []
+                elif in_peer and "=" in ls:
+                    k, v = (x.strip() for x in ls.split("=", 1))
+                    if k.lower() == "publickey":
+                        pk = v
+                    elif k.lower() == "allowedips":
+                        allowed += [x.strip() for x in v.split(",") if x.strip()]
+            flush()
+    except OSError:
+        return {}
+    return out
+
+
+def _wg_peer_host_ips(address):
+    """A peer's host routes from its client Address (as wg0.conf is written:
+    a.b.c.d/32 plus the matching IPv6 /128)."""
+    addr = str(address or "").split("/")[0].strip()
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return []
+    if ip.version == 6:
+        return ["%s/128" % ip.compressed]
+    return ["%s/32" % addr, "%s/128" % wg_client_v6(addr.split(".")[3])]
+
+
 def _devices_wg_snapshot():
     """WireGuard peers for the device engine (public keys, names, allowed
     IPs, handshake time - never a private or preshared key). Written only
@@ -20745,12 +20892,17 @@ def _devices_wg_snapshot():
                         "last_handshake": int(p.get("last_handshake") or 0)}
         except Exception:
             pass
+        # wg0 down (or a peer not loaded yet): the AllowedIPs of the config,
+        # never the client's interface Address (a /24 would cover every peer)
+        conf = _wg_conf_peer_allowed()
+        for pk, allowed in conf.items():
+            peers.setdefault(pk, {"public_key": pk, "name": "", "last_handshake": 0, "allowed_ips": allowed})
         for sp in load_wg_state().get("peers") or []:
             pk = sp.get("public_key")
             if not is_wg_key(pk or ""):
                 continue
             e = peers.setdefault(pk, {"public_key": pk, "name": "", "last_handshake": 0,
-                                      "allowed_ips": [sp["address"]] if sp.get("address") else []})
+                                      "allowed_ips": _wg_peer_host_ips(sp.get("address"))})
             e["name"] = str(sp.get("name") or "")[:64]
     obj = {"schema": 1, "iface": WG_IFACE, "peers": sorted(peers.values(), key=lambda p: p["public_key"])}
     try:
@@ -23197,7 +23349,8 @@ def _dispatch_alert(cfg, incident, transition, force=False, priority=None):
         priority = priority or "default"
     else:
         title = ("[%s] %s" % (incident.get("severity", "info").upper(), incident.get("title", "TuxWall incident")))
-    detail = incident.get("detail", "")
+    # the stored detail describes the problem ("... is not active"): not for the all-clear
+    detail = "This problem has cleared." if transition == "resolved" else incident.get("detail", "")
     text = "%s\n%s\n%s" % (title, detail, time.strftime("%Y-%m-%d %H:%M:%S"))
 
     ntfy_url = cfg.get("ntfy_url", "")

@@ -188,13 +188,14 @@ def _never_matched(a):
         (a.version == 4 and a == ipaddress.IPv4Address("255.255.255.255"))
 
 
-def validate_local_indicator(item, router_ips=(), lan_nets=()):
+def validate_local_indicator(item, router_ips=(), lan_nets=(), router_names=()):
     """Normalise one admin-entered indicator; raises ValueError with a
     user-facing message. Returns {"type", "value", "severity", "note"}.
     router_ips / lan_nets (the API passes them when an admin adds one): the
     router's own addresses and its LAN/VLAN networks are refused - device
     monitoring only looks at traffic between a device and the outside, so
-    such an entry could never match."""
+    such an entry could never match. router_names: the router's own host
+    names (every device asking for them would be flagged)."""
     if not isinstance(item, dict):
         raise ValueError("indicator must be an object")
     raw = str(item.get("value") or "").strip()
@@ -249,6 +250,11 @@ def validate_local_indicator(item, router_ips=(), lan_nets=()):
         if not d:
             raise ValueError("not a domain name")
         v = ("*." + d) if wild else d
+        names = {str(n).strip().lower().rstrip(".") for n in router_names or ()} - {""}
+        hit = next((n for n in sorted(names) if n == d or (wild and n.endswith("." + d))), None)
+        if hit:
+            raise ValueError("%s is %s name of this router - every device that looks it up would be flagged"
+                             % (v, "the" if hit == d else "a parent domain of a"))
     sev = str(item.get("severity") or "high").strip().lower()
     if sev not in SEVERITIES:
         raise ValueError("severity must be critical, high, medium or low")

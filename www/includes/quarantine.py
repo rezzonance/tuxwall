@@ -79,6 +79,8 @@ MAX_ADDRS = 32                      # per device and family
 ISOLATE_UDP = (53, 67, 547)
 ISOLATE_TCP = (53,)
 WG_MIN_PREFIX = {4: 24, 6: 64}      # a peer routing more than this is a site, not a device
+WG_HOST_PREFIX = {4: 32, 6: 128}    # what quarantine accepts: the peer's own host addresses
+RECENT_SECONDS = 600                # a non-current address counts this long after it was last seen
 MAC_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 DEVICE_ID_RE = re.compile(r"^[mwi][0-9a-f]{12,16}$")
 IFNAME_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,15}$")
@@ -318,37 +320,69 @@ def router_context(env, wan=None):
 
 # ── targets + decision ────────────────────────────────────────────────────────
 
-def device_targets(device, devices=(), wg_peers=None, neigh=None):
+def device_targets(device, devices=(), wg_peers=None, neigh=None, now=None):
     """{"kind", "mac", "ips", "ipv6", "nets"} for a device of the inventory:
-    its current addresses (and those of the last 24 h). Addresses another
-    device CURRENTLY holds are left out (a DHCP address handed on must not
-    stay quarantined) - an address another device merely held before does
-    not count; the MAC rule still catches the device itself on any address.
-    neigh ({ip: mac}, the router's neighbour table now) adds what the MAC
-    uses at this moment - quicker than the inventory's next pass."""
+    the addresses it holds NOW (leases / neighbour table: current_ips, and
+    neigh {ip: mac}, the router's neighbour table at this moment - quicker
+    than the inventory's next pass), plus those seen on it in the last
+    RECENT_SECONDS that no other known device owns (DW-14): not one another
+    device holds now, was seen on later, or last used as its own address (an
+    idle device with a static address has no lease and no neighbour entry).
+    An address both claim right now is left out; the MAC rule still catches
+    the device itself on any address."""
+    now = time.time() if now is None else now
     did = device.get("id") or ""
     kind = {"m": "mac", "w": "wg", "i": "ip"}.get(did[:1], "ip")
-    others = set()
-    for d in devices or ():
-        if isinstance(d, dict) and d.get("id") != did:
-            others.update(norm_ip(x) for x in (d.get("current_ips") or []) if isinstance(x, str) and "/" not in x)
     mac = norm_mac(device.get("mac")) if kind == "mac" else ""
+    others = set()                  # held by another device now
+    claimed = {}                    # ip -> latest time another device was seen on it
+    owned = set()                   # another device's latest address (per family)
+    for d in devices or ():
+        if not isinstance(d, dict) or d.get("id") == did:
+            continue
+        others.update(norm_ip(x) for x in (d.get("current_ips") or []) if isinstance(x, str) and "/" not in x)
+        seen = _ip_seen(d)
+        for ip, t in seen.items():
+            claimed[ip] = max(claimed.get(ip, 0), t)
+        for fam in (False, True):
+            last = max(((t, ip) for ip, t in seen.items() if (":" in ip) == fam), default=None)
+            if last:
+                owned.add(last[1])
+        if not seen:                # an engine without ip_seen: its list, newest first
+            for k in ("ips", "ipv6"):
+                v = [norm_ip(x) for x in (d.get(k) or []) if isinstance(x, str) and "/" not in x]
+                owned.update(x for x in v[:1] if x)
     if mac and neigh:
         for ip, m in neigh.items():
             if m != mac:
                 others.add(norm_ip(ip))
-    addrs = []                      # current first: the cap below keeps those
+    addrs = []                      # held now first: the cap below keeps those
     if mac and neigh:
         for ip, m in sorted(neigh.items()):
             v = norm_ip(ip)
             if m == mac and v and _usable_host(v) and v not in addrs:
                 addrs.append(v)
-    for k in ("current_ips", "ips", "ipv6"):
-        for x in device.get(k) or []:
-            if isinstance(x, str) and "/" not in x:
-                v = norm_ip(x)
-                if v and _usable_host(v) and v not in others and v not in addrs:
-                    addrs.append(v)
+
+    def add(x):
+        if isinstance(x, str) and "/" not in x:
+            v = norm_ip(x)
+            if v and _usable_host(v) and v not in others and v not in addrs:
+                addrs.append(v)
+    for x in device.get("current_ips") or []:
+        add(x)
+    seen = _ip_seen(device)
+    listed = [x for k in ("ips", "ipv6") for x in (device.get(k) or [])]
+    if kind == "ip":                # no MAC: the address is the device
+        recent = sorted(seen, key=lambda k: -seen[k]) or listed
+    elif "ip_seen" not in device:   # an engine older than ip_seen: its 24-h list
+        recent = listed
+    else:
+        recent = [ip for ip in sorted(seen, key=lambda k: -seen[k]) if seen[ip] >= now - RECENT_SECONDS]
+    for ip in recent:
+        v = norm_ip(ip) if isinstance(ip, str) else ""
+        if not v or v in owned or (v in claimed and claimed[v] >= seen.get(v, 0)):
+            continue
+        add(v)
     v4 = sorted([a for a in addrs if ":" not in a][:MAX_ADDRS])
     v6 = sorted([a for a in addrs if ":" in a][:MAX_ADDRS])
     nets = []
@@ -364,6 +398,17 @@ def device_targets(device, devices=(), wg_peers=None, neigh=None):
             if n is not None and str(n) not in nets:
                 nets.append(str(n))
     return {"kind": kind, "mac": mac, "ips": v4, "ipv6": v6, "nets": nets[:MAX_ADDRS]}
+
+
+def _ip_seen(device):
+    """{ip: last seen} of an inventory device (devicewatch "ip_seen")."""
+    out = {}
+    raw = device.get("ip_seen")
+    for ip, t in (raw.items() if isinstance(raw, dict) else ()):
+        v = norm_ip(ip) if isinstance(ip, str) and "/" not in ip else ""
+        if v and isinstance(t, (int, float)):
+            out[v] = max(out.get(v, 0), t)
+    return out
 
 
 def _covers(nets, ip):
@@ -417,9 +462,10 @@ def check_request(device, targets, mode, expires, ctx, client_ip="", confirm_sel
                      "error": "This device is the router's upstream gateway - quarantining it would cut the internet"}
     for n in targets.get("nets") or []:
         net = ipaddress.ip_network(n, strict=False)
-        if net.prefixlen < WG_MIN_PREFIX[net.version]:
+        if net.prefixlen < WG_HOST_PREFIX[net.version]:
             return 409, {"ok": False, "code": "wide_peer",
-                         "error": "This VPN peer routes %s - more than one device; edit the peer instead" % n}
+                         "error": "This VPN peer routes %s - more than its own address (a site-to-site peer); "
+                                  "edit the peer instead" % n}
     if mode == "internet" and not ctx.get("wan"):
         return 409, {"ok": False, "code": "no_wan",
                      "error": "The WAN interface is unknown - use Isolate, or check Interfaces"}

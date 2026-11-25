@@ -142,6 +142,7 @@ DESTS_PER_HOUR = 64
 TOP_N = 10
 NEW_DEVICE_SECONDS = 86400
 ONLINE_SECONDS = 600
+NEIGH_ACTIVE = ("REACHABLE", "DELAY", "PROBE", "PERMANENT")
 WG_ONLINE_SECONDS = 180
 IP_HISTORY_SECONDS = 7 * 86400
 IP_HISTORY_MAX = 20000
@@ -776,6 +777,32 @@ def read_kea_leases(paths, now, v6=False):
     return out
 
 
+def stale_leases(leases, neigh_active, iface_of):
+    """IPv4 addresses of leases that are not the MAC's address now (DW-13): a
+    MAC with several active leases on one network (a new client id got a
+    new address, the old lease runs out later) holds the one the neighbour
+    table sees in use - or, with no neighbour entry, the newest lease."""
+    groups = {}
+    for le in leases:
+        if not le.get("v6"):
+            groups.setdefault((le["mac"], iface_of(le["ip"])), []).append(le)
+    active_on = {}
+    for mac, ip in neigh_active:
+        if ":" not in ip:
+            active_on.setdefault((mac, iface_of(ip)), set()).add(ip)
+    out = set()
+    for key, group in groups.items():
+        if len(group) < 2:
+            continue
+        live = active_on.get(key) or set()
+        if live:
+            out.update(le["ip"] for le in group if le["ip"] not in live)
+        else:
+            best = max(group, key=lambda le: (le["cltt"] or 0, le["expire"] or 0, le["ip"]))
+            out.update(le["ip"] for le in group if le is not best)
+    return out
+
+
 def read_kea_reservations(path):
     if _kea_conf is None:
         return []
@@ -1275,7 +1302,7 @@ class Engine:
         self.journal_active = False
         self.journal_error = None
         self.neigh_state = {}       # mac -> state
-        self.lease_ips = {}         # device -> set of current IPs
+        self.lease_ips = {}         # device -> {current IP: (neighbour active, lease start)}
         self.wg_peers = {}
         self.wg_nets = []
         self.prefixes = []
@@ -1293,6 +1320,7 @@ class Engine:
                       "l2_attributed": 0, "cycles": 0, "last_cycle_s": 0.0}
         self.source_status = {}
         self.suricata_ifaces = None     # capture interfaces from suricata.yaml (None: unknown)
+        self.suricata_key = None
         self.role_parents = {}
         self.zeek_cyc = [0, 0, 0, 0]    # this cycle: conn lines, with MACs, TCP lines, TCP with bad checksums
         self.zeek_win = []              # per-cycle counters, about the last hour
@@ -1406,6 +1434,8 @@ class Engine:
     def refresh_topology(self, force=False):
         now = self.clock()
         if not force and now - self.topology_at < TOPOLOGY_SECONDS and self.prefixes:
+            if self._file_key(self.cfg.suricata_conf) != self.suricata_key:
+                self._read_suricata()           # a capture fix shows within a cycle (INFO-1)
             return
         self.topology_at = now
         roles, wan, parents = {}, set(), {}
@@ -1465,6 +1495,18 @@ class Engine:
         self.prefixes, self.own_ips, self.roles, self.wan_devs = prefixes, own, roles, wan
         self.own_macs = own_macs
         self.role_parents = parents
+        self._read_suricata()
+
+    @staticmethod
+    def _file_key(path):
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+    def _read_suricata(self):
+        self.suricata_key = self._file_key(self.cfg.suricata_conf)
         self.suricata_ifaces = suricata_capture(self.cfg.suricata_conf)
 
     def suricata_status(self):
@@ -1498,7 +1540,7 @@ class Engine:
                 "hint": "Add the LAN interface%s to Suricata's capture: sudo python3 /usr/local/share/tuxwall/scripts/"
                         "tune-suricata.py --add-lan /etc/suricata/suricata.yaml && sudo systemctl restart suricata"
                         % (" (%s)" % lan if lan else "")})
-        z = self.zeek_window()
+        z = self.zeek_window(recent=True)
         if z["lines"] >= ZEEK_MIN_LINES and z["tcp"] and z["bad_checksum"] >= BAD_CHECKSUM_SHARE * z["tcp"]:
             out.append({
                 "code": "zeek_bad_checksums",
@@ -1513,9 +1555,14 @@ class Engine:
                 "hint": "sudo /usr/local/share/tuxwall/scripts/zeek-site-setup.sh"})
         return out
 
-    def zeek_window(self):
+    def zeek_window(self, recent=False):
+        """Zeek counters of about the last hour; recent: only the newest
+        cycles that reach ZEEK_MIN_LINES, so a fixed site policy clears its
+        warning as soon as enough new lines arrive (INFO-1)."""
         lines = l2 = tcp = bad = 0
-        for a, b, c, d in self.zeek_win:
+        for a, b, c, d in reversed(self.zeek_win):
+            if recent and lines >= ZEEK_MIN_LINES:
+                break
             lines += a
             l2 += b
             tcp += c
@@ -1728,30 +1775,45 @@ class Engine:
                 continue
             usable.append((dev, mac, ip, st))
         neigh_mac = {ip: mac for _dev, mac, ip, _st in usable}
+        neigh_active = {(mac, ip) for _dev, mac, ip, st in usable if st in NEIGH_ACTIVE}
         # Kea leases (v4 + v6) and reservations
-        cur_ips = {}
+        cur_ips = {}                # device -> {ip: (neighbour active, lease start)}
+
+        def held_now(did, ip, active, start):
+            m = cur_ips.setdefault(did, {})
+            a0, s0 = m.get(ip, (0, 0))
+            m[ip] = (max(a0, active), max(s0, start))
+        all_leases = []
         for v6, paths in ((False, self.cfg.kea4), (True, self.cfg.kea6)):
             leases = read_kea_leases(paths, now, v6)
             if not v6:
                 self.source_status["kea"] = {"ok": any(os.access(p, os.R_OK) for p in paths),
                                              "active_leases": len(leases)}
-            for le in leases:
-                mac = le["mac"]
-                d = self.ensure_device(mac_id(mac), "mac", min(now, le["cltt"] or now), mac=mac)
-                if d is None:
-                    continue
-                if le["hostname"]:
-                    d["names"]["kea"] = le["hostname"]
-                # a lease the neighbour table contradicts (another MAC uses the
-                # address now) is not evidence of who holds it
-                held = neigh_mac.get(le["ip"]) in (None, mac)
-                self.touch(d, min(now, le["cltt"] or now), "lease", le["ip"] if held else None)
-                if held:
-                    self.observe(le["ip"], d["id"], now)
-                    cur_ips.setdefault(d["id"], set()).add(le["ip"])
-                c, dev = self.classify(le["ip"])
-                if dev:
-                    self._set_iface(d, dev)
+            all_leases += [dict(le, v6=v6) for le in leases]
+        earlier = stale_leases(all_leases, neigh_active, lambda ip: self.classify(ip)[1])
+        kea_names = {}              # device -> (held, in use, start, hostname): the current lease names it
+        for le in all_leases:
+            mac = le["mac"]
+            d = self.ensure_device(mac_id(mac), "mac", min(now, le["cltt"] or now), mac=mac)
+            if d is None:
+                continue
+            # a lease the neighbour table contradicts (another MAC uses the
+            # address now) is not evidence of who holds it; neither is a
+            # second, older lease of the MAC on the same network (DW-13)
+            held = neigh_mac.get(le["ip"]) in (None, mac) and le["ip"] not in earlier
+            if le["hostname"]:
+                rank = (held, (mac, le["ip"]) in neigh_active, not le.get("v6"), le["cltt"] or 0, le["hostname"])
+                if rank > kea_names.get(d["id"], (False,)):
+                    kea_names[d["id"]] = rank
+            self.touch(d, min(now, le["cltt"] or now), "lease", le["ip"] if held else None)
+            if held:
+                self.observe(le["ip"], d["id"], now)
+                held_now(d["id"], le["ip"], int((mac, le["ip"]) in neigh_active), le["cltt"] or 0)
+            c, dev = self.classify(le["ip"])
+            if dev:
+                self._set_iface(d, dev)
+        for did, rank in kea_names.items():
+            self.devices[did]["names"]["kea"] = rank[-1]
         for r in read_kea_reservations(self.cfg.kea_conf):
             d = self.devices.get(mac_id(r["mac"]))
             if d is not None and r["hostname"]:
@@ -1767,11 +1829,11 @@ class Engine:
             d = self.ensure_device(mac_id(mac), "mac", now, mac=mac)
             if d is None:
                 continue
-            active = st in ("REACHABLE", "DELAY", "PROBE", "PERMANENT")
+            active = st in NEIGH_ACTIVE
             if not ip.startswith("fe80:"):
                 self.observe(ip, d["id"], now)
                 self.touch(d, now if active else (d.get("last_seen") or now), "neighbour", ip)
-                cur_ips.setdefault(d["id"], set()).add(ip)
+                held_now(d["id"], ip, int(active), 0)
             elif active:
                 self.touch(d, now, "neighbour")
             self._set_iface(d, dev)
@@ -1809,7 +1871,7 @@ class Engine:
                     if net.num_addresses == 1:
                         ip = net.network_address.compressed
                         self.observe(ip, did, now)
-                        cur_ips.setdefault(did, set()).add(ip)
+                        held_now(did, ip, 0, 0)
                     else:
                         nets.append((net, iface))
         if nets != self.wg_nets:
@@ -2368,17 +2430,21 @@ class Engine:
         risk, health, reason, worst = score_device(d, flist, now)
         a = self.agg.get(did)
         today = self._day(now)
-        current = sorted(self.lease_ips.get(did, ()))
+        # current addresses: the one the neighbour table sees in use first,
+        # then the newest lease (the Clients row, the viewer row and the
+        # panel all take the first IPv4 one - DW-13)
+        held = self.lease_ips.get(did) or {}
+        current = sorted(held, key=lambda ip: (-held[ip][0], -held[ip][1], ip))
         # addresses of the last 24 h: current ones first, then the most
         # recent; never one that another device holds now (reused by DHCP)
-        mine = set(current)
+        mine = {ip: i for i, ip in enumerate(current)}
         seen = d.get("ips") or {}
         cur = sorted((ip for ip, t in seen.items() if t >= now - 86400
                       and (ip in mine or not ((holders or {}).get(ip, set()) - {did}))),
-                     key=lambda ip: (ip not in mine, -(seen.get(ip) or 0), ip))
+                     key=lambda ip: (mine.get(ip, len(mine)), -(seen.get(ip) or 0), ip))
         online = False
         nstate = self.neigh_state.get(mac) if mac else None
-        if nstate in ("REACHABLE", "DELAY", "PROBE", "PERMANENT"):
+        if nstate in NEIGH_ACTIVE:
             online = True
         last_traffic = (a or {}).get("last_traffic") or 0
         if now - last_traffic < ONLINE_SECONDS:
@@ -2424,6 +2490,9 @@ class Engine:
             "type": typ, "type_reason": why,
             "ips": [ip for ip in cur if ":" not in ip], "ipv6": [ip for ip in cur if ":" in ip],
             "current_ips": current,
+            # every address of the device with when it was last seen on it
+            # (quarantine: recent addresses no other device owns - DW-14)
+            "ip_seen": {ip: int(t) for ip, t in seen.items()},
             "iface": d.get("iface") or "", "zone": d.get("zone") or "", "zone_name": d.get("zone_name") or "",
             "vlan": d.get("vlan"), "first_seen": int(d.get("first_seen") or 0), "last_seen": int(d.get("last_seen") or 0),
             "online": online, "neighbour_state": nstate, "baseline": bool(d.get("baseline")),

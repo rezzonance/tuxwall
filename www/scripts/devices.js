@@ -10,7 +10,7 @@
    (links: [data-tw-settings="<pane>"] -> window.twSettings.open).
    Data: GET /api/devices/summary, /feeds (everyone), /api/devices/<id>,
    /indicators, /alerts, /findings/recent (admin); POST /api/devices/<id>/{quarantine,
-   unquarantine,rename,expected}, /api/devices/feeds/{update,key},
+   unquarantine,rename,expected,new-ack}, /api/devices/feeds/{update,key},
    /api/devices/indicators, /api/devices/alerts (admin + same Origin).
    The per-device outbound profile ("LAN Device Activity", formerly a
    Security card) comes from GET /api/security/zeek. Markup: index.html
@@ -187,14 +187,24 @@
   const ACTION_LABEL = { blocked: "blocked", attempted: "attempted, no answer", lookup: "looked up", contacted: "contacted" };
 
   function recentRows(list) {
-    return list.map((x) => `<tr>
+    return list.map((x) => {
+      // a new device (Inventory): no host involved, dismissed instead of marked expected
+      const isNew = x.kind === "new_device";
+      const host = isNew
+        ? `—${x.detail ? `<br><span class="muted">${esc(x.detail)}</span>` : ""}`
+        : `<span class="mono">${esc(x.indicator || "—")}</span><br><span class="muted">${esc(ACTION_LABEL[x.action] || x.action)}</span>`;
+      const act = isNew
+        ? `<button class="btn btn-sm btn-ghost" type="button" data-dev-new-ack="${esc(x.device)}" title="Dismiss: removes this new-device row">Dismiss</button>`
+        : `<button class="btn btn-sm btn-ghost" type="button" data-dev-thr-exp="${esc(x.id)}" data-dev="${esc(x.device)}" title="Mark as expected: stops counting toward health and stops its alerts">Mark expected</button>`;
+      return `<tr>
         <td>${sevBadge(x.severity)}</td>
         <td>${esc(x.feed)}</td>
-        <td><span class="mono">${esc(x.indicator || "—")}</span><br><span class="muted">${esc(ACTION_LABEL[x.action] || x.action)}</span></td>
+        <td>${host}</td>
         <td><a href="#clients" data-dev-goto="${esc(x.device)}">${esc(x.device_name || x.device)}</a></td>
         <td title="${esc(when(x.ts))}">${esc(ago(x.ts))}</td>
-        <td class="td-right"><button class="btn btn-sm btn-ghost" type="button" data-dev-thr-exp="${esc(x.id)}" data-dev="${esc(x.device)}" title="Mark as expected: stops counting toward health and stops its alerts">Mark expected</button></td>
-      </tr>`).join("");
+        <td class="td-right">${act}</td>
+      </tr>`;
+    }).join("");
   }
 
   function renderRecent() {
@@ -220,6 +230,18 @@
     await loadRecent();
     loadSummary();
     if (window.twClients) window.twClients.refresh();
+  }
+
+  async function dismissNew(btn) {
+    btn.disabled = true;
+    const r = await post(`/api/devices/${btn.dataset.devNewAck}/new-ack`, {});
+    if (!r.ok) {
+      btn.disabled = false;
+      const msg = $("dev-thr-msg");
+      if (msg) msg.textContent = r.data.error || "Failed";
+      return;
+    }
+    await loadRecent();
   }
 
   function localPaneVisible() {
@@ -780,6 +802,8 @@
       }
       const x = e.target.closest && e.target.closest("[data-dev-thr-exp]");
       if (x) markExpected(x);
+      const n = e.target.closest && e.target.closest("[data-dev-new-ack]");
+      if (n) dismissNew(n);
     });
     const qm = $("dev-q-modal");
     if (qm) {

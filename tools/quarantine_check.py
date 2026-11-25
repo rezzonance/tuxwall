@@ -610,8 +610,50 @@ def t_campaign4():
           "DW-10: 'same switch or Wi-Fi' warning only for LAN devices")
 
 
+def t_small_batch():
+    """Campaign 4b DW-14 / DW-15 (documentation addresses, fake MACs)."""
+    # DW-14 repro: B has a static .77, no lease, idle (no neighbour entry);
+    # A's history has .77 (ARP flux) - A's targets never take B's address
+    a = dev("m02005e005301", MAC_A, ["192.0.2.101", "192.0.2.100", "192.0.2.77"], [], ["192.0.2.101"], name="client",
+            ip_seen={"192.0.2.101": NOW - 5, "192.0.2.100": NOW - 120, "192.0.2.77": NOW - 60,
+                     "192.0.2.123": NOW - 7200})
+    b = dev("m02005e005302", MAC_B, [], [], [], name="macvlan", ip_seen={"192.0.2.77": NOW - 86400 * 3})
+    ta = Q.device_targets(a, [a, b], now=NOW)
+    check(ta["ips"] == ["192.0.2.100", "192.0.2.101"],
+          "DW-14: held now + seen in the last 10 min; an idle static device's address and an old one left out (%r)"
+          % ta["ips"])
+    st = {"wan": ["wan0"], "entries": [Q.make_entry(a, ta, "internet", "none", NOW)]}
+    st2, _e, _c = Q.sync(st, [a, b], NOW + 30, ["wan0"], None, {})
+    check("192.0.2.77" not in st2["entries"][0]["ips"], "DW-14: sync never adds the idle device's address")
+    # another device seen on an address later than A owns it, even when A saw it recently
+    c = dev("m02005e005303", "02:00:5e:00:53:03", [], [], [], name="other",
+            ip_seen={"192.0.2.100": NOW - 30, "192.0.2.150": NOW - 10})
+    check("192.0.2.100" not in Q.device_targets(a, [a, b, c], now=NOW)["ips"],
+          "DW-14: an address another device was seen on later is left out")
+    # ... and its own address stays its own while it holds it now
+    check(Q.device_targets(dict(a, current_ips=["192.0.2.101", "192.0.2.77"]), [a, b], now=NOW)["ips"]
+          == ["192.0.2.100", "192.0.2.101", "192.0.2.77"], "DW-14: an address the device holds now is kept")
+    # the recent window ends after 10 minutes
+    check(Q.device_targets(a, [a, b], now=NOW + 700)["ips"] == ["192.0.2.101"],
+          "DW-14: a non-current address drops out 10 min after it was last seen")
+    # an engine older than ip_seen (until its restart): its list, never another device's own address
+    check(Q.device_targets(dev("m02005e005301", MAC_A, ["192.0.2.101", "192.0.2.77", "192.0.2.90"], [], ["192.0.2.101"]),
+                           [b, dev("m02005e005304", MAC_B, ["192.0.2.90"])], now=NOW)["ips"] == ["192.0.2.101"],
+          "DW-14: no ip_seen -> another device's latest address left out")
+    # DW-15: a peer whose target set covers more than its own host addresses is refused
+    ctx = {"macs": set(), "ips": set(), "gateways": set(), "gateway_macs": set(), "wan": ["wan0"], "neigh": {}}
+    for nets in (["10.0.0.0/24"], ["198.18.0.7/32", "198.18.0.8/31"], ["2001:db8:7::/64"]):
+        t = Q.device_targets(DW, [DW], [{"public_key": WG_PK, "allowed_ips": nets}])
+        r = Q.check_request(DW, t, "isolate", "none", ctx)
+        check(r is not None and r[1].get("code") == "wide_peer" and "site-to-site" in r[1]["error"],
+              "DW-15: peer routing %s refused (%r)" % (nets, r and r[1]))
+    t = Q.device_targets(DW, [DW], [{"public_key": WG_PK, "allowed_ips": ["198.18.0.7/32", "2001:db8:7::7/128"]}])
+    check(Q.check_request(DW, t, "isolate", "none", ctx) is None and sorted(t["nets"]) == ["198.18.0.7/32", "2001:db8:7::7/128"],
+          "DW-15: host /32 + /128 accepted (%r)" % t["nets"])
+
+
 def main():
-    for t in (t_render, t_plan_filter, t_refusals, t_sync_expiry, t_campaign4, t_persistence_restore, t_api):
+    for t in (t_render, t_plan_filter, t_refusals, t_sync_expiry, t_campaign4, t_small_batch, t_persistence_restore, t_api):
         try:
             t()
         except Exception:

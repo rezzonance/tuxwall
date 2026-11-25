@@ -848,6 +848,79 @@ def t_false_positives():
           "feed file gone: its findings are kept")
 
 
+def t_small_batch():
+    """3.3.7 small batch (Nov 25): DW-13 one MAC with two active leases,
+    INFO-1 source warnings re-evaluated within a cycle, INFO-2 the router's
+    own names refused as indicators, ip_seen for the quarantine (DW-14)."""
+    r = make_root("sb")
+    src = FakeSources()
+    clock = Clock(NOW)
+    A = dw.mac_id(MAC_A)
+    OLD, CUR = "192.0.2.10", "192.0.2.11"
+    # a new client id got a new address; the old lease runs out LATER (renewed
+    # just before) - the neighbour table sees only the new one in use
+    w(r + "/var/lib/kea/kea-leases4.csv", leases_csv([(OLD, MAC_A, "old-name", NOW + 3500),
+                                                      (CUR, MAC_A, "new-name", NOW + 3400),
+                                                      ("192.0.2.70", MAC_A, "vlan-name", NOW + 3000)]))
+    src.neigh = [{"dst": CUR, "dev": "lan0", "lladdr": MAC_A, "state": ["REACHABLE"]}]
+    eng = dw.Engine(dw.Config(r), src, clock)
+    eng.cycle()
+    out = {d["id"]: d for d in json.load(open(r + "/var/lib/tuxwall/devices/devices.json"))["devices"]}
+    a = out[A]
+    check(a["current_ips"][0] == CUR and OLD not in a["current_ips"] and "192.0.2.70" in a["current_ips"],
+          "DW-13: the lease the neighbour table sees is current, the second lease on the same network is not, "
+          "a lease on another network stays (%r)" % a["current_ips"])
+    check(a["ips"][0] == CUR and a["hostnames"].get("kea") == "new-name",
+          "DW-13: the viewer list starts with the same address, hostname from the current lease (%r)" % a["ips"])
+    check(eng.who(OLD, NOW) is None, "DW-13: the stale lease is no ownership evidence (%r)" % eng.ip_hist.get(OLD))
+    # no neighbour entry at all: the newest lease (latest start) wins
+    src.neigh = []
+    clock.t = NOW + 60
+    eng.cycle()
+    a = {d["id"]: d for d in json.load(open(r + "/var/lib/tuxwall/devices/devices.json"))["devices"]}[A]
+    v4 = [x for x in a["current_ips"] if ":" not in x and x != "192.0.2.70"]
+    check(v4 == [OLD] and a["ips"][0] in (OLD, "192.0.2.70"),
+          "DW-13: without a neighbour entry the newest lease is current (%r)" % a["current_ips"])
+    check(dw.stale_leases([{"ip": "192.0.2.5", "mac": MAC_B, "cltt": 1, "expire": 9}], set(), lambda ip: "lan0") == set(),
+          "DW-13: a single lease is never stale")
+    check(isinstance(a.get("ip_seen"), dict) and set(a["ip_seen"]) >= {CUR, OLD} and all(
+          isinstance(t, int) for t in a["ip_seen"].values()), "DW-14: devices.json carries ip_seen {ip: ts}")
+    # INFO-1: a suricata.yaml change is re-read within a cycle (not with the 10-min topology)
+    y = r + "/etc/suricata/suricata.yaml"
+    w(y, "%YAML 1.1\n---\naf-packet:\n  - interface: wan0\n    cluster-id: 99\n  - interface: default\n")
+    clock.t = NOW + 120
+    eng.cycle()
+    eng.refresh_topology(force=True)
+    check(any(x["code"] == "suricata_no_lan" for x in eng.warnings(clock.t)), "INFO-1: WAN-only capture warned")
+    w(y, "%YAML 1.1\n---\naf-packet:\n  - interface: wan0\n    cluster-id: 99\n  - interface: lan0\n"
+      "    cluster-id: 97\n  - interface: default\n")
+    clock.t = NOW + 180
+    eng.cycle()
+    check(not any(x["code"] == "suricata_no_lan" for x in eng.warnings(clock.t)),
+          "INFO-1: the LAN capture fix clears the warning on the next cycle")
+    # INFO-1: Zeek warnings judged on the newest lines, not the whole hour
+    eng.zeek_win = [(300, 0, 300, 290)] * 30 + [(250, 250, 250, 5)]
+    codes = {x["code"] for x in eng.warnings(clock.t)}
+    check("zeek_bad_checksums" not in codes and "zeek_no_mac" not in codes,
+          "INFO-1: fixed Zeek site policy clears both warnings once enough new lines arrived (%r)" % codes)
+    eng.zeek_win = [(300, 0, 300, 290)] * 3
+    codes = {x["code"] for x in eng.warnings(clock.t)}
+    check({"zeek_bad_checksums", "zeek_no_mac"} <= codes, "INFO-1: still warned while the problem persists")
+    # INFO-2: the router's own names are refused as domain indicators
+    rn = ["router", "router.local", "gateway.home.arpa"]
+    for v in ("gateway.home.arpa", "GATEWAY.home.arpa.", "router.local", "*.home.arpa"):
+        try:
+            feeds.validate_local_indicator({"value": v}, router_names=rn)
+            ok = False
+        except ValueError as exc:
+            ok = "this router" in str(exc)
+        check(ok, "INFO-2: %s refused as the router's own name" % v)
+    check(feeds.validate_local_indicator({"value": "evil.home.arpa.example"}, router_names=rn)["value"]
+          == "evil.home.arpa.example" and feeds.validate_local_indicator({"value": "other.home.arpa"},
+                                                                          router_names=rn)["value"] == "other.home.arpa",
+          "INFO-2: other names accepted")
+
+
 def t_score():
     dev = {"first_seen": NOW - 10 * 86400, "baseline": False}
     f = lambda sev, age, exp=False: {"id": sev + str(age), "severity": sev, "last": NOW - age, "kind": "dns_lookup",  # noqa: E731
@@ -1026,6 +1099,106 @@ def t_api():
         check(pre not in snap and "c2VjcmV0" not in snap and "privkeyAAA" not in snap and "203.0.113.9" not in snap
               and sj["peers"][0]["name"] == "Laptop VPN" and sj["peers"][0]["allowed_ips"] == ["192.0.2.130/32"],
               "WG snapshot: no private/preshared key, no endpoint")
+        # DW-15: wg0 down -> AllowedIPs from wg0.conf, else the host routes of the address (never the /24)
+        pk2 = base64.b64encode(bytes(range(1, 33))).decode()
+        pk3 = base64.b64encode(bytes(range(2, 34))).decode()
+
+        def wg_down(args, **k):
+            raise RuntimeError("Unable to access interface: No such device")
+        A._wg = wg_down
+        w(A.WG_CONF, "[Interface]\nAddress = 192.0.2.129/26\nPrivateKey = c2VjcmV0\n\n# Peer: x\n[Peer]\n"
+          "PublicKey = %s\nPresharedKey = %s\nAllowedIPs = 192.0.2.130/32, 2001:db8:2::82/128\n\n[Peer]\n"
+          "PublicKey = %s\nAllowedIPs = 198.18.0.0/24\n" % (WG_PK, pre, pk3))
+        A.load_wg_state = lambda: {"peers": [{"public_key": WG_PK, "name": "Laptop VPN", "address": "192.0.2.130/24"},
+                                             {"public_key": pk2, "name": "new-phone", "address": "192.0.2.131/24"}]}
+        A._devices_wg_snapshot()
+        sj = {p["public_key"]: p for p in json.load(open(A.DEVICES_WG_SNAPSHOT))["peers"]}
+        check(sj[WG_PK]["allowed_ips"] == ["192.0.2.130/32", "2001:db8:2::82/128"] and sj[WG_PK]["name"] == "Laptop VPN"
+              and sj[pk2]["allowed_ips"][0] == "192.0.2.131/32" and sj[pk2]["allowed_ips"][1].endswith("/128")
+              and sj[pk3]["allowed_ips"] == ["198.18.0.0/24"] and pre not in open(A.DEVICES_WG_SNAPSHOT).read(),
+              "DW-15: wg0 down -> peers' AllowedIPs from the config / host routes, no key material (%r)" % sj)
+        if A._qm is not None:
+            ctx = {"macs": set(), "ips": set(), "gateways": set(), "gateway_macs": set(), "wan": ["wan0"], "neigh": {}}
+            site = {"id": dw.wg_id(pk3), "wg_public_key": pk3, "current_ips": ["198.18.0.0/24"]}
+            t = A._qm.device_targets(site, [site], A._devices_wg_peers())
+            check((A._qm.check_request(site, t, "isolate", "none", ctx) or (0, {}))[1].get("code") == "wide_peer",
+                  "DW-15: the site-to-site peer from the config is refused")
+        # INFO-2: the router's own names (hostname, .local, DHCP domain, Local domains on its addresses)
+        import socket as _s
+        host = _s.gethostname().strip().lower().split(".")[0]
+        A.load_domains = lambda: [{"domain": "gateway.home.arpa", "ip": "192.0.2.1"},
+                                  {"domain": "nas.home.arpa", "ip": "192.0.2.40"}]
+        A.discover_local_domains = lambda: [{"domain": "fw.lab.example", "ip": "198.51.100.2"}]
+        A._read_kea = lambda: {"Dhcp4": {"subnet4": [{"option-data": [{"name": "domain-name", "data": "lan.example"}]}]}}
+        names = A._devices_router_names(["192.0.2.1", "198.51.100.2"])
+        check({"gateway.home.arpa", "fw.lab.example", host, host + ".local", host + ".lan.example"} <= set(names)
+              and "nas.home.arpa" not in names, "INFO-2: router names collected (%d)" % len(names))
+        for v in ("gateway.home.arpa", host + ".local"):
+            r = H.request("POST", "/api/devices/indicators", role="admin", origin=H.SAME,
+                          body={"action": "add", "indicator": {"value": v}})
+            check(r.status == 400 and "this router" in r.json["error"], "INFO-2 API: the router's own name refused")
+        check(H.request("POST", "/api/devices/indicators", role="admin", origin=H.SAME,
+                        body={"action": "add", "indicator": {"value": "nas.home.arpa"}}).status == 200,
+              "INFO-2 API: another local name accepted")
+        H.request("POST", "/api/devices/indicators", role="admin", origin=H.SAME,
+                  body={"action": "remove", "value": "nas.home.arpa"})
+        # INFO-3: the [RESOLVED] push does not repeat the problem text
+        sent = []
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, n):
+                return b""
+        real_open = A.urllib.request.urlopen
+        A.urllib.request.urlopen = lambda req, timeout=0: (sent.append((dict(req.header_items()), req.data)), _Resp())[1]
+        try:
+            inc = {"id": "x", "severity": "warning", "title": "Suricata IDS is not running",
+                   "detail": "suricata.service is not active. Check the service on System > Maintenance."}
+            A._dispatch_alert({"enabled": True, "ntfy_url": "http://127.0.0.1:9/t", "notify_resolved": True},
+                              inc, "resolved")
+            A._dispatch_alert({"enabled": True, "ntfy_url": "http://127.0.0.1:9/t", "min_severity": "info"},
+                              inc, "opened")
+        finally:
+            A.urllib.request.urlopen = real_open
+        check(len(sent) == 2 and b"[RESOLVED] Suricata IDS is not running" in sent[0][1]
+              and b"is not active" not in sent[0][1] and b"cleared" in sent[0][1] and b"is not active" in sent[1][1],
+              "INFO-3: resolved body says it cleared, the opened one keeps the detail")
+        # new devices in Security > Local: rows from events.jsonl, dismissed per device
+        w(st + "/devices.json", json.dumps({"schema": 1, "generated_at": int(time.time()), "devices": [
+            dev, dict(dev, id=dw.mac_id(MAC_B), mac=MAC_B, name="tv-b", vendor="ICANN, IANA Department", type="tv")]}))
+        now = int(time.time())
+        w(st + "/events.jsonl.1", jl({"type": "new_device", "device": dw.mac_id(MAC_B), "kind": "mac", "ts": now - 40 * 86400}))
+        w(st + "/events.jsonl", jl({"type": "new_device", "device": dw.mac_id(MAC_B), "kind": "mac", "ts": now - 30})
+          + jl({"type": "new_device", "device": "m00005e0053ff", "kind": "mac", "ts": now - 20})
+          + jl({"type": "finding", "device": dev["id"], "ts": now - 10}))
+        r = H.request("GET", "/api/devices/findings/recent?limit=50", role="admin")
+        rows = r.json["findings"]
+        nd = [x for x in rows if x["kind"] == "new_device"]
+        check(r.status == 200 and len(nd) == 1 and nd[0]["device"] == dw.mac_id(MAC_B) and nd[0]["severity"] == "info"
+              and nd[0]["feed"] == "Inventory" and nd[0]["ts"] == now - 30 and "tv" in nd[0]["detail"]
+              and [x["ts"] for x in rows] == sorted((x["ts"] for x in rows), reverse=True),
+              "new-device rows: one per known device, info/Inventory, newest first (%r)" % nd)
+        check(len(H.request("GET", "/api/devices/findings/recent?limit=1", role="admin").json["findings"]) == 1,
+              "new-device rows count toward the limit")
+        check(H.request("GET", "/api/devices/findings/recent", role="viewer").status == 403, "new-device rows: viewer 403")
+        check(H.request("POST", "/api/devices/%s/new-ack" % dw.mac_id(MAC_B), role="viewer", origin=H.SAME,
+                        body={}).status == 403
+              and H.request("POST", "/api/devices/%s/new-ack" % dw.mac_id(MAC_B), role="admin",
+                            origin="https://evil.example.com", body={}).status == 403,
+              "new-ack: viewer 403, foreign Origin 403")
+        r = H.request("POST", "/api/devices/%s/new-ack" % dw.mac_id(MAC_B), role="admin", origin=H.SAME, body={})
+        ent = json.load(open(conf + "/expected.json"))["entries"]
+        rows = H.request("GET", "/api/devices/findings/recent?limit=50", role="admin").json["findings"]
+        check(r.status == 200 and not any(x["kind"] == "new_device" for x in rows)
+              and [e["kind"] for e in ent] == ["new_device"] and ent[0]["device"] == dw.mac_id(MAC_B),
+              "new-ack: recorded in the expected overlay, the row is gone")
+        check(H.request("POST", "/api/devices/m00005e0053fe/new-ack", role="admin", origin=H.SAME, body={}).status == 404,
+              "new-ack: unknown device -> 404")
     finally:
         H.close()
 
@@ -1110,7 +1283,7 @@ def t_units():
           "analysis engine opens no network connection (feeds are a separate unit)")
 
 
-for t in (t_follower, t_feeds, t_engine, t_campaign4, t_false_positives, t_score, t_units, t_api):
+for t in (t_follower, t_feeds, t_engine, t_campaign4, t_false_positives, t_small_batch, t_score, t_units, t_api):
     try:
         t()
     except Exception:
