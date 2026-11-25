@@ -1629,15 +1629,6 @@
         </div>
       </div>
 
-      <!-- Device threats (scripts/devices.js; data: GET /api/devices/summary) -->
-      <div class="card dev-threat-card" id="dev-threat-card" hidden>
-        <div class="card-head">
-          <h2>Device threats</h2>
-          <span class="muted" id="dev-threat-hint">LAN devices matched against threat intelligence and IDS alerts</span>
-        </div>
-        <div class="dev-threat-body" id="dev-threat-body"></div>
-      </div>
-
       <!-- Last 10 device threats popup (scripts/devices.js; data: GET /api/devices/findings/recent) -->
       <div class="modal" id="dev-thr-modal" hidden>
         <div class="modal-box modal-box-wide dev-box" role="dialog" aria-modal="true" aria-labelledby="dev-thr-title">
@@ -1649,6 +1640,7 @@
 
       <!-- OPNsense-style sub-tabs -->
       <div class="fw-subtabs" id="sec-subtabs">
+        <button class="fw-subtab" type="button" data-sec-pane="local">Local</button>
         <button class="fw-subtab active" type="button" data-sec-pane="attacks">Attacks</button>
         <button class="fw-subtab" type="button" data-sec-pane="timeline">Timeline</button>
         <button class="fw-subtab" type="button" data-sec-pane="tripwire">Tripwire</button>
@@ -1657,6 +1649,18 @@
         <button class="fw-subtab" type="button" data-sec-pane="integrity">Integrity</button>
         <button class="fw-subtab" type="button" data-sec-pane="traffic">Traffic</button>
         <span class="fw-subtabs-fill"></span>
+      </div>
+
+      <!-- Pane: Local (device threats; scripts/devices.js) -->
+      <div class="fw-pane" data-sec-pane="local" hidden>
+      <!-- Device threats (scripts/devices.js; data: GET /api/devices/summary) -->
+      <div class="card dev-threat-card" id="dev-threat-card" hidden>
+        <div class="card-head">
+          <h2>Device threats</h2>
+          <span class="muted" id="dev-threat-hint">LAN devices matched against threat intelligence and IDS alerts</span>
+        </div>
+        <div class="dev-threat-body" id="dev-threat-body"></div>
+      </div>
       </div>
 
       <!-- Pane: Timeline (filled by /scripts/netmap.js) -->
@@ -4236,7 +4240,7 @@
 <script src="/scripts/worldmap.js?v=202611210025"></script>
 <script src="/scripts/community-settings.js?v=202611210025"></script>
 <script src="/scripts/https-settings.js?v=202611231900"></script>
-<script src="/scripts/devices.js?v=202611251400"></script>
+<script src="/scripts/devices.js?v=202611251530"></script>
 <script src="/scripts/dashboard.js?v=202611251400"></script>
 <script src="/scripts/enhance.js?v=202611210025"></script>
 <script src="/scripts/netmap.js?v=202611210025"></script>

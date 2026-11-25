@@ -244,10 +244,15 @@
     if (window.twClients) window.twClients.refresh();
   }
 
+  function localPaneVisible() {
+    const p = document.querySelector('#view-security .fw-pane[data-sec-pane="local"]');
+    return !!p && !p.hidden;
+  }
+
   function schedulePoll() {
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = null;
-    if (activeView === "security" || activeView === "overview" || activeView === "clients") {
+    if (activeView === "overview" || activeView === "clients" || (activeView === "security" && localPaneVisible())) {
       loadSummary();
       pollTimer = setInterval(() => { if (!document.hidden) loadSummary(); }, POLL_MS);
     }
@@ -836,6 +841,10 @@
     if (!t) return;
     if (t.dataset.settingsPane === "threat") loadFeeds();
     if (t.dataset.settingsPane === "alerts" && isAdmin) loadAlerts();
+  });
+  // The Security card lives in the "Local" sub-tab: fetch only while it is shown
+  document.addEventListener("click", (e) => {
+    if (e.target.closest && e.target.closest('#sec-subtabs [data-sec-pane]')) schedulePoll();
   });
   // "Settings → Threat" links (Clients hint, Security card, the device panel)
   document.addEventListener("click", (e) => {
