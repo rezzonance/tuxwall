@@ -193,6 +193,10 @@ A.build_devices_summary = lambda: {
     "worst": {"severity": "critical", "reason": "Connected to a known botnet C2 server (Feodo Tracker)",
               "device": "m020000000001", "device_name": "Example laptop", "last": int(NOW) - 60},
     "feeds_ok": 1, "feeds_total": 3}
+A._integ_devices_recent = lambda: (
+    [{"id": "f" * 16, "severity": "critical", "reason": "Connected to a known botnet C2 server (Feodo Tracker)",
+      "device": "m020000000001", "device_name": "Example laptop", "first": int(NOW) - 120, "last": int(NOW) - 60}],
+    [{"id": "m020000000002", "name": "Example plug", "zone": "IoT", "vendor": "", "first_seen": int(NOW) - 300}])
 
 
 def reset():
@@ -320,8 +324,10 @@ def t_values(j):
     check(j["tuxwall_version"] == "3.3.6", "tuxwall_version")
     d = j["devices"]
     check(d["flagged"] == 2 and d["quarantined"] == 0 and d["worst"]["severity"] == "critical"
-          and set(d["worst"]) == {"severity", "reason", "device_name", "last"} and "findings" not in d,
-          "devices: flagged/quarantined/worst only, no indicator or address (%r)" % d)
+          and set(d["worst"]) == {"severity", "reason", "device_name", "last"}
+          and set(d["findings"][0]) == {"id", "severity", "reason", "device", "device_name", "first", "last"}
+          and set(d["new_devices"][0]) == {"id", "name", "zone", "vendor", "first_seen"},
+          "devices: counts, worst, newest findings/new devices - generic reasons, no indicator or address (%r)" % d)
 
 
 def t_derived():

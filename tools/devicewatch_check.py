@@ -672,6 +672,9 @@ def t_api():
         os.makedirs(st)
         A.DEVICES_STATE_DIR, A.DEVICES_CONF_DIR = st, conf
         A.DEVICES_WG_SNAPSHOT = os.path.join(H.scratch, "wg-peers.json")
+        if A._qm is not None:      # never the router's real quarantine list
+            A._QUAR["env"] = A._qm.Env(state_file=os.path.join(H.scratch, "quarantine.json"),
+                                       log_file=os.path.join(H.scratch, "device-actions.jsonl"))
         r = H.request("GET", "/api/devices", role="viewer")
         check(r.status == 200 and r.json["available"] is False and r.json["devices"] == [],
               "API: no engine state -> available false")
@@ -691,7 +694,7 @@ def t_api():
         r = H.request("GET", "/api/devices", role="viewer")
         d = (r.json or {}).get("devices", [{}])[0]
         check(r.status == 200 and d.get("health") == "critical" and d.get("risk") == 60
-              and set(d) == set(A.DEVICE_VIEWER_FIELDS) and C2_IP not in r.body.decode(),
+              and set(d) == set(A.DEVICE_VIEWER_FIELDS) | {"quarantine"} and C2_IP not in r.body.decode(),
               "API list (viewer): recomputed health, viewer fields only, no indicator/destination (%r)" % sorted(d))
         r = H.request("GET", "/api/devices", role="admin")
         check("findings" in r.json["devices"][0] and "top_destinations" not in r.json["devices"][0],
@@ -757,7 +760,8 @@ def t_api():
         A.build_devices_summary.__globals__["_INTEG_CACHES"]["devices"].drop()
         j = A._integ_devices()
         check(j["ok"] and j["flagged"] == 1 and j["quarantined"] == 0 and set(j["worst"]) ==
-              {"severity", "reason", "device_name", "last"}, "integration section: small, no indicator")
+              {"severity", "reason", "device_name", "last"} and C2_IP not in json.dumps(j),
+              "integration section: small, no indicator")
         # WireGuard snapshot: public data only
         pre = base64.b64encode(b"p" * 32).decode()
         A.WG_CONF = os.path.join(H.scratch, "wg0.conf")

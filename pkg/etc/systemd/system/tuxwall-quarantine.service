@@ -1,0 +1,43 @@
+[Unit]
+Description=TuxWall device quarantine (load the nftables table at boot)
+Documentation=file:///var/www/html/includes/quarantine.py
+# Before the network: a quarantined device must not get a window at boot,
+# and the dashboard API may start later (or not at all). After nftables.service
+# in case an owner enabled it (its ruleset starts with "flush ruleset").
+DefaultDependencies=no
+After=local-fs.target nftables.service
+Before=network-pre.target tuxwall.service shutdown.target
+Wants=network-pre.target
+Conflicts=shutdown.target
+ConditionPathExists=/var/www/html/includes/quarantine.py
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Reads /etc/tuxwall/devices/quarantine.json (root 0600) and loads table inet
+# tuxwall_quarantine (empty when no device is quarantined). Expired entries are
+# skipped; the API drops and reports them on its next pass.
+ExecStart=/usr/bin/python3 -B /var/www/html/includes/quarantine.py restore
+TimeoutStartSec=60
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_NET_ADMIN
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

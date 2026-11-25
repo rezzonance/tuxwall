@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
   <link rel="stylesheet" href="/css/style.css?v=202611210025">
-  <link rel="stylesheet" href="/css/polish.css?v=202611210025">
+  <link rel="stylesheet" href="/css/polish.css?v=202611242150">
   <link rel="stylesheet" href="/css/firewall.css?v=202611210025">
   <link rel="stylesheet" href="/css/bento.css?v=202611210025">
   <link rel="stylesheet" href="/css/heroes.css?v=202611210025">
@@ -238,6 +238,7 @@
           <div class="ov-mon-foot">
             <div><b id="ov-dns-blocked">—</b><small>DNS blocked</small></div>
             <div><b id="ov-fw-blocks">—</b><small>FW blocks</small></div>
+            <div><b id="ov-dev-flagged" title="Devices flagged by device monitoring">—</b><small>Flagged devices</small></div>
           </div>
         </div>
 
@@ -458,7 +459,7 @@
 
       <!-- OPNsense-style sub-tabs -->
       <div class="fw-subtabs" id="dhcp-subtabs">
-        <button class="fw-subtab active" type="button" data-dhcp-pane="dynamic">Dynamic</button>
+        <button class="fw-subtab active" type="button" data-dhcp-pane="dynamic">Devices</button>
         <button class="fw-subtab" type="button" data-dhcp-pane="static">Static</button>
         <span class="fw-subtabs-fill"></span>
       </div>
@@ -467,11 +468,12 @@
       <div class="fw-pane" data-dhcp-pane="dynamic">
       <div class="card">
         <div class="card-head">
-          <h2>Dynamic Leases</h2>
-          <span class="muted">Active DHCP clients and lease status</span>
+          <h2>Devices</h2>
+          <span class="muted" id="dev-list-hint">DHCP leases plus every device the router has seen</span>
         </div>
         <div class="card-toolbar">
-          <input type="search" id="search" placeholder="Filter by hostname, IP or MAC..." autocomplete="off">
+          <input type="search" id="search" placeholder="Filter by name, IP, MAC or vendor..." autocomplete="off">
+          <label class="alerts-check" id="dev-flagged-wrap" hidden><input type="checkbox" id="dev-flagged-only"> Flagged only</label>
           <span class="muted" id="result-count"></span>
         </div>
         <div class="table-wrap">
@@ -482,8 +484,10 @@
                 <th data-sort="ip" class="sortable">IP Address</th>
                 <th data-sort="mac" class="sortable">MAC Address</th>
                 <th data-sort="type" class="sortable">Type</th>
-                <th data-sort="remaining" class="sortable">Lease Remaining</th>
+                <th data-sort="remaining" class="sortable">Lease</th>
                 <th data-sort="last_seen" class="sortable">Last Seen</th>
+                <th data-sort="health" class="sortable">Health</th>
+                <th data-sort="activity" class="sortable">Activity</th>
                 <th data-sort="banned" class="sortable">Access</th>
               </tr>
             </thead>
@@ -494,7 +498,7 @@
           No clients found. Waiting for a device to request a DHCP lease.
         </div>
       </div>
-      <p class="muted bl-note">Banning a client blocks all internet access with a UFW deny rule plus an Unbound DNS block. Bans apply to the client's current IP address — if it gets a new lease with a different IP, re-ban it.</p>
+      <p class="muted bl-note">Banning a client blocks all internet access with a UFW deny rule plus an Unbound DNS block. Bans apply to the client's current IP address — if it gets a new lease with a different IP, re-ban it. <b>Quarantine</b> (click a device) follows the device by its MAC address and every address it uses, survives reboots and can expire on its own.</p>
       </div>
 
       <!-- ── Pane: Static reservations ───────────────────────────────── -->
@@ -562,6 +566,20 @@
               <span class="muted" id="res-edit-hint"></span>
             </div>
           </div>
+        </div>
+      </div>
+
+      <!-- Device detail panel + quarantine dialog (scripts/devices.js) -->
+      <div class="modal" id="dev-modal" hidden>
+        <div class="modal-box modal-box-wide dev-box" role="dialog" aria-modal="true" aria-labelledby="dev-title">
+          <button type="button" class="modal-close" id="dev-modal-close" aria-label="Close">&times;</button>
+          <div id="dev-body"></div>
+        </div>
+      </div>
+      <div class="modal" id="dev-q-modal" hidden>
+        <div class="modal-box dev-q-box" role="dialog" aria-modal="true" aria-labelledby="dev-q-title">
+          <button type="button" class="modal-close" id="dev-q-close" aria-label="Close">&times;</button>
+          <div id="dev-q-body"></div>
         </div>
       </div>
 
@@ -1610,6 +1628,15 @@
         </div>
       </div>
 
+      <!-- Device threats (scripts/devices.js; data: GET /api/devices/summary) -->
+      <div class="card dev-threat-card" id="dev-threat-card" hidden>
+        <div class="card-head">
+          <h2>Device threats</h2>
+          <span class="muted" id="dev-threat-hint">LAN devices matched against threat intelligence and IDS alerts</span>
+        </div>
+        <div class="dev-threat-body" id="dev-threat-body"></div>
+      </div>
+
       <!-- OPNsense-style sub-tabs -->
       <div class="fw-subtabs" id="sec-subtabs">
         <button class="fw-subtab active" type="button" data-sec-pane="attacks">Attacks</button>
@@ -1961,20 +1988,6 @@
           </table>
         </div>
         <p class="muted bl-note">Behavioral alerts from Zeek's <b>Notice framework</b> — scan detection, SSL certificate anomalies, DNS weirdness, protocol violations — read live from <b>/opt/zeek/logs/current/notice.log</b>. Zeek runs as a <b>passive sensor</b> on the LAN interface and never sits in the forwarding path, so throughput is unaffected.</p>
-      </div>
-
-      <div class="card card-mt">
-        <div class="card-head">
-          <h2>LAN Device Activity</h2>
-          <span class="muted" id="sec-zeek-dev-hint">outbound external peers · last hour</span>
-        </div>
-        <div class="table-wrap">
-          <table id="sec-zeek-dev-table">
-            <thead><tr><th>LAN Device</th><th>External Conns</th><th>Distinct Peers</th><th>Top Peer</th><th>Last Seen</th></tr></thead>
-            <tbody id="sec-zeek-dev-body"></tbody>
-          </table>
-        </div>
-        <p class="muted bl-note">Outbound connection profile per LAN device (from Zeek <b>conn.log</b>). A device suddenly talking to many unknown external hosts — or beeping at the same one on a fixed interval — is the classic malware check-in pattern. Cross-reference device IPs with the <a href="#clients">Clients</a> tab.</p>
       </div>
 
       <div class="card card-mt">
@@ -3806,6 +3819,17 @@
         <p class="vl-info">Serves the dashboard over an encrypted connection with a certificate from this router's own certificate authority (CA). Trust the CA once per device and the browser warning goes away.</p>
         <div id="https-body"></div>
       </div>
+      <div class="card" id="ti-card" hidden>
+        <div class="card-head">
+          <h2>Threat intelligence</h2>
+          <span class="badge" id="ti-badge">…</span>
+        </div>
+        <div class="vl-info">
+          <p>Device monitoring compares what LAN devices connect to and look up with lists of known malware servers. The lists are downloaded every 6 hours; only these downloads leave the router — no device data is sent anywhere.</p>
+          <p>Feodo Tracker works without an account. URLhaus and ThreatFox need a free abuse.ch <b>Auth-Key</b>: sign in at <a href="https://auth.abuse.ch/" target="_blank" rel="noopener">auth.abuse.ch</a> (GitHub, Google, LinkedIn or X account), open your profile and copy the Auth-Key. The key is stored on the router (root only) and never shown again.</p>
+        </div>
+        <div id="ti-body"></div>
+      </div>
 
       </div>
 
@@ -3845,6 +3869,38 @@
           <span class="muted" id="alerts-msg" role="status" aria-live="polite"></span>
         </div>
         <p class="muted alerts-note">Incidents are always recorded in the bell timeline. External notifications are optional and only sent for incidents at or above the selected severity. Webhooks receive JSON; ntfy receives a plain-text message.</p>
+      </div>
+
+      <div class="card" id="dev-alerts-card" hidden>
+        <div class="card-head">
+          <h2>Device alerts</h2>
+          <span class="muted">Sent through the channels above</span>
+        </div>
+        <div class="alerts-grid">
+          <label class="fw-field">
+            <span>New device</span>
+            <select id="dev-al-new">
+              <option value="lan">On the main LAN</option>
+              <option value="all">On any network (LAN, VLANs, VPN)</option>
+              <option value="off">Off</option>
+            </select>
+          </label>
+          <label class="fw-field">
+            <span>Findings from</span>
+            <select id="dev-al-sev">
+              <option value="medium">Warning (medium) and above</option>
+              <option value="high">High and above</option>
+              <option value="critical">Critical only</option>
+            </select>
+          </label>
+          <label class="alerts-check"><input type="checkbox" id="dev-al-findings"> Notify when a device is flagged</label>
+          <label class="alerts-check"><input type="checkbox" id="dev-al-quar"> Notify on quarantine, release and expiry</label>
+        </div>
+        <div class="card-toolbar alerts-actions">
+          <button class="btn btn-primary" id="dev-al-save" type="button">Save device alerts</button>
+          <span class="muted" id="dev-al-msg" role="status" aria-live="polite"></span>
+        </div>
+        <p class="muted alerts-note">Device alerts use the notification channels above (they need "Send external notifications") but not its minimum severity. At most 10 detection alerts per hour; the same finding is announced once a day unless it gets worse. "Mark as expected" on a finding stops its alerts.</p>
       </div>
 
       <div class="card">
@@ -4150,7 +4206,8 @@
 <script src="/scripts/worldmap.js?v=202611210025"></script>
 <script src="/scripts/community-settings.js?v=202611210025"></script>
 <script src="/scripts/https-settings.js?v=202611231900"></script>
-<script src="/scripts/dashboard.js?v=202611221113"></script>
+<script src="/scripts/devices.js?v=202611242150"></script>
+<script src="/scripts/dashboard.js?v=202611242150"></script>
 <script src="/scripts/enhance.js?v=202611210025"></script>
 <script src="/scripts/netmap.js?v=202611210025"></script>
 <script src="/scripts/insights.js?v=202611210025"></script>

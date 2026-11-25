@@ -82,6 +82,7 @@ global.document = new Proxy({
   createTextNode: () => makeEl("#text"),
   addEventListener: (ev, cb) => { if (ev === "DOMContentLoaded") domReady.push(cb); },
   removeEventListener() {},
+  dispatchEvent: () => true,
   body: makeEl("body"),
   documentElement: makeEl("html"),
   head: makeEl("head"),

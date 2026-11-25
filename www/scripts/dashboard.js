@@ -10,6 +10,9 @@
 
   const state = {
     leases: [],
+    devices: [],          // device monitoring inventory (GET /api/devices), merged into the Clients table
+    devAvail: false,
+    flaggedOnly: false,
     lastOk: Date.now(),
     idleWarn: false,
     sortKey: "ip",
@@ -50,6 +53,8 @@
   const els = {
     body: document.getElementById("leases-body"),
     count: document.getElementById("result-count"),
+    devFlaggedOnly: document.getElementById("dev-flagged-only"),
+    devFlaggedWrap: document.getElementById("dev-flagged-wrap"),
     search: document.getElementById("search"),
     total: document.getElementById("stat-total"),
     dynamic: document.getElementById("stat-dynamic"),
@@ -210,8 +215,6 @@
     secCanaryBody: document.getElementById("sec-canary-body"),
     secCanaryChips: document.getElementById("sec-canary-chips"),
     secCanaryMeta: document.getElementById("sec-canary-meta"),
-    secZeekDevBody: document.querySelector("#sec-zeek-dev-body"),
-    secZeekDevHint: document.getElementById("sec-zeek-dev-hint"),
     secQuicBody: document.querySelector("#sec-quic-body"),
     secQuicHint: document.getElementById("sec-quic-hint"),
     secChart: document.getElementById("sec-chart"),
@@ -741,12 +744,65 @@
     return 0;
   }
 
+  // ── Clients table = DHCP leases merged with the device inventory ──────
+  // (device monitoring, GET /api/devices). A lease row gets its device by
+  // MAC (else IP); devices without a lease (static IPs, VLAN hosts,
+  // WireGuard peers, IPv6-only) are added as rows with a source badge.
+  const HEALTH_RANK = { critical: 3, warning: 2, new: 1, normal: 0 };
+  const HEALTH_LABEL = { critical: "Critical", warning: "Warning", new: "New", normal: "Normal" };
+  const HEALTH_DOT = { critical: "dot-err", warning: "dot-warn", new: "dot-new", normal: "dot-ok" };
+
+  function deviceSource(d) {
+    if (d.kind === "wg") return "VPN";
+    if (d.vlan != null || (d.zone && d.zone !== "lan")) return d.zone_name || "VLAN";
+    if (!(d.ips || []).length && (d.ipv6 || []).length) return "IPv6 only";
+    return "Static IP";
+  }
+
+  function mergeDevices(leases, devices) {
+    const byMac = new Map();
+    const byIp = new Map();
+    devices.forEach((d) => {
+      if (d.mac) byMac.set(String(d.mac).toLowerCase(), d);
+      [...(d.ips || []), ...(d.current_ips || [])].forEach((ip) => { if (!byIp.has(ip)) byIp.set(ip, d); });
+    });
+    const used = new Set();
+    const rows = leases.map((l) => {
+      const d = (l.mac && byMac.get(String(l.mac).toLowerCase())) || byIp.get(l.ip) || null;
+      if (d) used.add(d.id);
+      return { ...l, dev: d };
+    });
+    devices.forEach((d) => {
+      if (used.has(d.id)) return;
+      const v4 = (d.ips || [])[0] || "";
+      rows.push({
+        ip: v4 || (d.ipv6 || [])[0] || ((d.current_ips || [])[0] || "").split("/")[0],
+        hostname: d.name || "", mac: d.mac || "", vendor: d.vendor || "",
+        os: /apple/i.test(d.vendor || "") ? "apple" : "other",
+        state: 0, type: 0, expires: null, remaining: null, last_seen: d.last_seen || null,
+        banned: false, static: false, online: !!d.online, inventory: true, source: deviceSource(d), dev: d,
+      });
+    });
+    return rows;
+  }
+
+  function devActivityTotal(l) {
+    const a = l.dev && l.dev.activity;
+    return a ? (a.bytes_in || 0) + (a.bytes_out || 0) : -1;
+  }
+
   function sortLeases(leases) {
     const { sortKey: key, sortDir: dir } = state;
     const sorted = [...leases];
     sorted.sort((x, y) => {
       if (key === "ip") return compareIp(x.ip, y.ip) * dir;
       if (key === "remaining") return ((x.remaining ?? -1) - (y.remaining ?? -1)) * dir;
+      if (key === "health") {
+        const hx = x.dev ? (HEALTH_RANK[x.dev.health] ?? 0) * 1000 + (x.dev.risk || 0) : -1;
+        const hy = y.dev ? (HEALTH_RANK[y.dev.health] ?? 0) * 1000 + (y.dev.risk || 0) : -1;
+        return (hx - hy) * dir || compareIp(x.ip, y.ip);
+      }
+      if (key === "activity") return (devActivityTotal(x) - devActivityTotal(y)) * dir;
       const a = String(x[key] ?? "").toLowerCase();
       const b = String(y[key] ?? "").toLowerCase();
       return a.localeCompare(b) * dir;
@@ -754,26 +810,67 @@
     return sorted;
   }
 
+  function isFlagged(l) {
+    return !!(l.dev && (l.dev.health === "warning" || l.dev.health === "critical" || l.dev.quarantine));
+  }
+
   function filterLeases(leases) {
     const q = state.filter.trim().toLowerCase();
-    if (!q) return leases;
-    return leases.filter((l) =>
-      [l.hostname, l.ip, l.mac, l.vendor].some((v) => String(v).toLowerCase().includes(q))
-    );
+    let out = state.flaggedOnly ? leases.filter(isFlagged) : leases;
+    if (!q) return out;
+    return out.filter((l) => {
+      const d = l.dev || {};
+      return [l.hostname, l.ip, l.mac, l.vendor, d.name, d.type, d.zone_name, l.source,
+        ...(d.ips || []), ...(d.ipv6 || [])].some((v) => v != null && String(v).toLowerCase().includes(q));
+    });
+  }
+
+  function healthCell(l) {
+    const d = l.dev;
+    if (!d) return `<span class="muted">—</span>`;
+    const h = d.health || "normal";
+    const reason = d.reason || "";
+    return `<div class="dev-health" title="${esc(reason || HEALTH_LABEL[h] || h)}">
+        <span class="dot ${HEALTH_DOT[h] || "dot-off"}"></span>
+        <span class="dev-health-text"><span class="dev-health-label">${esc(HEALTH_LABEL[h] || h)} ${quarantineBadge(d)}</span>${reason ? `<span class="dev-health-reason">${esc(reason)}</span>` : ""}</span>
+      </div>`;
+  }
+
+  function shortBytes(n) {
+    const s = formatBytes(n);
+    return s.replace(/^(\d{2,})\.\d /, "$1 ");
+  }
+
+  function activityCell(l) {
+    const a = l.dev && l.dev.activity;
+    if (!a || !(a.bytes_in || a.bytes_out || a.conns)) return `<span class="muted">—</span>`;
+    return `<div class="dev-activity" title="Today: ${esc(formatBytes(a.bytes_in))} received, ${esc(formatBytes(a.bytes_out))} sent, ${formatNumber(a.conns || 0)} connections">
+        <span class="mono">↓${esc(shortBytes(a.bytes_in))} ↑${esc(shortBytes(a.bytes_out))}</span>
+        <span class="dev-activity-sub">${formatNumber(a.destinations || 0)} dest.</span>
+      </div>`;
+  }
+
+  function quarantineBadge(d) {
+    if (!d || !d.quarantine) return "";
+    const q = d.quarantine;
+    const until = q.expires ? ` until ${new Date(q.expires * 1000).toLocaleString()}` : "";
+    return `<span class="badge badge-err" title="${esc((q.mode === "isolate" ? "Isolated from the network" : "Internet blocked") + until)}">Quarantined</span>`;
   }
 
   function render() {
     const active = state.leases.filter((l) => (l.state || 0) !== 2);
-    const rows = filterLeases(sortLeases(active));
+    const merged = state.devAvail ? mergeDevices(active, state.devices) : active;
+    const rows = filterLeases(sortLeases(merged));
+    if (els.devFlaggedWrap) els.devFlaggedWrap.hidden = !state.devAvail;
 
     els.total.textContent = active.length;
     els.dynamic.textContent = active.filter((l) => (l.type || 0) === 0 && !l.static).length;
     els.reserved.textContent = active.filter((l) => (l.type || 0) === 1).length;
     els.statStatic.textContent = active.filter((l) => l.static).length;
-    els.count.textContent = rows.length ? `${rows.length} of ${active.length} shown` : "";
+    els.count.textContent = rows.length ? `${rows.length} of ${merged.length} shown` : "";
 
     els.body.innerHTML = rows.map((l) => {
-      const dotClass = l.static && l.online === false
+      const dotClass = (l.static || l.inventory) && l.online === false
         ? "dot-off"
         : (l.state || 0) === 1 ? "dot-warn" : "dot-ok";
       const osInfo = OS_ICONS[l.os];
@@ -781,11 +878,15 @@
         ? `<span class="os-badge os-badge-${esc(l.os)}" title="${esc([osInfo.label, l.os_detail, l.vendor].filter(Boolean).join(" · "))}" style="--os-color:${esc(osInfo.color)}">${osInfo.svg}</span>`
         : `<span class="os-badge os-badge-unknown" style="--os-color:#8b949e">${OS_ICONS.other.svg}</span>`;
       const vendor = l.vendor ? `<div class="client-vendor">${esc(l.vendor)}</div>` : "";
-      const typeBadge = l.static
+      const typeBadge = l.inventory
+        ? `<span class="badge badge-static" title="Seen by device monitoring; no DHCP lease">${esc(l.source)}</span>`
+        : l.static
         ? `<span class="badge badge-static">Static</span>`
         : `<span class="badge">${esc(TYPE_LABEL[l.type] || "Unknown")}</span>`;
       let actions;
-      if (l.static) {
+      if (l.inventory) {
+        actions = `<span class="badge ${l.online ? "badge-ok" : "badge-static"}">${l.online ? "Online" : "Offline"}</span>`;
+      } else if (l.static) {
         actions = `<span class="badge badge-static">${l.online === false ? "Offline" : "Static"}</span>`;
       } else if (state.role !== "admin") {
         actions = `<span class="badge ${l.banned ? "badge-err" : "badge-ok"}">${l.banned ? "Banned" : "Active"}</span>`;
@@ -797,12 +898,14 @@
       }
       const rem = Number(l.remaining);
       let leaseCls = "";
-      if (!l.static && Number.isFinite(rem)) {
+      if (!l.static && !l.inventory && l.remaining != null && Number.isFinite(rem)) {
         if (rem <= 0) leaseCls = " lease-expired";
         else if (rem < 120) leaseCls = " lease-critical";
         else if (rem < 900) leaseCls = " lease-soon";
       }
-      return `<tr class="client-row${l.banned ? " client-banned" : ""}${l.online === false && l.static ? " client-offline" : ""}">
+      const devAttr = l.dev ? ` data-dev="${esc(l.dev.id)}" tabindex="0"` : "";
+      const offline = (l.online === false && (l.static || l.inventory));
+      return `<tr class="client-row${l.banned ? " client-banned" : ""}${offline ? " client-offline" : ""}${l.dev ? " dev-row" : ""}"${devAttr}>
         <td>
           <div class="client-host-cell">
             <span class="dot ${dotClass}"></span>
@@ -816,8 +919,10 @@
         <td class="mono">${esc(l.ip)}</td>
         <td class="mono">${esc(l.mac || "—")}</td>
         <td>${typeBadge}</td>
-        <td class="lease-cell${leaseCls}" title="${l.static ? "Static reservation" : esc(formatDateTime(l.expires))}">${l.static ? "Static" : formatDuration(l.remaining)}</td>
+        <td class="lease-cell${leaseCls}" title="${l.inventory ? "No DHCP lease" : l.static ? "Static reservation" : esc(formatDateTime(l.expires))}">${l.inventory ? "—" : l.static ? "Static" : formatDuration(l.remaining)}</td>
         <td title="${l.static && l.online === false ? "No current lease" : esc(formatDateTime(l.last_seen))}">${l.static && l.online === false ? "Offline" : formatRelative(l.last_seen)}</td>
+        <td>${healthCell(l)}</td>
+        <td>${activityCell(l)}</td>
         <td>${actions}</td>
       </tr>`;
     }).join("");
@@ -932,7 +1037,19 @@
   setInterval(checkCoreServices, 30000);
   checkCoreServices();
 
+  async function refreshDevices() {
+    try {
+      const d = await fetchJSON("/api/devices");
+      state.devAvail = !!(d && d.ok && d.available);
+      state.devices = state.devAvail ? (d.devices || []) : [];
+    } catch (_) {
+      state.devAvail = false;
+      state.devices = [];
+    }
+  }
+
   async function refresh() {
+    const devP = state.authed ? refreshDevices() : Promise.resolve();
     try {
       const data = await fetchJSON("/api/leases");
       if (!data.ok) throw new Error(data.error || "Kea returned an error");
@@ -942,6 +1059,7 @@
     } catch (err) {
       showBanner(true, err.message);
     }
+    await devP;
     render();
     if (els.updated) {
       els.updated.textContent = state.lastUpdate
@@ -1104,23 +1222,59 @@
   });
 
   // Auto-fill MAC from leases table when a client row is clicked
-  document.getElementById("leases-body").addEventListener("click", e => {
-    const row = e.target.closest("tr.client-row");
-    if (!row) return;
-    const ip  = row.querySelector("td:nth-child(2)")?.textContent?.trim() || "";
-    const mac = row.querySelector("td:nth-child(3)")?.textContent?.trim() || "";
-    if (!ip || !mac || mac === "—") return;
+  // Prefill the reservation form (Static tab) with a client's IP + MAC
+  function reserveFill(ip, mac) {
+    if (!ip || !mac || mac === "—" || ip.includes(":")) return false;
     const macIn = document.getElementById("res-mac");
     const ipIn  = document.getElementById("res-ip");
-    // Only fill if fields are empty
-    if (!macIn.value && !ipIn.value) {
-      macIn.value = mac;
-      ipIn.value  = ip;
-      setDhcpTab("static");
-      document.getElementById("reservations-card").scrollIntoView({ behavior: "smooth", block: "start" });
-      macIn.focus();
+    macIn.value = mac;
+    ipIn.value  = ip;
+    setDhcpTab("static");
+    document.getElementById("reservations-card").scrollIntoView({ behavior: "smooth", block: "start" });
+    macIn.focus();
+    return true;
+  }
+
+  // Row click: the device panel (admins, device monitoring on); otherwise
+  // the old shortcut - prefill an empty reservation form with the row
+  document.getElementById("leases-body").addEventListener("click", e => {
+    const row = e.target.closest("tr.client-row");
+    if (!row || e.target.closest("button, a, input")) return;
+    if (row.dataset.dev && state.role === "admin" && window.twDevices) {
+      window.twDevices.open(row.dataset.dev);
+      return;
     }
+    const ip  = row.querySelector("td:nth-child(2)")?.textContent?.trim() || "";
+    const mac = row.querySelector("td:nth-child(3)")?.textContent?.trim() || "";
+    const macIn = document.getElementById("res-mac");
+    const ipIn  = document.getElementById("res-ip");
+    if (!macIn.value && !ipIn.value) reserveFill(ip, mac);
   });
+  document.getElementById("leases-body").addEventListener("keydown", e => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const row = e.target.closest("tr.dev-row");
+    if (!row || e.target !== row || state.role !== "admin" || !window.twDevices) return;
+    e.preventDefault();
+    window.twDevices.open(row.dataset.dev);
+  });
+  if (els.devFlaggedOnly) {
+    els.devFlaggedOnly.addEventListener("change", () => {
+      state.flaggedOnly = !!els.devFlaggedOnly.checked;
+      render();
+    });
+  }
+  window.twClients = {
+    refresh: () => refresh(),
+    reserveFill,
+    showFlagged(on) {
+      state.flaggedOnly = !!on;
+      if (els.devFlaggedOnly) els.devFlaggedOnly.checked = !!on;
+      setDhcpTab("dynamic");
+      switchView("clients");
+      if (history.replaceState) history.replaceState(null, "", "#clients");
+      render();
+    },
+  };
 
   // Load reservations when clients view is first shown
   refreshReservations();
@@ -3749,9 +3903,6 @@
       els.secZeekHint.textContent = "not running";
       els.secZeekBody.innerHTML =
         `<tr><td colspan="5" class="empty">${esc(d.hint || "Zeek not available.")}</td></tr>`;
-      els.secZeekDevHint.textContent = "not running";
-      els.secZeekDevBody.innerHTML =
-        `<tr><td colspan="5" class="empty">${esc(d.hint || "Zeek not available.")}</td></tr>`;
       return;
     }
     const notices = d.notices || [];
@@ -3767,19 +3918,7 @@
         <td class="mono">${esc(n.dst)}${n.dport ? ":" + esc(n.dport) : ""}</td>
       </tr>`).join("")
       || `<tr><td colspan="5" class="empty">No Zeek notices in the last 24h — normal for a quiet network.</td></tr>`;
-    const devices = d.devices || [];
-    els.secZeekDevHint.textContent = devices.length
-      ? `${devices.length} active devices · last hour`
-      : "no active devices · last hour";
-    els.secZeekDevBody.innerHTML = devices.map((v) => `
-      <tr>
-        <td class="mono">${esc(v.device)}</td>
-        <td>${formatNumber(v.conns)}</td>
-        <td>${formatNumber(v.peer_count)}</td>
-        <td class="mono">${esc(v.top_peer || "—")}${v.top_peer_hits ? ` <span class="muted">×${formatNumber(v.top_peer_hits)}</span>` : ""}</td>
-        <td class="mono">${formatTime(v.last_ts)}</td>
-      </tr>`).join("")
-      || `<tr><td colspan="5" class="empty">No LAN→external connections seen in the last hour.</td></tr>`;
+    // the per-device outbound profile (d.devices) moved into the device panel on Clients (devices.js)
   }
 
   async function refreshZeek() {
@@ -13224,7 +13363,8 @@
     "Port Forwarding": "route", "DMZ Clients": "shield", "Firewall Settings": "settings",
     "VLAN Interfaces": "network", "Inter-VLAN Routing Policies": "route",
     "Top Countries": "globe", "Top Attackers": "target", "Hits Over Time": "activity",
-    "Zeek Notices": "file", "LAN Device Activity": "users", "QUIC Connections": "activity",
+    "Zeek Notices": "file", "Devices": "users", "QUIC Connections": "activity",
+    "Device threats": "shield", "Threat intelligence": "rss", "Device alerts": "bell",
     "File Integrity (AIDE)": "shield", "Traffic Monitor": "activity",
     "Diagnose Blocked Traffic": "search", "WireGuard VPN": "lock", "Clients": "users",
     "Active Decisions": "shield", "Bouncers (Remediation Components)": "server",
@@ -13784,6 +13924,7 @@
       : (VIEW_TITLES[view] || "Dashboard");
     setTimeout(() => { initSubtabs(); syncSubtabState(); enhanceCardHeads(); }, 0);
     state.activeView = view;
+    document.dispatchEvent(new CustomEvent("tw:view", { detail: { view } }));
     const implemented = view === "overview" || view === "clients" || view === "dns" || view === "domains" || view === "firewall" || view === "vlans" || view === "interfaces" || view === "security" || view === "wireguard" || view === "crowdsec" || view === "bandwidth" || view === "blocklists" || view === "system" || view === "backups" || view === "logs" || view === "settings" || view === "ai" || !!pluginView;
     document.querySelectorAll(".view").forEach((v) => { v.hidden = true; });
     document.querySelectorAll(".pie-canvas").forEach((c) => {
@@ -16698,7 +16839,6 @@
     "tm-table",
     "cs-bouncers-table",
     "sec-zeek-table",
-    "sec-zeek-dev-table",
     "sec-quic-table",
     "sec-aide-table",
     "sec-honey-table",

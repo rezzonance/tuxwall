@@ -1182,6 +1182,28 @@ def t_devicewatch_setup():
           "postrm purge: overlays/key and the service user removed")
 
 
+def t_quarantine_unit():
+    fn = func("quarantine_unit_setup")
+    check("quarantine_unit_setup()" in fn, "postinst defines quarantine_unit_setup")
+    body = SRC[SRC.index('step 7 "'):]
+    check("$(quarantine_unit_setup)" in body, "configure runs quarantine_unit_setup")
+    for fail, want in (("", "table loaded"), ("1", "not loaded")):
+        d = tempfile.mkdtemp(prefix="pkg-q-")
+        fakebin(d, {"systemctl": '#!/bin/sh\necho "systemctl $*" >> "$FAKE_LOG"\n'
+                                 '[ "$1" = restart ] && [ -n "$FAKE_RESTART_FAIL" ] && exit 1\nexit 0\n'})
+        rc, calls, out, err = bash_run(d, fn + "quarantine_unit_setup\n", env={"FAKE_RESTART_FAIL": fail})
+        shutil.rmtree(d)
+        check(rc == 0 and "systemctl enable tuxwall-quarantine.service" in calls
+              and "systemctl restart tuxwall-quarantine.service" in calls and want in out,
+              "quarantine unit enabled + loaded, never fails (restart fail=%r): %s %r" % (fail, calls, out))
+    prerm = open(PRERM).read()
+    check("disable tuxwall-quarantine.service" in prerm and "nft delete table inet tuxwall_quarantine" in prerm,
+          "prerm remove: quarantine unit disabled and every device released")
+    unit = open(os.path.join(ROOT_DIR, "pkg", "etc", "systemd", "system", "tuxwall-quarantine.service")).read()
+    check("Before=network-pre.target" in unit and "quarantine.py restore" in unit and "DefaultDependencies=no" in unit
+          and "CapabilityBoundingSet=CAP_NET_ADMIN" in unit, "quarantine unit: before the network, restore, NET_ADMIN only")
+
+
 def main():
     for p in (POSTINST, PRERM, os.path.join(ROOT_DIR, "pkg", "DEBIAN", "postrm")):
         r = subprocess.run(["bash", "-n", p], capture_output=True, text=True)
@@ -1201,6 +1223,7 @@ def main():
     t_rsyslog_rule()
     t_agent_config_split()
     t_devicewatch_setup()
+    t_quarantine_unit()
     print("pkg_scripts_check: %d passed, %d failed" % (PASS, FAIL))
     sys.exit(1 if FAIL else 0)
 

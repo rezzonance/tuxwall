@@ -93,6 +93,21 @@ devicewatch_setup() {       # devicewatch_setup MARKER [CONF_DIR] -> one status 
        "(reads via groups:${groups:- none})"
 }
 
+# Device quarantine (3.3.7): tuxwall-quarantine.service loads table inet
+# tuxwall_quarantine from /etc/tuxwall/devices/quarantine.json at boot, before
+# the network (empty table when nothing is quarantined). Always enabled: it is
+# what makes a quarantine survive a reboot; it adds no rule by itself.
+# tools/pkg_scripts_check.py runs this function against fake commands.
+quarantine_unit_setup() {   # -> one status line, never fails
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl enable tuxwall-quarantine.service >/dev/null 2>&1 || true
+  if systemctl restart tuxwall-quarantine.service >/dev/null 2>&1; then
+    echo "device quarantine: table loaded"
+  else
+    echo "device quarantine: table not loaded (journalctl -u tuxwall-quarantine)"
+  fi
+}
+
 # CrowdSec bouncer iptables -> nftables (full ban durations), upgrades only:
 # fresh installs get nftables from tuxwall-install.sh. The helper decides
 # (installed? iptables mode? opt-out /etc/tuxwall/no-bouncer-migration? nft
@@ -1130,6 +1145,7 @@ PY
 
     # Device monitoring: read-only analysis service + hourly feed timer (3.3.7)
     echo "   $(devicewatch_setup "$STATE_DIR/.devicewatch-enabled-once")"
+    echo "   $(quarantine_unit_setup)"
 
     step 8 "Triggering initial blocklist download (background)..."
     sleep 2

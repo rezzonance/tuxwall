@@ -24,6 +24,12 @@ case "$1" in
       fi
       systemctl stop tuxwall-devicewatch-feeds.timer tuxwall-devicewatch.service 2>/dev/null || true
       systemctl disable tuxwall-devicewatch-feeds.timer tuxwall-devicewatch.service 2>/dev/null || true
+      # device quarantine: without the package nothing could release a
+      # device, so removing it releases every quarantined device (the list
+      # stays in /etc/tuxwall/devices until purge; a reinstall restores it)
+      systemctl stop tuxwall-quarantine.service 2>/dev/null || true
+      systemctl disable tuxwall-quarantine.service 2>/dev/null || true
+      nft delete table inet tuxwall_quarantine 2>/dev/null || true
     fi
     ;;
 esac

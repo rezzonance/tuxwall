@@ -176,7 +176,7 @@ READ_ONLY = {
     "/etc/resolv.conf", "/etc/chrony/chrony.conf",
     "/boot", "/boot/efi", "/usr",
     "/usr/bin/aide", "/usr/bin/avahi-browse", "/usr/bin/cscli", "/usr/bin/dig", "/usr/bin/fastfetch",
-    "/usr/bin/ssh", "/usr/bin/sshpass", "/usr/sbin/nft", "/usr/share/ieee-data/oui.csv",
+    "/usr/bin/ssh", "/usr/bin/sshpass", "/usr/sbin/nft", "/usr/sbin/ip", "/usr/share/ieee-data/oui.csv",
     "/usr/share/ieee-data/oui.txt",  # devicewatch.py vendor lookup (the engine's own unit, read-only)
     "/usr/bin:/bin", "/usr/bin:/bin:/usr/local/bin", "/usr/sbin:/usr/bin:/sbin:/bin",
     "/usr/lib/systemd/system/tuxwall-agent.service.d/20-local-config.conf",

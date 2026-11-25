@@ -48,6 +48,9 @@ REQUIRED = {
     "./etc/systemd/system/tuxwall-devicewatch-feeds.timer": "-rw-r--r--",
     "./var/www/html/includes/devicewatch.py": None,
     "./var/www/html/includes/devicewatch_feeds.py": None,
+    "./var/www/html/includes/quarantine.py": None,
+    "./etc/systemd/system/tuxwall-quarantine.service": "-rw-r--r--",
+    "./var/www/html/scripts/devices.js": None,
 }
 ABSENT = (
     "./etc/rsyslog.d/45-tuxwall-unbound.conf",   # postinst-owned since 3.3.5

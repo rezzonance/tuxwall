@@ -57,6 +57,7 @@ OWNERS = {
     "mdns": ("mDNS reflector (Avahi)", ""),
     "management": ("Router access (installer rule)", ""),
     "traffic": ("Traffic accounting (per-client counters)", ""),
+    "quarantine": ("Clients → device quarantine", "#clients"),
     "iptables-nft": ("ufw / iptables (iptables-nft tables)", "#firewall"),
     "user": ("", ""),
 }
@@ -724,6 +725,8 @@ def classify_nft(ctx):
             c = _mk("crowdsec", "CrowdSec Range bans enforced by TuxWall (nftables mode)")
         elif family == "inet" and name == "tuxwall_traffic":
             c = _mk("traffic", "Per-client traffic counters (no verdicts)")
+        elif family == "inet" and name == "tuxwall_quarantine":
+            c = _mk("quarantine", "Quarantined devices (drops only; empty when no device is quarantined)")
         elif family in ("ip", "ip6") and name in XT_TABLES:
             c = _mk("iptables-nft", "iptables-nft table (ufw chains + raw iptables rules)")
         else:

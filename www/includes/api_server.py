@@ -72,6 +72,11 @@ try:
 except Exception as _exc:  # device monitoring views answer "unavailable" without it
     print("tuxwall: devicewatch module unavailable: %r" % _exc, flush=True)
     _dw = None
+try:
+    import quarantine as _qm
+except Exception as _exc:  # quarantine routes answer 503 without it
+    print("tuxwall: quarantine module unavailable: %r" % _exc, flush=True)
+    _qm = None
 
 
 def _topo(fn, default=""):
@@ -12415,9 +12420,10 @@ ADMIN_GET_PREFIXES = (
     # config view shows the API key's first/last 4 characters (3.3.6).
     "/api/security/ai-summary",
     "/api/security/ai-config",
-    # device monitoring: the local indicator list (3.3.7; device detail is
-    # admin-only in devices_get)
+    # device monitoring: the local indicator list and the device alert
+    # settings (3.3.7; device detail is admin-only in devices_get)
     "/api/devices/indicators",
+    "/api/devices/alerts",
 )
 
 
@@ -17666,7 +17672,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_crowdsec_summary())
         elif path == "/api/integration/summary":
             self._send(200, build_integration_summary())
-        elif path in ("/api/devices", "/api/devices/summary", "/api/devices/feeds", "/api/devices/indicators") \
+        elif path in ("/api/devices", "/api/devices/summary", "/api/devices/feeds", "/api/devices/indicators",
+                      "/api/devices/alerts") \
                 or re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})$", path):
             self._send(*devices_get(path, identity))
         elif path == "/api/crowdsec/blocklist":
@@ -19271,9 +19278,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/interfaces/plan":
             self._send(*interfaces_plan(body, _client_key(self)))
 
-        elif path in ("/api/devices/feeds/update", "/api/devices/feeds/key", "/api/devices/indicators") \
-                or re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})/(rename|expected)$", path):
-            self._send(*devices_post(path, body, identity))
+        elif path in ("/api/devices/feeds/update", "/api/devices/feeds/key", "/api/devices/indicators",
+                      "/api/devices/alerts") \
+                or re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})/(rename|expected|quarantine|unquarantine)$", path):
+            self._send(*devices_post(path, body, identity, _client_key(self)))
         elif path in ("/api/https/settings", "/api/https/regenerate", "/api/https/custom-cert",
                       "/api/https/dismiss-announce"):
             self._send(*https_post(path.rsplit("/", 1)[1], body, identity, _client_key(self)))
@@ -20383,8 +20391,15 @@ def build_devices(identity):
         return _devices_unavailable()
     admin = _is_admin(identity)
     fields = DEVICE_VIEWER_FIELDS + (DEVICE_LIST_EXTRA if admin else ())
+    quar = _quar_map()
+    rows = []
+    for d in devices:
+        row = {k: d.get(k) for k in fields}
+        q = quar.get(d["id"])
+        row["quarantine"] = {"mode": q["mode"], "expires": q.get("expires")} if q else None
+        rows.append(row)
     return {"ok": True, "available": True, "running": running, "generated_at": gen, "admin": admin,
-            "devices": [{k: d.get(k) for k in fields} for d in devices]}
+            "quarantine_supported": _qm is not None, "devices": rows}
 
 
 def build_device_detail(did):
@@ -20397,7 +20412,7 @@ def build_device_detail(did):
     fl = sorted((f for f in findings if f.get("device") == did),
                 key=lambda f: (bool(f.get("expected")), -_dw.SEV_RANK.get(f.get("severity"), 0), -(f.get("last") or 0)))
     return 200, {"ok": True, "running": running, "generated_at": gen, "device": dev, "findings": fl,
-                 "quarantine": {"supported": False, "active": False}}
+                 "quarantine": _quar_detail(dev)}
 
 
 def build_devices_summary():
@@ -20410,12 +20425,12 @@ def build_devices_summary():
             feeds_ok += 1 if (st.get(name) or {}).get("status") == "ok" else 0
     if devices is None:
         return {"ok": True, "available": False, "running": False, "devices": 0, "online": 0, "new_24h": 0,
-                "flagged": 0, "critical": 0, "warning": 0, "quarantined": 0, "worst": None,
+                "flagged": 0, "critical": 0, "warning": 0, "quarantined": len(_quar_map()), "worst": None,
                 "feeds_ok": feeds_ok, "feeds_total": feeds_total}
     s = _dw.summarize(devices, findings, time.time())
     return {"ok": True, "available": True, "running": running, "generated_at": gen,
             "devices": s["devices"], "online": s["online"], "new_24h": s["new_24h"], "flagged": s["flagged"],
-            "critical": s["critical"], "warning": s["warning"], "quarantined": 0,
+            "critical": s["critical"], "warning": s["warning"], "quarantined": len(_quar_map()),
             "findings_active": s["findings_active"], "worst": s["worst"],
             "feeds_ok": feeds_ok, "feeds_total": feeds_total}
 
@@ -20457,6 +20472,10 @@ def devices_get(path, identity):
         if not _is_admin(identity):
             return 403, {"ok": False, "error": "Administrator role required"}
         return 200, build_devices_indicators()
+    if path == "/api/devices/alerts":
+        if not _is_admin(identity):
+            return 403, {"ok": False, "error": "Administrator role required"}
+        return 200, {"ok": True, "config": _device_alert_config()}
     m = re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})$", path)
     if m:
         if not _is_admin(identity):
@@ -20477,11 +20496,18 @@ def _devices_request_feed_update():
                    capture_output=True, text=True, timeout=15, check=False)
 
 
-def devices_post(path, body, identity):
-    """POST /api/devices/... (admin; the CSRF/role gates ran before)."""
+def devices_post(path, body, identity, client_ip=""):
+    """POST /api/devices/... (admin; the CSRF/role gates ran before).
+    client_ip (from the trusted proxy) feeds the quarantine self check."""
     if _dw is None:
         return 503, {"ok": False, "error": "devicewatch module unavailable"}
     who = (identity or {}).get("username") or "?"
+    if path == "/api/devices/alerts":
+        try:
+            cfg = save_device_alert_config(body)
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc)}
+        return 200, {"ok": True, "config": cfg}
     if path == "/api/devices/feeds/update":
         try:
             _devices_request_feed_update()
@@ -20537,13 +20563,17 @@ def devices_post(path, body, identity):
                 return 400, {"ok": False, "error": "action must be add or remove"}
             _dw_conf_write("local-indicators.json", {"version": 1, "indicators": items})
         return 200, {"ok": True, "indicators": items}
-    m = re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})/(rename|expected)$", path)
+    m = re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})/(rename|expected|quarantine|unquarantine)$", path)
     if not m:
         return 404, {"ok": False, "error": "Not found"}
     did, action = m.group(1), m.group(2)
     devices, findings, _gen, _run = _devices_state()
+    if action == "unquarantine":
+        return _quar_release(did, who)
     if devices is None or not any(d["id"] == did for d in devices):
         return 404, {"ok": False, "error": "Unknown device"}
+    if action == "quarantine":
+        return _quar_request(next(d for d in devices if d["id"] == did), devices, body, who, client_ip)
     if action == "rename":
         name = " ".join(str(body.get("name") or "").split())
         name = "".join(ch for ch in name if ch.isprintable())
@@ -20634,16 +20664,461 @@ def start_devices_wg_snapshot():
     threading.Thread(target=_devices_wg_loop, name="devices-wg", daemon=True).start()
 
 
+# --- Device quarantine (3.3.7) ----------------------------------------------
+# The rule logic, persistence and boot restore live in www/includes/
+# quarantine.py (tuxwall-quarantine.service loads the table at boot, before
+# the network, so a quarantine survives a reboot even with the API down).
+# The API takes the requests (admin + CSRF; the safety decision refuses the
+# router, its upstream gateway, wide VPN peers and - unless confirm_self -
+# the requesting admin's own device), and the device monitor below keeps the
+# addresses in step with the inventory and expires entries every minute.
+# Separate from the Clients "Access" ban (/api/leases/ban: ufw deny + unbound
+# refuse for one IPv4 address): both can be on; the device panel shows both.
+DEVICES_MONITOR_INTERVAL = 60
+DEVICES_MONITOR_START_DELAY = 5
+_QUAR_LOCK = threading.Lock()
+_QUAR = {"env": None, "last_error": "", "last_sync": 0}
+
+
+def _quar_env():
+    if _qm is None:
+        return None
+    if _QUAR["env"] is None:
+        _QUAR["env"] = _qm.Env()
+    return _QUAR["env"]
+
+
+def _quar_map():
+    """{device id: entry} of the persisted quarantine (expired entries
+    included until the monitor drops them - they are not enforced)."""
+    env = _quar_env()
+    if env is None:
+        return {}
+    now = time.time()
+    return {e["device"]: e for e in _qm.load_state(env)["entries"]
+            if not (e.get("expires") and e["expires"] <= now)}
+
+
+def _quar_wan():
+    w = _detect_wan_iface()
+    return [w] if w else []
+
+
+def _devices_wg_peers():
+    try:
+        with open(DEVICES_WG_SNAPSHOT, encoding="utf-8") as f:
+            peers = (json.load(f) or {}).get("peers")
+        return peers if isinstance(peers, list) else []
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def _quar_detail(dev):
+    env = _quar_env()
+    if env is None:
+        return {"supported": False, "active": False}
+    e = _quar_map().get(dev["id"])
+    banned = sorted({b["ip"] for b in load_bans()} & set(dev.get("ips") or []))
+    out = {"supported": True, "active": e is not None, "lease_banned": banned,
+           "modes": list(_qm.MODES), "expires_options": list(_qm.EXPIRES),
+           "actions": [{k: a.get(k) for k in ("ts", "action", "mode", "by", "code", "expires")}
+                       for a in _qm.read_actions(env, dev["id"], 10)]}
+    if e is not None:
+        out.update(_qm.public_entry(e))
+    return out
+
+
+def _quar_apply_locked(env, st, ctx, force=False):
+    changed, err = _qm.apply(env, _qm.plan(st, ctx, time.time()), force=force)
+    _QUAR["last_error"] = err
+    return changed, err
+
+
+def _quar_label(name, did):
+    return (name or did)[:64]
+
+
+def _quar_request(dev, devices, body, who, client_ip):
+    env = _quar_env()
+    if env is None:
+        return 503, {"ok": False, "error": "quarantine module unavailable"}
+    mode = str(body.get("mode") or "")
+    expires = str(body.get("expires") or "none")
+    confirm_self = body.get("confirm_self") is True
+    note = " ".join(str(body.get("note") or "").split())[:200]
+    wan = _quar_wan()
+    ctx = _qm.router_context(env, wan)
+    targets = _qm.device_targets(dev, devices, _devices_wg_peers())
+    refused = _qm.check_request(dev, targets, mode, expires, ctx, client_ip, confirm_self)
+    if refused:
+        _qm.log_action(env, {"action": "refused", "device": dev["id"], "mode": mode,
+                             "code": refused[1].get("code"), "by": who})
+        print("[devices] quarantine of %s refused (%s) for %s" % (dev["id"], refused[1].get("code"), who), flush=True)
+        return refused
+    now = time.time()
+    entry = _qm.make_entry(dev, targets, mode, expires, now, by=who, note=note)
+    if entry is None:
+        return 409, {"ok": False, "code": "no_address", "error": "Nothing to match for this device"}
+    with _QUAR_LOCK:
+        st = _qm.load_state(env)
+        old = {"version": 1, "wan": list(st["wan"]), "entries": list(st["entries"])}
+        prev = next((e for e in st["entries"] if e["device"] == dev["id"]), None)
+        st["entries"] = [e for e in st["entries"] if e["device"] != dev["id"]] + [entry]
+        if len(st["entries"]) > _qm.MAX_ENTRIES:
+            return 409, {"ok": False, "error": "Too many quarantined devices (max %d)" % _qm.MAX_ENTRIES}
+        if wan:
+            st["wan"] = wan
+        _changed, err = _quar_apply_locked(env, st, ctx, force=True)
+        if err:
+            _quar_apply_locked(env, old, ctx, force=True)
+            return 500, {"ok": False, "error": "nftables refused the quarantine: %s" % err}
+        try:
+            _qm.save_state(env, st)
+        except OSError as exc:
+            _quar_apply_locked(env, old, ctx, force=True)
+            return 500, {"ok": False, "error": "could not save the quarantine: %s" % exc.__class__.__name__}
+    _qm.log_action(env, {"action": "quarantine" if prev is None else "change", "device": dev["id"],
+                         "mode": mode, "expires": entry.get("expires"), "by": who,
+                         "self": bool(confirm_self and _qm.is_self(targets, client_ip, ctx))})
+    print("[devices] %s quarantined (%s, expires %s) by %s" % (dev["id"], mode, expires, who), flush=True)
+    _device_alert_quarantine("quarantine", entry, who)
+    return 200, {"ok": True, "id": dev["id"], "quarantine": dict(_qm.public_entry(entry), active=True),
+                 "warnings": _qm.warnings_for(dev, targets, mode)}
+
+
+def _quar_release(did, who, reason="release"):
+    env = _quar_env()
+    if env is None:
+        return 503, {"ok": False, "error": "quarantine module unavailable"}
+    with _QUAR_LOCK:
+        st = _qm.load_state(env)
+        gone = next((e for e in st["entries"] if e["device"] == did), None)
+        if gone is None:
+            return 404, {"ok": False, "error": "This device is not quarantined"}
+        st["entries"] = [e for e in st["entries"] if e["device"] != did]
+        ctx = _qm.router_context(env, st["wan"])
+        _changed, err = _quar_apply_locked(env, st, ctx, force=True)
+        if err:
+            return 500, {"ok": False, "error": "nftables refused the release: %s" % err}
+        _qm.save_state(env, st)
+    _qm.log_action(env, {"action": reason, "device": did, "mode": gone["mode"], "by": who})
+    print("[devices] %s released (%s) by %s" % (did, reason, who), flush=True)
+    _device_alert_quarantine(reason, gone, who)
+    return 200, {"ok": True, "id": did, "quarantine": {"supported": True, "active": False}}
+
+
+def devices_quarantine_sync(origin="periodic"):
+    """Every minute: expire entries, refresh addresses from the inventory,
+    make sure the table is loaded (rewritten only when it differs)."""
+    env = _quar_env()
+    if env is None:
+        return None
+    devices, _f, _g, running = _devices_state()
+    expired = []
+    with _QUAR_LOCK:
+        st = _qm.load_state(env)
+        wan = _quar_wan()
+        st2, expired, changed = _qm.sync(st, devices if running else [], time.time(), wan, _devices_wg_peers())
+        if changed:
+            try:
+                _qm.save_state(env, st2)
+            except OSError as exc:
+                print("[devices] quarantine state not saved: %r" % (exc,), flush=True)
+        ctx = _qm.router_context(env, st2["wan"])
+        rewritten, err = _quar_apply_locked(env, st2, ctx)
+    _QUAR["last_sync"] = int(time.time())
+    for e in expired:
+        _qm.log_action(env, {"action": "expire", "device": e["device"], "mode": e["mode"], "by": "auto"})
+        _device_alert_quarantine("expire", e, "auto")
+    if err or rewritten and origin != "startup" or expired:
+        print("[devices] quarantine %s: %d active, %d expired%s%s" % (
+            origin, len(st2["entries"]), len(expired), ", table rewritten" if rewritten else "",
+            "; nft: " + err if err else ""), flush=True)
+    return {"entries": len(st2["entries"]), "expired": len(expired), "rewritten": rewritten, "error": err}
+
+
+# --- Device alerts (ntfy / webhook through the incident channels) ------------
+# The engine appends new_device / finding events to events.jsonl; the device
+# monitor tails it (inode + offset in DEVICE_ALERT_STATE, so a restart never
+# repeats or loses events; the first run starts at the end) and sends them
+# through _notify_async with the device settings as the gate (the incident
+# minimum severity does not apply; "Send external notifications" and the
+# channel URLs do). Dedupe: a finding once per FINDING_REALERT unless it
+# escalates, a new device once. At most DEVICE_ALERT_MAX_PER_HOUR detection
+# alerts per hour; the rest are counted and mentioned in the next one.
+# Quarantine / release / expiry are always sent (they are admin actions).
+DEVICE_ALERT_DEFAULTS = {"new_device": "lan", "findings": True, "min_severity": "medium", "quarantine": True}
+DEVICE_ALERT_NEW = ("off", "lan", "all")
+DEVICE_ALERT_SEVERITIES = ("medium", "high", "critical")
+DEVICE_ALERT_MAX_PER_HOUR = 10
+DEVICE_ALERT_STATE = os.path.join(BLOCKLIST_DIR, "device-alerts.json")
+DEVICE_ALERT_READ_MAX = 2 << 20
+FINDING_REALERT = 86400
+_DEVICE_ALERT_LOCK = threading.Lock()
+
+
+def _device_alert_config():
+    raw = _incident_read_json(ALERT_CONFIG_FILE, {}).get("devices")
+    cfg = dict(DEVICE_ALERT_DEFAULTS)
+    if isinstance(raw, dict):
+        if raw.get("new_device") in DEVICE_ALERT_NEW:
+            cfg["new_device"] = raw["new_device"]
+        if raw.get("min_severity") in DEVICE_ALERT_SEVERITIES:
+            cfg["min_severity"] = raw["min_severity"]
+        for k in ("findings", "quarantine"):
+            if isinstance(raw.get(k), bool):
+                cfg[k] = raw[k]
+    return cfg
+
+
+def save_device_alert_config(body):
+    cfg = _device_alert_config()
+    if "new_device" in body:
+        if body["new_device"] not in DEVICE_ALERT_NEW:
+            raise ValueError("new_device must be off, lan or all")
+        cfg["new_device"] = body["new_device"]
+    if "min_severity" in body:
+        if body["min_severity"] not in DEVICE_ALERT_SEVERITIES:
+            raise ValueError("min_severity must be medium, high or critical")
+        cfg["min_severity"] = body["min_severity"]
+    for k in ("findings", "quarantine"):
+        if k in body:
+            cfg[k] = bool(body[k])
+    with _INCIDENT_LOCK:
+        raw = _incident_read_json(ALERT_CONFIG_FILE, {})
+        raw = dict(raw) if isinstance(raw, dict) else {}
+        if not raw:
+            raw = _load_alert_config()
+        raw["devices"] = cfg
+        _incident_write_json(ALERT_CONFIG_FILE, raw)
+    return cfg
+
+
+def _device_alert_send(key, severity, title, detail, priority=None):
+    _notify_async({"id": "device-" + key, "key": "device:" + key, "severity": severity, "title": title,
+                   "detail": detail, "status": "active", "first_seen": int(time.time()),
+                   "last_seen": int(time.time())}, "device", force=True, priority=priority)
+
+
+def _device_alert_quarantine(action, entry, who):
+    try:
+        if not _device_alert_config().get("quarantine"):
+            return
+        name = _quar_label(entry.get("name"), entry.get("device"))
+        mode = "internet blocked" if entry.get("mode") == "internet" else "isolated from the network"
+        if action == "quarantine" or action == "change":
+            exp = entry.get("expires")
+            _device_alert_send("q-" + entry["device"], "warning", "Device quarantined: %s" % name,
+                               "%s by %s; %s." % (mode.capitalize(), who,
+                                                  "expires %s" % time.strftime("%Y-%m-%d %H:%M", time.localtime(exp))
+                                                  if exp else "no expiry"))
+        elif action == "expire":
+            _device_alert_send("q-" + entry["device"], "info", "Device released: %s" % name,
+                               "The quarantine (%s) expired." % mode, priority="default")
+        else:
+            _device_alert_send("q-" + entry["device"], "info", "Device released: %s" % name,
+                               "Quarantine (%s) lifted by %s." % (mode, who), priority="default")
+    except Exception as exc:
+        print("[devices] quarantine alert failed: %r" % (exc,), flush=True)
+
+
+def _device_alert_state():
+    data = _incident_read_json(DEVICE_ALERT_STATE, {})
+    return data if isinstance(data, dict) else {}
+
+
+def _device_alert_save(st):
+    tmp = DEVICE_ALERT_STATE + ".tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+        os.replace(tmp, DEVICE_ALERT_STATE)
+    except OSError as exc:
+        print("[devices] alert state not saved: %r" % (exc,), flush=True)
+
+
+def _device_events_read(path, offset):
+    """Complete JSON lines from offset -> (events, new offset)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return [], offset
+    try:
+        if (os.fstat(fd).st_mode & 0o170000) != 0o100000:
+            return [], offset
+        os.lseek(fd, offset, os.SEEK_SET)
+        data = os.read(fd, DEVICE_ALERT_READ_MAX)
+    finally:
+        os.close(fd)
+    end = data.rfind(b"\n")
+    if end < 0:
+        return [], offset
+    out = []
+    for line in data[:end].split(b"\n"):
+        try:
+            ev = json.loads(line.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if isinstance(ev, dict):
+            out.append(ev)
+    return out, offset + end + 1
+
+
+def _device_events_new(st):
+    path = os.path.join(DEVICES_STATE_DIR, "events.jsonl")
+    try:
+        s1 = os.stat(path)
+    except OSError:
+        s1 = None
+    if "inode" not in st:
+        st["inode"], st["offset"] = (s1.st_ino, s1.st_size) if s1 else (0, 0)
+        return []
+    if s1 is None:
+        return []
+    evs = []
+    if s1.st_ino != st.get("inode"):
+        try:
+            if os.stat(path + ".1").st_ino == st.get("inode"):
+                evs, _o = _device_events_read(path + ".1", int(st.get("offset") or 0))
+        except OSError:
+            pass
+        st["inode"], st["offset"] = s1.st_ino, 0
+    elif s1.st_size < int(st.get("offset") or 0):
+        st["offset"] = 0
+    more, st["offset"] = _device_events_read(path, int(st.get("offset") or 0))
+    return evs + more
+
+
+def devices_alert_pass():
+    """Send alerts for the engine events written since the last pass."""
+    if _dw is None:
+        return 0
+    with _DEVICE_ALERT_LOCK:
+        st = _device_alert_state()
+        before = json.dumps(st, sort_keys=True)
+        events = _device_events_new(st)
+        cfg = _device_alert_config()
+        now = time.time()
+        sent_keys = {k: v for k, v in (st.get("sent") or {}).items() if now - float(v or 0) < 30 * 86400}
+        window = [t for t in (st.get("window") or []) if now - float(t) < 3600]
+        held = int(st.get("held") or 0)
+        sent = 0
+        devices = findings = None
+        if events:
+            devices, findings, _g, _r = _devices_state()
+        by_dev = {d["id"]: d for d in devices or []}
+        by_fid = {f.get("id"): f for f in findings or []}
+        for ev in events[-500:]:
+            typ = ev.get("type")
+            dev = by_dev.get(ev.get("device")) or {}
+            name = _quar_label(dev.get("name"), str(ev.get("device") or "?"))
+            if typ == "new_device":
+                if cfg["new_device"] == "off" or (cfg["new_device"] == "lan" and dev.get("zone") != "lan"):
+                    continue
+                key = "n:%s" % ev.get("device")
+                if key in sent_keys:
+                    continue
+                msg = ("New device on %s: %s" % (dev.get("zone_name") or dev.get("zone") or "the network", name),
+                       "%s%s. First seen %s. Review it on the Clients page." % (
+                           dev.get("vendor") or "Unknown vendor",
+                           " (private MAC)" if dev.get("private_mac") or ev.get("private_mac") else "",
+                           time.strftime("%H:%M", time.localtime(ev.get("ts") or now))),
+                       "info")
+            elif typ == "finding":
+                if not cfg["findings"]:
+                    continue
+                f = by_fid.get(ev.get("finding")) or {}
+                sev = f.get("severity") or ev.get("severity")
+                if _dw.SEV_RANK.get(sev, 0) < _dw.SEV_RANK[cfg["min_severity"]] or f.get("expected"):
+                    continue
+                key = "f:%s" % ev.get("finding")
+                if key in sent_keys and not ev.get("escalated") and now - float(sent_keys[key]) < FINDING_REALERT:
+                    continue
+                src = _dw.SOURCE_TITLES.get(f.get("source") or ev.get("source"), "")
+                msg = ("Device flagged: %s" % name,
+                       "%s%s. Review it on the Clients page (Health)." % (
+                           f.get("title") or _dw.KIND_TEXT.get(ev.get("kind"), "Suspicious activity"),
+                           " - " + src if src else ""),
+                       "critical" if sev == "critical" else "warning")
+            else:
+                continue
+            sent_keys[key] = now
+            if len(window) >= DEVICE_ALERT_MAX_PER_HOUR:
+                held += 1
+                continue
+            title, detail, sev = msg
+            if held:
+                detail += " (+%d more device alert(s) held back in the last hour.)" % held
+                held = 0
+            _device_alert_send(key, sev, title, detail, priority="default" if sev == "info" else None)
+            window.append(now)
+            sent += 1
+        if held and len(window) < DEVICE_ALERT_MAX_PER_HOUR:
+            _device_alert_send("held", "warning", "Device alerts held back",
+                               "%d device alert(s) were held back by the rate limit - see the Clients page." % held)
+            window.append(now)
+            held = 0
+        st.update(sent=sent_keys, window=window, held=held)
+        if json.dumps(st, sort_keys=True) != before:
+            _device_alert_save(st)
+    return sent
+
+
+def _devices_monitor_loop():
+    time.sleep(DEVICES_MONITOR_START_DELAY)
+    origin = "startup"
+    while True:
+        try:
+            devices_quarantine_sync(origin)
+        except Exception as exc:
+            print("[devices] quarantine sync failed: %r" % (exc,), flush=True)
+        try:
+            devices_alert_pass()
+        except Exception as exc:
+            print("[devices] alert pass failed: %r" % (exc,), flush=True)
+        origin = "periodic"
+        time.sleep(DEVICES_MONITOR_INTERVAL)
+
+
+def start_devices_monitor():
+    threading.Thread(target=_devices_monitor_loop, name="devices-monitor", daemon=True).start()
+
+
+INTEG_DEVICES_RECENT = 10
+
+
+def _integ_devices_recent():
+    """Newest active findings and new devices for Home Assistant's events
+    (generic reasons only, as viewers see them - never an indicator)."""
+    devices, findings, _gen, _run = _devices_state()
+    if devices is None:
+        return [], []
+    names = {d["id"]: d.get("name") or "" for d in devices}
+    act = sorted((f for f in findings if not f.get("expected") and f.get("id")),
+                 key=lambda f: -(f.get("last") or 0))[:INTEG_DEVICES_RECENT]
+    recent = [{"id": f["id"], "severity": f.get("severity"), "reason": _dw.public_reason(f),
+               "device": f.get("device"), "device_name": names.get(f.get("device"), ""),
+               "first": int(f.get("first") or 0), "last": int(f.get("last") or 0)} for f in act]
+    new = sorted((d for d in devices if d.get("health") == "new" or
+                  (not d.get("baseline") and time.time() - (d.get("first_seen") or 0) < _dw.NEW_DEVICE_SECONDS)),
+                 key=lambda d: -(d.get("first_seen") or 0))[:INTEG_DEVICES_RECENT]
+    return recent, [{"id": d["id"], "name": d.get("name") or "", "zone": d.get("zone_name") or d.get("zone") or "",
+                     "vendor": d.get("vendor") or "", "first_seen": int(d.get("first_seen") or 0)} for d in new]
+
+
 def _integ_devices():
     s = build_devices_summary()
     if not s.get("available"):
         return {"ok": False, "error": "device monitoring has no data yet"}
     w = s.get("worst")
+    s["recent_findings"], s["recent_new"] = _integ_devices_recent()
     return {"ok": True, "running": s["running"], "devices": s["devices"], "online": s["online"],
             "new_24h": s["new_24h"], "flagged": s["flagged"], "critical": s["critical"], "warning": s["warning"],
-            "quarantined": 0,
+            "quarantined": s["quarantined"],
             "worst": {"severity": w["severity"], "reason": w["reason"], "device_name": w["device_name"],
-                      "last": w["last"]} if w else None}
+                      "last": w["last"]} if w else None,
+            "findings": s.get("recent_findings") or [], "new_devices": s.get("recent_new") or []}
 
 
 # GET /api/integration/summary: everything the Home Assistant integration
@@ -22514,17 +22989,23 @@ def save_alert_config(body):
     if sev not in INCIDENT_SEVERITY_RANK:
         raise ValueError("min_severity must be info, warning or critical")
     cfg["min_severity"] = sev
-    _incident_write_json(ALERT_CONFIG_FILE, cfg)
+    with _INCIDENT_LOCK:
+        # the device alert settings (Settings > Alerts > Devices) live in the same file
+        dev = _incident_read_json(ALERT_CONFIG_FILE, {}).get("devices")
+        out = dict(cfg, devices=dev) if isinstance(dev, dict) else cfg
+        _incident_write_json(ALERT_CONFIG_FILE, out)
     return {"ok": True, "config": cfg}
 
 
-def _dispatch_alert(cfg, incident, transition):
-    """Send one incident transition to the configured channels."""
+def _dispatch_alert(cfg, incident, transition, force=False, priority=None):
+    """Send one incident transition to the configured channels. force: the
+    caller applied its own gate (device alerts have their own settings), so
+    the incident minimum severity is skipped; priority overrides ntfy's."""
     errors = []
     if not cfg.get("enabled"):
         return errors
     rank = INCIDENT_SEVERITY_RANK.get(incident.get("severity", "info"), 1)
-    if rank < INCIDENT_SEVERITY_RANK.get(cfg.get("min_severity", "warning"), 2):
+    if not force and rank < INCIDENT_SEVERITY_RANK.get(cfg.get("min_severity", "warning"), 2):
         return errors
     if transition == "resolved" and not cfg.get("notify_resolved", True):
         return errors
@@ -22538,8 +23019,8 @@ def _dispatch_alert(cfg, incident, transition):
         try:
             headers = {
                 "Title": title.encode("ascii", "ignore").decode("ascii") or "TuxWall incident",
-                "Priority": "urgent" if incident.get("severity") == "critical" else "high",
-                "Tags": "warning" if transition == "opened" else "white_check_mark",
+                "Priority": priority or ("urgent" if incident.get("severity") == "critical" else "high"),
+                "Tags": "warning" if transition in ("opened", "device") else "white_check_mark",
                 "Content-Type": "text/plain; charset=utf-8",
             }
             req = urllib.request.Request(ntfy_url, data=text.encode("utf-8"), headers=headers, method="POST")
@@ -22568,11 +23049,11 @@ def _dispatch_alert(cfg, incident, transition):
     return errors
 
 
-def _notify_async(incident, transition):
+def _notify_async(incident, transition, force=False, priority=None):
     cfg = _load_alert_config()
     def run():
         try:
-            errors = _dispatch_alert(cfg, incident, transition)
+            errors = _dispatch_alert(cfg, incident, transition, force=force, priority=priority)
             if errors:
                 print("[incidents] notify %s: %s" % (incident.get("id"), "; ".join(errors)), flush=True)
         except Exception as exc:
@@ -23895,6 +24376,7 @@ def main():
     _ensure_agent_api_token()     # /etc/tuxwall/agent/api.token for the agent's read-only MCP tool
     _plugin_pins_startup()        # plugin secrets 0600, pins (TOFU once for pre-3.3.3 installs)
     start_devices_wg_snapshot()   # WireGuard peers (public data) for tuxwall-devicewatch (60 s)
+    start_devices_monitor()       # device quarantine sync/expiry + device alerts (60 s)
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     server.daemon_threads = True
     print(f"tuxwall API listening on http://{LISTEN_HOST}:{LISTEN_PORT}", flush=True)
