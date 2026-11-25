@@ -133,6 +133,39 @@ def norm_domain(value):
     return d
 
 
+# Shared platforms a FEED may never flag as a whole: malware is hosted on them
+# (a GitHub repo, a Discord attachment, a Steam profile or Telegram channel used
+# as a C2 dead drop), but the platform itself is not malicious and every
+# household uses it. Each entry also covers its subdomains, so only list
+# platforms whose subdomains the platform operates itself - not ones that hand
+# out per-customer subdomains (github.io, workers.dev, s3 buckets, blogspot),
+# where a listed subdomain is a real indicator. The owner's local indicator
+# list is never filtered.
+SHARED_PLATFORMS = frozenset((
+    "github.com", "githubusercontent.com", "githubassets.com", "gitlab.com", "bitbucket.org",
+    "youtube.com", "youtu.be", "ytimg.com", "googlevideo.com",
+    "google.com", "googleapis.com", "gstatic.com", "googleusercontent.com", "gvt1.com",
+    "steamcommunity.com", "steampowered.com", "steamstatic.com",
+    "discord.com", "discord.gg", "discordapp.com", "discordapp.net",
+    "telegram.org", "telegram.me", "t.me",
+    "pastebin.com", "dropbox.com", "dropboxusercontent.com", "mediafire.com", "mega.nz",
+    "jsdelivr.net", "unpkg.com", "cloudflare.com",
+    "microsoft.com", "live.com", "1drv.ms", "office.com", "apple.com", "icloud.com",
+    "facebook.com", "fbcdn.net", "instagram.com", "twitter.com", "x.com", "reddit.com",
+    "wikipedia.org", "amazon.com",
+))
+
+
+def shared_platform(domain):
+    """True when `domain` is one of SHARED_PLATFORMS or a subdomain of one."""
+    d = str(domain or "").lower().rstrip(".")
+    while d:
+        if d in SHARED_PLATFORMS:
+            return True
+        _, _, d = d.partition(".")
+    return False
+
+
 # Documentation ranges (RFC 5737 / RFC 3849) are never routed, so listing them
 # is harmless - and they are what tests and the lab use as "bad" addresses.
 DOC_NETS = tuple(ipaddress.ip_network(n) for n in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24",
@@ -303,7 +336,7 @@ def parse_hostfile(data, now=None):
                 ips[ip] = {"t": "malware_host"}
             continue
         d = norm_domain(host)
-        if d and d not in ("localhost", "localhost.localdomain"):
+        if d and d not in ("localhost", "localhost.localdomain") and not shared_platform(d):
             doms[d] = {"t": "malware_host"}
     if seen_lines and not (ips or doms):
         raise FeedError("no usable entries")
@@ -351,19 +384,18 @@ def parse_threatfox_csv(stream, min_confidence=50):
                 ips[ip] = meta
         elif typ == "domain":
             d = norm_domain(val)
-            if d:
+            if d and not shared_platform(d):
                 doms[d] = meta
         elif typ == "url":
+            # A URL indicator names one path on a host. Only an IP host is kept:
+            # reducing https://github.com/<repo>/payload.exe (or a Steam profile
+            # used as a dead drop) to its host flagged the whole platform. Domains
+            # that only serve malware come from URLhaus and ThreatFox "domain" IOCs.
             m = re.match(r"^[a-z][a-z0-9+.-]*://\[?([^/\]:?#]+)", val, re.I)
             if m:
                 ip = norm_ip(m.group(1))
-                if ip:
-                    if public_ip(ip):
-                        ips.setdefault(ip, meta)
-                else:
-                    d = norm_domain(m.group(1))
-                    if d:
-                        doms.setdefault(d, meta)
+                if ip and public_ip(ip):
+                    ips.setdefault(ip, meta)
     if header is None:
         raise FeedError("CSV header not found")
     if rows and not (ips or doms):

@@ -338,11 +338,24 @@ def t_feeds():
     tz = feeds.parse_threatfox_zip(threatfox_zip([
         ("203.0.113.88:4444", "ip:port", "botnet_cc", 100), ("c2.example.com", "domain", "botnet_cc", 75),
         ("https://payload.example.org/x.exe", "url", "payload_delivery", 90),
+        ("http://203.0.113.90/drop.bin", "url", "payload_delivery", 90),
+        ("https://github.com/someone/repo/raw/main/x.exe", "url", "payload_delivery", 90),
+        ("https://steamcommunity.com/profiles/76561199000000000", "url", "botnet_cc", 90),
+        ("raw.githubusercontent.com", "domain", "payload_delivery", 90),
         ("203.0.113.89:80", "ip:port", "botnet_cc", 25),            # below the confidence threshold
         ("d41d8cd98f00b204e9800998ecf8427e", "md5_hash", "payload", 100)]))
     check(tz["ip"].get("203.0.113.88", {}).get("p") == 4444 and tz["ip"]["203.0.113.88"]["t"] == "botnet_cc"
-          and set(tz["domain"]) == {"c2.example.com", "payload.example.org"} and "203.0.113.89" not in tz["ip"],
-          "threatfox: ip:port / domain / url hosts, confidence threshold, hashes ignored (%r)" % tz)
+          and set(tz["domain"]) == {"c2.example.com"} and "203.0.113.90" in tz["ip"]
+          and "203.0.113.89" not in tz["ip"],
+          "threatfox: ip:port / domain; a url counts only by its IP host (never a whole site), shared platforms "
+          "dropped, confidence threshold, hashes ignored (%r)" % tz)
+    check(feeds.shared_platform("github.com") and feeds.shared_platform("gist.github.com")
+          and feeds.shared_platform("www.youtube.com") and feeds.shared_platform("cdn.discordapp.com")
+          and not feeds.shared_platform("someone.github.io") and not feeds.shared_platform("notgithub.com")
+          and not feeds.shared_platform("github.com.evil.example"),
+          "shared_platform: platform + its subdomains; never per-customer hosts or look-alikes")
+    hp = feeds.parse_hostfile(b"127.0.0.1 raw.githubusercontent.com\n127.0.0.1 evil.example.org\n")
+    check(set(hp["domain"]) == {"evil.example.org"}, "hostfile: shared platform dropped (%r)" % hp)
     for bad in (b"PK-not-a-zip", threatfox_zip([("x.example.com", "domain", "botnet_cc", 90)], header=False)):
         try:
             feeds.parse_threatfox_zip(bad)
@@ -736,7 +749,9 @@ def t_campaign4():
     T = NOW + 400
     zeek(r, "dns", dns(T, IP_B, "blocked.example", None, "NXDOMAIN", tid=7) + dns(T + 4, IP_B, "blocked.example", None,
                                                                                   "NXDOMAIN", tid=8))
-    src.journal_lines = [(T + 6, "unbound[1:0] info: always_nxdomain %s@5353 blocked.example. A IN" % IP_B)]
+    src.journal_lines = [(T + 6, "unbound[1:0] info: blocked.example. always_nxdomain %s@5353 blocked.example. A IN"
+                                 % IP_B), (T + 7, "unbound[1:0] info: blocked.example. always_nxdomain "
+                                          "%s@5353 blocked.example. AAAA IN" % IP_B)]
     clock.t = NOW + 460
     eng.cycle()
     fd = [f for f in eng.findings.values() if f["kind"] == "dns_blocked" and f["indicator"] == "blocked.example"]
@@ -773,6 +788,64 @@ def t_campaign4():
     w(r + "/etc/tuxwall/devices/li.json", json.dumps({"indicators": [{"value": "0.0.0.0"}, {"value": "198.51.100.5"}]}))
     check([x["value"] for x in feeds.load_local_indicators(r + "/etc/tuxwall/devices/li.json")] == ["198.51.100.5"],
           "DW-8: an old never-matchable entry is skipped on load")
+
+
+def t_false_positives():
+    """ThreatFox platform URLs (Nov 25): a feed never flags a shared platform,
+    an empty AAAA answer is not a block, and feed findings whose indicator
+    leaves the feed are withdrawn."""
+    r = make_root("fp")
+    src = FakeSources()
+    clock = Clock(NOW)
+    w(r + "/var/lib/kea/kea-leases4.csv", leases_csv([("192.0.2.10", MAC_A, "phone-a", NOW + 3000)]))
+    src.neigh = [{"dst": "192.0.2.10", "dev": "lan0", "lladdr": MAC_A, "state": ["REACHABLE"]}]
+    eng = dw.Engine(dw.Config(r), src, clock)
+    eng.cycle()
+    A = dw.mac_id(MAC_A)
+    tf = r + "/var/lib/tuxwall/devices/feeds/threatfox.json"
+    meta = {"m": "Test", "t": "payload_delivery", "c": 90}
+    # a feed file written before the parse-time filter: it still lists github.com
+    w(tf, json.dumps({"schema": 1, "feed": "threatfox", **feeds.compact(
+        {"ip": {}, "domain": {"github.com": meta, "evil.example.net": meta, "drop2.example.net": meta}})}))
+    w(r + "/etc/tuxwall/devices/local-indicators.json", json.dumps({"version": 1, "indicators": [
+        {"type": "domain", "value": "www.youtube.com", "severity": "medium", "note": "owner's own rule"}]}))
+    clock.t = NOW + 60
+    T = NOW + 30
+    zeek(r, "dns", "".join([
+        dns(T, "192.0.2.10", "github.com", ["198.51.100.40"], tid=11),
+        dns(T + 1, "192.0.2.10", "evil.example.net", ["198.51.100.41"], tid=12),
+        dns(T + 2, "192.0.2.10", "drop2.example.net", [], tid=13),          # NOERROR, no records (AAAA/NODATA)
+        dns(T + 3, "192.0.2.10", "drop2.example.net", None, "SERVFAIL", tid=14),
+        dns(T + 4, "192.0.2.10", "www.youtube.com", ["198.51.100.42"], tid=15),
+    ]))
+    eng.cycle()
+    fs = {(f["kind"], f["indicator"]): f for f in eng.findings.values() if f["device"] == A}
+    check(not any(i == "github.com" for _k, i in fs), "feed listing github.com: no finding (shared platform)")
+    check(("dns_lookup", "evil.example.net") in fs, "a real feed domain still matches")
+    check(not any(i == "drop2.example.net" for _k, i in fs),
+          "NOERROR without records / SERVFAIL are not 'blocked' (DW-16) (%r)" % sorted(fs))
+    check(("dns_lookup", "www.youtube.com") in fs and fs[("dns_lookup", "www.youtube.com")]["source"] == "local",
+          "the owner's local list is never filtered")
+    # the feed drops evil.example.net -> its finding is withdrawn; the local one stays
+    w(tf, json.dumps({"schema": 1, "feed": "threatfox", **feeds.compact(
+        {"ip": {}, "domain": {"other.example.net": meta}})}))
+    os.utime(tf, (NOW + 90, NOW + 90))
+    clock.t = NOW + 120
+    eng.cycle()
+    fs = {(f["kind"], f["indicator"]): f for f in eng.findings.values() if f["device"] == A}
+    check(("dns_lookup", "evil.example.net") not in fs and ("dns_lookup", "www.youtube.com") in fs,
+          "finding withdrawn when the feed no longer lists it; local finding kept (%r)" % sorted(fs))
+    evs = [json.loads(x) for x in open(r + "/var/lib/tuxwall/devices/events.jsonl")]
+    check(any(e.get("type") == "retracted" and e.get("source") == "threatfox" for e in evs), "retraction logged")
+    # a feed that is missing keeps its findings (no mass withdrawal on a failed download)
+    clock.t = NOW + 150
+    zeek(r, "dns", dns(NOW + 140, "192.0.2.10", "other.example.net", ["198.51.100.43"], tid=16))
+    eng.cycle()
+    os.remove(tf)
+    clock.t = NOW + 180
+    eng.cycle()
+    check(any(f["indicator"] == "other.example.net" for f in eng.findings.values()),
+          "feed file gone: its findings are kept")
 
 
 def t_score():
@@ -1037,7 +1110,7 @@ def t_units():
           "analysis engine opens no network connection (feeds are a separate unit)")
 
 
-for t in (t_follower, t_feeds, t_engine, t_campaign4, t_score, t_units, t_api):
+for t in (t_follower, t_feeds, t_engine, t_campaign4, t_false_positives, t_score, t_units, t_api):
     try:
         t()
     except Exception:

@@ -995,6 +995,8 @@ class IntelDetector(Detector):
                 "details": details}
 
     def on_dns(self, eng, ev):
+        if not (ev.answered or ev.blocked):
+            return ()
         hits = eng.intel.match_domain(ev.query)
         if not hits:
             return ()
@@ -1145,12 +1147,15 @@ class Intel:
 
     def match_domain(self, q):
         """[(feed, meta, matched name)] - exact names for the feeds, '*.'
-        entries of the local list also match their subdomains."""
+        entries of the local list also match their subdomains. Feeds never
+        match a shared platform (feeds.shared_platform) - also for feed files
+        parsed before that filter existed."""
         hits = []
-        for name, f in self.feeds.items():
-            m = f["domain"].get(q)
-            if m is not None:
-                hits.append((name, m, q))
+        if self.feeds and not feeds.shared_platform(q):
+            for name, f in self.feeds.items():
+                m = f["domain"].get(q)
+                if m is not None:
+                    hits.append((name, m, q))
         m = self.local_domain.get(q)
         if m is not None:
             hits.append(("local", m, q))
@@ -1927,7 +1932,11 @@ class Engine:
         de.ts, de.device, de.dev_ip, de.query = ts, did, o, q
         de.qtype, de.rcode, de.answers = ev.get("qtype_name") or "", rcode, real
         de.answered = rcode == "NOERROR" and bool(real or [a for a in answers if a and a not in SINKHOLES])
-        de.blocked = not de.answered
+        # Blocked only when the answer is a sinkhole address. NOERROR without
+        # records (an AAAA query for an IPv4-only name), NXDOMAIN, SERVFAIL or
+        # no reply are neither; RPZ/local-zone blocks arrive via on_unbound().
+        de.blocked = (not de.answered and rcode == "NOERROR"
+                      and bool(answers) and all((not a) or a in SINKHOLES for a in answers))
         de.source = "zeek"
         self._run_detectors("on_dns", de, o, iface)
 
@@ -2202,6 +2211,34 @@ class Engine:
                              "kind": f["kind"], "source": f["source"], "escalated": True}, ts)
         return f
 
+    INTEL_KINDS = ("c2_connection", "intel_connection", "intel_attempt", "intel_inbound",
+                   "dns_lookup", "dns_blocked")
+
+    def _retract_stale_intel(self):
+        """Drop feed findings whose indicator the feed no longer lists (a feed
+        correction, or a filter such as feeds.shared_platform). Only for feeds
+        that are loaded right now - a feed that is missing or disabled keeps its
+        findings - and never for the owner's local list or Suricata."""
+        gone = []
+        for fid, f in self.findings.items():
+            src = f.get("source") or ""
+            if f.get("kind") not in self.INTEL_KINDS or src not in self.intel.feeds:
+                continue
+            ind = f.get("indicator") or ""
+            if f.get("indicator_type") == "domain":
+                listed = any(name == src for name, _m, _q in self.intel.match_domain(ind))
+            else:
+                listed = any(name == src for name, _m in self.intel.match_ip(ind))
+            if not listed:
+                gone.append(fid)
+        for fid in gone:
+            f = self.findings.pop(fid)
+            self._event({"type": "retracted", "device": f["device"], "finding": fid,
+                         "kind": f["kind"], "source": f.get("source") or ""}, self.clock())
+        if gone:
+            self.stats["retracted"] = self.stats.get("retracted", 0) + len(gone)
+        return len(gone)
+
     def _prune_findings(self, force=False):
         cut = self.clock() - self.retention_seconds()
         for fid in [k for k, f in self.findings.items() if (f.get("last") or 0) < cut]:
@@ -2280,7 +2317,7 @@ class Engine:
         self.load_overlays()
         self.refresh_topology()
         if self.intel.reload(self.config):
-            pass
+            self._retract_stale_intel()
         self.refresh_inventory()
         self.poll_logs()
         for det in self.detectors:
