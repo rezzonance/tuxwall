@@ -295,7 +295,7 @@ FEODO = json.dumps([
      "malware": "ExampleBot"},
     {"ip_address": OLD_C2, "port": 8080, "status": "offline", "first_seen": "2025-01-01 00:00:00",
      "last_online": "2025-03-01", "malware": "OldBot"},
-    {"ip_address": "192.168.1.5", "port": 80, "status": "online", "malware": "x"},     # private: dropped
+    {"ip_address": "172.16.99.5", "port": 80, "status": "online", "malware": "x"},     # private: dropped
 ]).encode()
 HOSTFILE = ("# URLhaus host file\n#\n127.0.0.1\t%s\n127.0.0.1\tdrop.example.org\n127.0.0.1\t203.0.113.77\n"
             "127.0.0.1\tnot a host\n127.0.0.1\tlocalhost\n" % BAD_HOST).encode()
@@ -512,6 +512,9 @@ def t_engine():
         dns(T + 3, "192.0.2.10", "harmless.example.com", ["198.51.100.20"], tid=4),
     ]))
     zeek(r, "conn", conn(T + 20, "192.0.2.10", "198.51.100.50"))           # connection to the answered address
+    l2 = json.loads(conn(T + 21, "2001:db8:1:0:1:2:3:4", "2001:db8:ffff::7"))
+    l2.update(orig_l2_addr=MAC_B, resp_l2_addr="00:00:5e:00:53:fe")         # Zeek mac-logging policy fields
+    zeek(r, "conn", jl(l2))
     src.journal_lines = [(T + 1, "unbound[1:0] info: rpz: applied [threat] drop.example.org. rpz-nxdomain "
                                  "192.0.2.70@5353 drop.example.org. A IN")]
     eng.cycle()
@@ -536,6 +539,7 @@ def t_engine():
     check(sev((G, "c2_connection", "198.51.100.100")) is None and sev((G, "intel_connection", "198.51.100.100")) == "critical",
           "WireGuard peer traffic attributed to the peer; local CIDR indicator keeps its own severity")
     check(D in eng.devices and eng.devices[D]["mac"] == MAC_D, "EUI-64 IPv6 address -> device of the embedded MAC")
+    check(eng.who("2001:db8:1:0:1:2:3:4", T + 21) == B, "Zeek orig_l2_addr maps an address unknown to the neighbour table")
     check(not any(f["indicator"] == "192.0.2.11" for f in eng.findings.values()), "LAN-internal flow ignored")
     agg = eng.agg[A]
     check(agg["in"] == 5000 + 9000 + 123456 + 5000 and agg["n"] == 4 and agg["dl"].count() == 4,
@@ -571,6 +575,10 @@ def t_engine():
         eve(NOW + 7150, "203.0.113.6", "192.0.2.11", "ET INFO Observed DNS Query to .biz TLD", "Potentially Bad Traffic", 2),
         eve(NOW + 7150, "203.0.113.7", "192.0.2.11", "GPL ATTACK_RESPONSE id check returned root",
             "Potentially Bad Traffic", 2, sid=2100498, direction="to_client"),
+        eve(NOW + 7150, "203.0.113.8", "192.0.2.11", "ET EXPLOIT Example RCE Attempt Inbound",
+            "Attempted Administrator Privilege Gain", 1, sid=2030001),
+        eve(NOW + 7150, "192.0.2.11", "203.0.113.9", "ET ATTACK_RESPONSE Output of id command from HTTP server",
+            "Successful Administrator Privilege Gain", 1, sid=2030002, direction="to_client"),
     ]), "a")
     clock.t = NOW + 7260
     eng.cycle()
@@ -581,7 +589,11 @@ def t_engine():
     check(ids_f.get((B, "sid:2100498"), {}).get("severity") == "medium"
           and ids_f[(B, "sid:2100498")]["details"]["direction"] == "outbound",
           "ATTACK_RESPONSE to the client that opened the flow (to_client) -> outbound, medium")
-    check(len(ids_f) == 3 and eng.stats["suricata_ignored"] == 2, "decoder / INFO alerts ignored")
+    check(ids_f.get((B, "sid:2030001"), {}).get("severity") == "low",
+          "inbound exploit attempt against the device (it is the server) -> low, health unchanged")
+    check(ids_f.get((B, "sid:2030002"), {}).get("severity") == "high",
+          "the device itself answered with attack-response output -> high although the flow was inbound")
+    check(len(ids_f) == 5 and eng.stats["suricata_ignored"] == 2, "decoder / INFO alerts ignored")
 
     # expected suppression + retention
     fid = next(f["id"] for f in eng.findings.values() if f["device"] == A and f["kind"] == "c2_connection")
@@ -811,6 +823,9 @@ def t_units():
     main = unit("tuxwall-devicewatch.service")
     check(main[("Service", "RestrictAddressFamilies")][-1].split() == ["AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK"]
           and main[("Service", "IPAddressDeny")][-1] == "any", "analysis service: no network (IPAddressDeny=any), netlink allowed")
+    check(main[("Service", "SystemCallFilter")] == ["@system-service", "~@privileged @resources", "capset"]
+          and main[("Service", "CapabilityBoundingSet")] == [""],
+          "analysis service: syscall allow-list (+ capset for ip(8), harmless without capabilities)")
     check(main[("Service", "MemoryMax")][-1] == "256M" and main[("Install", "WantedBy")][-1] == "multi-user.target",
           "analysis service: MemoryMax 256M, enabled at boot")
     fu = unit("tuxwall-devicewatch-feeds.service")

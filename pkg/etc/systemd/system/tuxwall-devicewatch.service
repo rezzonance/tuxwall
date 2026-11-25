@@ -51,6 +51,9 @@ MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
+# ip(8) drops capabilities at start (capset); with an empty bounding set that
+# can only ever lower privileges, and without it `ip neigh` exits at once
+SystemCallFilter=capset
 CapabilityBoundingSet=
 AmbientCapabilities=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK

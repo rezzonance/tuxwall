@@ -52,9 +52,12 @@ Severity (finding kinds)
   intel_connection   completed outbound connection to a malware host     high
   dns_lookup         answered DNS lookup of a malware domain              high
   intel_attempt      outbound attempt to a listed address, no answer     medium
-  ids_alert          Suricata alert (malware/exploit classes only):
-                     severity 1 high, 2 medium, 3 low; one step lower when
-                     the device did not start the flow
+  ids_alert          Suricata alert (malware/exploit classes only) on a
+                     flow the device started: severity 1 high, 2 medium,
+                     3 low. Attacks the device only received (it is the
+                     server) are low - unless the device itself sent the
+                     alerting packet of an attack-response / "Successful
+                     ... Privilege Gain" signature (then as above)
   intel_inbound      a listed address connected to the device            low
   dns_blocked        lookup blocked by DNS (RPZ / blocklist) or failed    low
   A Feodo entry offline for more than 30 days counts as "old": at most
@@ -133,8 +136,8 @@ IP_HISTORY_PER_IP = 4
 MAX_FINDINGS = 10000
 MAX_DEVICES = 2000
 EVENTS_MAX_BYTES = 1 << 20
-RDNS_MAX = 100000
-DEDUPE_MAX = 200000
+RDNS_MAX = 50000
+DEDUPE_MAX = 50000
 CLASSIFY_CACHE_MAX = 200000
 DNS_HOT_SECONDS = 3600
 
@@ -871,8 +874,8 @@ class DnsEvent:
 
 
 class AlertEvent:
-    __slots__ = ("ts", "device", "dev_ip", "peer", "outbound", "sid", "rev", "signature", "category",
-                 "severity", "proto", "dest_port", "action")
+    __slots__ = ("ts", "device", "dev_ip", "peer", "outbound", "device_sent", "sid", "rev", "signature",
+                 "category", "severity", "proto", "dest_port", "action")
 
 
 class Detector:
@@ -984,8 +987,10 @@ class SuricataDetector(Detector):
 
     def on_alert(self, eng, ev):
         sev = {1: "high", 2: "medium"}.get(ev.severity, "low")
-        if not ev.outbound:
-            sev = lower_sev(sev)
+        compromise = ev.device_sent and (ev.signature.upper().startswith(("ET ATTACK_RESPONSE", "GPL ATTACK_RESPONSE"))
+                                         or ev.category.startswith("Successful"))
+        if not ev.outbound and not compromise:
+            sev = "low"                 # an attack the device received (internet scanners on exposed services)
         return ({"kind": "ids_alert", "indicator": "sid:%s" % ev.sid, "indicator_type": "signature",
                  "severity": sev, "title": ev.signature[:160], "source": "suricata",
                  "details": {"category": ev.category[:80], "sid": ev.sid, "rev": ev.rev, "peer": ev.peer,
@@ -1225,6 +1230,7 @@ class Engine:
         self.wg_nets = []
         self.prefixes = []
         self.own_ips = set()
+        self.own_macs = set()
         self.roles = {}
         self.wan_devs = set()
         self.topology_at = 0
@@ -1364,12 +1370,15 @@ class Engine:
                 if isinstance(v, dict) and v.get("device"):
                     roles[v["device"]] = {"zone": "vpn", "name": v.get("name") or v["device"], "vlan": None}
         wan |= set(self.src.default_route_devs() or ())
-        prefixes, own = [], set()
+        prefixes, own, own_macs = [], set(), set()
         fallback = not (isinstance(conf, dict) and conf.get("lan"))
         for ifc in self.src.addresses() or []:
             if not isinstance(ifc, dict):
                 continue
             dev = ifc.get("ifname")
+            m = norm_mac(ifc.get("address"))
+            if m:
+                own_macs.add(m)
             for a in ifc.get("addr_info") or []:
                 local = a.get("local")
                 ip = feeds.norm_ip(local) if local else None
@@ -1396,6 +1405,7 @@ class Engine:
         if prefixes != self.prefixes or own != self.own_ips:
             self.cls_cache.clear()
         self.prefixes, self.own_ips, self.roles, self.wan_devs = prefixes, own, roles, wan
+        self.own_macs = own_macs
 
     def classify(self, ip):
         """(class, interface) of an address: EXT, LAN (a device), OWN (the
@@ -1807,6 +1817,15 @@ class Engine:
         if not isinstance(rb, int):
             rb = 0
         b_out, b_in = (ob, rb) if outbound else (rb, ob)
+        # Zeek's optional mac-logging policy adds the link-layer addresses: the
+        # LAN side's MAC settles addresses the neighbour table no longer holds
+        l2 = norm_mac(ev.get("orig_l2_addr" if outbound else "resp_l2_addr"))
+        if l2 and l2 not in self.own_macs and not self.who(dev_ip, ts):
+            d = self.ensure_device(mac_id(l2), "mac", ts, mac=l2)
+            if d is not None:
+                self.observe(dev_ip, d["id"], ts)
+                if iface:
+                    self._set_iface(d, iface)
         did = self.attribute(dev_ip, ts, iface)
         if did:
             self._traffic(did, ts, peer, b_in, b_out)
@@ -1850,6 +1869,7 @@ class Engine:
                 continue
             ae = AlertEvent()
             ae.ts, ae.dev_ip, ae.peer, ae.outbound = ts, ip, other, ip == client
+            ae.device_sent = ip == src
             ae.sid, ae.rev = a.get("signature_id"), a.get("rev")
             ae.signature, ae.category = sig, cat
             ae.severity = a.get("severity") if isinstance(a.get("severity"), int) else 3
@@ -2083,10 +2103,10 @@ class Engine:
                 pass
         self.prune()
         self.bootstrapped = True
-        self.write_outputs()
-        self.flush_events()
         self.stats["cycles"] += 1
         self.stats["last_cycle_s"] = round(time.monotonic() - t0, 3)
+        self.write_outputs()
+        self.flush_events()
         if self.clock() - self.last_save >= STATE_SAVE_SECONDS:
             self.save_state()
 
