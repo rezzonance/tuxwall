@@ -691,6 +691,14 @@ def t_campaign4():
           "DW-1: Zeek orig_l2_addr decides (the flow came from B's MAC)")
     check(fa[0]["device"] == A and eng.findings[fa[0]["id"]]["device"] == A, "DW-1: existing findings never move")
     check(eng.who(IP, NOW + 240) == A, "DW-1: one L2 sighting of B inside A's interval does not take the address over later")
+    # an IPv6 privacy address that only talks to the router (DNS): the flow's MAC still maps it
+    v6p = "2001:db8:1:0:5:6:7:8"
+    dflow = json.loads(conn(NOW + 280, v6p, "2001:db8:1::1", rp=53, proto="udp"))
+    dflow.update(orig_l2_addr=MAC_A, resp_l2_addr="00:00:5e:00:53:fe")
+    zeek(r, "conn", jl(dflow))
+    clock.t = NOW + 320
+    eng.cycle()
+    check(eng.who(v6p, NOW + 290) == A, "DW-1: a device -> router flow (DNS) with Zeek MACs maps the address")
     # DW-5: B's address list never shows A's current address; current first
     out = {d["id"]: d for d in json.load(open(r + "/var/lib/tuxwall/devices/devices.json"))["devices"]}
     check(out[B]["ips"] == [IP_B] and out[A]["ips"][0] == IP,

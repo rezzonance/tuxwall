@@ -1975,6 +1975,15 @@ class Engine:
         elif cr == LAN and co == EXT:
             dev_ip, peer, outbound, iface = r, o, False, rif
         else:
+            # device <-> router (DNS, DHCP, NTP) or routed LAN <-> VLAN: no
+            # detection, but the MAC on the flow still says who holds the
+            # address (an IPv6 privacy address used only for DNS lookups)
+            if (co == LAN or cr == LAN) and ("orig_l2_addr" in ev or "resp_l2_addr" in ev):
+                ts = self._ts(ev)
+                for ip, cls, ifc, key in ((o, co, oif, "orig_l2_addr"), (r, cr, rif, "resp_l2_addr")):
+                    mac = norm_mac(ev.get(key)) if cls == LAN and ts else None
+                    if mac and mac not in self.own_macs:
+                        self.attribute_mac(ip, mac, ts, ifc)
             return
         ts = self._ts(ev)
         if not ts:
