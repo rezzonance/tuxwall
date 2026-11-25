@@ -20,12 +20,21 @@ from .const import (
     CORE_SERVICES,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
+    EVENT_DEVICE_FINDING,
+    EVENT_NEW_DEVICE,
     EVENT_TYPE,
     INTEGRATION_SUMMARY_PATH,
     LOGGER,
     SUMMARY_RETRY_SECONDS,
 )
-from .summary_data import normalize_legacy, normalize_summary, packages_latest, router_latest, section
+from .summary_data import (
+    device_events,
+    normalize_legacy,
+    normalize_summary,
+    packages_latest,
+    router_latest,
+    section,
+)
 
 # legacy (routers without /api/integration/summary): CrowdSec counts
 SUMMARY_PATH = "/api/crowdsec/summary"
@@ -59,6 +68,8 @@ class TuxwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # does not report one): (version, monotonic time of the fetch)
         self.repo_latest: str | None = None
         self._repo_checked = -APT_CHECK_SECONDS
+        # finding / new-device ids already announced (None until the first poll)
+        self._device_seen: dict | None = None
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
@@ -168,6 +179,13 @@ class TuxwallCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for line in new_lines[-3:]:
             if "auto-banned" in line or "trapped" in line.lower():
                 fire({"type": "tarpit_catch", "message": str(line)[:200]})
+
+        # device monitoring: new findings / new devices (deduped by id)
+        if section(data, "devices") is not None:
+            events, self._device_seen = device_events(data, self._device_seen)
+            for etype, payload in events:
+                if etype in (EVENT_DEVICE_FINDING, EVENT_NEW_DEVICE) and self.hass.is_running:
+                    self.hass.bus.async_fire(etype, payload)
 
     def _down_list(self, data: dict[str, Any]) -> list[str]:
         services = data.get("services", [])

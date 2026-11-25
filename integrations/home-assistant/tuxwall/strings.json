@@ -98,6 +98,9 @@
       },
       "certificate_expiry": {
         "name": "Certificate expiry"
+      },
+      "flagged_devices": {
+        "name": "Flagged devices"
       }
     },
     "binary_sensor": {
@@ -109,6 +112,9 @@
       },
       "ipv6_connectivity": {
         "name": "IPv6 connectivity"
+      },
+      "device_threat": {
+        "name": "Device threat"
       }
     }
   },

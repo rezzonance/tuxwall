@@ -25,7 +25,7 @@ from .crowdsec_data import crowdsec_active_count, crowdsec_ips
 SECTIONS = (
     "services", "security", "firewall", "crowdsec", "dns", "blocklist", "system",
     "wan", "tarpit", "canary", "tripwire", "community", "wireguard", "dhcp",
-    "backup", "https", "update",
+    "backup", "https", "update", "devices",
 )
 PEER_ONLINE_SECONDS = 180
 COMMUNITY_STATES = ["ok", "queued", "error", "off"]
@@ -187,6 +187,22 @@ def _cert_expiry(s: dict) -> Any:
     return s.get("expires")
 
 
+def _worst(s: dict) -> dict | None:
+    w = s.get("worst")
+    if not isinstance(w, dict):
+        return None
+    return {"severity": w.get("severity"), "reason": w.get("reason"), "device": w.get("device_name"),
+            "last": w.get("last")}
+
+
+def _device_attrs(s: dict) -> dict:
+    w = _worst(s) or {}
+    return {"quarantined": s.get("quarantined"), "critical": s.get("critical"), "warning": s.get("warning"),
+            "devices": s.get("devices"), "online": s.get("online"), "new_24h": s.get("new_24h"),
+            "worst_severity": w.get("severity"), "worst_finding": w.get("reason"), "worst_device": w.get("device"),
+            "worst_last": w.get("last")}
+
+
 VALUES: dict[str, tuple[str, Callable[[dict], Any], Callable[[dict], dict] | None]] = {
     # 1.0 sensors (unique_ids/names unchanged)
     "attacks_per_min": ("security", lambda s: s.get("hits_1m"),
@@ -246,10 +262,15 @@ VALUES: dict[str, tuple[str, Callable[[dict], Any], Callable[[dict], dict] | Non
                          lambda s: {"interface": s.get("ifname"), "checked_at": s.get("sample_at")}),
     "ipv6_connectivity": ("wan", lambda s: s.get("ipv6_ready"),
                           lambda s: {"basis": "global WAN address + IPv6 default route"}),
+    # 1.3: device monitoring (TuxWall 3.3.7+; older routers: unavailable)
+    "flagged_devices": ("devices", lambda s: s.get("flagged"), _device_attrs),
+    "device_threat": ("devices", lambda s: (_num(s.get("flagged")) or 0) > 0 if _num(s.get("flagged")) is not None
+                      else None, _device_attrs),
 }
 
 # attributes holding epoch seconds (shown as ISO 8601)
-TIMESTAMP_ATTRS = {"last_delivery", "last_error_at", "updated_at", "last_failure", "since", "checked_at"}
+TIMESTAMP_ATTRS = {"last_delivery", "last_error_at", "updated_at", "last_failure", "since", "checked_at",
+                   "worst_last"}
 
 
 def section(data: Any, name: str) -> dict | None:
@@ -313,3 +334,42 @@ def installed_version(data: Any) -> str | None:
 
 def router_latest(data: Any) -> str | None:
     return (section(data, "update") or {}).get("latest") or None
+
+
+# ── device events (1.3) ─────────────────────────────────────────────────────
+# The router lists its newest active findings and new devices (the "devices"
+# section, at most 10 each, generic reasons only). The coordinator fires one
+# event per id it has not seen before; the first poll after a start only
+# records what is there (no replay after a Home Assistant restart).
+SEEN_MAX = 500
+
+
+def device_events(data: Any, seen: dict | None) -> tuple[list[tuple[str, dict]], dict]:
+    """-> ([(event type, payload), ...], new seen state)."""
+    sec = section(data, "devices")
+    if sec is None:
+        return [], seen or {}
+    findings = [f for f in (sec.get("findings") or []) if isinstance(f, dict) and f.get("id")]
+    new = [d for d in (sec.get("new_devices") or []) if isinstance(d, dict) and d.get("id")]
+    first = seen is None
+    seen = {"f": list((seen or {}).get("f") or []), "n": list((seen or {}).get("n") or [])}
+    events: list[tuple[str, dict]] = []
+    for f in reversed(findings):
+        if f["id"] in seen["f"]:
+            continue
+        seen["f"].append(f["id"])
+        if not first:
+            events.append(("tuxwall_device_finding", {
+                "id": f["id"], "severity": f.get("severity"), "reason": f.get("reason"),
+                "device_id": f.get("device"), "device": f.get("device_name"),
+                "first": f.get("first"), "last": f.get("last")}))
+    for d in reversed(new):
+        if d["id"] in seen["n"]:
+            continue
+        seen["n"].append(d["id"])
+        if not first:
+            events.append(("tuxwall_new_device", {
+                "device_id": d["id"], "device": d.get("name"), "zone": d.get("zone"), "vendor": d.get("vendor"),
+                "first_seen": d.get("first_seen")}))
+    seen["f"], seen["n"] = seen["f"][-SEEN_MAX:], seen["n"][-SEEN_MAX:]
+    return events, seen

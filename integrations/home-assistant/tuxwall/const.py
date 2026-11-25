@@ -18,6 +18,9 @@ CONF_CA_CERT: Final = "ca_cert"
 CONF_SCAN_INTERVAL: Final = "scan_interval"
 
 EVENT_TYPE: Final = "tuxwall_event"
+# device monitoring (TuxWall 3.3.7+): one event per new finding / new device
+EVENT_DEVICE_FINDING: Final = "tuxwall_device_finding"
+EVENT_NEW_DEVICE: Final = "tuxwall_new_device"
 
 # TuxWall after 3.3.6: one compact payload per poll; older routers answer 404 and
 # the per-page endpoints are polled instead (the summary is retried hourly)

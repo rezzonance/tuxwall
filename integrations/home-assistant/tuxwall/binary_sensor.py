@@ -1,5 +1,5 @@
-"""Binary sensors: per-core-service health plus an aggregate, Tripwire and
-WAN / IPv6 connectivity."""
+"""Binary sensors: per-core-service health plus an aggregate, Tripwire,
+WAN / IPv6 connectivity and the device threat flag."""
 from __future__ import annotations
 
 from typing import Any
@@ -42,6 +42,8 @@ BINARY_SENSORS: tuple[BinarySensorEntityDescription, ...] = (
                                   has_entity_name=True, device_class=BinarySensorDeviceClass.CONNECTIVITY),
     BinarySensorEntityDescription(key="ipv6_connectivity", translation_key="ipv6_connectivity",
                                   has_entity_name=True, device_class=BinarySensorDeviceClass.CONNECTIVITY),
+    BinarySensorEntityDescription(key="device_threat", translation_key="device_threat", has_entity_name=True,
+                                  device_class=BinarySensorDeviceClass.PROBLEM),
 )
 
 

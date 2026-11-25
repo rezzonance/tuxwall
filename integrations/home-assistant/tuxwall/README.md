@@ -45,6 +45,15 @@ hit rate (%), WAN IP (`ifname`, `ipv6`), VPN peers online (`peers`,
 | DHCP clients | active Kea leases; `online` (answering ARP), `reserved` |
 | Blocked domains | size of the DNS blocklist; `updated_at` |
 
+**Device monitoring (1.3, TuxWall 3.3.7+)**
+
+| Entity | What |
+|---|---|
+| Flagged devices | LAN devices with health *warning* or *critical* (threat-intel match, IDS alert); `quarantined`, `critical`, `warning`, `devices`, `online`, `new_24h`, `worst_severity`, `worst_finding` (a generic reason such as "Connected to a known botnet C2 server (Feodo Tracker)" — never the address or domain), `worst_device`, `worst_last` |
+| Device threat (binary, problem) | on = at least one device is flagged; same attributes |
+
+Routers without device monitoring show both as unavailable.
+
 **System and maintenance (1.2, diagnostic)** — CPU usage (%), Memory usage
 (%), CPU temperature (°C, when the board reports one), Root disk usage (%),
 Last boot (timestamp), TuxWall version, Last successful backup (timestamp;
@@ -76,6 +85,15 @@ Unbound DNS block; requires an **admin** tuxwall user).
 | `tarpit_catch` | the honeypot trapped/auto-banned a source |
 | `ha_login_failure` | HA's own failed-login alert (east-west blind spot) |
 
+Device monitoring (1.3, TuxWall 3.3.7+) fires two more event types, once per
+finding / device id (the router lists its 10 newest; the first poll after a
+Home Assistant start only records them, so a restart never replays old ones):
+
+| event type | data |
+|---|---|
+| `tuxwall_device_finding` | `id`, `severity` (low/medium/high/critical), `reason` (generic), `device`, `device_id`, `first`, `last` |
+| `tuxwall_new_device` | `device`, `device_id`, `zone`, `vendor`, `first_seen` |
+
 ## Install (HAOS)
 
 1. Create a **dedicated tuxwall user** (dashboard → Settings → User
@@ -105,9 +123,9 @@ Unbound DNS block; requires an **admin** tuxwall user).
 
 1. Copy the new folder over `/config/custom_components/tuxwall/`, replacing
    every file and adding the new ones (1.2.0 adds `entity.py`,
-   `summary_data.py`, `update.py`, `icons.json`). With the *Terminal & SSH*
-   add-on:
-   `rm -rf /config/custom_components/tuxwall && tar -xzf tuxwall-ha-1.2.0.tar.gz -C /config`
+   `summary_data.py`, `update.py`, `icons.json`; 1.2.1 `brand/`). With the
+   *Terminal & SSH* add-on:
+   `rm -rf /config/custom_components/tuxwall && tar -xzf tuxwall-ha-1.3.0.tar.gz -C /config`
    (the archive holds `custom_components/tuxwall/`). Over the *Samba share*
    add-on: replace the `config/custom_components/tuxwall` folder.
 2. Restart Home Assistant (**Settings → System → Restart**). The config
@@ -120,6 +138,12 @@ Unbound DNS block; requires an **admin** tuxwall user).
 
 ## Changelog
 
+- **1.3.0** — Device monitoring (TuxWall 3.3.7): *Flagged devices* sensor
+  (attributes: quarantined count, worst finding as a generic reason, critical
+  / warning counts) and *Device threat* binary sensor (problem), read from
+  the `devices` section of `/api/integration/summary` (routers without it:
+  unavailable). Events `tuxwall_device_finding` and `tuxwall_new_device`,
+  fired from the difference between polls and deduplicated by id.
 - **1.2.1** — Integration icon: `brand/icon.png` and `brand/icon@2x.png` (the
   TuxWall logo), shown by Home Assistant 2026.3 and later.
 - **1.2.0** — One request per poll: `GET /api/integration/summary` (about

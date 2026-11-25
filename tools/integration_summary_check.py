@@ -213,8 +213,8 @@ def summary(role="viewer"):
 
 SECTIONS = ("services", "security", "firewall", "crowdsec", "dns", "blocklist", "system", "wan", "tarpit",
             "canary", "tripwire", "community", "wireguard", "dhcp", "backup", "https", "update", "devices")
-# server sections the Home Assistant integration does not read yet (HA 1.3.0, 3.3.7 session 2)
-NOT_IN_HA_YET = {"devices"}
+# server sections the Home Assistant integration does not read (none since HA 1.3.0)
+NOT_IN_HA_YET = set()
 
 
 def t_swr_kick_wait():

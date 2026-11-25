@@ -77,6 +77,16 @@ SUMMARY = {
     "backup": {"ok": True, "stale": False, "last_success": int(NOW) - 7200, "failed": False},
     "https": {"ok": False, "stale": True, "error": "HTTPS status unavailable"},
     "update": {"ok": True, "stale": False, "installed": "3.3.6", "latest": "3.3.7", "checked_at": int(NOW)},
+    "devices": {"ok": True, "stale": False, "running": True, "devices": 12, "online": 9, "new_24h": 1, "flagged": 2,
+                "critical": 1, "warning": 1, "quarantined": 1,
+                "worst": {"severity": "critical", "reason": "Connected to a known botnet C2 server (Feodo Tracker)",
+                          "device_name": "Example laptop", "last": int(NOW) - 60},
+                "findings": [{"id": "f2", "severity": "critical", "reason": "r2", "device": "m020000000001",
+                              "device_name": "Example laptop", "first": int(NOW) - 60, "last": int(NOW) - 60},
+                             {"id": "f1", "severity": "medium", "reason": "r1", "device": "m020000000002",
+                              "device_name": "Example tv", "first": int(NOW) - 900, "last": int(NOW) - 600}],
+                "new_devices": [{"id": "m020000000003", "name": "Example plug", "zone": "IoT", "vendor": "",
+                                 "first_seen": int(NOW) - 300}]},
 }
 
 LEGACY = {
@@ -123,7 +133,8 @@ def t_summary_shape():
             "community_reporting": "queued", "internet_latency": 15.2, "dhcp_clients": 14,
             "blocked_domains": 1000, "cpu_usage": 7.5, "memory_usage": 30.1, "disk_usage": 9.9,
             "temperature": 51.0, "last_boot": int(NOW) - 1000, "tuxwall_version": "3.3.6",
-            "last_backup": int(NOW) - 7200, "tripwire": True, "wan_connectivity": True, "ipv6_connectivity": True}
+            "last_backup": int(NOW) - 7200, "tripwire": True, "wan_connectivity": True, "ipv6_connectivity": True,
+            "flagged_devices": 2, "device_threat": True}
     for k, v in want.items():
         check(sd.value(d, k) == v, "summary %s = %r (%r)" % (k, v, sd.value(d, k)))
     check(set(want) | {"certificate_expiry"} == set(sd.VALUES), "every entity key covered by the test")
@@ -134,6 +145,16 @@ def t_summary_shape():
     check(sd.attributes(d, "top_attack_country") == {"iso": "NL", "hits": 90, "sources": 4,
                                                      "runners_up": ["Germany"]}, "top country attributes")
     check(sd.installed_version(d) == "3.3.6" and sd.router_latest(d) == "3.3.7", "versions")
+    da = sd.attributes(d, "flagged_devices")
+    check(da["quarantined"] == 1 and da["worst_finding"].startswith("Connected to a known botnet")
+          and da["worst_device"] == "Example laptop" and da["worst_severity"] == "critical"
+          and sd.attributes(d, "device_threat") == da, "device attributes (quarantined, worst finding)")
+    calm = sd.normalize_summary(dict(SUMMARY, devices=dict(SUMMARY["devices"], flagged=0, worst=None)))
+    check(sd.value(calm, "device_threat") is False and sd.value(calm, "flagged_devices") == 0
+          and sd.attributes(calm, "flagged_devices")["worst_finding"] is None, "no flagged device -> threat off")
+    old_router = sd.normalize_summary({k: v for k, v in SUMMARY.items() if k != "devices"})
+    check(not sd.available(old_router, "flagged_devices") and not sd.available(old_router, "device_threat"),
+          "router without device monitoring -> unavailable")
     # unknown community state is not passed through an enum sensor
     d2 = sd.normalize_summary(dict(SUMMARY, community={"ok": True, "status": "weird"}))
     check(sd.value(d2, "community_reporting") is None, "unknown enum state -> None")
@@ -160,7 +181,7 @@ def t_legacy_shape():
     check(abs(sd.value(d, "last_boot") - (NOW - 1000)) <= 30 and sd.value(d, "last_boot") % 60 == 0,
           "legacy: boot time from uptime, minute-rounded")
     for k in ("canary_hits_24h", "community_reporting", "dhcp_clients", "blocked_domains", "last_backup",
-              "certificate_expiry", "tripwire"):
+              "certificate_expiry", "tripwire", "flagged_devices", "device_threat"):
         check(not sd.available(d, k), "legacy: %s unavailable (not in the old payloads)" % k)
     check(sd.attributes(d, "crowdsec_bans")["ips"][:2] == ["203.0.113.1", "203.0.113.2"], "legacy crowdsec ips")
     check(sd.attributes(d, "wan_ip")["ipv6"] == ["2001:db8::1", "2001:db8::2"], "legacy wan ipv6 trimmed")
@@ -177,6 +198,36 @@ def t_legacy_shape():
     check(sd.value(sd.normalize_legacy(hp_off, now=NOW), "honeypot_trapped") == 0, "tarpit off -> 0")
     zero = dict(LEGACY, system=dict(LEGACY["system"], latency={"current_ms": 0.0}))
     check(sd.value(sd.normalize_legacy(zero, now=NOW), "wan_connectivity") is False, "every ping lost -> offline")
+
+
+def t_device_events():
+    d = sd.normalize_summary(SUMMARY)
+    ev, seen = sd.device_events(d, None)
+    check(ev == [] and set(seen["f"]) == {"f1", "f2"} and seen["n"] == ["m020000000003"],
+          "events: first poll only records (no replay after a restart)")
+    ev2, seen2 = sd.device_events(d, seen)
+    check(ev2 == [] and seen2 == seen, "events: same payload -> nothing fired")
+    nxt = dict(SUMMARY, devices=dict(SUMMARY["devices"], findings=[
+        {"id": "f3", "severity": "high", "reason": "r3", "device": "m020000000002", "device_name": "Example tv",
+         "first": int(NOW), "last": int(NOW)}] + SUMMARY["devices"]["findings"], new_devices=[
+        {"id": "m020000000004", "name": "Example cam", "zone": "LAN", "vendor": "Example", "first_seen": int(NOW)}]
+        + SUMMARY["devices"]["new_devices"]))
+    ev3, seen3 = sd.device_events(sd.normalize_summary(nxt), seen2)
+    check([e[0] for e in ev3] == ["tuxwall_device_finding", "tuxwall_new_device"]
+          and ev3[0][1] == {"id": "f3", "severity": "high", "reason": "r3", "device_id": "m020000000002",
+                            "device": "Example tv", "first": int(NOW), "last": int(NOW)}
+          and ev3[1][1]["device"] == "Example cam" and ev3[1][1]["zone"] == "LAN", "events: one per new id (%r)" % ev3)
+    ev4, _s = sd.device_events(sd.normalize_summary(nxt), seen3)
+    check(ev4 == [], "events: deduped by id")
+    old = sd.normalize_summary({k: v for k, v in SUMMARY.items() if k != "devices"})
+    check(sd.device_events(old, None) == ([], {}), "events: router without the section -> none")
+    big = {"f": ["x%d" % i for i in range(600)], "n": []}
+    _e, s5 = sd.device_events(d, big)
+    check(len(s5["f"]) == sd.SEEN_MAX, "events: seen list bounded")
+    coord = open(os.path.join(HA_DIR, "coordinator.py")).read()
+    const = ha_module("const")
+    check("device_events(data, self._device_seen)" in coord and const.EVENT_DEVICE_FINDING == "tuxwall_device_finding"
+          and const.EVENT_NEW_DEVICE == "tuxwall_new_device", "coordinator fires the device events")
 
 
 def t_packages():
@@ -204,7 +255,7 @@ def t_metadata():
                "documentation", "integration_type", "iot_class", "issue_tracker", "loggers", "requirements",
                "version", "quality_scale", "single_config_entry"}
     check(set(man) <= allowed, "manifest keys known (%s)" % sorted(set(man) - allowed))
-    check(man["domain"] == "tuxwall" and man["version"] == "1.2.1" and man["iot_class"] == "local_polling"
+    check(man["domain"] == "tuxwall" and man["version"] == "1.3.0" and man["iot_class"] == "local_polling"
           and re.fullmatch(r"\d+\.\d+\.\d+", man["version"]), "manifest domain/version/iot_class")
     for name, size in (("icon.png", 256), ("icon@2x.png", 512)):
         path = os.path.join(HA_DIR, "brand", name)
@@ -262,7 +313,7 @@ def t_metadata():
               "%s: no blocking I/O helpers" % f)
 
 
-for t in (t_summary_shape, t_legacy_shape, t_packages, t_metadata):
+for t in (t_summary_shape, t_legacy_shape, t_device_events, t_packages, t_metadata):
     try:
         t()
     except Exception as exc:

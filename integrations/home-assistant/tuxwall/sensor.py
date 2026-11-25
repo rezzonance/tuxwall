@@ -104,6 +104,9 @@ NEW_SENSORS: tuple[SensorEntityDescription, ...] = (
                             has_entity_name=True, state_class=MEASUREMENT),
     SensorEntityDescription(key="blocked_domains", translation_key="blocked_domains",
                             has_entity_name=True, state_class=MEASUREMENT),
+    # device monitoring (1.3)
+    SensorEntityDescription(key="flagged_devices", translation_key="flagged_devices",
+                            has_entity_name=True, state_class=MEASUREMENT),
     # system (diagnostic)
     SensorEntityDescription(key="cpu_usage", translation_key="cpu_usage", has_entity_name=True,
                             native_unit_of_measurement=PERCENTAGE, state_class=MEASUREMENT,

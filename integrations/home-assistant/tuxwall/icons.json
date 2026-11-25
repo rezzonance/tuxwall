@@ -47,6 +47,9 @@
       },
       "certificate_expiry": {
         "default": "mdi:certificate"
+      },
+      "flagged_devices": {
+        "default": "mdi:shield-account-outline"
       }
     },
     "binary_sensor": {
@@ -64,6 +67,12 @@
       },
       "ipv6_connectivity": {
         "default": "mdi:numeric-6-box-outline"
+      },
+      "device_threat": {
+        "default": "mdi:shield-check-outline",
+        "state": {
+          "on": "mdi:shield-alert-outline"
+        }
       }
     }
   }
