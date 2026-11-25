@@ -48,8 +48,17 @@
   let recent = [];              // newest not-expected findings (admin), for the Security card + popup
 
   // ── helpers ──────────────────────────────────────────────────────────────
-  async function getJSON(url) {
-    const res = await fetch(url, { cache: "no-store", credentials: "same-origin" });
+  async function getJSON(url, timeoutMs = 20000) {
+    const ctl = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = ctl ? setTimeout(() => ctl.abort(), timeoutMs) : null;
+    let res;
+    try {
+      res = await fetch(url, { cache: "no-store", credentials: "same-origin", signal: ctl ? ctl.signal : undefined });
+    } catch (e) {
+      throw new Error(e && e.name === "AbortError" ? `No answer from the router after ${Math.round(timeoutMs / 1000)} s` : (e && e.message) || "Network error");
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
     let d = null;
     try { d = await res.json(); } catch (_) { d = null; }
     if (!res.ok) throw Object.assign(new Error((d && d.error) || `HTTP ${res.status}`), { status: res.status, data: d });
@@ -287,7 +296,14 @@
     }
     current.detail = detail.value;
     current.zeek = zeek.status === "fulfilled" ? zeek.value : null;
-    renderPanel();
+    try {
+      renderPanel();
+    } catch (e) {
+      // never leave the panel on "Loading…": say what failed
+      console.error("device panel", e);
+      $("dev-body").innerHTML = `<p class="login-error">Could not show this device: ${esc((e && e.message) || String(e))}</p>
+        <p class="muted dev-small">Please report this message. Reloading the page (Ctrl+Shift+R) may help if the dashboard was just updated.</p>`;
+    }
   }
 
   function leaseFor(dev) {
