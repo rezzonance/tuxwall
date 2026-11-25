@@ -1288,6 +1288,11 @@
   window.twClients = {
     refresh: () => refresh(),
     reserveFill,
+    openDevice(id) {
+      switchView("clients");
+      if (history.replaceState) history.replaceState(null, "", "#clients");
+      if (window.twDevices) window.twDevices.open(id);
+    },
     showFlagged(on) {
       state.flaggedOnly = !!on;
       if (els.devFlaggedOnly) els.devFlaggedOnly.checked = !!on;

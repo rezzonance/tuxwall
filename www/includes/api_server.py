@@ -12424,6 +12424,7 @@ ADMIN_GET_PREFIXES = (
     # settings (3.3.7; device detail is admin-only in devices_get)
     "/api/devices/indicators",
     "/api/devices/alerts",
+    "/api/devices/findings",
 )
 
 
@@ -17672,6 +17673,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_crowdsec_summary())
         elif path == "/api/integration/summary":
             self._send(200, build_integration_summary())
+        elif path == "/api/devices/findings/recent":
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            self._send(*build_devices_findings_recent((qs.get("limit") or [""])[0]))
         elif path in ("/api/devices", "/api/devices/summary", "/api/devices/feeds", "/api/devices/indicators",
                       "/api/devices/alerts") \
                 or re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})$", path):
@@ -20417,6 +20421,57 @@ def build_device_detail(did):
                 key=lambda f: (bool(f.get("expected")), -_dw.SEV_RANK.get(f.get("severity"), 0), -(f.get("last") or 0)))
     return 200, {"ok": True, "running": running, "generated_at": gen, "device": dev, "findings": fl,
                  "quarantine": _quar_detail(dev, devices)}
+
+
+DEVICES_RECENT_DEFAULT = 10
+DEVICES_RECENT_MAX = 50
+DEVICES_FEED_LABELS = {"feodo": "Feodo Tracker", "urlhaus": "URLhaus", "threatfox": "ThreatFox",
+                       "local": "Local list"}
+
+
+def build_devices_findings_recent(limit_raw):
+    """GET /api/devices/findings/recent?limit=N (admin: ADMIN_GET_PREFIXES).
+    Newest not-expected findings from the engine's findings.json; nothing is
+    parsed or computed beyond the already-written state."""
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        limit = DEVICES_RECENT_DEFAULT
+    limit = max(1, min(DEVICES_RECENT_MAX, limit))
+    devices, findings, gen, running = _devices_state()
+    if devices is None:
+        return 200, {"ok": True, "available": False, "running": False, "findings": []}
+    names = {d["id"]: (d.get("name") or d.get("mac") or d["id"]) for d in devices}
+    rows = []
+    for f in sorted((x for x in findings if not x.get("expected")), key=lambda x: -(x.get("last") or 0))[:limit]:
+        kind = f.get("kind")
+        det = f.get("details") if isinstance(f.get("details"), dict) else {}
+        src = f.get("source") or ""
+        if kind == "new_device":
+            feed = "Inventory"
+        elif src == "suricata" or kind == "ids_alert":
+            feed = str(f.get("title") or "Suricata")
+        else:
+            feed = DEVICES_FEED_LABELS.get(src) or (src or "Unknown")
+        indicator = str(f.get("indicator") or "")
+        if kind == "ids_alert" and det.get("peer"):
+            indicator = str(det["peer"])
+        if kind == "dns_blocked" or (kind == "ids_alert" and det.get("action") == "blocked"):
+            action = "blocked"
+        elif kind == "intel_attempt":
+            action = "attempted"
+        elif kind == "dns_lookup":
+            action = "lookup"
+        else:
+            action = "contacted"
+        last = int(f.get("last") or 0)
+        rows.append({
+            "id": f.get("id"), "severity": f.get("severity"), "feed": feed, "kind": kind,
+            "indicator": indicator, "action": action,
+            "device": f.get("device"), "device_name": names.get(f.get("device")) or f.get("device"),
+            "ts": last, "iso": datetime.fromtimestamp(last, timezone.utc).isoformat(),
+            "count": f.get("count") or 1})
+    return 200, {"ok": True, "available": True, "running": running, "generated_at": gen, "findings": rows}
 
 
 def build_devices_summary():

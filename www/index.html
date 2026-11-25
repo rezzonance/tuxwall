@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
   <link rel="stylesheet" href="/css/style.css?v=202611210025">
-  <link rel="stylesheet" href="/css/polish.css?v=202611251200">
+  <link rel="stylesheet" href="/css/polish.css?v=202611251400">
   <link rel="stylesheet" href="/css/firewall.css?v=202611210025">
   <link rel="stylesheet" href="/css/bento.css?v=202611210025">
   <link rel="stylesheet" href="/css/heroes.css?v=202611210025">
@@ -1636,6 +1636,15 @@
           <span class="muted" id="dev-threat-hint">LAN devices matched against threat intelligence and IDS alerts</span>
         </div>
         <div class="dev-threat-body" id="dev-threat-body"></div>
+      </div>
+
+      <!-- Last 10 device threats popup (scripts/devices.js; data: GET /api/devices/findings/recent) -->
+      <div class="modal" id="dev-thr-modal" hidden>
+        <div class="modal-box modal-box-wide dev-box" role="dialog" aria-modal="true" aria-labelledby="dev-thr-title">
+          <button type="button" class="modal-close" id="dev-thr-close" aria-label="Close">&times;</button>
+          <div class="dev-head"><h3 id="dev-thr-title">Last 10 threats</h3></div>
+          <div id="dev-thr-body"></div>
+        </div>
       </div>
 
       <!-- OPNsense-style sub-tabs -->
@@ -4227,8 +4236,8 @@
 <script src="/scripts/worldmap.js?v=202611210025"></script>
 <script src="/scripts/community-settings.js?v=202611210025"></script>
 <script src="/scripts/https-settings.js?v=202611231900"></script>
-<script src="/scripts/devices.js?v=202611251200"></script>
-<script src="/scripts/dashboard.js?v=202611251200"></script>
+<script src="/scripts/devices.js?v=202611251400"></script>
+<script src="/scripts/dashboard.js?v=202611251400"></script>
 <script src="/scripts/enhance.js?v=202611210025"></script>
 <script src="/scripts/netmap.js?v=202611210025"></script>
 <script src="/scripts/insights.js?v=202611210025"></script>

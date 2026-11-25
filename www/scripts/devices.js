@@ -9,12 +9,12 @@
    show on Clients and on the Security card, with a link to Settings > Threat
    (links: [data-tw-settings="<pane>"] -> window.twSettings.open).
    Data: GET /api/devices/summary, /feeds (everyone), /api/devices/<id>,
-   /indicators, /alerts (admin); POST /api/devices/<id>/{quarantine,
+   /indicators, /alerts, /findings/recent (admin); POST /api/devices/<id>/{quarantine,
    unquarantine,rename,expected}, /api/devices/feeds/{update,key},
    /api/devices/indicators, /api/devices/alerts (admin + same Origin).
    The per-device outbound profile ("LAN Device Activity", formerly a
    Security card) comes from GET /api/security/zeek. Markup: index.html
-   (#dev-modal, #dev-q-modal, #dev-threat-card, #dev-src-card, #dev-src-hint,
+   (#dev-modal, #dev-q-modal, #dev-thr-modal, #dev-threat-card, #dev-src-card, #dev-src-hint,
    #ti-card, #ti-viewer-card, #dev-alerts-card, #ov-dev-flagged); shared classes only (card, modal, badge, dot, btn,
    vl-info, alerts-grid, ov-kv, chart-legend, bw-canvas). */
 (() => {
@@ -45,6 +45,7 @@
   let pollTimer = null;
   let current = null;           // {id, detail, zeek}
   let tiData = null;
+  let recent = [];              // newest not-expected findings (admin), for the Security card + popup
 
   // ── helpers ──────────────────────────────────────────────────────────────
   async function getJSON(url) {
@@ -157,10 +158,90 @@
         ${worst}
         <button class="btn btn-sm" type="button" id="dev-threat-review">Review devices</button>
         ${isAdmin ? `<button class="btn btn-sm btn-ghost" type="button" data-tw-settings="threat">Threat settings</button>` : ""}
-      </div>${warn}`;
+      </div>${warn}
+      ${isAdmin ? `<div class="dev-threat-recent" id="dev-threat-recent"></div>`
+        : `<p class="muted dev-threat-recent">Details are for administrators</p>`}`;
     $("dev-threat-review").addEventListener("click", () => {
       if (window.twClients) window.twClients.showFlagged(!!(s.flagged || s.quarantined));
     });
+    if (isAdmin) {
+      renderRecent();
+      loadRecent();
+    }
+  }
+
+  // ── recent threats: Security card table + "Last 10 threats" popup ───────
+  async function loadRecent() {
+    try {
+      const d = await getJSON("/api/devices/findings/recent?limit=10");
+      recent = Array.isArray(d.findings) ? d.findings : [];
+    } catch (_) {
+      return;
+    }
+    renderRecent();
+    renderThreatsModal();
+  }
+
+  const ACTION_LABEL = { blocked: "blocked", attempted: "attempted, no answer", lookup: "looked up", contacted: "contacted" };
+
+  function recentRows(list, withAction) {
+    return list.map((x) => `<tr>
+        <td>${sevBadge(x.severity)}</td>
+        <td>${esc(x.feed)}</td>
+        <td><span class="mono">${esc(x.indicator || "—")}</span><br><span class="muted">${esc(ACTION_LABEL[x.action] || x.action)}</span></td>
+        <td><a href="#clients" data-dev-goto="${esc(x.device)}">${esc(x.device_name || x.device)}</a></td>
+        <td title="${esc(when(x.ts))}">${esc(ago(x.ts))}</td>
+        ${withAction ? `<td class="td-right"><button class="btn btn-sm btn-ghost" type="button" data-dev-thr-exp="${esc(x.id)}" data-dev="${esc(x.device)}" title="Mark as expected: stops counting toward health and stops its alerts">Mark expected</button></td>` : ""}
+      </tr>`).join("");
+  }
+
+  const recentHead = (withAction) => `<thead><tr><th>Severity</th><th>Feed</th><th>Blocked Host</th><th>Client</th><th>Time</th>${withAction ? "<th></th>" : ""}</tr></thead>`;
+
+  function renderRecent() {
+    const el = $("dev-threat-recent");
+    if (!el) return;
+    el.innerHTML = recent.length
+      ? `<div class="table-wrap"><table class="dev-table">${recentHead(false)}<tbody>${recentRows(recent.slice(0, 5), false)}</tbody></table></div>
+         <button class="btn btn-sm" type="button" id="dev-thr-open">Last 10 threats</button>`
+      : `<p class="muted">No threats in the last 30 days</p>`;
+    const b = $("dev-thr-open");
+    if (b) b.addEventListener("click", openThreats);
+  }
+
+  function renderThreatsModal() {
+    const m = $("dev-thr-modal");
+    if (!m || m.hidden) return;
+    $("dev-thr-body").innerHTML = recent.length
+      ? `<div class="table-wrap"><table class="dev-table">${recentHead(true)}<tbody>${recentRows(recent, true)}</tbody></table></div>
+         <p class="muted dev-small" id="dev-thr-msg" role="status" aria-live="polite"></p>`
+      : `<p class="muted">No threats in the last 30 days</p>`;
+  }
+
+  function openThreats() {
+    const m = $("dev-thr-modal");
+    if (!m || !isAdmin) return;
+    m.hidden = false;
+    renderThreatsModal();
+  }
+
+  function closeThreats() {
+    const m = $("dev-thr-modal");
+    if (m) m.hidden = true;
+  }
+
+  async function markExpected(btn) {
+    if (!(await confirmDlg("Mark this finding as expected? It stops counting toward the device's health and stops its alerts. Unmark it any time from the device panel."))) return;
+    btn.disabled = true;
+    const r = await post(`/api/devices/${btn.dataset.dev}/expected`, { finding: btn.dataset.devThrExp, expected: true });
+    if (!r.ok) {
+      btn.disabled = false;
+      const msg = $("dev-thr-msg");
+      if (msg) msg.textContent = r.data.error || "Failed";
+      return;
+    }
+    await loadRecent();
+    loadSummary();
+    if (window.twClients) window.twClients.refresh();
   }
 
   function schedulePoll() {
@@ -697,7 +778,7 @@
     if (al) al.hidden = !isAdmin;
     const card = $("dev-threat-card");
     if (card) card.hidden = false;
-    if (!isAdmin) closePanel();
+    if (!isAdmin) { closePanel(); closeThreats(); recent = []; }
     loadSummary();
   }
 
@@ -707,6 +788,22 @@
       $("dev-modal-close").addEventListener("click", closePanel);
       m.addEventListener("click", (e) => { if (e.target === m) closePanel(); });
     }
+    const tm = $("dev-thr-modal");
+    if (tm) {
+      $("dev-thr-close").addEventListener("click", closeThreats);
+      tm.addEventListener("click", (e) => { if (e.target === tm) closeThreats(); });
+    }
+    document.addEventListener("click", (e) => {
+      const g = e.target.closest && e.target.closest("[data-dev-goto]");
+      if (g) {
+        e.preventDefault();
+        closeThreats();
+        if (window.twClients) window.twClients.openDevice(g.dataset.devGoto);
+        return;
+      }
+      const x = e.target.closest && e.target.closest("[data-dev-thr-exp]");
+      if (x) markExpected(x);
+    });
     const qm = $("dev-q-modal");
     if (qm) {
       $("dev-q-close").addEventListener("click", () => { qm.hidden = true; });
@@ -716,6 +813,7 @@
       if (e.key !== "Escape") return;
       if (qm && !qm.hidden) qm.hidden = true;
       else if (m && !m.hidden) closePanel();
+      else if (tm && !tm.hidden) closeThreats();
     });
     const save = $("dev-al-save");
     if (save) save.addEventListener("click", saveAlerts);
