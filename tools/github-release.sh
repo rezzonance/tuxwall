@@ -5,6 +5,7 @@
 # is published; safe to re-run (idempotent).
 #
 #   tools/github-release.sh [--force] TAG...
+#   tools/github-release.sh --assets DIR TAG    attach the install images
 #
 # For each tag vX.Y.Z:
 #   - the .deb is the EXACT file the apt repository publishes: read from the
@@ -20,7 +21,16 @@
 #   - the release is created, or updated: missing assets uploaded, title/
 #     notes filled in when empty or written by this script (notes written by
 #     hand are kept). Releases that already have all assets are skipped
-#     unless --force. The newest vX.Y.Z tag is marked "latest".
+#     unless --force. The newest vX.Y.Z tag is marked "latest";
+#   - install images attached earlier (--assets) stay listed in SHA256SUMS
+#     when it is re-signed.
+#
+# --assets DIR TAG (job "images", after the release exists): every
+# tuxwall-netinstall-<ver>-amd64.iso / tuxwall-vm-<ver>-amd64.qcow2 in DIR,
+# each checked against its .sha256 and GitHub's 2 GiB asset limit, is added
+# to the release; SHA256SUMS = the release's signed SHA256SUMS (signature
+# checked) + the images, re-signed; the notes (when written by this script)
+# get an "Install images" list. Re-runs replace the same assets.
 #
 # Environment: GH_TOKEN + GH_REPO (gh), GPG_FPR (imported secret key),
 # PAGES_REF (origin/gh-pages), PAGES_URL (https://rezzonance.github.io/tuxwall),
@@ -34,15 +44,23 @@ EXPECT_FPR=${EXPECT_FPR:-5D79B9082DCAEB9CCB731382F5D8235716BDBDD1}
 MARKER="<!-- tuxwall-release-assets -->"
 DRY_RUN=${DRY_RUN:-0}
 
+IMAGES_MARK="<!-- tuxwall-images -->"
+IMAGES_END="<!-- /tuxwall-images -->"
+# GitHub: each release asset must be under 2 GiB
+MAX_ASSET_BYTES=$((2 * 1024 * 1024 * 1024 - 1))
+
 FORCE=0
+ASSETS_DIR=""
 TAGS=()
-for a in "$@"; do
-    case "$a" in
-        --force) FORCE=1 ;;
-        *) TAGS+=("$a") ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --force) FORCE=1; shift ;;
+        --assets) ASSETS_DIR="${2:-}"; [[ -n $ASSETS_DIR ]] || { echo "--assets needs a directory" >&2; exit 2; }; shift 2 ;;
+        *) TAGS+=("$1"); shift ;;
     esac
 done
-(( ${#TAGS[@]} )) || { echo "usage: $0 [--force] TAG..." >&2; exit 2; }
+(( ${#TAGS[@]} )) || { echo "usage: $0 [--force] TAG... | $0 --assets DIR TAG" >&2; exit 2; }
+[[ -z $ASSETS_DIR || ${#TAGS[@]} -eq 1 ]] || { echo "--assets takes exactly one TAG" >&2; exit 2; }
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -114,6 +132,58 @@ index_sha() {
     return 0
 }
 
+# kept_sums TAG STATE DIR DEB -> DIR/kept.sums: the lines of the release's current
+# SHA256SUMS for its other assets (install images), when that file's signature
+# verifies with the apt key; nothing otherwise
+kept_sums() {
+    local tag=$1 state=$2 d=$3 deb=$4 name
+    : >"$d/kept.sums"
+    [[ $state == *"SHA256SUMS,"* && $state == *"SHA256SUMS.asc,"* ]] || return 0
+    mkdir -p "$d/current"
+    gh release download "$tag" -p SHA256SUMS -p SHA256SUMS.asc -D "$d/current" --clobber >/dev/null 2>&1 || return 0
+    gpgv --keyring "$GNUPG_VERIFY" "$d/current/SHA256SUMS.asc" "$d/current/SHA256SUMS" >/dev/null 2>&1 || {
+        echo "   current SHA256SUMS does not verify - not kept" >&2
+        return 0
+    }
+    while read -r sum name; do
+        name=${name#\*}
+        [[ $sum =~ ^[0-9a-f]{64}$ && $name != "$deb" && $name =~ ^tuxwall-[A-Za-z0-9._-]+$ ]] || continue
+        [[ $state == *"assets=$name,"* || $state == *",$name,"* ]] || continue
+        printf '%s  %s\n' "$sum" "$name"
+    done <"$d/current/SHA256SUMS" >"$d/kept.sums"
+    return 0
+}
+
+# images_section SUMSFILE DEB -> the notes' "Install images" list (empty without images)
+images_section() {
+    local sum name what
+    grep -qv -- "  $2\$" "$1" 2>/dev/null || return 0
+    printf '%s\n**Install images** (README: "Install from USB (netinstaller)", "Run as a VM"):\n\n' "$IMAGES_MARK"
+    # shellcheck disable=SC2016  # backticks are Markdown
+    while read -r sum name; do
+        [[ $name == "$2" ]] && continue
+        case "$name" in
+            *.iso) what="USB/CD netinstaller, BIOS + UEFI (Secure Boot)" ;;
+            *.qcow2) what="VM image for Proxmox / KVM, cloud-init" ;;
+            *) what="" ;;
+        esac
+        printf -- '- `%s`%s - SHA-256 `%s`\n' "$name" "${what:+ ($what)}" "$sum"
+    done <"$1"
+    printf '%s\n\n' "$IMAGES_END"
+}
+
+sign_sums() {   # sign_sums DIR -> DIR/SHA256SUMS.asc (verified)
+    if [[ $DRY_RUN == 1 ]]; then
+        echo "DRY-RUN gpg --detach-sign SHA256SUMS"
+        : >"$1/SHA256SUMS.asc"
+        return 0
+    fi
+    [[ ${GPG_FPR:-} == "$EXPECT_FPR" ]] || { echo "::error::signing key ${GPG_FPR:-none} != $EXPECT_FPR" >&2; return 1; }
+    gpg --batch --yes --local-user "$GPG_FPR" --armor --detach-sign --output "$1/SHA256SUMS.asc" "$1/SHA256SUMS"
+    gpgv --keyring "$GNUPG_VERIFY" "$1/SHA256SUMS.asc" "$1/SHA256SUMS" >/dev/null 2>&1 \
+        || { echo "::error::SHA256SUMS.asc does not verify with $APT_KEY" >&2; return 1; }
+}
+
 release_one() {
     local tag=$1 ver deb state src sha idx want commit note latest=false d
     [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::not a release tag: $tag" >&2; return 1; }
@@ -149,16 +219,10 @@ release_one() {
     fi
     echo "   $deb from $src, sha256 $sha"
 
-    (cd "$d" && sha256sum "$deb" >SHA256SUMS)
-    if [[ $DRY_RUN == 1 ]]; then
-        echo "DRY-RUN gpg --detach-sign SHA256SUMS"
-        : >"$d/SHA256SUMS.asc"
-    else
-        [[ ${GPG_FPR:-} == "$EXPECT_FPR" ]] || { echo "::error::signing key ${GPG_FPR:-none} != $EXPECT_FPR" >&2; return 1; }
-        gpg --batch --yes --local-user "$GPG_FPR" --armor --detach-sign --output "$d/SHA256SUMS.asc" "$d/SHA256SUMS"
-        gpgv --keyring "$GNUPG_VERIFY" "$d/SHA256SUMS.asc" "$d/SHA256SUMS" >/dev/null 2>&1 \
-            || { echo "::error::SHA256SUMS.asc does not verify with $APT_KEY" >&2; return 1; }
-    fi
+    kept_sums "$tag" "$state" "$d" "$deb"
+    { (cd "$d" && sha256sum "$deb"); cat "$d/kept.sums"; } >"$d/SHA256SUMS"
+    [[ -s $d/kept.sums ]] && echo "   kept in SHA256SUMS: $(awk '{print $2}' "$d/kept.sums" | paste -sd' ' -)"
+    sign_sums "$d" || return 1
 
     # shellcheck disable=SC2016  # backticks are Markdown
     {
@@ -169,6 +233,7 @@ release_one() {
         printf '%s\n\n' "$note"
         printf 'Verify a download: `sha256sum -c SHA256SUMS` and `gpg --verify SHA256SUMS.asc SHA256SUMS` '
         printf '(TuxWall APT signing key `%s`, published as `apt-public.asc`; see SECURITY.md).\n\n' "$EXPECT_FPR"
+        images_section "$d/SHA256SUMS" "$deb"
         printf '%s\n' "$MARKER"
     } >"$d/notes.md"
 
@@ -188,7 +253,71 @@ release_one() {
     fi
 }
 
+assets_one() {
+    local tag=$1 dir=$2 ver deb state d f n files=() bytes body
+    [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::not a release tag: $tag" >&2; return 1; }
+    ver=${tag#v}
+    deb="tuxwall_${ver}_all.deb"
+    [[ "$(git cat-file -t "refs/tags/$tag" 2>/dev/null)" == tag ]] \
+        || { echo "::error::$tag is not an annotated tag (git fetch --force --tags?)" >&2; return 1; }
+    for f in "$dir"/tuxwall-netinstall-"$ver"-amd64.iso "$dir"/tuxwall-vm-"$ver"-amd64.qcow2; do
+        [[ -f $f ]] && files+=("$f")
+    done
+    (( ${#files[@]} )) || { echo "::error::no tuxwall-netinstall-$ver-amd64.iso / tuxwall-vm-$ver-amd64.qcow2 in $dir" >&2; return 1; }
+    for f in "${files[@]}"; do
+        n=${f##*/}
+        bytes="$(stat -c %s "$f")"
+        (( bytes <= MAX_ASSET_BYTES )) || { echo "::error::$n is $bytes bytes - over GitHub's 2 GiB asset limit" >&2; return 1; }
+        [[ -f $f.sha256 ]] || { echo "::error::$n.sha256 missing" >&2; return 1; }
+        [[ "$(awk 'NR == 1 {sub(/^\*/, "", $2); print $2}' "$f.sha256")" == "$n" ]] \
+            || { echo "::error::$n.sha256 is not about $n" >&2; return 1; }
+        (cd "$dir" && sha256sum -c --quiet "$n.sha256") || { echo "::error::$n does not match $n.sha256" >&2; return 1; }
+    done
+    state="$(release_state "$tag")"
+    echo "== $tag images: $state"
+    [[ $state == exists=1* && $state == *"$deb,"* && $state == *"SHA256SUMS,"* && $state == *"SHA256SUMS.asc,"* ]] \
+        || { echo "::error::release $tag lacks $deb / SHA256SUMS(.asc) - run the release job first" >&2; return 1; }
+    d="$WORK/$tag-images"
+    mkdir -p "$d/current"
+    gh release download "$tag" -p SHA256SUMS -p SHA256SUMS.asc -D "$d/current" --clobber >/dev/null \
+        || { echo "::error::cannot download SHA256SUMS of $tag" >&2; return 1; }
+    gpgv --keyring "$GNUPG_VERIFY" "$d/current/SHA256SUMS.asc" "$d/current/SHA256SUMS" >/dev/null 2>&1 \
+        || { echo "::error::the SHA256SUMS of release $tag does not verify with $APT_KEY" >&2; return 1; }
+    {
+        awk -v deb="$deb" '{sub(/^\*/, "", $2)} $2 == deb {print $1 "  " $2}' "$d/current/SHA256SUMS"
+        awk -v deb="$deb" -v skip=" $(for f in "${files[@]}"; do printf '%s ' "${f##*/}"; done)" \
+            '{sub(/^\*/, "", $2)} $2 != deb && index(skip, " " $2 " ") == 0 {print $1 "  " $2}' "$d/current/SHA256SUMS"
+        for f in "${files[@]}"; do awk 'NR == 1 {sub(/^\*/, "", $2); print $1 "  " $2}' "$f.sha256"; done
+    } >"$d/SHA256SUMS"
+    grep -q "  $deb\$" "$d/SHA256SUMS" || { echo "::error::$deb missing from the release's SHA256SUMS" >&2; return 1; }
+    sign_sums "$d" || return 1
+    sed 's/^/   /' "$d/SHA256SUMS"
+
+    body="$(gh release view "$tag" --json body 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("body") or "")')"
+    if [[ $body == *"$MARKER"* ]]; then
+        images_section "$d/SHA256SUMS" "$deb" >"$d/images.md"
+        BODY="$body" python3 - "$d/images.md" "$IMAGES_MARK" "$IMAGES_END" "$MARKER" >"$d/notes.md" <<'PY'
+import os, re, sys
+body, sec = os.environ["BODY"], open(sys.argv[1]).read()
+start, end, marker = sys.argv[2:]
+body = re.sub(re.escape(start) + r".*?" + re.escape(end) + r"\n*", "", body, flags=re.S)
+i = body.rfind(marker)
+print(body[:i] + sec + body[i:], end="")
+PY
+        gh_ release edit "$tag" --notes-file "$d/notes.md" >/dev/null
+    else
+        echo "   notes written by hand - kept (images not listed there)"
+    fi
+    gh_ release upload "$tag" --clobber "${files[@]}"
+    gh_ release upload "$tag" --clobber "$d/SHA256SUMS" "$d/SHA256SUMS.asc"
+    echo "   images attached: $(for f in "${files[@]}"; do printf '%s ' "${f##*/}"; done)"
+}
+
 rc=0
+if [[ -n $ASSETS_DIR ]]; then
+    assets_one "${TAGS[0]}" "$ASSETS_DIR" || rc=1
+    exit "$rc"
+fi
 for t in "${TAGS[@]}"; do
     release_one "$t" || rc=1
 done

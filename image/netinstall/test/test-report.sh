@@ -48,6 +48,7 @@ check login-summary grep -q '^TuxWall dashboard: https://' /etc/issue.d/zz-tuxwa
 if [ -e /etc/tuxwall/vm-image ]; then
     # VM image (image/vm/test/make-test-seed.sh): cloud-init + the auto answers path
     check vm-cloud-init-done sh -c 'cloud-init status 2>/dev/null | grep -q "^status: done"'
+    # shellcheck disable=SC2016  # expanded by the inner sh
     check vm-rootfs-grown sh -c '[ "$(df -B1G --output=size / | tail -n1 | tr -d " ")" -ge 10 ]'
     check vm-password-file-removed test ! -e /etc/tuxwall/test-admin-password
     say "TUXWALL-TEST-INFO vm-image $(tr '\n' ' ' </etc/tuxwall/vm-image)"

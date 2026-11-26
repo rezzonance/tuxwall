@@ -13,6 +13,12 @@
    update (empty notes, missing assets), skip when complete, --force, owner
    notes kept, latest flag, tampered .deb refused, "computed at backfill"
    when the index is gone, lightweight tag / wrong signing key refused.
+3. The "images" job (install images, 3.3.7): runs after the release job on
+   tags (and workflow_dispatch tag + images), builds the netinstall ISO + VM
+   qcow2 from the tag, verifies them, attaches them with
+   github-release.sh --assets: SHA256SUMS = the release's signed list + the
+   images, re-signed; notes get an images list; a release re-run keeps the
+   image lines; > 2 GiB, bad .sha256, missing release, unsigned list refused.
 
     python3 tools/release_workflow_check.py
 """
@@ -75,6 +81,35 @@ def t_structure():
     check("publish" in pub.get("if", "") or "inputs.tag == ''" in pub.get("if", ""),
           "publish skipped when only a release is requested")
 
+    img = jobs.get("images", {})
+    check(img.get("needs") == "release", "images job runs after the release job")
+    iif = img.get("if", "")
+    check("needs.release.result == 'success'" in iif and "github.ref_type == 'tag'" in iif
+          and "inputs.tag != ''" in iif and "inputs.images" in iif,
+          "images job: only for a tag, after a successful release (push or dispatch with tag + images)")
+    check(img.get("permissions") == {"contents": "write"}, "images job: contents: write, nothing else")
+    check((on.get("workflow_dispatch") or {}).get("inputs", {}).get("images", {}).get("type") == "boolean",
+          "workflow_dispatch has an images switch")
+    isteps = img.get("steps", [])
+    ico = next((x for x in isteps if str(x.get("uses", "")).startswith("actions/checkout")), {})
+    check((ico.get("with") or {}).get("ref") == "${{ inputs.tag || github.ref }}", "images are built from the tag")
+    iruns = "\n".join(x.get("run", "") for x in isteps)
+    check("${{" not in iruns, "images job: no inline ${{ }} in run steps")
+    order = [k for k in ("image/netinstall/build.sh", "image/vm/build.sh --latest", "image/verify-images.sh",
+                         "tools/github-release.sh --assets") if k in iruns]
+    check(order == ["image/netinstall/build.sh", "image/vm/build.sh --latest", "image/verify-images.sh",
+                    "tools/github-release.sh --assets"]
+          and iruns.index("image/verify-images.sh") < iruns.index("tools/github-release.sh --assets"),
+          "images job: build ISO, build VM image, verify, then attach")
+    check('[ "$TAG" != "v$VERSION" ]' in iruns, "images job: tag must match the package version")
+    check("predates the install images" in iruns, "images job: tags without image/ are skipped")
+    check("ubuntu-cloudimage-keyring" in iruns and "qemu-utils" in iruns and "xorriso" in iruns,
+          "images job installs the build tools + Ubuntu keyrings")
+    check(img.get("env", {}).get("GH_TOKEN") == "${{ github.token }}", "images job: gh uses the job token")
+    ver = open(os.path.join(ROOT, "image/verify-images.sh")).read()
+    check("MAX_BYTES=$((2 * 1024 * 1024 * 1024 - 1))" in ver and "BIOS" in ver and "UEFI" in ver
+          and "check -q" in ver and "-TEST" in ver, "verify-images.sh: 2 GiB, BIOS+UEFI, qemu-img check, no TEST image")
+
     steps = pub.get("steps", [])
     digest = steps_digest(steps)
     check(digest == PUBLISH_STEPS_V334, "apt publish steps unchanged since v3.3.4 (digest %s)" % digest)
@@ -105,6 +140,16 @@ def opt(args, name):
     return args[args.index(name) + 1] if name in args else None
 assert a[0] == "release", a
 cmd, tag = a[1], a[2]
+if cmd == "download":
+    adir = os.path.join(st, "assets", tag)
+    pats = [a[i + 1] for i, x in enumerate(a) if x == "-p"]
+    dest = opt(a, "-D") or "."
+    got = [n for n in pats if os.path.isfile(os.path.join(adir, n))]
+    if not got:
+        print("no assets match", file=sys.stderr); sys.exit(1)
+    for n in got:
+        shutil.copy(os.path.join(adir, n), os.path.join(dest, n))
+    sys.exit(0)
 if cmd == "view":
     d = rel(tag)
     if d is None:
@@ -302,8 +347,79 @@ def t_script():
         check(rc == 1 and not calls, "tag that does not exist: error, nothing published")
         rc, out, calls = lab.run("v1.0.1", "v1.2.3")
         check(rc == 1 and "complete - skipped" in out, "one bad tag fails the run but the others still run")
+        t_assets(lab)
     finally:
         lab.close()
+
+
+def t_assets(lab):
+    img = os.path.join(lab.d, "images")
+    os.makedirs(img)
+    names = ("tuxwall-netinstall-1.0.1-amd64.iso", "tuxwall-vm-1.0.1-amd64.qcow2")
+    for n in names:
+        open(os.path.join(img, n), "wb").write(("image " + n).encode())
+        sh(["sh", "-c", "sha256sum %s > %s.sha256" % (n, n)], cwd=img)
+    deb = lab.asset("v1.0.1", "tuxwall_1.0.1_all.deb")
+    rc, out, calls = lab.run("--assets", img, "v1.0.1")
+    r = lab.rel("v1.0.1")
+    check(rc == 0 and set(names) <= set(r["assets"]), "--assets: images attached (%s)" % out[-500:])
+    sums = lab.asset("v1.0.1", "SHA256SUMS").decode()
+    want = ["{}  tuxwall_1.0.1_all.deb".format(hashlib.sha256(deb).hexdigest())] + [
+        "{}  {}".format(hashlib.sha256(("image " + n).encode()).hexdigest(), n) for n in names]
+    check(sums.splitlines() == want, "--assets: SHA256SUMS = deb line + image lines\n" + sums)
+    d = tempfile.mkdtemp(dir=lab.d)
+    for n in ("SHA256SUMS", "SHA256SUMS.asc"):
+        open(os.path.join(d, n), "wb").write(lab.asset("v1.0.1", n))
+    sh(["gpg", "--batch", "--yes", "--dearmor", "-o", d + "/k.gpg", lab.repo + "/apt-public.asc"], env=lab.env)
+    v = sh(["gpgv", "--keyring", d + "/k.gpg", d + "/SHA256SUMS.asc", d + "/SHA256SUMS"], env=lab.env, check_rc=False)
+    check(v.returncode == 0, "--assets: SHA256SUMS re-signed with the apt key")
+    body = r["body"]
+    check(body.count("<!-- tuxwall-images -->") == 1 and all(n in body for n in names)
+          and body.index("<!-- tuxwall-images -->") < body.index("<!-- tuxwall-release-assets -->")
+          and "Notes for 1.0.1" in body, "--assets: notes list the images above the marker")
+    ups = [c for c in calls if c[1] == "upload"]
+    check(len(ups) == 2 and ups[-1][-2:] and os.path.basename(ups[-1][-1]) == "SHA256SUMS.asc"
+          and "--clobber" in ups[0], "--assets: images uploaded first, then SHA256SUMS(.asc)")
+    rc, out, calls = lab.run("--assets", img, "v1.0.1")
+    r = lab.rel("v1.0.1")
+    check(rc == 0 and r["body"].count("<!-- tuxwall-images -->") == 1
+          and lab.asset("v1.0.1", "SHA256SUMS").decode().splitlines() == want, "--assets re-run: same list, one images section")
+    rc, out, calls = lab.run("--force", "v1.0.1")
+    r = lab.rel("v1.0.1")
+    check(rc == 0 and lab.asset("v1.0.1", "SHA256SUMS").decode().splitlines() == want
+          and "kept in SHA256SUMS" in out and r["body"].count("<!-- tuxwall-images -->") == 1,
+          "release re-run (--force) keeps the image lines + images list\n" + out[-400:])
+    # refusals: nothing uploaded
+    open(os.path.join(img, names[1]), "ab").write(b"x")
+    rc, out, calls = lab.run("--assets", img, "v1.0.1")
+    check(rc == 1 and "does not match" in out and not [c for c in calls if c[1] in ("upload", "edit")],
+          "--assets: image not matching its .sha256 refused")
+    open(os.path.join(img, names[1]), "wb").write(("image " + names[1]).encode())
+    with open(os.path.join(img, names[0]), "r+b") as f:
+        f.truncate(2 * 1024 ** 3)
+    rc, out, calls = lab.run("--assets", img, "v1.0.1")
+    check(rc == 1 and "2 GiB" in out and not [c for c in calls if c[1] in ("upload", "edit")],
+          "--assets: image over 2 GiB refused")
+    os.unlink(os.path.join(img, names[0]))
+    os.unlink(os.path.join(img, names[0] + ".sha256"))
+    rc, out, calls = lab.run("--assets", img, "v1.0.0")
+    check(rc == 1 and "no tuxwall-netinstall-1.0.0" in out and not calls, "--assets: images of another version refused")
+    img2 = os.path.join(lab.d, "images2")
+    os.makedirs(img2)
+    n = "tuxwall-vm-0.9.0-amd64.qcow2"
+    open(os.path.join(img2, n), "wb").write(b"vm")
+    sh(["sh", "-c", "sha256sum %s > %s.sha256" % (n, n)], cwd=img2)
+    json.dump({"name": "TuxWall 0.9.0", "body": "x", "assets": {}}, open(lab.state + "/v0.9.0.json", "w"))
+    rc, out, calls = lab.run("--assets", img2, "v0.9.0")
+    check(rc == 1 and "run the release job first" in out and not [c for c in calls if c[1] in ("upload", "edit")],
+          "--assets: release without deb/SHA256SUMS refused")
+    adir = os.path.join(lab.state, "assets", "v1.0.1")
+    open(os.path.join(adir, "SHA256SUMS"), "a").write("0" * 64 + "  evil.iso\n")
+    os.unlink(os.path.join(img, names[1] + ".sha256"))
+    sh(["sh", "-c", "sha256sum %s > %s.sha256" % (names[1], names[1])], cwd=img)
+    rc, out, calls = lab.run("--assets", img, "v1.0.1")
+    check(rc == 1 and "does not verify" in out and not [c for c in calls if c[1] in ("upload", "edit")],
+          "--assets: a release SHA256SUMS whose signature fails is refused")
 
 
 def main():

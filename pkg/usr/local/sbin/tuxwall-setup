@@ -773,6 +773,7 @@ finish_info() {   # -> FIN_HOST FIN_URL FIN_FPR
 write_issue() {
     [[ -n ${FIN_URL:-} ]] || finish_info
     mkdir -p "${ISSUE%/*}" 2>/dev/null || return 0
+    # shellcheck disable=SC1003  # tr deletes backslashes
     {
         printf 'TuxWall dashboard: %s\n' "$FIN_URL"
         [[ $FIN_URL == https://* && -n $FIN_FPR ]] && printf 'Router CA SHA-256: %s\n' "$FIN_FPR"

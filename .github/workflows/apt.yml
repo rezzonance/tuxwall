@@ -21,6 +21,14 @@ name: Publish APT repository
 # releases of the tags in BACKFILL_TAGS that lack those assets.
 # workflow_dispatch with a tag (re)runs only the release step for that tag;
 # without one it publishes from the selected ref as before.
+#
+# Then the "images" job builds the install images from the tag -
+# image/netinstall/build.sh (netinstall ISO) and image/vm/build.sh --latest
+# (VM qcow2 from the newest signed Ubuntu cloud image) - checks them
+# (image/verify-images.sh: SHA-256, BIOS + UEFI El Torito, qemu-img check,
+# GitHub's 2 GiB asset limit) and attaches them to the release with
+# re-signed SHA256SUMS (tools/github-release.sh --assets). Tags without
+# image/ (v3.3.6 and older) are skipped. workflow_dispatch: tag + images.
 
 on:
   push:
@@ -31,6 +39,11 @@ on:
         description: "Only (re)create the GitHub Release of this existing tag, e.g. v3.3.4 (empty: publish as before)"
         required: false
         default: ""
+      images:
+        description: "Also build + attach the install images (netinstall ISO, VM qcow2) of that tag"
+        type: boolean
+        required: false
+        default: true
 
 permissions:
   contents: read
@@ -204,3 +217,75 @@ jobs:
             bash tools/github-release.sh $BACKFILL_TAGS || rc=1
           fi
           exit "$rc"
+
+  images:
+    name: Install images (netinstall ISO, VM qcow2)
+    needs: release
+    if: always() && needs.release.result == 'success' && ((github.event_name == 'push' && github.ref_type == 'tag') || (inputs.tag != '' && inputs.images))
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Fetch annotated tags
+        run: git fetch --force --tags origin
+
+      - name: Check the tag
+        id: tag
+        run: |
+          VERSION="$(sed -n 's/^Version: //p' pkg/DEBIAN/control)"
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::Tag $TAG does not match pkg/DEBIAN/control Version: $VERSION"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ -x image/netinstall/build.sh ] && [ -x image/vm/build.sh ] && [ -x image/verify-images.sh ]; then
+            echo "build=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$TAG predates the install images - nothing to build"
+            echo "build=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install image tools
+        if: steps.tag.outputs.build == '1'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xorriso qemu-utils e2fsprogs fdisk gpgv ubuntu-keyring ubuntu-cloudimage-keyring python3-yaml
+
+      - name: Build the netinstall ISO
+        if: steps.tag.outputs.build == '1'
+        run: image/netinstall/build.sh --out "$RUNNER_TEMP/images" --cache "$RUNNER_TEMP/cache"
+
+      - name: Build the VM image
+        if: steps.tag.outputs.build == '1'
+        run: image/vm/build.sh --latest --out "$RUNNER_TEMP/images" --cache "$RUNNER_TEMP/cache"
+
+      - name: Verify the images
+        if: steps.tag.outputs.build == '1'
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          rm -f "$RUNNER_TEMP"/images/*.build.log
+          image/verify-images.sh "$RUNNER_TEMP/images" "$VERSION"
+
+      - name: Import signing key
+        if: steps.tag.outputs.build == '1'
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          printf '%s\n' "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "GPG_FPR=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')" >> "$GITHUB_ENV"
+
+      - name: Attach the images to the GitHub Release
+        if: steps.tag.outputs.build == '1'
+        run: bash tools/github-release.sh --assets "$RUNNER_TEMP/images" "$TAG"

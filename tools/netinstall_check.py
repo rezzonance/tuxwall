@@ -38,7 +38,7 @@ VM = os.path.join(ROOT, "image", "vm")
 SHELL_SCRIPTS = (WIZ, FIRSTBOOT, os.path.join(NI, "build.sh"), os.path.join(NI, "verify-ubuntu-iso.sh"),
                  os.path.join(NI, "test", "run-qemu-test.sh"), os.path.join(NI, "test", "test-report.sh"),
                  os.path.join(NI, "test", "lan-gate.sh"), os.path.join(VM, "build.sh"),
-                 os.path.join(VM, "test", "make-test-seed.sh"))
+                 os.path.join(VM, "test", "make-test-seed.sh"), os.path.join(ROOT, "image", "verify-images.sh"))
 
 PASS = FAIL = 0
 
