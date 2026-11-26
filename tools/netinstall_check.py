@@ -185,8 +185,22 @@ def check_grub(p):
             if w.startswith("iso-scan/filename="):
                 check(w == "iso-scan/filename=/" + p["UBUNTU_ISO"], "iso-scan finds the pinned ISO file")
     check("url=http:" not in g, "no plain-http ISO URL")
-    tg = read(os.path.join(NI, "test", "grub-test.cfg.in"))
-    check("autoinstall" in tg, "test GRUB is unattended (test ISO only)")
+    tg = render(read(os.path.join(NI, "test", "grub-test.cfg.in")), p)
+    entries = re.findall(r'^menuentry "([^"]*)"\s*\{\s*linux\s+([^\n]*)', tg, re.M)
+    check(len(entries) == 3 and all("autoinstall" in l.split() for _, l in entries),
+          "test GRUB: three unattended entries (test ISO only)")
+    if len(entries) == 3:
+        scan, dev, dl = (l.split() for _, l in entries)
+        check("iso-scan/filename=/" + p["UBUNTU_ISO"] in scan, "test entry 0 = iso-scan (ISO file on a disk)")
+        check(not any(w.startswith(("iso-scan", "iso-url", "url=")) for w in dev), "test entry 1 = casper device scan")
+        check(any(w.startswith("iso-url=https://") for w in dl), "test entry 2 = download")
+    check(re.search(r"set default=2\s+if search [^\n]*--file [^\n]*/%s; then\s+set default=0\s+"
+                    r"elif search [^\n]*--file [^\n]*/casper/[^\n]*\.squashfs; then\s+set default=1\s+fi"
+                    % re.escape(p["UBUNTU_ISO"]), tg) is not None,
+          "test GRUB picks the entry from where the Ubuntu ISO is (file / CD / download)")
+    rep = read(os.path.join(NI, "test", "test-report.sh"))
+    check(re.search(r"guest_agent\.0 \] && exit 0\s+sleep 3\s+systemctl poweroff", rep) is not None,
+          "test report keeps the VM up when a guest agent reads it (Proxmox), powers off otherwise (QEMU driver)")
 
 
 def check_firstboot():

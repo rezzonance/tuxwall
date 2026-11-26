@@ -1,10 +1,15 @@
 #!/bin/sh
 # TEST ONLY: installed into the netinstall test VM. Waits for the unattended
 # tuxwall-setup run, prints a machine-readable report on the serial console
-# and powers the VM off.
+# (+ /var/log/tuxwall-test-report.log) and powers the VM off - unless a QEMU
+# guest agent channel exists (Proxmox lab: the report is read through the
+# agent, the VM stays up for more checks).
 out=/dev/ttyS0
 [ -w "$out" ] || out=/dev/console
-say() { echo "$*" >"$out"; }
+LOG=/var/log/tuxwall-test-report.log
+: >"$LOG"
+say() { echo "$*" | tee -a "$LOG" >"$out"; }
+emit() { tee -a "$LOG" >"$out"; }
 i=0
 while [ $i -lt 3600 ]; do
     [ -e /etc/tuxwall/setup-done ] && break
@@ -40,9 +45,10 @@ check tuxwall-apt-list grep -q rezzonance.github.io/tuxwall /etc/apt/sources.lis
 say "TUXWALL-TEST-INFO tuxwall=$(dpkg-query -W -f='${Version}' tuxwall 2>/dev/null) kernel=$(uname -r)"
 say "TUXWALL-TEST-INFO secureboot=$(mokutil --sb-state 2>/dev/null | head -n1 || echo n/a) $(dmesg 2>/dev/null | grep -m1 -i 'secure boot' || true)"
 say "TUXWALL-TEST-INFO ca=$(/usr/local/sbin/tuxwall-tls status 2>/dev/null | grep -m1 '^ca:' || true)"
-ip -br addr | sed 's/^/TUXWALL-TEST-INFO ip /' >"$out"
-tail -n 25 /var/log/tuxwall-setup.log 2>/dev/null | sed 's/^/TUXWALL-TEST-LOG setup /' >"$out"
-tail -n 40 /var/log/tuxwall-install.log 2>/dev/null | sed 's/^/TUXWALL-TEST-LOG install /' >"$out"
+ip -br addr | sed 's/^/TUXWALL-TEST-INFO ip /' | emit
+tail -n 25 /var/log/tuxwall-setup.log 2>/dev/null | sed 's/^/TUXWALL-TEST-LOG setup /' | emit
+tail -n 40 /var/log/tuxwall-install.log 2>/dev/null | sed 's/^/TUXWALL-TEST-LOG install /' | emit
 say "TUXWALL-TEST-REPORT-END"
+[ -e /dev/virtio-ports/org.qemu.guest_agent.0 ] && exit 0
 sleep 3
 systemctl poweroff --check-inhibitors=no

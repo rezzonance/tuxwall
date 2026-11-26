@@ -1,15 +1,25 @@
-# TEST ONLY (build.sh --test): unattended install for the QEMU test. The
-# Ubuntu ISO comes from a second virtual disk (iso-scan, the shipped "low RAM"
-# entry) so the test fits in 4 GB of RAM; the download entry is the same
-# kernel/initrd with iso-url=.
-set timeout=1
-set default=0
+# TEST ONLY (build.sh --test): unattended install for the QEMU/Proxmox tests.
+# The default entry follows where the Ubuntu ISO is: a file on a second disk
+# (QEMU driver: iso-scan, the shipped "low RAM" entry), the ISO itself in a
+# second CD drive (Proxmox lab: casper's own device scan), otherwise the
+# download entry (iso-url=, 6 GB+ RAM).
+set timeout=3
+set default=2
+if search --no-floppy --file --set=uiso /@UBUNTU_ISO@; then
+    set default=0
+elif search --no-floppy --file --set=uiso /casper/ubuntu-server-minimal.squashfs; then
+    set default=1
+fi
 if serial --unit=0 --speed=115200; then
     terminal_input console serial
     terminal_output console serial
 fi
 menuentry "TuxWall netinstall @TUXWALL_VERSION@ TEST (unattended, serial console)" {
     linux  /casper/vmlinuz iso-scan/filename=/@UBUNTU_ISO@ ds=nocloud autoinstall --- console=tty0 console=ttyS0,115200n8
+    initrd /casper/initrd
+}
+menuentry "TEST Ubuntu ISO in a second CD drive (casper device scan)" {
+    linux  /casper/vmlinuz ds=nocloud autoinstall --- console=tty0 console=ttyS0,115200n8
     initrd /casper/initrd
 }
 menuentry "TEST download variant (iso-url=, needs 6 GB+ RAM)" {

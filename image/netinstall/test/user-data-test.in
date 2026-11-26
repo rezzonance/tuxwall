@@ -3,7 +3,8 @@
 # for image/netinstall/test/run-qemu-test.sh: the same install as
 # ../user-data.in, but unattended (storage, identity answered; throwaway
 # test password "tuxwall-test-only" for a VM on QEMU user-mode networking),
-# plus the wizard answers file and a report unit for the second boot.
+# plus the wizard answers file and a report unit for the second boot, and the
+# QEMU guest agent (the Proxmox lab reads the report through it).
 autoinstall:
   version: 1
   locale: en_US.UTF-8
@@ -28,6 +29,7 @@ autoinstall:
     - curl
     - ca-certificates
     - gnupg
+    - qemu-guest-agent
   shutdown: poweroff
   early-commands:
     - |
