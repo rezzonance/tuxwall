@@ -5,7 +5,7 @@
 #    image/netinstall/build.sh --test
 #    image/netinstall/test/run-qemu-test.sh --iso out/tuxwall-netinstall-X-amd64-TEST.iso \
 #        --ubuntu-iso ~/.cache/tuxwall-netinstall/ubuntu-26.04.1/ubuntu-26.04.1-live-server-amd64.iso \
-#        --mode uefi|bios [--work DIR] [--mem MB]
+#        --mode uefi|bios [--work DIR] [--mem MB] [--phase2-only]
 #
 #  Phase 1 boots the TEST ISO: unattended install onto a blank 20 GB disk,
 #  the Ubuntu ISO file is found on a second (FAT) disk by iso-scan - the
@@ -13,6 +13,9 @@
 #  installed disk: the first-boot units run tuxwall-setup with the test
 #  answers (tuxwall-install.sh --source apt), a report unit prints checks on
 #  the serial console and powers off. Exit 0 = every check passed.
+#  Phase 2 runs on a qcow2 overlay of the installed disk (phase1.qcow2 in the
+#  work dir): --phase2-only repeats the first boot on a fresh overlay without
+#  reinstalling (same ISO payload: rebuild + full run after payload changes).
 #
 #  Networking is QEMU user-mode only: NIC 1 = "WAN" (QEMU NAT to the
 #  internet), NIC 2 = "LAN" (a unix datagram socket with no peer: isolated).
@@ -25,7 +28,7 @@
 ###############################################################################
 set -Eeuo pipefail
 
-ISO="" UISO="" MODE=uefi WORK="" MEM=4096 TIMEOUT1=5400 TIMEOUT2=5400
+ISO="" UISO="" MODE=uefi WORK="" MEM=4096 TIMEOUT1=5400 TIMEOUT2=5400 PHASE2_ONLY=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --iso) ISO=$(readlink -f "$2"); shift 2 ;;
@@ -33,7 +36,8 @@ while [[ $# -gt 0 ]]; do
         --mode) MODE=$2; shift 2 ;;
         --work) WORK=$2; shift 2 ;;
         --mem) MEM=$2; shift 2 ;;
-        -h|--help) sed -n '2,26p' "$0" | sed 's/^#  \{0,1\}//'; exit 0 ;;
+        --phase2-only) PHASE2_ONLY=1; shift ;;
+        -h|--help) sed -n '2,30p' "$0" | sed 's/^#  \{0,1\}//'; exit 0 ;;
         *) echo "unknown option $1" >&2; exit 2 ;;
     esac
 done
@@ -61,15 +65,20 @@ if [[ ! -s $UDISK ]]; then
     mkfs.vfat -C -F 32 -n UBUNTUISO "$UDISK" "$size_kb" >/dev/null
     mcopy -i "$UDISK" "$UISO" "::/$(basename "$UISO")"
 fi
-rm -f "$WORK/disk.qcow2" "$WORK/vars.fd"
-"$QEMU_IMG" create -f qcow2 "$WORK/disk.qcow2" 20G >/dev/null
+BASE="$WORK/phase1.qcow2" VARS1="$WORK/vars-phase1.fd"
+if (( PHASE2_ONLY )); then
+    [[ -s $BASE && ( $MODE == bios || -s $VARS1 ) ]] || { echo "--phase2-only: no phase-1 disk in $WORK" >&2; exit 2; }
+else
+    rm -f "$WORK/disk.qcow2" "$WORK/vars.fd" "$BASE" "$VARS1"
+    "$QEMU_IMG" create -f qcow2 "$WORK/disk.qcow2" 20G >/dev/null
+fi
 
 datadirs=()
 IFS=: read -r -a _dd <<<"${QEMU_DATADIRS:-}"
 for d in "${_dd[@]}"; do [[ -n $d ]] && datadirs+=(-L "$d"); done
 fw=()
 if [[ $MODE == uefi ]]; then
-    cp "$OVMF_VARS" "$WORK/vars.fd"
+    (( PHASE2_ONLY )) || cp "$OVMF_VARS" "$WORK/vars.fd"
     fw=(-machine "q35,smm=on,accel=kvm" -global "driver=cfi.pflash01,property=secure,value=on"
         -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF_CODE"
         -drive "if=pflash,format=raw,unit=1,file=$WORK/vars.fd")
@@ -101,16 +110,24 @@ run_vm() {   # run_vm LOG TIMEOUT extra-args...
     return "$rc"
 }
 
-echo "== phase 1: unattended install ($MODE, ${MEM} MB)"
-run_vm "$LOGP1" "$TIMEOUT1" \
-    -drive "file=$ISO,media=cdrom,readonly=on,if=none,id=cd0" -device ide-cd,drive=cd0,bootindex=0 \
-    -drive "file=$UDISK,format=raw,if=virtio,readonly=on" || { echo "FAIL: phase 1 did not finish"; exit 1; }
-for stage in early late; do
-    if ! grep -a -q "TUXWALL-TEST: $stage-commands ok" "$LOGP1"; then
-        echo "FAIL: $stage-commands did not report"; exit 1
-    fi
-    echo "$stage-commands ok"
-done
+if (( ! PHASE2_ONLY )); then
+    echo "== phase 1: unattended install ($MODE, ${MEM} MB)"
+    run_vm "$LOGP1" "$TIMEOUT1" \
+        -drive "file=$ISO,media=cdrom,readonly=on,if=none,id=cd0" -device ide-cd,drive=cd0,bootindex=0 \
+        -drive "file=$UDISK,format=raw,if=virtio,readonly=on" || { echo "FAIL: phase 1 did not finish"; exit 1; }
+    for stage in early late; do
+        if ! grep -a -q "TUXWALL-TEST: $stage-commands ok" "$LOGP1"; then
+            echo "FAIL: $stage-commands did not report"; exit 1
+        fi
+        echo "$stage-commands ok"
+    done
+    mv "$WORK/disk.qcow2" "$BASE"
+    [[ $MODE == bios ]] || cp "$WORK/vars.fd" "$VARS1"
+fi
+# phase 2 on a throw-away overlay: the installed disk stays reusable
+rm -f "$WORK/disk.qcow2"
+"$QEMU_IMG" create -f qcow2 -b "$BASE" -F qcow2 "$WORK/disk.qcow2" >/dev/null
+[[ $MODE == bios ]] || cp "$VARS1" "$WORK/vars.fd"
 
 echo "== phase 2: first boot, tuxwall-setup (answers file) + report"
 run_vm "$LOGP2" "$TIMEOUT2" || { echo "FAIL: phase 2 did not finish"; exit 1; }
