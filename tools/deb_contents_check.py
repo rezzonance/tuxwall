@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Built .deb listing: files 3.3.5 moved into the package (and the 3.3.6
-HTTPS helper/units, the 3.3.7 device-monitoring engine/units) are there with
+HTTPS helper/units, the 3.3.7 device-monitoring engine/units, the first-boot wizard) are there with
 the right modes, files it moved out and
 generated per-router files (HTTPS snippet, settings, keys) are absent.
 
@@ -54,6 +54,9 @@ REQUIRED = {
     # device monitoring fixes (3.3.7): Zeek MAC logging, Suricata LAN capture
     "./usr/local/share/tuxwall/scripts/zeek-site-setup.sh": "-rwxr-xr-x",
     "./usr/local/share/tuxwall/scripts/tune-suricata.py": "-rw-r--r--",
+    # first-boot setup wizard (netinstall / VM images; the unit is never enabled by the package)
+    "./usr/local/sbin/tuxwall-setup": "-rwxr-xr-x",
+    "./etc/systemd/system/tuxwall-setup@.service": "-rw-r--r--",
 }
 ABSENT = (
     "./etc/rsyslog.d/45-tuxwall-unbound.conf",   # postinst-owned since 3.3.5
@@ -94,6 +97,7 @@ def main(argv):
                                  "/etc/systemd/system/tuxwall-devicewatch-feeds.service",
                                  "/etc/systemd/system/tuxwall-devicewatch-feeds.timer")),
           "conffiles: the device-monitoring units")
+    check("/etc/systemd/system/tuxwall-setup@.service" in ctl, "conffiles: the first-boot wizard unit")
     check(all(c.startswith("/etc/") for c in ctl) and all("./" + c.lstrip("/") in entries for c in ctl),
           "every conffile is shipped under /etc")
     print("deb_contents_check: {} passed, {} failed".format(PASS, FAIL))

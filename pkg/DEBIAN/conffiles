@@ -19,3 +19,4 @@
 /etc/systemd/system/tuxwall-devicewatch.service
 /etc/systemd/system/tuxwall-devicewatch-feeds.service
 /etc/systemd/system/tuxwall-devicewatch-feeds.timer
+/etc/systemd/system/tuxwall-setup@.service

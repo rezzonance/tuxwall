@@ -1,0 +1,10 @@
+# TEST ONLY (QEMU, image/netinstall/test/run-qemu-test.sh): answers for an
+# unattended tuxwall-setup run. Ports by MAC: the test VM's NICs.
+ROLE=gateway
+WAN_MAC=52:54:00:12:34:01
+WAN_MODE=dhcp
+LAN_MAC=52:54:00:12:34:02
+LAN_SUBNET=192.168.1.1/24
+ADMIN_USER=admin
+ADMIN_PASSWORD_FILE=/etc/tuxwall/test-admin-password
+EXTRA=--no-agent --no-speedtest --no-geoip

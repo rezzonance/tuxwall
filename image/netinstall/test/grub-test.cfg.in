@@ -1,0 +1,18 @@
+# TEST ONLY (build.sh --test): unattended install for the QEMU test. The
+# Ubuntu ISO comes from a second virtual disk (iso-scan, the shipped "low RAM"
+# entry) so the test fits in 4 GB of RAM; the download entry is the same
+# kernel/initrd with iso-url=.
+set timeout=1
+set default=0
+if serial --unit=0 --speed=115200; then
+    terminal_input console serial
+    terminal_output console serial
+fi
+menuentry "TuxWall netinstall @TUXWALL_VERSION@ TEST (unattended, serial console)" {
+    linux  /casper/vmlinuz iso-scan/filename=/@UBUNTU_ISO@ ds=nocloud autoinstall --- console=tty0 console=ttyS0,115200n8
+    initrd /casper/initrd
+}
+menuentry "TEST download variant (iso-url=, needs 6 GB+ RAM)" {
+    linux  /casper/vmlinuz ip=dhcp iso-url=@ISO_URL@ initramfs_options=size=90% ds=nocloud autoinstall --- console=tty0 console=ttyS0,115200n8
+    initrd /casper/initrd
+}

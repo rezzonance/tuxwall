@@ -1,0 +1,32 @@
+# TuxWall first-boot setup wizard on a console (tty1, ttyS0, ...).
+# Shipped by the .deb but NOT enabled by it: only the netinstaller / VM
+# images enable instances (image/common/install-firstboot.sh), and it only
+# runs while /etc/tuxwall/setup-pending exists. tuxwall-setup removes the
+# flag and the instance links when the setup is completed.
+[Unit]
+Description=TuxWall first-boot setup on %I
+Documentation=file:/usr/local/sbin/tuxwall-setup
+ConditionPathExists=/etc/tuxwall/setup-pending
+ConditionPathExists=/dev/%I
+# Starts once the boot is complete (gettys running, cloud-init done), takes
+# the console over from its getty and gives it back afterwards.
+DefaultDependencies=no
+After=multi-user.target cloud-final.service systemd-user-sessions.service
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/systemctl stop getty@%i.service serial-getty@%i.service
+ExecStart=/usr/local/sbin/tuxwall-setup --console %I
+ExecStopPost=-/bin/sh -c 'case "%I" in tty[0-9]*) u=getty@%I.service ;; *) u=serial-getty@%I.service ;; esac; /usr/bin/systemctl --no-block start "$u"'
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/%I
+TTYReset=yes
+TTYVHangup=yes
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

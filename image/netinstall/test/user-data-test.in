@@ -1,0 +1,56 @@
+#cloud-config
+# TEST ONLY - never shipped. build.sh --test puts this seed into a *-TEST.iso
+# for image/netinstall/test/run-qemu-test.sh: the same install as
+# ../user-data.in, but unattended (storage, identity answered; throwaway
+# test password "tuxwall-test-only" for a VM on QEMU user-mode networking),
+# plus the wizard answers file and a report unit for the second boot.
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  source:
+    id: ubuntu-server-minimal
+  identity:
+    hostname: tuxwall-test
+    username: tester
+    password: "$6$tuxwalltest$ogxK7WQidgMnMPUdnX7z4/wT9iHCnU.PvSmhnUkCTABrB65gCv7ucCsb0tKjyjoef0mKINJnrUd8YDap8ltXh0"
+  ssh:
+    install-server: true
+    allow-pw: true
+  storage:
+    layout:
+      name: direct
+      match:
+        size: largest
+  packages:
+    - whiptail
+    - curl
+    - ca-certificates
+    - gnupg
+  shutdown: poweroff
+  early-commands:
+    - |
+      set -eu
+      seed=/run/tuxwall-seed
+      mkdir -p "$seed"
+      if ! mountpoint -q "$seed"; then
+        devs="$(blkid -t LABEL=CIDATA -o device 2>/dev/null || true)"
+        dev="$(printf '%s\n' $devs | grep -E '^/dev/(sr[0-9]+|.*[0-9])$' | head -n1 || true)"
+        [ -n "$dev" ] || dev="$(printf '%s\n' $devs | head -n1)"
+        [ -n "$dev" ] || { echo "TuxWall: installer medium (label CIDATA) not found" >&2; exit 1; }
+        mount -o ro "$dev" "$seed"
+      fi
+      cd "$seed/tuxwall"
+      [ "$(sha256sum SHA256SUMS | cut -d' ' -f1)" = "@PAYLOAD_SHA256@" ] || { echo "TuxWall: payload checksum list does not match" >&2; exit 1; }
+      sha256sum -c --quiet SHA256SUMS
+      sh "$seed/tuxwall/verify-ubuntu-iso.sh" "@UBUNTU_ISO_SHA256@" "@UBUNTU_ISO_SIZE@"
+      echo "TUXWALL-TEST: early-commands ok" >/dev/console
+  late-commands:
+    - sh /run/tuxwall-seed/tuxwall/install-firstboot.sh --payload /run/tuxwall-seed/tuxwall --origin netinstall-test --consoles-from-cmdline --answers /run/tuxwall-seed/tuxwall/setup-answers.test /target
+    - sh -c 'printf %s tuxwall-test-only >/target/etc/tuxwall/test-admin-password && chmod 600 /target/etc/tuxwall/test-admin-password'
+    - install -m 0755 /run/tuxwall-seed/tuxwall/test-report.sh /target/usr/local/sbin/tuxwall-test-report
+    - sh -c 'printf "[Unit]\nDescription=TuxWall netinstall test report\nAfter=multi-user.target\nDefaultDependencies=no\n[Service]\nType=simple\nExecStart=/usr/local/sbin/tuxwall-test-report\n[Install]\nWantedBy=multi-user.target\n" >/target/etc/systemd/system/tuxwall-test-report.service'
+    - ln -sf /etc/systemd/system/tuxwall-test-report.service /target/etc/systemd/system/multi-user.target.wants/tuxwall-test-report.service
+    - "sh -c 'echo TUXWALL-TEST: late-commands ok >/dev/console'"
+    - umount /run/tuxwall-seed || true

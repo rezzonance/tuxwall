@@ -1,0 +1,56 @@
+#cloud-config
+# TuxWall netinstall @TUXWALL_VERSION@ - autoinstall answers for Ubuntu's own
+# installer (subiquity, Ubuntu @UBUNTU_VERSION@ LTS). Rendered by
+# image/netinstall/build.sh; read by cloud-init from this ISO (volume label
+# CIDATA, kernel option ds=nocloud).
+#
+# Interactive on purpose: the user picks the disk (storage), the account
+# (identity) and SSH keys; nothing is wiped without the installer's own
+# disk choice + "Confirm destructive action" dialog. TuxWall's network setup
+# is NOT done here: the first-boot wizard (tuxwall-setup) asks for the ports.
+autoinstall:
+  version: 1
+  interactive-sections:
+    - locale
+    - keyboard
+    - storage
+    - identity
+    - ssh
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  source:
+    id: ubuntu-server-minimal
+  ssh:
+    install-server: true
+    allow-pw: true
+  packages:
+    - whiptail
+    - curl
+    - ca-certificates
+    - gnupg
+  early-commands:
+    # 1. Mount this ISO (read-only, kept mounted: the installer then hides the
+    #    USB stick from the disk list) and check the TuxWall payload.
+    # 2. Check the Ubuntu ISO the installer runs from against the pinned
+    #    SHA-256 (also verified with Ubuntu's signed SHA256SUMS at build time).
+    - |
+      set -eu
+      seed=/run/tuxwall-seed
+      mkdir -p "$seed"
+      if ! mountpoint -q "$seed"; then
+        devs="$(blkid -t LABEL=CIDATA -o device 2>/dev/null || true)"
+        dev="$(printf '%s\n' $devs | grep -E '^/dev/(sr[0-9]+|.*[0-9])$' | head -n1 || true)"
+        [ -n "$dev" ] || dev="$(printf '%s\n' $devs | head -n1)"
+        [ -n "$dev" ] || { echo "TuxWall: installer medium (label CIDATA) not found" >&2; exit 1; }
+        mount -o ro "$dev" "$seed"
+      fi
+      cd "$seed/tuxwall"
+      [ "$(sha256sum SHA256SUMS | cut -d' ' -f1)" = "@PAYLOAD_SHA256@" ] || { echo "TuxWall: payload checksum list does not match" >&2; exit 1; }
+      sha256sum -c --quiet SHA256SUMS
+      sh "$seed/tuxwall/verify-ubuntu-iso.sh" "@UBUNTU_ISO_SHA256@" "@UBUNTU_ISO_SIZE@"
+  late-commands:
+    # TuxWall APT repository (key fingerprint @TUXWALL_APT_KEY_FPR@ checked at
+    # build time), tuxwall-setup + its first-boot units, the setup-pending flag.
+    - sh /run/tuxwall-seed/tuxwall/install-firstboot.sh --payload /run/tuxwall-seed/tuxwall --origin netinstall --consoles-from-cmdline /target
+    - umount /run/tuxwall-seed || true
