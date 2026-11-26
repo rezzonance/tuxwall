@@ -33,6 +33,8 @@ The base is stock Ubuntu. `apt`, `systemd`, `journalctl` and every tool you alre
 - [How it fits together](#how-it-fits-together)
 - [Requirements](#requirements)
 - [Installation](#installation)
+- [Install from USB (netinstaller)](#install-from-usb-netinstaller)
+- [Run as a VM](#run-as-a-vm)
 - [First login](#first-login)
 - [Configuration](#configuration)
 - [HTTPS for the dashboard](#https-for-the-dashboard)
@@ -141,10 +143,12 @@ The dashboard is served by nginx from `/var/www/html`; the Python API runs as `t
 
 ## Requirements
 
-- **Ubuntu 24.04 LTS or newer** on x86_64. Ubuntu **26.04 LTS** is the current recommendation. A stock server install is enough; no custom ISO is required.
+- **Ubuntu 24.04 LTS or newer** on x86_64. Ubuntu **26.04 LTS** is the current recommendation. A stock server install is enough; the [netinstaller](#install-from-usb-netinstaller) and the [VM image](#run-as-a-vm) are optional shortcuts that set up exactly that (stock Ubuntu + TuxWall from the signed APT repository).
 - **Two network interfaces:** one for **WAN** (modem/ONT) and one for **LAN** (switch/access points). A VM with two virtual NICs also works for testing.
 - **Root or sudo access** and an internet connection during installation.
 - The machine should be your network's gateway. For a typical setup, put the ISP modem in bridge mode and give the WAN interface a DHCP or static address.
+
+**Hardware:** x86_64 (amd64), BIOS or UEFI (Secure Boot can stay on), 2 wired network ports, **16 GB+ disk**, **4 GB RAM** recommended (2 GB runs the gateway without the heavier extras). The netinstaller's default *download* entry keeps the 2.9 GB Ubuntu installer image in RAM and needs **6 GB+ RAM** (4 GB fails, 5 GB is the bare minimum); on smaller boxes use one of its *low RAM* entries.
 
 TuxWall is designed for a dedicated gateway. Running it on your desktop or on a machine that is not the default gateway will work as a dashboard, but routing, DHCP and DNS features will not apply to your network as intended.
 
@@ -157,6 +161,8 @@ curl -fsSL https://tuxwall.org/downloads/tuxwall-install.sh -o tuxwall-install.s
 sudo bash tuxwall-install.sh --dry-run   # see the full plan first
 sudo bash tuxwall-install.sh             # guided install, review screen included
 ```
+
+No Ubuntu on the box yet? Use the [netinstaller](#install-from-usb-netinstaller) (USB stick) or the [VM image](#run-as-a-vm) instead: both install stock Ubuntu 26.04 LTS and then ask for the WAN/LAN ports on the first boot.
 
 From a repository clone, run `sudo bash tuxwall-install.sh` instead (it defaults to building the package from your checkout). For headless or fresh-appliance installs, `sudo bash tuxwall-install.sh --console` stages a one-time first-boot wizard on the console. Unattended installs pass `--yes` with `--wan`/`--lan` and the options from `--help`.
 
@@ -227,6 +233,111 @@ Plain `http://` redirects there. Until your device trusts the router's own certi
 ### Optional configuration
 
 The dashboard covers day-to-day changes. For a complete reference of every config file TuxWall touches — netplan, sysctl, UFW, Kea, Unbound, radvd, WireGuard, nginx, systemd and the opencode agent — see **[tuxwall.org/configs.html](https://tuxwall.org/configs.html)**. The site also includes a gateway config generator if you prefer to build the files yourself.
+
+## Install from USB (netinstaller)
+
+`tuxwall-netinstall-<version>-amd64.iso` (~130 MB) turns a spare box into a TuxWall gateway without installing Ubuntu by hand. It is **Ubuntu's own installer**: the boot chain (Ubuntu's signed shim, GRUB and kernel) is taken unchanged from the official Ubuntu 26.04.1 live-server ISO, which it downloads from releases.ubuntu.com over HTTPS (or finds on a second stick) and checks against a pinned SHA-256 before anything is installed. TuxWall is set up on the first boot from the signed APT repository. Details: [image/netinstall/README.md](image/netinstall/README.md).
+
+**1. Download and verify** `tuxwall-netinstall-<version>-amd64.iso`, `SHA256SUMS` and `SHA256SUMS.asc` from [Releases](https://github.com/rezzonance/tuxwall/releases):
+
+```bash
+curl -fsSL https://rezzonance.github.io/tuxwall/public.asc | gpg --import   # fingerprint 5D79 B908 2DCA EB9C CB73 1382 F5D8 2357 16BD BDD1
+gpg --verify SHA256SUMS.asc SHA256SUMS                                       # "Good signature" from that key
+sha256sum -c --ignore-missing SHA256SUMS                                     # "tuxwall-netinstall-...iso: OK"
+```
+
+On Windows, `certutil -hashfile tuxwall-netinstall-<version>-amd64.iso SHA256` prints the hash to compare with `SHA256SUMS`.
+
+**2. Write it to a USB stick** (everything on the stick is erased): [balenaEtcher](https://etcher.balena.io/) (any OS), [Rufus](https://rufus.ie/) (Windows - choose *Write in DD Image mode* when asked), or on Linux:
+
+```bash
+lsblk                                   # find the stick, e.g. /dev/sdX (not a partition like /dev/sdX1)
+sudo dd if=tuxwall-netinstall-<version>-amd64.iso of=/dev/sdX bs=4M conv=fsync status=progress
+```
+
+**3. Boot the box from the stick** (boot menu key, often F12, F11, F8 or Esc). BIOS and UEFI both work, and **Secure Boot can stay on**. Plug the WAN port into your modem/router first: the default entry needs internet by DHCP. The menu:
+
+| Entry | Use it when |
+|---|---|
+| **Install TuxWall (downloads Ubuntu 26.04.1 into RAM: needs 6 GB+ RAM)** | Default. Downloads the 2.9 GB Ubuntu installer over HTTPS into RAM. |
+| Install TuxWall - Ubuntu ISO written to a second USB stick (low RAM) | Less than 6 GB RAM: write `ubuntu-26.04.1-live-server-amd64.iso` from [releases.ubuntu.com](https://releases.ubuntu.com/26.04.1/) to a second stick (same tools as above) and plug both in. Needs only normal installer RAM (about 4 GB). |
+| Install TuxWall - Ubuntu ISO file on another USB stick / disk (low RAM) | Same, but with the `.iso` **file** copied to the top folder of any other stick or disk (exFAT, FAT32 or ext4). |
+| Install TuxWall - download from old-releases.ubuntu.com | The first entry fails because Ubuntu has published a newer point release. |
+| Serial console (ttyS0, 115200 baud) ... | Headless boxes with a serial console. |
+| Help: which entry? | A short version of this table on the screen. |
+
+The low-RAM entries need exactly that Ubuntu ISO (its SHA-256 is checked; a different one stops the install with a message).
+
+**4. Install Ubuntu.** Ubuntu's installer asks for the language, keyboard, **disk**, your user account and SSH. **It always asks before using a disk:** it lists every disk with size and model (the TuxWall stick is hidden), and nothing is written until you confirm its *Confirm destructive action* dialog. No password is preset - you choose it. After the install, remove the stick and reboot.
+
+**5. First boot: TuxWall setup.** The screen (and the serial console) shows *Press Enter to start the setup*. It asks for the **WAN port** (or *Detect*: plug the modem cable in when asked), DHCP / static / keep, the **LAN port** and network (192.168.1.1/24 unless that collides with the WAN), and optionally the dashboard administrator, then installs TuxWall from the signed APT repository (a few minutes). At the end it shows the **dashboard URL and the router CA's SHA-256 fingerprint**; both stay above the console login prompt. Type `skip` to get a normal login instead; run the setup again any time with `sudo tuxwall-setup`.
+
+## Run as a VM
+
+`tuxwall-vm-<version>-amd64.qcow2` (~820 MB, 16 GB virtual disk) is the **official Ubuntu 26.04 LTS cloud image**, signature-verified and otherwise unchanged, plus the TuxWall first-boot setup (`tuxwall-setup`, `tuxwall-install.sh` and the signed APT source). TuxWall itself is installed by that setup on the first boot from the APT repository, so the image stays small and you always get the current release. Verify it with `SHA256SUMS` / `SHA256SUMS.asc` like the netinstaller above.
+
+The VM needs: x86_64 KVM (Proxmox VE, libvirt, plain QEMU), 2 vCPUs, 4 GB RAM, UEFI (Secure Boot works) or BIOS, and **two virtual NICs: the first is the WAN, the second the LAN**. Like every Ubuntu cloud image it has **no default login**: give it a user and SSH key through cloud-init (Proxmox's cloud-init drive or a NoCloud seed). Without a network config, cloud-init uses DHCP on the first NIC; leave the LAN NIC unconfigured - the setup does it.
+
+**Proxmox VE** (on the Proxmox host, as root; adjust the VM id, storage and bridges):
+
+```bash
+wget https://github.com/rezzonance/tuxwall/releases/download/v<version>/tuxwall-vm-<version>-amd64.qcow2
+qm create 200 --name tuxwall --ostype l26 --machine q35 --bios ovmf --cpu host --cores 2 --memory 4096 \
+  --efidisk0 local-lvm:1,efitype=4m,pre-enrolled-keys=1 --scsihw virtio-scsi-single \
+  --scsi0 local-lvm:0,import-from=/root/tuxwall-vm-<version>-amd64.qcow2,discard=on --boot order=scsi0 \
+  --net0 virtio,bridge=vmbr0 --net1 virtio,bridge=vmbr1 --serial0 socket --vga std \
+  --ide2 local-lvm:cloudinit --ciuser admin --sshkeys /root/.ssh/id_ed25519.pub --ipconfig0 ip=dhcp
+qm start 200
+```
+
+`vmbr0` is the bridge towards your modem (WAN), `vmbr1` the bridge with your LAN devices. In the web UI the same works with *Datacenter → Storage → (a directory storage) → Content: Import*, uploading the `.qcow2` there and choosing it as the *Import* source of the VM's disk; set *User*, *SSH public key* and *IP Config (net0): DHCP* on the VM's *Cloud-Init* tab and leave net1 unset. Then open the VM's console (noVNC, or xterm.js on the serial port) and press Enter for the TuxWall setup. With Proxmox's *Upgrade packages* cloud-init option (on by default) the setup appears a few minutes later, once the upgrade is done. The setup keeps the NIC names it sees (Proxmox's cloud-init config would rename them at the next boot) and turns cloud-init's network handling off, so later edits on the *Cloud-Init* tab no longer touch the network.
+
+**libvirt / plain QEMU** with a NoCloud seed (`cloud-localds` is in the `cloud-image-utils` package):
+
+```bash
+cat >user-data <<'EOF'
+#cloud-config
+users:
+  - name: admin
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys: ["ssh-ed25519 AAAA... you@example"]
+EOF
+printf 'instance-id: tuxwall-1\nlocal-hostname: tuxwall\n' >meta-data
+cloud-localds seed.iso user-data meta-data
+virt-install --name tuxwall --memory 4096 --vcpus 2 --boot uefi --osinfo linux2022 --import \
+  --disk tuxwall-vm-<version>-amd64.qcow2,bus=virtio --disk seed.iso,device=cdrom \
+  --network bridge=br-wan,model=virtio --network bridge=br-lan,model=virtio
+```
+
+**Headless (no console):** put the setup's answers into the cloud-init user-data; the first boot then runs the setup unattended (also when the file appears later, while the console waits) and shows the result on the console and its login screen:
+
+```yaml
+#cloud-config
+users:
+  - name: admin
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys: ["ssh-ed25519 AAAA... you@example"]
+write_files:
+  - path: /etc/tuxwall/setup-answers
+    permissions: "0600"
+    content: |
+      # ports by MAC address (or WAN=ens18 / LAN=ens19)
+      WAN_MAC=52:54:00:aa:bb:01
+      WAN_MODE=dhcp
+      LAN_MAC=52:54:00:aa:bb:02
+      LAN_SUBNET=192.168.1.1/24
+      ADMIN_USER=admin
+      ADMIN_PASSWORD_FILE=/etc/tuxwall/admin-password
+  - path: /etc/tuxwall/admin-password
+    permissions: "0600"
+    content: "use-a-long-random-password"
+```
+
+Answer keys: `WAN`/`WAN_MAC`, `WAN_MODE` (`dhcp`, `static` with `WAN_ADDRESS=203.0.113.10/24`, `WAN_GATEWAY`, `WAN_DNS=9.9.9.9,1.1.1.1`, or `keep`), `LAN`/`LAN_MAC`, `LAN_SUBNET`, `ADMIN_USER` + `ADMIN_PASSWORD_FILE` (deleted after use), `ROLE=dashboard` (no routing) and `EXTRA` (`--no-crowdsec --no-agent --no-speedtest --no-geoip --ssh-wan`). Check a file with `tuxwall-setup --answers FILE --print-command`. cloud-init keeps its own copy of the user-data (root-only, under `/var/lib/cloud/`), so change the administrator password in the dashboard afterwards. On Proxmox, custom user-data goes in with `qm set 200 --cicustom user=local:snippets/tuxwall-user.yaml` (a storage with the *Snippets* content type); it replaces the *Cloud-Init* tab's user and key, so put the user in that file.
 
 ## First login
 
@@ -448,6 +559,22 @@ ls -lh /var/lib/kea/kea-leases4.csv
 sudo cscli decisions list
 sudo cscli decisions delete --ip <address>
 ```
+
+**Netinstaller: BusyBox `(initramfs)` prompt, "No space left on device" / "Unable to find a live file system on the network"**
+
+The *download* entry keeps the 2.9 GB Ubuntu installer in RAM: with less than ~6 GB RAM the download fails at about 80 %. Power off and boot one of the *low RAM* entries ([Install from USB](#install-from-usb-netinstaller), step 3). The same message without "No space left" means the download did not start: check the WAN cable and that the network gives out addresses by DHCP. If releases.ubuntu.com no longer has 26.04.1 (Ubuntu moved on to a newer point release), use the *old-releases.ubuntu.com* entry.
+
+**Netinstaller: "the Ubuntu ISO behind /cdrom ... has SHA-256 ... Install stopped"**
+
+The Ubuntu ISO on the second stick or disk is not the exact `ubuntu-26.04.1-live-server-amd64.iso` the netinstaller was built for (or it is damaged). Download it again from releases.ubuntu.com and check it with Ubuntu's `SHA256SUMS`.
+
+**First-boot setup: skipped, wrong port, or no internet**
+
+Run `sudo tuxwall-setup` from the console or over SSH from the LAN; it can be repeated and shows the ports with link state, MAC address and driver (`sudo tuxwall-setup --list-nics`). Logs: `/var/log/tuxwall-setup.log` and `/var/log/tuxwall-install.log`.
+
+**VM image: no login prompt works**
+
+The image has no default password: attach a cloud-init drive (Proxmox: *Cloud-Init* tab with a user and SSH key) or a NoCloud seed with a user, then boot again.
 
 **A firewall change locked you out**
 

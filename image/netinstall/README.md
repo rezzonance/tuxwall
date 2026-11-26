@@ -13,10 +13,16 @@ live-server ISO; TuxWall comes from its signed APT repository.
      `ubuntu-26.04.1-live-server-amd64.iso` from releases.ubuntu.com over HTTPS
      (`iso-url=`) **into RAM**. Needs DHCP internet on one port and **6 GB+ RAM**
      (the 2.9 GB ISO stays in RAM during the install).
+   - *Ubuntu ISO written to a second USB stick (low RAM)* - the same ISO written
+     (dd/Rufus/Etcher) to another stick; casper's own device scan finds it (no
+     `iso-url=`/`iso-scan`), normal installer RAM. When casper mounts the
+     stick's ISO9660 partition, `verify-ubuntu-iso.sh` hashes the whole disk.
    - *Ubuntu ISO file on another USB stick / disk (low RAM)* - copy the same ISO
      file to the root of any other stick/partition (FAT32, exFAT, ext4); casper
      finds it (`iso-scan/filename=`) and the install needs no more RAM than a
      normal Ubuntu server install (~2 GB+; tested with 4 GB).
+   - *Help* - prints which entry to use (RAM, "No space left on device" +
+     BusyBox prompt = too little RAM for the download entry); Esc returns.
    - *download from old-releases.ubuntu.com* - when Ubuntu has published a newer
      point release, the pinned one moves there.
    - Serial-console variants (ttyS0, 115200 baud) for headless boxes.
@@ -41,7 +47,10 @@ live-server ISO; TuxWall comes from its signed APT repository.
    unless that collides with the WAN), optionally the dashboard admin, review,
    then it runs `tuxwall-install.sh --source apt --role gateway --wan … --lan …
    --wan-mode … --subnet … -y` and shows the dashboard URL, the router CA's
-   SHA-256 fingerprint and how to log in. Re-run any time: `sudo tuxwall-setup`.
+   SHA-256 fingerprint and how to log in (also kept on the console login
+   screen: `/etc/issue.d/zz-tuxwall.issue`). Re-run any time: `sudo tuxwall-setup`.
+   Unattended: an answers file at `/etc/tuxwall/setup-answers` is run by the
+   first-boot units without asking (see the main README, "Run as a VM").
 
 ## Build
 
