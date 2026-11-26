@@ -31,7 +31,7 @@ sed 's/^/TUXWALL-TEST-LOG /' /var/log/tuxwall-test-lan-gate.log 2>/dev/null | em
 check setup-done test -e /etc/tuxwall/setup-done
 check pending-cleared test ! -e /etc/tuxwall/setup-pending
 check firstboot-units-disabled sh -c '! ls /etc/systemd/system/multi-user.target.wants/tuxwall-setup@* 2>/dev/null'
-for s in nginx tuxwall unbound kea-dhcp4-server radvd ssh; do
+for s in nginx tuxwall unbound kea-dhcp4-server radvd ssh crowdsec crowdsec-firewall-bouncer; do
     check "active-$s" systemctl is-active --quiet "$s"
 done
 # LAN = 172.31.250.1/24 (setup-answers.test). curl binds to that address, so
