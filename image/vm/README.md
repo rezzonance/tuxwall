@@ -19,6 +19,10 @@ needs anyway.
 Usage (Proxmox, libvirt, cloud-init, headless answers): main README,
 "Run as a VM".
 
+Only a qcow2 is published (a raw.xz of the 16 GiB disk would cost minutes of
+xz per release for no gain); for a raw disk: `qemu-img convert -O raw
+tuxwall-vm-<version>-amd64.qcow2 tuxwall-vm.raw`.
+
 ## Build
 
 ```sh
