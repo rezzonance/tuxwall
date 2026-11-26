@@ -871,6 +871,7 @@ console_gate() {   # first-boot unit: wait for Enter on this console
             if flock -n 8; then
                 [[ -e $PENDING ]] || exit 0
                 ANSWERS=$AUTO_ANSWERS AUTO_RUN=1
+                [[ $CONSOLE_TTY == tty[0-9]* ]] && printf '\033[H\033[2J'
                 printf '\n  TuxWall setup: running unattended with %s\n\n' "$AUTO_ANSWERS"
                 return 0
             fi
