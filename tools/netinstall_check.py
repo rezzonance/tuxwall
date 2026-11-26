@@ -31,7 +31,8 @@ UNIT = os.path.join(ROOT, "pkg", "etc", "systemd", "system", "tuxwall-setup@.ser
 FIRSTBOOT = os.path.join(ROOT, "image", "common", "install-firstboot.sh")
 INSTALLER = os.path.join(ROOT, "tuxwall-install.sh")
 SHELL_SCRIPTS = (WIZ, FIRSTBOOT, os.path.join(NI, "build.sh"), os.path.join(NI, "verify-ubuntu-iso.sh"),
-                 os.path.join(NI, "test", "run-qemu-test.sh"), os.path.join(NI, "test", "test-report.sh"))
+                 os.path.join(NI, "test", "run-qemu-test.sh"), os.path.join(NI, "test", "test-report.sh"),
+                 os.path.join(NI, "test", "lan-gate.sh"))
 
 PASS = FAIL = 0
 
@@ -158,9 +159,33 @@ def check_seed(p):
         for k in ("early-commands", "late-commands"):
             check(all(isinstance(c, str) for c in ai.get(k) or []), "test seed %s are strings (subiquity schema)" % k)
         check(any("--answers" in str(c) for c in ai.get("late-commands") or []), "test seed passes the answers file")
+        late_t = "\n".join(str(c) for c in ai.get("late-commands") or [])
+        check("lan-gate.sh /target/usr/local/sbin/tuxwall-test-lan-gate" in late_t
+              and "multi-user.target.wants/tuxwall-test-lan-gate.service" in late_t,
+              "test seed installs + enables the LAN isolation gate")
+        dropin = re.search(r"printf \"(\[Unit\][^\"]*)\" >/target/etc/systemd/system/tuxwall-setup@\.service\.d/[^ ']+\.conf", late_t)
+        check(dropin is not None and "Requires=tuxwall-test-lan-gate.service" in dropin.group(1)
+              and "After=tuxwall-test-lan-gate.service" in dropin.group(1)
+              and "ExecStartPre=/usr/bin/test -e /run/tuxwall-test/lan-isolated" in dropin.group(1),
+              "test wizard requires the gate and its lan-isolated marker (fail-closed)")
     build = read(os.path.join(NI, "build.sh"))
     check(re.search(r'if \(\( TEST \)\); then\s+render "\$HERE/test/user-data-test.in"', build) is not None,
           "build.sh uses the test seed only with --test")
+    m = re.search(r'if \(\( TEST \)\); then\n((?:    [^\n]*\n)+)fi', build)
+    check(m is not None and "lan-gate.sh" in m.group(1) and "lan-gate.service" in m.group(1)
+          and build.count("lan-gate") == m.group(1).count("lan-gate"), "build.sh adds the LAN gate to the TEST payload only")
+    gate = read(os.path.join(NI, "test", "lan-gate.sh"))
+    tail = gate.rsplit("\n", 4)
+    check(gate.count('"$RUN/lan-isolated"') == 2 and 'rm -f "$RUN/lan-isolated"' in gate
+          and '>"$RUN/lan-isolated"' in "".join(tail[-3:]),
+          "LAN gate: stale marker removed first, marker written only as the last step")
+    check('[ "$n" = 0 ] || fail' in gate and '[ "$rx0" = "$rx1" ] || fail' in gate and "|| fail \"capture failed" in gate,
+          "LAN gate: any received frame, moving RX counter or a failed capture blocks the wizard")
+    check("PACKET_OUTGOING" in gate and 'ip link set dev "$dev" down' in gate and "scope global" in gate,
+          "LAN gate: ignores only its own frames, takes the NIC down on failure, refuses a pre-addressed NIC")
+    unit = read(os.path.join(NI, "test", "lan-gate.service"))
+    check("Type=oneshot" in unit and "RemainAfterExit=yes" in unit and "/usr/local/sbin/tuxwall-test-lan-gate" in unit,
+          "LAN gate unit: oneshot, stays active for the wizard's Requires=")
     check('NAME+="-TEST"' in build, "test ISO is named *-TEST")
     check("-TEST.iso" in read(os.path.join(NI, "test", "run-qemu-test.sh")), "QEMU test refuses a non-TEST ISO")
     check("-volid CIDATA" in build and "-boot_image any replay" in build, "ISO: Ubuntu boot setup replayed, NoCloud label")
@@ -199,6 +224,7 @@ def check_grub(p):
                     % re.escape(p["UBUNTU_ISO"]), tg) is not None,
           "test GRUB picks the entry from where the Ubuntu ISO is (file / CD / download)")
     rep = read(os.path.join(NI, "test", "test-report.sh"))
+    check("check lan-isolated test -e /run/tuxwall-test/lan-isolated" in rep, "test report: LAN gate result")
     check(re.search(r"guest_agent\.0 \] && exit 0\s+sleep 3\s+systemctl poweroff", rep) is not None,
           "test report keeps the VM up when a guest agent reads it (Proxmox), powers off otherwise (QEMU driver)")
 

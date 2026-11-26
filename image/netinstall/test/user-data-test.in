@@ -4,7 +4,8 @@
 # ../user-data.in, but unattended (storage, identity answered; throwaway
 # test password "tuxwall-test-only" for a VM on QEMU user-mode networking),
 # plus the wizard answers file and a report unit for the second boot, and the
-# QEMU guest agent (the Proxmox lab reads the report through it).
+# QEMU guest agent (the Proxmox lab reads the report through it), and the
+# LAN isolation gate the wizard waits for (lan-gate.sh).
 autoinstall:
   version: 1
   locale: en_US.UTF-8
@@ -54,5 +55,9 @@ autoinstall:
     - install -m 0755 /run/tuxwall-seed/tuxwall/test-report.sh /target/usr/local/sbin/tuxwall-test-report
     - sh -c 'printf "[Unit]\nDescription=TuxWall netinstall test report\nAfter=multi-user.target\nDefaultDependencies=no\n[Service]\nType=simple\nExecStart=/usr/local/sbin/tuxwall-test-report\n[Install]\nWantedBy=multi-user.target\n" >/target/etc/systemd/system/tuxwall-test-report.service'
     - ln -sf /etc/systemd/system/tuxwall-test-report.service /target/etc/systemd/system/multi-user.target.wants/tuxwall-test-report.service
+    - install -m 0755 /run/tuxwall-seed/tuxwall/lan-gate.sh /target/usr/local/sbin/tuxwall-test-lan-gate
+    - install -m 0644 /run/tuxwall-seed/tuxwall/lan-gate.service /target/etc/systemd/system/tuxwall-test-lan-gate.service
+    - ln -sf /etc/systemd/system/tuxwall-test-lan-gate.service /target/etc/systemd/system/multi-user.target.wants/tuxwall-test-lan-gate.service
+    - sh -c 'printf "[Unit]\nRequires=tuxwall-test-lan-gate.service\nAfter=tuxwall-test-lan-gate.service\n[Service]\nExecStartPre=/usr/bin/test -e /run/tuxwall-test/lan-isolated\n" >/target/etc/systemd/system/tuxwall-setup@.service.d/60-test-lan-gate.conf'
     - "sh -c 'echo TUXWALL-TEST: late-commands ok >/dev/console'"
     - umount /run/tuxwall-seed || true

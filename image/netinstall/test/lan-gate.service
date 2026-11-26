@@ -1,0 +1,15 @@
+# TEST ONLY (test seed): LAN isolation gate, see tuxwall-test-lan-gate.
+# tuxwall-setup@ requires it (drop-in 60-test-lan-gate.conf).
+[Unit]
+Description=TuxWall TEST: LAN isolation gate before the wizard
+ConditionPathExists=/etc/tuxwall/setup-pending
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/tuxwall-test-lan-gate
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

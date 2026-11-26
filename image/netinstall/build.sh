@@ -134,6 +134,8 @@ install -m 0755 "$HERE/verify-ubuntu-iso.sh" "$P/verify-ubuntu-iso.sh"
 if (( TEST )); then
     install -m 0600 "$HERE/test/setup-answers.test" "$P/setup-answers.test"
     install -m 0755 "$HERE/test/test-report.sh" "$P/test-report.sh"
+    install -m 0755 "$HERE/test/lan-gate.sh" "$P/lan-gate.sh"
+    install -m 0644 "$HERE/test/lan-gate.service" "$P/lan-gate.service"
 fi
 printf 'TuxWall %s netinstall payload (Ubuntu %s)\n' "$VERSION" "${PIN[UBUNTU_VERSION]}" >"$P/VERSION"
 (cd "$P" && find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort | xargs sha256sum >"$WORK/payload.sums" && mv "$WORK/payload.sums" SHA256SUMS)

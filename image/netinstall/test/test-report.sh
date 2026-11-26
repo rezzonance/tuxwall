@@ -26,6 +26,8 @@ check() {   # check NAME cmd...
     if "$@" >/dev/null 2>&1; then say "TUXWALL-TEST-CHECK $n PASS"; else say "TUXWALL-TEST-CHECK $n FAIL"; fi
 }
 say "TUXWALL-TEST-REPORT-BEGIN"
+check lan-isolated test -e /run/tuxwall-test/lan-isolated
+sed 's/^/TUXWALL-TEST-LOG /' /var/log/tuxwall-test-lan-gate.log 2>/dev/null | emit
 check setup-done test -e /etc/tuxwall/setup-done
 check pending-cleared test ! -e /etc/tuxwall/setup-pending
 check firstboot-units-disabled sh -c '! ls /etc/systemd/system/multi-user.target.wants/tuxwall-setup@* 2>/dev/null'
