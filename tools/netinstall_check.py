@@ -18,6 +18,7 @@
 """
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -415,6 +416,60 @@ def check_secrets():
     check(os.path.isfile(gi) and "out/" in read(gi), "build output ignored by git")
 
 
+INSTALLER_HARNESS = r'''
+set +Eeu; trap - ERR
+LOG=$TD/install.log; : >"$LOG"
+# run_long: maintainer scripts must not inherit the console's TERM
+TERM=vt220 run_long "env" sh -c 'echo "ENV TERM=$TERM NO_COLOR=$NO_COLOR"'
+# step_crowdsec: every install fails and leaves a half-configured bouncer
+curl() { return 1; }
+gpg() { cat >/dev/null; return 1; }
+sleep() { :; }
+bouncer_nft_usable() { return 1; }
+configure_bouncer() { echo CONFIGURED >>"$TD/calls"; }
+dpkg-query() {
+    printf 'crowdsec ii \ncrowdsec-firewall-bouncer-iptables iF \ncrowdsec-firewall-bouncer-nftables un \n'
+    printf 'crowdsec-firewall-bouncer rc \n'
+}
+apt-get() { echo "APT TERM=$TERM $*" >>"$TD/calls"; [[ $1 == purge ]]; }
+PATH=$TD/bin
+step_crowdsec
+echo "RC $?" >>"$TD/calls"
+'''
+
+
+def check_installer_apt():
+    """tuxwall-install.sh: apt runs with TERM=dumb (the bouncer postinst died
+    on the serial console's TERM=vt220) and a failed CrowdSec attempt purges
+    its half-configured packages instead of leaving dpkg broken."""
+    with tempfile.TemporaryDirectory() as td:
+        os.mkdir(os.path.join(td, "bin"))
+        for tool in ("grep", "cat", "date", "sh", "dirname", "readlink", "basename"):
+            src = shutil.which(tool)
+            if src:
+                os.symlink(src, os.path.join(td, "bin", tool))
+        script = "source %s\n%s" % (shlex.quote(INSTALLER), INSTALLER_HARNESS)
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60,
+                           env=dict(os.environ, TD=td))
+        log = read(os.path.join(td, "install.log"))
+        calls = read(os.path.join(td, "calls")) if os.path.exists(os.path.join(td, "calls")) else ""
+        check("ENV TERM=dumb NO_COLOR=1" in log, "run_long: TERM=dumb NO_COLOR=1 for the command\n" + log[-800:])
+        installs = [c for c in calls.splitlines() if c.startswith("APT ") and " install " in c]
+        purges = [c for c in calls.splitlines() if c.startswith("APT ") and " purge " in c]
+        check(installs and all(c.startswith("APT TERM=dumb ") for c in installs),
+              "apt-get install runs with TERM=dumb\n" + calls)
+        check(purges and all(c.endswith(" crowdsec-firewall-bouncer-iptables") for c in purges),
+              "half-configured bouncer (only) purged\n" + calls)
+        order = [("purge" if " purge " in c else "install") for c in calls.splitlines() if c.startswith("APT ")]
+        check(order[:1] == ["install"] and order[-1] == "purge" and "purge" in order[1:-1]
+              and any(c.endswith("install -y -q --no-install-recommends -o DPkg::Lock::Timeout=600 "
+                                 "-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "
+                                 "crowdsec crowdsec-firewall-bouncer") for c in installs),
+              "purge between attempts, Ubuntu archive fallback tried, dpkg left clean\n" + calls)
+        check("CONFIGURED" not in calls and "RC 0" in calls, "CrowdSec failure is a warning (rc 0)\n" + calls
+              + r.stderr[-800:])
+
+
 def check_shell():
     for s in SHELL_SCRIPTS:
         shell = "sh" if read(s).startswith("#!/bin/sh") else "bash"
@@ -435,6 +490,7 @@ def main():
     check_firstboot()
     check_wizard()
     check_unit_and_package()
+    check_installer_apt()
     check_secrets()
     check_shell()
     print("netinstall_check: {} passed, {} failed".format(PASS, FAIL))

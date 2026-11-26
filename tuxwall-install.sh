@@ -129,14 +129,18 @@ step() {
 q() { "$@" >>"$LOG" 2>&1; }
 
 # Run a long command with a spinner and elapsed time; output goes to the log.
+# TERM=dumb NO_COLOR=1: the output is a log file, and apt hands maintainer
+# scripts a pty with our TERM. On a serial console (TERM=vt220, no colours)
+# CrowdSec's bouncer postinst (set -e; FG_RED=$(tput setaf 1)) dies silently
+# with exit 1, which left dpkg broken for every later apt-get.
 run_long() {
     local msg="$1"; shift
     log "RUN  $*"
     if [[ ! -t 1 ]]; then
-        "$@" >>"$LOG" 2>&1
+        TERM=dumb NO_COLOR=1 "$@" >>"$LOG" 2>&1
         return
     fi
-    ( trap - ERR; "$@" ) >>"$LOG" 2>&1 &
+    ( trap - ERR; TERM=dumb NO_COLOR=1 "$@" ) >>"$LOG" 2>&1 &
     # shellcheck disable=SC1003
     local pid=$! i=0 rc=0 start=$SECONDS frames='|/-\'
     [[ "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" =~ [Uu][Tt][Ff]-?8 ]] && frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
@@ -937,17 +941,42 @@ step_crowdsec() {
     if run_long "Installing CrowdSec + firewall bouncer" \
            apt-get install "${APT_OPTS[@]}" crowdsec "$bouncer"; then
         ok "CrowdSec installed (packagecloud, ${bouncer#crowdsec-firewall-bouncer-} bouncer)"
-    elif [[ $bouncer != crowdsec-firewall-bouncer-iptables ]] && run_long "Installing CrowdSec + iptables bouncer" \
+    elif crowdsec_drop_broken && [[ $bouncer != crowdsec-firewall-bouncer-iptables ]] \
+           && run_long "Installing CrowdSec + iptables bouncer" \
            apt-get install "${APT_OPTS[@]}" crowdsec crowdsec-firewall-bouncer-iptables; then
         ok "CrowdSec installed (packagecloud, iptables bouncer)"
-    elif run_long "Installing CrowdSec from the Ubuntu archive" \
+    elif crowdsec_drop_broken && run_long "Installing CrowdSec from the Ubuntu archive" \
            apt-get install "${APT_OPTS[@]}" crowdsec crowdsec-firewall-bouncer; then
         ok "CrowdSec installed (Ubuntu archive)"
     else
+        crowdsec_drop_broken
         warn "CrowdSec could not be installed; the dashboard works without it."
         return 0
     fi
     configure_bouncer
+}
+
+# A failed CrowdSec attempt must not leave dpkg broken: apt-get refuses every
+# later install while a package is half-configured ("1 not fully installed"),
+# so the next attempt - and the TuxWall package itself - would fail too.
+# Purges the CrowdSec packages that are not fully installed. Always returns 0.
+crowdsec_drop_broken() {
+    local -a broken=()
+    local pkg st
+    # db:Status-Abbrev = want, state, error flag: U/F/H = unpacked,
+    # half-configured, half-installed; R = reinstallation required
+    while read -r pkg st; do
+        [[ -n $pkg ]] || continue
+        if [[ ${st:1:1} == [UFH] || ${st:2:1} == R ]]; then broken+=("$pkg"); fi
+    done < <(dpkg-query -W -f='${Package} ${db:Status-Abbrev}\n' 'crowdsec*' 2>/dev/null)
+    (( ${#broken[@]} )) || return 0
+    log "INFO CrowdSec: purging packages left half-installed: ${broken[*]}"
+    run_long "Removing the half-installed CrowdSec packages" \
+        apt-get purge -y -q -o DPkg::Lock::Timeout=600 "${broken[@]}" \
+        || run_long "Removing the half-installed CrowdSec packages (dpkg)" \
+               dpkg --purge --force-remove-reinstreq "${broken[@]}" \
+        || true
+    return 0
 }
 
 bouncer_nft_usable() {
