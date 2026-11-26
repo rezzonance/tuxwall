@@ -44,6 +44,14 @@ check ssh-listening sh -c 'ss -Hltn "( sport = :22 )" | grep -q .'
 check ufw-active sh -c 'ufw status | grep -q "Status: active"'
 check internet-dns getent hosts archive.ubuntu.com
 check tuxwall-apt-list grep -q rezzonance.github.io/tuxwall /etc/apt/sources.list.d/tuxwall.list
+check login-summary grep -q '^TuxWall dashboard: https://' /etc/issue.d/zz-tuxwall.issue
+if [ -e /etc/tuxwall/vm-image ]; then
+    # VM image (image/vm/test/make-test-seed.sh): cloud-init + the auto answers path
+    check vm-cloud-init-done sh -c 'cloud-init status 2>/dev/null | grep -q "^status: done"'
+    check vm-rootfs-grown sh -c '[ "$(df -B1G --output=size / | tail -n1 | tr -d " ")" -ge 10 ]'
+    check vm-password-file-removed test ! -e /etc/tuxwall/test-admin-password
+    say "TUXWALL-TEST-INFO vm-image $(tr '\n' ' ' </etc/tuxwall/vm-image)"
+fi
 say "TUXWALL-TEST-INFO tuxwall=$(dpkg-query -W -f='${Version}' tuxwall 2>/dev/null) kernel=$(uname -r)"
 say "TUXWALL-TEST-INFO secureboot=$(mokutil --sb-state 2>/dev/null | head -n1 || echo n/a) $(dmesg 2>/dev/null | grep -m1 -i 'secure boot' || true)"
 say "TUXWALL-TEST-INFO ca=$(/usr/local/sbin/tuxwall-tls status 2>/dev/null | grep -m1 '^ca:' || true)"

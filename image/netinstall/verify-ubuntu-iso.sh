@@ -17,6 +17,13 @@ fi
 # the ISO's own length is hashed: a CD drive or a USB stick the ISO was
 # written to can be larger.
 got="$(head -c "$size" "$src" | sha256sum | cut -d' ' -f1)"
+# The ISO written to a second USB stick: casper may mount its ISO9660
+# partition (it starts 32 KiB into the image) - the ISO is the whole disk.
+parent="$(lsblk -ndo PKNAME "$src" 2>/dev/null || true)"
+if [ "$got" != "$want" ] && [ -n "$parent" ] && [ -b "/dev/$parent" ]; then
+    got="$(head -c "$size" "/dev/$parent" | sha256sum | cut -d' ' -f1)"
+    src="$src on /dev/$parent"
+fi
 if [ "$got" != "$want" ]; then
     msg="TuxWall: the Ubuntu ISO behind /cdrom ($src) has SHA-256 $got, expected $want. Install stopped."
     echo "$msg" >&2

@@ -187,8 +187,9 @@ TuxWall $VERSION netinstall for Ubuntu ${PIN[UBUNTU_VERSION]} LTS (amd64, BIOS +
 Boot this stick, pick the disk and your account in Ubuntu's installer; after
 the reboot the TuxWall setup asks for the WAN/LAN ports on the console.
 The installer downloads ${PIN[UBUNTU_ISO]} (SHA-256 ${PIN[UBUNTU_ISO_SHA256]})
-from ${PIN[UBUNTU_BASE_URL]}/ into RAM (6 GB+ RAM), or uses that file from
-another USB stick/disk ("low RAM" menu entry). https://github.com/rezzonance/tuxwall
+from ${PIN[UBUNTU_BASE_URL]}/ into RAM (6 GB+ RAM), or uses that ISO written
+to a second USB stick / that file on another disk ("low RAM" menu entries).
+https://github.com/rezzonance/tuxwall
 EOF
 find "$OV" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
 (cd "$OV" && find . -type f | LC_ALL=C sort | sed 's/^/  /')

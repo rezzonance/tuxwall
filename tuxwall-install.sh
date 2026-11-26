@@ -142,10 +142,18 @@ run_long() {
     fi
     ( trap - ERR; TERM=dumb NO_COLOR=1 "$@" ) >>"$LOG" 2>&1 &
     # shellcheck disable=SC1003
-    local pid=$! i=0 rc=0 start=$SECONDS frames='|/-\'
+    local pid=$! i=0 rc=0 start=$SECONDS frames='|/-\' every=1 tty
     [[ "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" =~ [Uu][Tt][Ff]-?8 ]] && frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    # Serial console (first-boot wizard on ttyS0): a spinner frame every
+    # 0.15 s floods the line and console logs - redraw every ~10 s instead.
+    tty="$(readlink "/proc/$$/fd/1" 2>/dev/null || true)"
+    if [[ $tty == /dev/ttyS* || $tty == /dev/ttyAMA* || $tty == /dev/ttyUSB* || $tty == /dev/hvc* ]]; then
+        frames='.' every=67
+    fi
     while kill -0 "$pid" 2>/dev/null; do
-        printf '\r  %s%s%s %s %s(%ss)%s' "$C_C" "${frames:i%${#frames}:1}" "$C_0" "$msg" "$C_DIM" "$((SECONDS - start))" "$C_0"
+        if (( i % every == 0 )); then
+            printf '\r  %s%s%s %s %s(%ss)%s' "$C_C" "${frames:i/every%${#frames}:1}" "$C_0" "$msg" "$C_DIM" "$((SECONDS - start))" "$C_0"
+        fi
         i=$((i + 1))
         sleep 0.15
     done

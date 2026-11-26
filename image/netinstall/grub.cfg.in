@@ -15,9 +15,14 @@ loadfont unicode
 set menu_color_normal=white/black
 set menu_color_highlight=black/light-gray
 
-menuentry "Install TuxWall (downloads Ubuntu @UBUNTU_VERSION@, ~2.9 GB into RAM: 6 GB+ RAM)" {
+menuentry "Install TuxWall (downloads Ubuntu @UBUNTU_VERSION@ into RAM: needs 6 GB+ RAM)" {
     set gfxpayload=keep
     linux  /casper/vmlinuz ip=dhcp iso-url=@ISO_URL@ initramfs_options=size=90% ds=nocloud ---
+    initrd /casper/initrd
+}
+menuentry "Install TuxWall - Ubuntu ISO written to a second USB stick (low RAM)" {
+    set gfxpayload=keep
+    linux  /casper/vmlinuz ds=nocloud ---
     initrd /casper/initrd
 }
 menuentry "Install TuxWall - Ubuntu ISO file on another USB stick / disk (low RAM)" {
@@ -35,10 +40,36 @@ submenu "Serial console (ttyS0, 115200 baud) ..." {
         linux  /casper/vmlinuz ip=dhcp iso-url=@ISO_URL@ initramfs_options=size=90% ds=nocloud --- console=tty0 console=ttyS0,115200n8
         initrd /casper/initrd
     }
+    menuentry "Install TuxWall on the serial console (Ubuntu ISO written to a second USB stick)" {
+        linux  /casper/vmlinuz ds=nocloud --- console=tty0 console=ttyS0,115200n8
+        initrd /casper/initrd
+    }
     menuentry "Install TuxWall on the serial console (ISO file on another USB stick / disk)" {
         linux  /casper/vmlinuz iso-scan/filename=/@UBUNTU_ISO@ ds=nocloud --- console=tty0 console=ttyS0,115200n8
         initrd /casper/initrd
     }
+}
+menuentry "Help: which entry? (RAM, 'No space left on device', BusyBox shell)" {
+    echo ""
+    echo "TuxWall netinstall @TUXWALL_VERSION@ - which menu entry?"
+    echo ""
+    echo "* 6 GB RAM or more, internet by DHCP on a network port:"
+    echo "    'Install TuxWall (downloads Ubuntu ...)'. The 2.9 GB Ubuntu ISO is"
+    echo "    downloaded into RAM. With too little RAM it stops with"
+    echo "    'No space left on device' / 'Unable to find a live file system'"
+    echo "    and a BusyBox (initramfs) prompt: power off and use an entry below."
+    echo ""
+    echo "* Less RAM (4 GB is enough): get @UBUNTU_ISO@"
+    echo "    from releases.ubuntu.com and either write it to a second USB stick"
+    echo "    (Rufus / balenaEtcher / dd) -> 'Ubuntu ISO written to a second USB stick',"
+    echo "    or copy the .iso FILE to any other stick or disk"
+    echo "    -> 'Ubuntu ISO file on another USB stick / disk'."
+    echo ""
+    echo "Nothing is written to a disk before you pick it in Ubuntu's installer"
+    echo "and confirm. Details: https://github.com/rezzonance/tuxwall#install-from-usb-netinstaller"
+    echo ""
+    echo "Press Esc to return to the menu."
+    sleep --interruptible 600
 }
 grub_platform
 if [ "$grub_platform" = "efi" ]; then

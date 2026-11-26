@@ -9,7 +9,7 @@
 #   FAIL -> LAN NIC down, wizard blocked, VM powers off in 10 minutes
 set -u
 WATCH=${TUXWALL_LAN_GATE_SECONDS:-30}
-ANS=/etc/tuxwall/setup-answers
+ANS=${TUXWALL_LAN_GATE_ANSWERS:-/etc/tuxwall/setup-answers}   # override: answers staged elsewhere (VM image lab)
 LOG=/var/log/tuxwall-test-lan-gate.log
 RUN=/run/tuxwall-test
 con=/dev/ttyS0

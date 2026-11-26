@@ -11,7 +11,10 @@
 #  It never starts by itself on an existing install: the first-boot units
 #  (tuxwall-setup@tty1.service, tuxwall-setup@ttyS0.service) only run while
 #  /etc/tuxwall/setup-pending exists, which only the netinstaller / VM image
-#  creates (image/common/install-firstboot.sh).
+#  creates (image/common/install-firstboot.sh). Unattended first boot: put an
+#  answers file at /etc/tuxwall/setup-answers (e.g. cloud-init write_files,
+#  VM images) - the first-boot unit then runs it without asking, also when the
+#  file appears while the console waits for Enter.
 #
 #    sudo tuxwall-setup                     guided setup (text UI)
 #    sudo tuxwall-setup --plain             plain prompts (serial consoles)
@@ -31,6 +34,11 @@ LOCK=/run/tuxwall-setup.lock
 LOG=/var/log/tuxwall-setup.log
 INSTALL_LOG=/var/log/tuxwall-install.log
 HINT=/etc/profile.d/zz-tuxwall-setup-hint.sh
+AUTO_ANSWERS=/etc/tuxwall/setup-answers
+# Shown above the console login prompt (agetty reads /etc/issue.d/*.issue):
+# the dashboard URL + CA fingerprint stay visible after the wizard's screen
+# is gone.
+ISSUE=/etc/issue.d/zz-tuxwall.issue
 WAN_NETPLAN=/etc/netplan/60-tuxwall-wan.yaml
 API=http://127.0.0.1:8008
 APT_PROBE=https://rezzonance.github.io/tuxwall/dists/stable/Release
@@ -43,10 +51,10 @@ INSTALLER_PATHS=(/usr/local/share/tuxwall/tuxwall-install.sh /opt/tuxwall-applia
 
 # ── Answers (asked, or read from --answers) ─────────────────────────────────
 ROLE=gateway WAN="" WAN_MODE="" WAN_ADDRESS="" WAN_GATEWAY="" WAN_DNS=""
-LAN="" LAN_SUBNET="" ADMIN_USER="" ADMIN_PASSWORD="" SOURCE=apt DEB_FILE=""
+LAN="" LAN_SUBNET="" ADMIN_USER="" ADMIN_PASSWORD="" ADMIN_PASSWORD_FILE="" SOURCE=apt DEB_FILE=""
 EXTRA_ARGS=()
 # ── Options ─────────────────────────────────────────────────────────────────
-CONSOLE_TTY="" ANSWERS="" PRINT_ONLY=0 LIST_ONLY=0 UI="" INSTALLER="${TUXWALL_INSTALLER:-}"
+CONSOLE_TTY="" ANSWERS="" AUTO_RUN=0 PRINT_ONLY=0 LIST_ONLY=0 UI="" INSTALLER="${TUXWALL_INSTALLER:-}"
 PHYS=()
 
 log() { { [[ -w $LOG ]] || [[ ! -e $LOG && -w ${LOG%/*} ]]; } && printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG" 2>/dev/null; return 0; }
@@ -363,6 +371,7 @@ read_answers() {
                 printf -v "${k%_MAC}" '%s' "$hit" ;;
             ADMIN_PASSWORD_FILE)
                 [[ -r $v ]] || die "answers: ADMIN_PASSWORD_FILE not readable"
+                ADMIN_PASSWORD_FILE=$v
                 ADMIN_PASSWORD="$(head -n1 "$v")" ;;
             EXTRA)
                 local a
@@ -412,7 +421,68 @@ have_internet() {
     curl -fsS -m 20 -o /dev/null "$APT_PROBE" >/dev/null 2>&1
 }
 
+# Cloud images (VM image, Proxmox cloud-init): cloud-init's netplan may rename
+# a port at the next boot (Proxmox: set-name eth0, which fails while the port
+# is up at first boot) - TuxWall's config would then name a port that no
+# longer exists. Keep every port's current name, and stop cloud-init from
+# rewriting the network config later (Proxmox changes the instance id when
+# its cloud-init settings are edited).
+CLOUD_NETPLAN=/etc/netplan/50-cloud-init.yaml
+CLOUD_NET_OFF=/etc/cloud/cloud.cfg.d/99-tuxwall-network.cfg
+CLOUD_NETPLAN_ORIG=/etc/tuxwall/50-cloud-init.yaml.orig
+pin_cloud_init_network() {
+    (( FIXTURE )) && return 0
+    [[ -d ${CLOUD_NET_OFF%/*} ]] || return 0
+    if [[ -f $CLOUD_NETPLAN ]]; then
+        local msg
+        msg="$(python3 - "$CLOUD_NETPLAN" "$SYS_NET" "$CLOUD_NET_OFF" "$CLOUD_NETPLAN_ORIG" <<'PY'
+import os, shutil, sys
+import yaml
+path, sysnet, off, bak = sys.argv[1:]
+d = yaml.safe_load(open(path)) or {}
+eth = (d.get("network") or {}).get("ethernets") or {}
+names = {}
+for n in os.listdir(sysnet):
+    try:
+        names[open(os.path.join(sysnet, n, "address")).read().strip().lower()] = n
+    except OSError:
+        pass
+out, notes = {}, []
+for key, cfg in eth.items():
+    cfg = dict(cfg or {})
+    mac = str((cfg.get("match") or {}).get("macaddress", "")).lower()
+    cur = names.get(mac)
+    if cur:
+        if cfg.get("set-name") and cfg["set-name"] != cur:
+            notes.append("%s: keep the name %s (no rename to %s)" % (mac, cur, cfg.pop("set-name")))
+        if key != cur and cur not in eth:
+            notes.append("%s: entry %s -> %s" % (mac, key, cur))
+            key = cur
+    out[key] = cfg
+if notes:
+    d["network"]["ethernets"] = out
+    if not os.path.exists(bak):
+        shutil.copy2(path, bak)
+    tmp = path + ".tuxwall-tmp"
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        f.write("# cloud-init's network config, ports pinned to their current names by tuxwall-setup\n")
+        f.write("# (original: %s). cloud-init no longer manages it (%s).\n" % (bak, off))
+        yaml.safe_dump(d, f, default_flow_style=False, sort_keys=False)
+    os.replace(tmp, path)
+print("; ".join(notes))
+PY
+)" || { say "warning: could not check $CLOUD_NETPLAN (see $LOG)"; msg=""; }
+        [[ -n $msg ]] && say "cloud-init network config: $msg"
+    fi
+    if [[ ! -e $CLOUD_NET_OFF ]]; then
+        printf '# Written by tuxwall-setup: TuxWall manages the network configuration.\nnetwork: {config: disabled}\n' \
+            >"$CLOUD_NET_OFF" && log "cloud-init network config disabled ($CLOUD_NET_OFF)"
+    fi
+    return 0
+}
+
 prepare_wan() {   # -> 0 when the internet works
+    pin_cloud_init_network
     if [[ $ROLE == gateway ]]; then
         if [[ $WAN_MODE == static ]] || { [[ $WAN_MODE == dhcp ]] && [[ -z "$(nic_v4 "$WAN")" ]]; }; then
             say "Configuring $WAN ($WAN_MODE) ..."
@@ -633,7 +703,8 @@ summary_text() {
             keep)   printf 'WAN:        %s  keep current config (%s)\n' "$WAN" "$(nic_v4 "$WAN")" ;;
         esac
         printf 'LAN:        %s  %s  (DHCP pool %s)\n' "$LAN" "$LAN_SUBNET" "$pool"
-        printf 'SSH:        from the LAN only (never the WAN)\n'
+        if [[ " ${EXTRA_ARGS[*]} " == *" --ssh-wan "* ]]; then printf 'SSH:        from the LAN and the WAN (--ssh-wan)\n'
+        else printf 'SSH:        from the LAN only (never the WAN)\n'; fi
         printf 'Dashboard:  https://%s/\n' "$gw"
     else
         printf 'Role:       dashboard only (network config unchanged)\n'
@@ -690,12 +761,31 @@ lan_address() {
     hostname -I 2>/dev/null | awk '{print $1}'
 }
 
+finish_info() {   # -> FIN_HOST FIN_URL FIN_FPR
+    FIN_HOST="$(lan_address)"
+    FIN_URL="http://$FIN_HOST/"
+    [[ "$(/usr/local/sbin/tuxwall-tls decide 2>/dev/null)" == active ]] && FIN_URL="https://$FIN_HOST/"
+    FIN_FPR="$(/usr/local/sbin/tuxwall-tls status --json 2>/dev/null | python3 -c 'import json,sys; print((json.load(sys.stdin).get("ca") or {}).get("fingerprint_sha256",""))' 2>/dev/null)"
+}
+
+# The login screen keeps the result (agetty prints /etc/issue.d/*.issue;
+# backslashes would be agetty escapes, so none are written).
+write_issue() {
+    [[ -n ${FIN_URL:-} ]] || finish_info
+    mkdir -p "${ISSUE%/*}" 2>/dev/null || return 0
+    {
+        printf 'TuxWall dashboard: %s\n' "$FIN_URL"
+        [[ $FIN_URL == https://* && -n $FIN_FPR ]] && printf 'Router CA SHA-256: %s\n' "$FIN_FPR"
+        [[ $FIN_URL == https://* ]] && printf 'Router CA: http://%s/tuxwall-ca.crt (compare the fingerprint)\n' "$FIN_HOST"
+        printf 'Re-run the setup: sudo tuxwall-setup\n\n'
+    } | tr -d '\\' >"$ISSUE.tmp" && chmod 644 "$ISSUE.tmp" && mv -f "$ISSUE.tmp" "$ISSUE"
+    log "login screen: $ISSUE"
+}
+
 finish_text() {
     local host url fpr admin_line
-    host="$(lan_address)"
-    url="http://$host/"
-    [[ "$(/usr/local/sbin/tuxwall-tls decide 2>/dev/null)" == active ]] && url="https://$host/"
-    fpr="$(/usr/local/sbin/tuxwall-tls status --json 2>/dev/null | python3 -c 'import json,sys; print((json.load(sys.stdin).get("ca") or {}).get("fingerprint_sha256",""))' 2>/dev/null)"
+    [[ -n ${FIN_URL:-} ]] || finish_info
+    host=$FIN_HOST url=$FIN_URL fpr=$FIN_FPR
     if [[ -n $ADMIN_USER ]] && ! setup_required; then
         admin_line="Log in as '$ADMIN_USER'."
     else
@@ -722,6 +812,11 @@ disarm() {   # setup finished (or "don't ask again"): no more first-boot runs
     done
     systemctl daemon-reload >/dev/null 2>&1 || true
     log "first-boot setup disarmed: $1"
+}
+
+drop_password_file() {   # only a file under /etc/tuxwall/ (written for this setup)
+    [[ -n $ADMIN_PASSWORD_FILE && $ADMIN_PASSWORD_FILE == /etc/tuxwall/* && -f $ADMIN_PASSWORD_FILE ]] || return 0
+    rm -f "$ADMIN_PASSWORD_FILE" && log "removed the used password file $ADMIN_PASSWORD_FILE"
 }
 
 mark_done() {
@@ -770,7 +865,21 @@ console_gate() {   # first-boot unit: wait for Enter on this console
     local a shown=0
     while true; do
         [[ -e $PENDING ]] || exit 0
+        if [[ -s $AUTO_ANSWERS ]]; then
+            # Unattended: one console runs it, the others wait for it to end.
+            if flock -n 8; then
+                [[ -e $PENDING ]] || exit 0
+                ANSWERS=$AUTO_ANSWERS AUTO_RUN=1
+                printf '\n  TuxWall setup: running unattended with %s\n\n' "$AUTO_ANSWERS"
+                return 0
+            fi
+            printf '\n  TuxWall setup is running unattended on another console.\n'
+            flock 8
+            exit 0
+        fi
         if (( ! shown )); then
+            # boot messages above the prompt: start from a clean screen
+            [[ $CONSOLE_TTY == tty[0-9]* ]] && printf '\033[H\033[2J'
             printf '\n\n  TuxWall setup\n  =============\n\n'
             printf '  This machine is not set up as a TuxWall router yet.\n\n'
             printf '  Press Enter to start the setup on this console,\n'
@@ -780,6 +889,7 @@ console_gate() {   # first-boot unit: wait for Enter on this console
         fi
         if read -r -t 5 a; then
             [[ ${a,,} == skip ]] && exit 0
+            [[ -s $AUTO_ANSWERS ]] && continue
             if ! flock -n 8; then
                 printf '  The setup is already running on another console or SSH session.\n'
                 shown=0; sleep 5; continue
@@ -836,9 +946,13 @@ Install TuxWall with these settings?" "Install" "Change"; then
 Create it in the browser instead (first visit)."
                 fi
                 mark_done
+                finish_info
+                write_issue
                 local txt; txt="$(finish_text)"
                 log "finished: ${txt//$'\n'/ | }"
-                ui_msg "TuxWall is ready" "$txt"
+                ui_msg "TuxWall is ready" "$txt
+
+(This also stays on the console's login screen.)"
                 return 0
             fi
             failure_menu; rc=$?
@@ -891,7 +1005,12 @@ main() {
         fi
         if [[ -n $ADMIN_USER ]]; then create_admin >/dev/null || say "warning: administrator not created"; fi
         mark_done
+        finish_info
+        write_issue
+        # answers dropped in by cloud-init / an image: the password file has served
+        (( AUTO_RUN )) && drop_password_file
         finish_text | tee -a "$LOG"
+        [[ -n $CONSOLE_TTY ]] && printf '\n(This summary stays on the login screen.)\n' && sleep 5
         exit 0
     fi
 

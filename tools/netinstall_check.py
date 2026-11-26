@@ -15,6 +15,10 @@
   tuxwall-install.sh), refusals, every flag exists in tuxwall-install.sh
 - unit not enabled by the package, shipped as a conffile; no secrets or
   owner data in image/; bash -n (+ shellcheck when installed)
+- VM image (image/vm): pinned cloud image + signer, build.sh writes only the
+  shared first-boot payload (no answers, no test seed), 2 GiB limit, checks;
+  wizard: answers file picked up on the console units, login-screen summary,
+  cloud-init netplan pinned to the current port names
 """
 import os
 import re
@@ -30,9 +34,11 @@ WIZ = os.path.join(ROOT, "pkg", "usr", "local", "sbin", "tuxwall-setup")
 UNIT = os.path.join(ROOT, "pkg", "etc", "systemd", "system", "tuxwall-setup@.service")
 FIRSTBOOT = os.path.join(ROOT, "image", "common", "install-firstboot.sh")
 INSTALLER = os.path.join(ROOT, "tuxwall-install.sh")
+VM = os.path.join(ROOT, "image", "vm")
 SHELL_SCRIPTS = (WIZ, FIRSTBOOT, os.path.join(NI, "build.sh"), os.path.join(NI, "verify-ubuntu-iso.sh"),
                  os.path.join(NI, "test", "run-qemu-test.sh"), os.path.join(NI, "test", "test-report.sh"),
-                 os.path.join(NI, "test", "lan-gate.sh"))
+                 os.path.join(NI, "test", "lan-gate.sh"), os.path.join(VM, "build.sh"),
+                 os.path.join(VM, "test", "make-test-seed.sh"))
 
 PASS = FAIL = 0
 
@@ -210,6 +216,17 @@ def check_grub(p):
             if w.startswith("iso-scan/filename="):
                 check(w == "iso-scan/filename=/" + p["UBUNTU_ISO"], "iso-scan finds the pinned ISO file")
     check("url=http:" not in g, "no plain-http ISO URL")
+    scan = [l for l in lines if not any(w.startswith(("iso-url=", "iso-scan/", "url=")) for w in l.split())]
+    check(len(scan) >= 2, "shipped GRUB: 'Ubuntu ISO written to a second USB stick' entries (casper device scan)")
+    m = re.search(r'menuentry "Help:[^"]*" \{(.*?)\n\}', g, re.S)
+    check(m is not None and "No space left on device" in m.group(1) and "BusyBox" in m.group(1)
+          and "sleep --interruptible" in m.group(1) and "linux" not in m.group(1),
+          "GRUB help entry explains the RAM failure and the low-RAM entries (boots nothing)")
+    check(re.search(r'menuentry "Install TuxWall \(downloads[^"]*6 GB\+ RAM\)"', g) is not None,
+          "download entry title states the RAM need")
+    ver = read(os.path.join(NI, "verify-ubuntu-iso.sh"))
+    check("PKNAME" in ver and 'head -c "$size" "/dev/$parent"' in ver,
+          "ISO check: an ISO9660 partition of a dd'ed stick is checked as its whole disk")
     tg = render(read(os.path.join(NI, "test", "grub-test.cfg.in")), p)
     entries = re.findall(r'^menuentry "([^"]*)"\s*\{\s*linux\s+([^\n]*)', tg, re.M)
     check(len(entries) == 3 and all("autoinstall" in l.split() for _, l in entries),
@@ -224,6 +241,10 @@ def check_grub(p):
                     % re.escape(p["UBUNTU_ISO"]), tg) is not None,
           "test GRUB picks the entry from where the Ubuntu ISO is (file / CD / download)")
     rep = read(os.path.join(NI, "test", "test-report.sh"))
+    check("check login-summary grep -q '^TuxWall dashboard: https://' /etc/issue.d/zz-tuxwall.issue" in rep,
+          "test report: the login screen keeps the dashboard URL")
+    check("vm-cloud-init-done" in rep and "vm-rootfs-grown" in rep and "vm-password-file-removed" in rep,
+          "test report: VM image checks")
     check("check lan-isolated test -e /run/tuxwall-test/lan-isolated" in rep, "test report: LAN gate result")
     check(re.search(r"guest_agent\.0 \] && exit 0\s+sleep 3\s+systemctl poweroff", rep) is not None,
           "test report keeps the VM up when a guest agent reads it (Proxmox), powers off otherwise (QEMU driver)")
@@ -265,6 +286,61 @@ def check_firstboot():
               read(j("etc/systemd/system/tuxwall-setup@.service.d/50-test-answers.conf")), "--answers adds the test drop-in")
         r = subprocess.run(["sh", FIRSTBOOT, "--payload", os.path.join(td, "nope"), root], capture_output=True, text=True)
         check(r.returncode != 0, "missing payload refused")
+
+
+def vm_pins():
+    out = {}
+    for line in read(os.path.join(VM, "ubuntu-cloud.env")).splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        m = re.match(r"^([A-Z0-9_]+)=([A-Za-z0-9._:/+-]+)$", line)
+        check(m is not None, "ubuntu-cloud.env line parses: " + line)
+        if m:
+            out[m.group(1)] = m.group(2)
+    return out
+
+
+def check_vm_image():
+    p = vm_pins()
+    for k in ("UBUNTU_CLOUD_VERSION", "UBUNTU_CLOUD_BASE_URL", "UBUNTU_CLOUD_SERIAL", "UBUNTU_CLOUD_IMAGE",
+              "UBUNTU_CLOUD_SHA256", "UBUNTU_CLOUD_KEY_FPR", "TUXWALL_APT_KEY_FPR", "VM_DISK_SIZE"):
+        check(k in p, "VM pin present: " + k)
+    if len(p) < 8:
+        return
+    check(p["UBUNTU_CLOUD_BASE_URL"].startswith("https://cloud-images.ubuntu.com/releases/"),
+          "cloud image from cloud-images.ubuntu.com over https")
+    check(re.fullmatch(r"\d{8}(\.\d+)?", p["UBUNTU_CLOUD_SERIAL"]) is not None, "cloud image serial pinned")
+    check(re.fullmatch(r"[0-9a-f]{64}", p["UBUNTU_CLOUD_SHA256"]) is not None, "cloud image SHA-256 pinned")
+    check(p["UBUNTU_CLOUD_IMAGE"] == "ubuntu-%s-server-cloudimg-amd64.img" % p["UBUNTU_CLOUD_VERSION"],
+          "cloud image name matches the version")
+    check(p["UBUNTU_CLOUD_KEY_FPR"] == "D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81",
+          "signer = UEC Image Automatic Signing Key")
+    check(p["TUXWALL_APT_KEY_FPR"] == pins()["TUXWALL_APT_KEY_FPR"], "same TuxWall APT key as the ISO pins")
+    check(re.fullmatch(r"\d+G", p["VM_DISK_SIZE"]) is not None and 8 <= int(p["VM_DISK_SIZE"][:-1]) <= 64,
+          "VM disk size 8-64 GiB")
+    b = read(os.path.join(VM, "build.sh"))
+    check("--proto '=https'" in b and "VALIDSIG" in b and "ubuntu-cloudimage-keyring.gpg" in b,
+          "VM build: https only, signature fingerprint check, cloud image keyring")
+    check('img_ok || { rm -f "$SRC"; die' in b and '[[ $IMG_SHA != "${PIN[UBUNTU_CLOUD_SHA256]}" ]]' in b,
+          "VM build: image hash checked against the signed list (and the pin unless --latest)")
+    check('image/common/install-firstboot.sh" --payload "$P" --origin vm-image --console ttyS0 "$STAGE"' in b,
+          "VM build: the shared first-boot payload, wizard on tty1 + ttyS0")
+    check("--answers" not in b and "test/" not in b and "setup-answers.test" not in b and "make-test-seed" not in b,
+          "VM build: no test answers / seed in the shipped image")
+    check('die "answers file in the image payload"' in b, "VM build refuses an answers file in the payload")
+    check("MAX_BYTES=$((2 * 1024 * 1024 * 1024 - 1))" in b and "(( bytes < MAX_BYTES ))" in b,
+          "VM build: fails over GitHub's 2 GiB asset limit")
+    for t in ('"$QEMU_IMG" check "$QCOW"', '"$QEMU_IMG" compare', "e2fsck -fn", "MISMATCH content"):
+        check(t in b, "VM build verifies its result: " + t)
+    check("sudo" not in b and "mount " not in b and "chroot" not in b and "qemu-system" not in b
+          and "virt-customize" not in b, "VM build: unprivileged, starts no VM")
+    gi = os.path.join(VM, ".gitignore")
+    check(os.path.isfile(gi) and "out/" in read(gi), "VM build output ignored by git")
+    seed = read(os.path.join(VM, "test", "make-test-seed.sh"))
+    check("TEST ONLY" in seed and "-TEST-seed.iso" in seed and "lan-gate.sh" in seed
+          and "/usr/local/sbin/tuxwall-test-lan-gate || true" in seed
+          and "ExecStartPre=/usr/bin/test -e /run/tuxwall-test/lan-isolated" in seed,
+          "VM test seed: LAN gate in runcmd, wizard fail-closed on its marker")
 
 
 def mk_nic(base, name, mac, driver=None, carrier=None, speed=None, ipv4=None, wireless=False, bridge=False, device=True):
@@ -416,6 +492,84 @@ step_wan <<<'b' || echo "BACK=$?"
         check("BACK=1" in out, "plain UI: 'b' goes back")
 
 
+FIRSTBOOT_HARNESS = r'''
+set -u
+source "$WIZ"
+PENDING=$TD/pending AUTO_ANSWERS=$TD/answers LOCK=$TD/lock LOG=$TD/log ISSUE=$TD/issue.d/zz-tuxwall.issue
+CONSOLE_TTY=ttyS9
+: >"$PENDING"; echo "ROLE=dashboard" >"$AUTO_ANSWERS"
+exec 8>"$LOCK"
+console_gate </dev/null >"$TD/gate1.out"; echo "GATE1 ANSWERS=$ANSWERS AUTO=$AUTO_RUN"
+exec 8>&-
+# a second console while the first holds the lock: waits, then gives way
+( exec 9>"$LOCK"; flock 9; sleep 2; rm -f "$PENDING" ) &
+sleep 0.5
+( exec 8>"$LOCK"; ANSWERS="" AUTO_RUN=0; console_gate </dev/null >"$TD/gate2.out"; echo "GATE2 RETURNED" ); echo "GATE2 rc=$?"
+wait
+FIN_URL=https://192.168.1.1/ FIN_HOST=192.168.1.1 FIN_FPR='AB:CD\\ef'
+write_issue; echo "ISSUE_RC=$?"
+ADMIN_PASSWORD_FILE=$TD/pw; : >"$ADMIN_PASSWORD_FILE"; drop_password_file; [[ -e $TD/pw ]] && echo "PW_KEPT_OUTSIDE_ETC"
+# cloud-init netplan: Proxmox names net0 eth0 (rename failed at first boot)
+FIXTURE=0 SYS_NET=$TD/net CLOUD_NETPLAN=$TD/50-cloud-init.yaml CLOUD_NET_OFF=$TD/cloud.cfg.d/99-tuxwall-network.cfg
+CLOUD_NETPLAN_ORIG=$TD/50.orig
+pin_cloud_init_network; echo "PIN1_RC=$?"
+pin_cloud_init_network; echo "PIN2_RC=$?"
+'''
+
+
+def check_wizard_firstboot_extras():
+    """Answers file dropped in by cloud-init / an image: run unattended by one
+    console unit, the other gives way; the summary stays on the login screen;
+    cloud-init's netplan keeps the ports' current names."""
+    with tempfile.TemporaryDirectory() as td:
+        os.makedirs(os.path.join(td, "issue.d"))
+        os.makedirs(os.path.join(td, "cloud.cfg.d"))
+        for n, mac in (("ens18", "52:54:00:12:34:01"), ("ens19", "52:54:00:12:34:02")):
+            os.makedirs(os.path.join(td, "net", n))
+            with open(os.path.join(td, "net", n, "address"), "w") as f:
+                f.write(mac + "\n")
+        with open(os.path.join(td, "50-cloud-init.yaml"), "w") as f:
+            f.write('network:\n  version: 2\n  ethernets:\n    eth0:\n      match:\n        macaddress: "52:54:00:12:34:01"\n'
+                    '      dhcp4: true\n      set-name: "eth0"\n    ens19:\n      match:\n        macaddress: "52:54:00:12:34:02"\n'
+                    '      set-name: "ens19"\n      dhcp4: false\n')
+        r = subprocess.run(["bash", "-c", FIRSTBOOT_HARNESS], capture_output=True, text=True, timeout=60,
+                           env=dict(os.environ, WIZ=WIZ, TD=td))
+        out = r.stdout
+        check("GATE1 ANSWERS=%s/answers AUTO=1" % td in out, "answers file on a console unit: unattended run\n"
+              + out + r.stderr[-600:])
+        check("running unattended" in read(os.path.join(td, "gate1.out")), "console says it runs unattended")
+        check("GATE2 rc=0" in out and "GATE2 RETURNED" not in out
+              and "running unattended on another console" in read(os.path.join(td, "gate2.out")),
+              "second console waits for the unattended run, then exits 0 (no failed unit)\n" + out)
+        issue = read(os.path.join(td, "issue.d", "zz-tuxwall.issue")) if os.path.exists(
+            os.path.join(td, "issue.d", "zz-tuxwall.issue")) else ""
+        check(issue.startswith("TuxWall dashboard: https://192.168.1.1/\nRouter CA SHA-256: AB:CDef\n")
+              and "\\" not in issue, "login-screen summary: URL + CA fingerprint, no agetty escapes\n" + issue)
+        check("PW_KEPT_OUTSIDE_ETC" in out, "only a password file under /etc/tuxwall/ is removed")
+        check("PIN1_RC=0" in out and "PIN2_RC=0" in out, "pin_cloud_init_network runs\n" + out + r.stderr[-600:])
+        try:
+            import yaml
+            d = yaml.safe_load(read(os.path.join(td, "50-cloud-init.yaml")))["network"]["ethernets"]
+            check(sorted(d) == ["ens18", "ens19"] and "set-name" not in d["ens18"]
+                  and d["ens18"]["match"]["macaddress"] == "52:54:00:12:34:01" and d["ens18"]["dhcp4"] is True
+                  and d["ens19"].get("set-name") == "ens19",
+                  "cloud-init netplan: pending rename dropped, entry keyed by the current name, matching rename kept: %s" % d)
+            check(os.path.exists(os.path.join(td, "50.orig")) and "eth0" in read(os.path.join(td, "50.orig")),
+                  "original cloud-init netplan kept")
+        except ImportError:
+            print("note: PyYAML missing, netplan pin result not parsed")
+        off = os.path.join(td, "cloud.cfg.d", "99-tuxwall-network.cfg")
+        check(os.path.exists(off) and "network: {config: disabled}" in read(off), "cloud-init network config disabled")
+    wiz = read(WIZ)
+    m = re.search(r"\nprepare_wan\(\) \{[^\n]*\n\s+pin_cloud_init_network\n", wiz)
+    check(m is not None, "prepare_wan pins the cloud-init netplan before any netplan apply")
+    inst = read(INSTALLER)
+    rl = re.search(r"\nrun_long\(\) \{\n(.*?)\n\}\n", inst, re.S)
+    body = rl.group(1) if rl else ""
+    check("/dev/ttyS*" in body and "every=67" in body and "(( i % every == 0 ))" in body,
+          "installer spinner redraws every ~10 s on a serial console (no flood)")
+
+
 def check_unit_and_package():
     u = read(UNIT)
     check("ConditionPathExists=/etc/tuxwall/setup-pending" not in u and "Environment=TUXWALL_SETUP_FIRSTBOOT=1" in u,
@@ -463,7 +617,8 @@ def check_secrets():
             check(not privacy_check.hits(t), "no owner data: " + rel)
             check("PRIVATE KEY" not in t, "no private key: " + rel)
             if "$6$" in t:
-                check(rel == "image/netinstall/test/user-data-test.in", "password hash only in the test seed: " + rel)
+                check(rel in ("image/netinstall/test/user-data-test.in", "image/vm/test/make-test-seed.sh"),
+                      "password hash only in the test seeds: " + rel)
     for f in (WIZ, UNIT):
         check(not privacy_check.hits(read(f)), "no owner data: " + os.path.relpath(f, ROOT))
     gi = os.path.join(ROOT, "image", "netinstall", ".gitignore")
@@ -629,7 +784,9 @@ def main():
     check_seed(p)
     check_grub(p)
     check_firstboot()
+    check_vm_image()
     check_wizard()
+    check_wizard_firstboot_extras()
     check_unit_and_package()
     check_installer_apt()
     check_installer_bouncer_key()
