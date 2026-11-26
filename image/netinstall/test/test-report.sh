@@ -8,7 +8,9 @@ say() { echo "$*" >"$out"; }
 i=0
 while [ $i -lt 3600 ]; do
     [ -e /etc/tuxwall/setup-done ] && break
-    if [ $i -gt 120 ] && [ -e /etc/tuxwall/setup-pending ] && ! pgrep -x tuxwall-setup >/dev/null; then
+    # the wizard runs as "bash tuxwall-setup": ask systemd, not pgrep
+    if [ $i -gt 120 ] && [ -e /etc/tuxwall/setup-pending ] \
+       && ! systemctl -q is-active tuxwall-setup@ttyS0.service tuxwall-setup@tty1.service; then
         break
     fi
     sleep 2; i=$((i + 2))
@@ -25,9 +27,12 @@ check firstboot-units-disabled sh -c '! ls /etc/systemd/system/multi-user.target
 for s in nginx tuxwall unbound kea-dhcp4-server radvd ssh; do
     check "active-$s" systemctl is-active --quiet "$s"
 done
-check lan-address sh -c 'ip -4 -o addr show | grep -q " 192.168.1.1/24"'
-check dashboard-https-lan sh -c 'curl -sk -o /dev/null -w "%{http_code}" https://192.168.1.1/ | grep -q "^200$"'
-check api-admin-created sh -c 'curl -sk https://192.168.1.1/api/auth/session | grep -q "\"setup_required\": false"'
+# LAN = 172.31.250.1/24 (setup-answers.test). curl binds to that address, so
+# nothing leaves the VM through QEMU's NAT when the LAN is not configured.
+LANIP=172.31.250.1
+check lan-address sh -c "ip -4 -o addr show | grep -q ' $LANIP/24'"
+check dashboard-https-lan sh -c "curl -sk --interface $LANIP -o /dev/null -w '%{http_code}' https://$LANIP/ | grep -q '^200\$'"
+check api-admin-created sh -c "curl -sk --interface $LANIP https://$LANIP/api/auth/session | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get(\"setup_required\") is False else 1)'"
 check ssh-listening sh -c 'ss -Hltn "( sport = :22 )" | grep -q .'
 check ufw-active sh -c 'ufw status | grep -q "Status: active"'
 check internet-dns getent hosts archive.ubuntu.com
@@ -40,4 +45,4 @@ tail -n 25 /var/log/tuxwall-setup.log 2>/dev/null | sed 's/^/TUXWALL-TEST-LOG se
 tail -n 40 /var/log/tuxwall-install.log 2>/dev/null | sed 's/^/TUXWALL-TEST-LOG install /' >"$out"
 say "TUXWALL-TEST-REPORT-END"
 sleep 3
-systemctl poweroff
+systemctl poweroff --check-inhibitors=no
