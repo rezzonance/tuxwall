@@ -849,6 +849,9 @@ Create it in the browser instead (first visit)."
 
 main() {
     parse_args "$@"
+    # Started by tuxwall-setup@.service: nothing to do once the setup is done
+    # (the unit then gives the console straight back to its getty).
+    [[ ${TUXWALL_SETUP_FIRSTBOOT:-} == 1 && ! -e $PENDING ]] && exit 0
     detect_phys
     if (( LIST_ONLY )); then nic_table; exit 0; fi
 

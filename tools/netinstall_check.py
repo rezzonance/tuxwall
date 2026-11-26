@@ -418,7 +418,21 @@ step_wan <<<'b' || echo "BACK=$?"
 
 def check_unit_and_package():
     u = read(UNIT)
-    check("ConditionPathExists=/etc/tuxwall/setup-pending" in u, "unit only runs while setup is pending")
+    check("ConditionPathExists=/etc/tuxwall/setup-pending" not in u and "Environment=TUXWALL_SETUP_FIRSTBOOT=1" in u,
+          "pending checked by the wizard, not as a unit condition (a skipped unit would keep its getty stopped)")
+    check("Conflicts=getty@%i.service serial-getty@%i.service" in u and "After=getty@%i.service serial-getty@%i.service" in u,
+          "unit takes the console from its getty via Conflicts= + After= (boot: getty start job dropped)")
+    check("ExecStartPre" not in u, "no ExecStartPre stopping the getty (raced TTYVHangup: wizard SIGHUPed on Proxmox BIOS)")
+    with tempfile.TemporaryDirectory() as td:
+        env = dict(os.environ, TUXWALL_SETUP_FIRSTBOOT="1")
+        if not os.path.exists("/etc/tuxwall/setup-pending"):
+            r = subprocess.run(["bash", WIZ, "--console", "ttyS9"], capture_output=True, text=True, timeout=30, env=env, cwd=td)
+            check(r.returncode == 0 and not r.stdout and not r.stderr,
+                  "first-boot unit run with nothing pending: exits 0 at once\n" + r.stdout + r.stderr)
+        env.pop("TUXWALL_SETUP_FIRSTBOOT")
+        r = subprocess.run(["bash", WIZ, "--console", "ttyS9"], capture_output=True, text=True, timeout=30, env=env, cwd=td)
+        check(os.geteuid() == 0 or (r.returncode != 0 and "root" in r.stderr + r.stdout),
+              "without the unit flag the pending shortcut does not apply\n" + r.stdout + r.stderr)
     check("ExecStart=/usr/local/sbin/tuxwall-setup --console %I" in u, "unit runs the wizard on its console")
     check("DefaultDependencies=no" in u and "After=multi-user.target" in u,
           "unit starts after boot (no ordering cycle with getty/cloud-final)")
