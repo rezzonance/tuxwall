@@ -1025,10 +1025,46 @@ PY
         warn "Could not adjust the bouncer config (left as installed)"
         return 0
     fi
+    bouncer_ensure_key "$cfg"
     if systemctl restart crowdsec-firewall-bouncer >>"$LOG" 2>&1; then
         ok "Firewall bouncer: $mode mode, input hook, priority -10"
     else
         warn "Firewall bouncer did not restart; check: journalctl -u crowdsec-firewall-bouncer"
+    fi
+}
+
+# The bouncer's postinst registers its LAPI key only when CrowdSec is already
+# configured, but apt configures the two packages of one transaction in either
+# order: bouncer first = no key ("API error: access forbidden", restart loop,
+# no ban enforced; seen on a fresh 26.04 netinstall). Register one then - only
+# when CrowdSec knows no bouncer at all.
+bouncer_ensure_key() {
+    local cfg=$1 name key
+    command -v cscli >/dev/null 2>&1 || return 0
+    [[ "$(cscli bouncers list -o json 2>>"$LOG" | tr -d '[:space:]')" == "[]" ]] || return 0
+    name="cs-firewall-bouncer-$(date +%s)"
+    if ! key="$(cscli bouncers add "$name" -o raw 2>>"$LOG")" || [[ -z $key ]]; then
+        warn "Could not register the firewall bouncer with CrowdSec (cscli bouncers add)"
+        return 0
+    fi
+    if TUXWALL_BOUNCER_KEY="$key" python3 - "$cfg" >>"$LOG" 2>&1 <<'PY'
+import os
+import re
+import sys
+
+path = sys.argv[1]
+s = open(path).read()
+line = "api_key: " + os.environ["TUXWALL_BOUNCER_KEY"].strip()
+if re.search(r"(?m)^api_key:.*$", s):
+    s = re.sub(r"(?m)^api_key:.*$", lambda m: line, s, count=1)
+else:
+    s = s.rstrip("\n") + "\n" + line + "\n"
+open(path, "w").write(s)
+PY
+    then
+        ok "Firewall bouncer registered with CrowdSec ($name; the package could not do it)"
+    else
+        warn "Could not write the bouncer key; run: cscli bouncers add NAME, then set api_key in $cfg"
     fi
 }
 

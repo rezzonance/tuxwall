@@ -510,6 +510,93 @@ def check_installer_apt():
               + r.stderr[-800:])
 
 
+BOUNCER_HARNESS = r'''
+set +Eeu; trap - ERR
+LOG=$TD/install.log; : >"$LOG"
+ok() { echo "OK $*" >>"$TD/calls"; }
+warn() { echo "WARN $*" >>"$TD/calls"; }
+info() { :; }
+bouncer_nft_usable() { return 0; }
+# keyless bouncer (configured before CrowdSec), CrowdSec knows no bouncer
+cscli() {
+    echo "CSCLI $*" >>"$TD/calls"
+    case "$1 $2" in
+        "bouncers list") cat "$TD/list" ;;
+        "bouncers add") echo "k3y-from-cscli" ;;
+    esac
+}
+bouncer_ensure_key "$TD/a.yaml"
+echo '[{"name":"cs-firewall-bouncer-1"}]' >"$TD/list"
+bouncer_ensure_key "$TD/b.yaml"
+'''
+
+
+def check_installer_bouncer_key():
+    """tuxwall-install.sh: a bouncer left without a LAPI key (its postinst ran
+    before CrowdSec was configured - fresh netinstall on Proxmox) gets one
+    from cscli; an existing registration is left alone."""
+    with tempfile.TemporaryDirectory() as td:
+        for n in ("a", "b"):
+            with open(os.path.join(td, n + ".yaml"), "w") as f:
+                f.write("mode: nftables\napi_url: http://127.0.0.1:8080/\napi_key: ${API_KEY}\nlog_mode: file\n")
+        with open(os.path.join(td, "list"), "w") as f:
+            f.write("[]\n")
+        script = "source %s\n%s" % (shlex.quote(INSTALLER), BOUNCER_HARNESS)
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60,
+                           env=dict(os.environ, TD=td))
+        calls = read(os.path.join(td, "calls")) if os.path.exists(os.path.join(td, "calls")) else ""
+        a, b = read(os.path.join(td, "a.yaml")), read(os.path.join(td, "b.yaml"))
+        check("api_key: k3y-from-cscli\n" in a and a.count("api_key") == 1 and "log_mode: file" in a,
+              "keyless bouncer gets a cscli key in its config\n" + a + calls + r.stderr[-500:])
+        adds = [c for c in calls.splitlines() if c.startswith("CSCLI bouncers add ")]
+        check(len(adds) == 1 and re.match(r"^CSCLI bouncers add cs-firewall-bouncer-\d+ -o raw$", adds[0]) is not None,
+              "exactly one bouncer registered, upstream-style name\n" + calls)
+        check("api_key: ${API_KEY}" in b, "existing bouncer registration left alone\n" + b)
+        check("k3y" not in read(os.path.join(td, "install.log")), "bouncer key not written to the install log")
+    inst = read(INSTALLER)
+    m = re.search(r"\nconfigure_bouncer\(\) \{\n(.*?)\n\}\n", inst, re.S)
+    body = m.group(1) if m else ""
+    check(re.search(r'bouncer_ensure_key "\$cfg"\n\s*if systemctl restart crowdsec-firewall-bouncer', body) is not None,
+          "configure_bouncer registers the key before restarting the bouncer")
+
+
+def check_blocklist_save_race():
+    """api_server.save_blocklists: the first-start seed and the installer's
+    first-download request save at once - one writer at a time (the loser's
+    os.replace found its .tmp moved away -> empty reply on a fresh install)."""
+    import ast
+    import threading
+    src = read(os.path.join(ROOT, "www", "includes", "api_server.py"))
+    tree = ast.parse(src)
+    keep = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "save_blocklists":
+            keep.append(node)
+        elif isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id.startswith("_BLOCKLIST")
+                                                  for t in node.targets):
+            keep.append(node)
+    check(any(isinstance(n, ast.FunctionDef) for n in keep), "save_blocklists found")
+    with tempfile.TemporaryDirectory() as td:
+        ns = {"os": os, "json": __import__("json"), "threading": threading,
+              "BLOCKLIST_DIR": td, "BLOCKLIST_CONFIG": os.path.join(td, "blocklists.json")}
+        exec(compile(ast.Module(body=keep, type_ignores=[]), "save_blocklists", "exec"), ns)
+        errors = []
+
+        def worker():
+            for _ in range(200):
+                try:
+                    ns["save_blocklists"]([{"url": "https://example.invalid/list", "domains": 0}])
+                except OSError as e:
+                    errors.append(e)
+        threads = [threading.Thread(target=worker) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        check(not errors, "concurrent save_blocklists calls never fail (%d errors: %s)"
+              % (len(errors), errors[:1]))
+
+
 def check_shell():
     for s in SHELL_SCRIPTS:
         shell = "sh" if read(s).startswith("#!/bin/sh") else "bash"
@@ -531,6 +618,8 @@ def main():
     check_wizard()
     check_unit_and_package()
     check_installer_apt()
+    check_installer_bouncer_key()
+    check_blocklist_save_race()
     check_secrets()
     check_shell()
     print("netinstall_check: {} passed, {} failed".format(PASS, FAIL))

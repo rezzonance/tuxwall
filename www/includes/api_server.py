@@ -10149,12 +10149,19 @@ def load_blocklists():
     return None
 
 
+_BLOCKLIST_SAVE_LOCK = threading.Lock()
+
+
 def save_blocklists(data):
     os.makedirs(BLOCKLIST_DIR, exist_ok=True)
     tmp = BLOCKLIST_CONFIG + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, BLOCKLIST_CONFIG)
+    # One writer at a time: on the first start the seed and the installer's
+    # first-download request both save, and the second os.replace found its
+    # .tmp already moved (FileNotFoundError -> empty reply to the request).
+    with _BLOCKLIST_SAVE_LOCK:
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, BLOCKLIST_CONFIG)
 
 
 def load_whitelist():
