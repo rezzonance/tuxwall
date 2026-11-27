@@ -514,7 +514,7 @@
         <!-- Add form -->
         <div class="card-toolbar bl-toolbar res-form">
           <input type="text" id="res-mac"      placeholder="MAC  aa:bb:cc:dd:ee:ff" autocomplete="off" spellcheck="false" style="width:200px">
-          <input type="text" id="res-ip"       placeholder="IP   192.168.1.x"        autocomplete="off" spellcheck="false" style="width:155px">
+          <input type="text" id="res-ip"       placeholder="IP   192.168.1.x" data-lan-placeholder="IP   {lan3}.x"        autocomplete="off" spellcheck="false" style="width:155px">
           <input type="text" id="res-hostname" placeholder="Hostname (optional)"     autocomplete="off" spellcheck="false" style="width:180px">
           <button id="res-add-btn" class="btn btn-primary" type="button">Add Reservation</button>
           <span class="toolbar-spacer"></span>
@@ -708,7 +708,7 @@
                 <tr><td><input type="radio" name="dns-up-choice" value="mullvad"></td><td><b>Mullvad</b> <span class="badge badge-static" title="Mullvad's public DNS service shuts down November 2, 2026">shutting down</span><br><span class="muted">194.242.2.2 — offline after Nov 2, 2026</span></td><td class="mono">194.242.2.2<br>2a07:a8c0::2</td></tr>
                 <tr><td><input type="radio" name="dns-up-choice" value="opendns"></td><td><b>OpenDNS</b> <span class="badge dns-up-tls" title="DNS-over-TLS supported">TLS</span><br><span class="muted">Cisco Umbrella — optional content filtering</span></td><td class="mono">208.67.222.222, 208.67.220.220<br>2620:119:35::35, 2620:119:53::53</td></tr>
                 <tr><td><input type="radio" name="dns-up-choice" value="quad9"></td><td><b>Quad9</b> <span class="badge dns-up-tls" title="DNS-over-TLS supported">TLS</span><br><span class="muted">9.9.9.9 — blocks malware domains</span></td><td class="mono">9.9.9.9, 149.112.112.112<br>2620:fe::fe, 2620:fe::9</td></tr>
-                <tr><td><input type="radio" name="dns-up-choice" value="pihole"></td><td><b>Pi-hole / custom server</b><br><span class="muted">Your own LAN DNS server — queries chain through it</span></td><td><input type="text" id="dns-up-pihole" class="dns-up-pihole-input mono" value="192.168.1.2" placeholder="Pi-hole LAN IP, e.g. 192.168.1.2" autocomplete="off" spellcheck="false"></td></tr>
+                <tr><td><input type="radio" name="dns-up-choice" value="pihole"></td><td><b>Pi-hole / custom server</b><br><span class="muted">Your own LAN DNS server — queries chain through it</span></td><td><input type="text" id="dns-up-pihole" class="dns-up-pihole-input mono" value="" placeholder="Pi-hole LAN IP, e.g. 192.168.1.2" data-lan-placeholder="Pi-hole LAN IP, e.g. {lan3}.2" autocomplete="off" spellcheck="false"></td></tr>
               </tbody>
             </table>
           </div>
@@ -754,7 +754,7 @@
         </div>
         <div class="card-toolbar bl-toolbar fw-form">
           <input type="text" id="dm-domain" placeholder="domain, e.g. plex.example.com" autocomplete="off" spellcheck="false">
-          <input type="text" id="dm-ip" value="192.168.1.12" placeholder="IP address" autocomplete="off" spellcheck="false">
+          <input type="text" id="dm-ip" value="" data-lan-value="{lan3}.12" placeholder="IP address" autocomplete="off" spellcheck="false">
           <input type="text" id="dm-port" placeholder="port (optional)" autocomplete="off" spellcheck="false" style="flex: 0 1 90px; min-width: 70px;">
           <input type="text" id="dm-note" placeholder="note (optional)" autocomplete="off" spellcheck="false">
           <button id="dm-add" class="btn" type="button">Add Domain</button>
@@ -874,7 +874,7 @@
             <option value="redirect">Redirect</option>
             <option value="passthru">Passthru (exempt)</option>
           </select>
-          <input type="text" id="rpz-target" placeholder="Redirect to IP, e.g. 192.168.1.1" autocomplete="off" spellcheck="false" hidden>
+          <input type="text" id="rpz-target" placeholder="Redirect to IP, e.g. 192.168.1.1" data-lan-placeholder="Redirect to IP, e.g. {lan_ip}" autocomplete="off" spellcheck="false" hidden>
           <button id="rpz-add" class="btn" type="button">Add policy</button>
           <span class="toolbar-spacer"></span>
           <span class="muted" id="rpz-hint"></span>
@@ -1355,7 +1355,7 @@
             </label>
             <label class="fw-field">
               <span>Source</span>
-              <input type="text" id="fw-from" placeholder="any — e.g. 192.168.1.0/24" autocomplete="off" spellcheck="false">
+              <input type="text" id="fw-from" placeholder="any — e.g. 192.168.1.0/24" data-lan-placeholder="any — e.g. {lan_cidr}" autocomplete="off" spellcheck="false">
             </label>
             <label class="fw-field">
               <span>Protocol</span>
@@ -2272,7 +2272,7 @@
               <input type="number" id="wg-setup-port" value="51820" min="1" max="65535">
             </label>
             <label>DNS
-              <input type="text" id="wg-setup-dns" value="192.168.1.1">
+              <input type="text" id="wg-setup-dns" value="" placeholder="this router's LAN address">
             </label>
             <label>Allowed IPs (client routes)
               <input type="text" id="wg-setup-allowed" value="0.0.0.0/0, ::/0">
@@ -3290,19 +3290,19 @@
           <label class="fw-field"><span>Interface</span>
             <select id="dhcp-f-iface"></select></label>
           <label class="fw-field"><span>Subnet (CIDR)</span>
-            <input type="text" id="dhcp-f-subnet" placeholder="192.168.1.0/24" autocomplete="off" spellcheck="false"></label>
+            <input type="text" id="dhcp-f-subnet" placeholder="192.168.1.0/24" data-lan-placeholder="{lan_cidr}" autocomplete="off" spellcheck="false"></label>
           <label class="fw-field"><span>Lease time (seconds)</span>
             <input type="number" id="dhcp-f-lease" min="60" max="31536000" autocomplete="off"></label>
           <label class="fw-field"><span>Pool start</span>
-            <input type="text" id="dhcp-f-start" placeholder="192.168.1.100" autocomplete="off" spellcheck="false"></label>
+            <input type="text" id="dhcp-f-start" placeholder="192.168.1.100" data-lan-placeholder="{lan3}.100" autocomplete="off" spellcheck="false"></label>
           <label class="fw-field"><span>Pool end</span>
-            <input type="text" id="dhcp-f-end" placeholder="192.168.1.200" autocomplete="off" spellcheck="false"></label>
+            <input type="text" id="dhcp-f-end" placeholder="192.168.1.200" data-lan-placeholder="{lan3}.200" autocomplete="off" spellcheck="false"></label>
           <label class="fw-field"><span>Router (gateway)</span>
-            <input type="text" id="dhcp-f-router" placeholder="192.168.1.1" autocomplete="off" spellcheck="false"></label>
+            <input type="text" id="dhcp-f-router" placeholder="192.168.1.1" data-lan-placeholder="{lan_ip}" autocomplete="off" spellcheck="false"></label>
           <label class="fw-field"><span>Domain name (optional)</span>
             <input type="text" id="dhcp-f-domain" placeholder="house.lan" autocomplete="off" spellcheck="false"></label>
           <label class="fw-field"><span>DNS servers (comma separated)</span>
-            <input type="text" id="dhcp-f-dns" placeholder="192.168.1.1" autocomplete="off" spellcheck="false"></label>
+            <input type="text" id="dhcp-f-dns" placeholder="192.168.1.1" data-lan-placeholder="{lan_ip}" autocomplete="off" spellcheck="false"></label>
         </div>
         <p class="muted fw-modal-hint" id="dhcp-form-hint"></p>
         <div class="fw-modal-actions">
@@ -4244,7 +4244,7 @@
 <script src="/scripts/community-settings.js?v=202611210025"></script>
 <script src="/scripts/https-settings.js?v=202611231900"></script>
 <script src="/scripts/devices.js?v=202611251815"></script>
-<script src="/scripts/dashboard.js?v=202611251721"></script>
+<script src="/scripts/dashboard.js?v=202611271200"></script>
 <script src="/scripts/enhance.js?v=202611210025"></script>
 <script src="/scripts/netmap.js?v=202611210025"></script>
 <script src="/scripts/insights.js?v=202611210025"></script>

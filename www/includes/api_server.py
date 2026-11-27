@@ -9335,13 +9335,11 @@ def _wg_default_dns():
     if WG_DEFAULT_DNS:
         return WG_DEFAULT_DNS
     conf = _net_conf()
-    if conf.get("lan_address"):
-        WG_DEFAULT_DNS = str(conf["lan_address"])
-        return WG_DEFAULT_DNS
-    addr = _topo("lan_address")
-    if addr:
+    for addr in (conf.get("lan_address"), _topo("lan_address")):
+        if not addr:
+            continue
         try:
-            WG_DEFAULT_DNS = str(ipaddress.ip_interface(addr).ip)
+            WG_DEFAULT_DNS = str(ipaddress.ip_interface(str(addr)).ip)
             return WG_DEFAULT_DNS
         except ValueError:
             pass
@@ -9888,7 +9886,7 @@ def setup_wireguard(body):
         raise RuntimeError("Invalid listen port")
     if not (0 < listen_port < 65536):
         raise RuntimeError("Invalid listen port")
-    dns = (body.get("dns") or WG_DEFAULT_DNS).strip()
+    dns = (body.get("dns") or _wg_default_dns()).strip()
     allowed_ips = (body.get("allowed_ips") or WG_DEFAULT_ALLOWED_IPS).strip()
     try:
         keepalive = int(body.get("keepalive") or WG_DEFAULT_KEEPALIVE)
@@ -9953,7 +9951,7 @@ def add_wg_peer(name=""):
     apply_wg_config()
     server_pub = wg_pubkey(server["private_key"]) if server.get("private_key") else ""
     allowed_ips = server.get("allowed_ips") or WG_DEFAULT_ALLOWED_IPS
-    dns = server.get("dns") or WG_DEFAULT_DNS
+    dns = server.get("dns") or _wg_default_dns()
     keepalive = server.get("keepalive") or WG_DEFAULT_KEEPALIVE
     port = server.get("listen_port") or WG_DEFAULT_PORT
     endpoint_host = server.get("endpoint") or get_wan_ip()
@@ -9994,7 +9992,7 @@ def peer_config(public_key):
     conf = build_client_conf(
         peer["private_key"], server_pub, client_ip, endpoint,
         server.get("allowed_ips") or WG_DEFAULT_ALLOWED_IPS,
-        server.get("dns") or WG_DEFAULT_DNS,
+        server.get("dns") or _wg_default_dns(),
         server.get("keepalive") or WG_DEFAULT_KEEPALIVE,
     )
     return {"ok": True, "name": peer.get("name"), "config": conf,
@@ -10099,7 +10097,7 @@ def build_wireguard():
             "public_key": (live_pub if is_wg_key(live_pub) else "") or server_pub,
             "listen_port": listen_port,
             "address": conf_addr,
-            "dns": server.get("dns") or WG_DEFAULT_DNS,
+            "dns": server.get("dns") or _wg_default_dns(),
             "allowed_ips": server.get("allowed_ips") or WG_DEFAULT_ALLOWED_IPS,
             "keepalive": server.get("keepalive") or WG_DEFAULT_KEEPALIVE,
             "rx": sum(p["rx"] for p in live_peers),

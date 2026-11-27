@@ -9,6 +9,7 @@
   const SYSTEM_WINDOW = 600;
 
   const state = {
+    lanInfo: { ip: "", cidr: "", net3: "" },   // router's LAN address (applyLanHints)
     leases: [],
     devices: [],          // device monitoring inventory (GET /api/devices), merged into the Clients table
     devAvail: false,
@@ -5102,7 +5103,7 @@
         <div class="trip-ed-grid">
           <label class="fw-field"><span>Trigger after (events)</span><input type="number" min="1" max="100" inputmode="numeric" data-f="count"></label>
           <label class="fw-field"><span>Within (minutes)</span><input type="number" min="1" max="1440" inputmode="numeric" data-f="minutes"></label>
-          <label class="fw-field trip-wide"><span>Excluded IPs / CIDRs (${suri ? "source or destination" : "destination"}), one per line</span><textarea rows="2" data-f="ips" spellcheck="false" placeholder="e.g. 192.168.1.181 or 203.0.113.0/24"></textarea></label>
+          <label class="fw-field trip-wide"><span>Excluded IPs / CIDRs (${suri ? "source or destination" : "destination"}), one per line</span><textarea rows="2" data-f="ips" spellcheck="false" placeholder="e.g. ${esc(lanHintText("{lan3}.181"))} or 203.0.113.0/24" data-lan-placeholder="e.g. {lan3}.181 or 203.0.113.0/24"></textarea></label>
           ${suri ? `<label class="fw-field trip-wide"><span>Excluded Suricata signature IDs</span><textarea rows="1" data-f="sids" spellcheck="false" placeholder="e.g. 2031123"></textarea></label>` : ""}
           <label class="fw-field trip-wide"><span>Test with ${suri ? "source" : "destination"} address (optional)</span><input type="text" data-f="test-src" spellcheck="false" autocomplete="off" placeholder="${suri ? "e.g. 203.0.113.9 — a simulated attacker" : "e.g. 203.0.113.9"}"></label>
         </div>
@@ -6409,7 +6410,15 @@
     state.wgData = d;
     els.wgUnconfigured.hidden = !!d.configured;
     els.wgConfigured.hidden = !d.configured;
-    if (!d.configured) return;
+    if (!d.configured) {
+      // Setup form: clients get this router's LAN address as their DNS.
+      const dns = els.wgSetupDns, def = (d.interface && d.interface.dns) || "";
+      if (dns && def && !dns.value && !dns.dataset.lanFilled && document.activeElement !== dns) {
+        dns.value = def;
+        dns.dataset.lanFilled = "1";
+      }
+      return;
+    }
 
     const iface = d.interface || {};
     els.wgState.textContent = iface.up ? "Connected" : "Stopped";
@@ -7618,11 +7627,48 @@
     return ` (${Math.round((part / total) * 100)}%)`;
   }
 
+  // The router's own LAN address (from /api/system: Kea's router option and
+  // the interface carrying it). Form examples and defaults follow it, so a
+  // LAN other than 192.168.1.0/24 gets matching hints.
+  function lanHintText(tpl) {
+    const lanInfo = state.lanInfo;
+    return String(tpl)
+      .replace(/\{lan_ip\}/g, lanInfo.ip || "192.168.1.1")
+      .replace(/\{lan_cidr\}/g, lanInfo.cidr || "192.168.1.0/24")
+      .replace(/\{lan3\}/g, lanInfo.net3 || "192.168.1");
+  }
+
+  function applyLanHints(sys) {
+    const lanInfo = state.lanInfo;
+    const ip = String((sys && sys.dhcp && sys.dhcp.router) || "").split(",")[0].trim();
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
+      let mask = 24;
+      ((sys && sys.interfaces) || []).forEach((i) => (i.addrs || []).forEach((a) => {
+        if (a.family === "inet" && a.addr === ip && a.mask) mask = Number(a.mask);
+      }));
+      const n = ip.split(".").reduce((acc, o) => acc * 256 + Number(o), 0);
+      const net = mask > 0 ? n - (n % 2 ** (32 - mask)) : 0;
+      lanInfo.ip = ip;
+      lanInfo.net3 = ip.split(".").slice(0, 3).join(".");
+      lanInfo.cidr = [24, 16, 8, 0].map((b) => Math.floor(net / 2 ** b) % 256).join(".") + "/" + mask;
+    }
+    document.querySelectorAll("[data-lan-placeholder]").forEach((el) => {
+      el.placeholder = lanHintText(el.dataset.lanPlaceholder);
+    });
+    if (!lanInfo.ip) return;
+    document.querySelectorAll("[data-lan-value]").forEach((el) => {
+      if (el.dataset.lanFilled || el.value || document.activeElement === el) return;
+      el.value = lanHintText(el.dataset.lanValue);
+      el.dataset.lanFilled = "1";
+    });
+  }
+
   function renderSystem(d) {
     if (!d.ok) {
       showBanner(true, d.error || "System info unavailable");
       return;
     }
+    applyLanHints(d);
     const brandVersion = document.getElementById("brand-version");
     if (brandVersion && d.tuxwall_version) brandVersion.textContent = "v" + d.tuxwall_version;
     const cpu = d.cpu || {};
