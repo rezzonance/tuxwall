@@ -729,6 +729,22 @@ def check_installer_bouncer_key():
           "configure_bouncer registers the key before restarting the bouncer")
 
 
+def check_installer_wait_online():
+    """tuxwall-install.sh: retiring systemd-resolved (for Unbound) leaves
+    netplan's generated systemd-networkd-wait-online drop-in waiting with --dns
+    (it pings io.systemd.Resolve.Monitor) - after the install that wait fails on
+    every boot. The installer drops a wait-online override that re-runs the same
+    wait without --dns."""
+    inst = read(INSTALLER)
+    m = re.search(r"\nstep_dns\(\) \{\n(.*?)\n\}\n", inst, re.S)
+    body = m.group(1) if m else ""
+    check("systemd-resolved.service" in body and "systemd-networkd-wait-online.service.d/tuxwall.conf" in body,
+          "step_dns retires resolved and writes a wait-online override")
+    check('ExecStart=/lib/systemd/systemd-networkd-wait-online --any -o routable -i %s' in body
+          and '"$WAN"' in body and 'ExecStart=\\n' in body,
+          "wait-online override re-runs without --dns, for the WAN interface\n" + body[:600])
+
+
 def check_blocklist_save_race():
     """api_server.save_blocklists: the first-start seed and the installer's
     first-download request save at once - one writer at a time (the loser's
@@ -823,6 +839,7 @@ def main():
     check_unit_and_package()
     check_installer_apt()
     check_installer_bouncer_key()
+    check_installer_wait_online()
     check_blocklist_save_race()
     check_secrets()
     check_macs()

@@ -1449,6 +1449,15 @@ step_gateway_config() {
 step_dns() {
     q systemctl disable --now systemd-resolved.service || true
     q systemctl disable --now systemd-resolved-varlink.socket systemd-resolved-monitor.socket || true
+    # netplan's generated systemd-networkd-wait-online drop-in waits with --dns
+    # (it pings io.systemd.Resolve.Monitor). Once resolved is retired the wait
+    # fails on every boot ("Failed to connect to io.systemd.Resolve.Monitor") -
+    # cosmetic (network-online.target is still reached) but it leaves a red
+    # failed unit. Re-run the same wait without --dns.
+    mkdir -p /etc/systemd/system/systemd-networkd-wait-online.service.d
+    printf '[Service]\nExecStart=\nExecStart=/lib/systemd/systemd-networkd-wait-online --any -o routable -i %s\n' \
+        "$WAN" >/etc/systemd/system/systemd-networkd-wait-online.service.d/tuxwall.conf
+    ok "network-online wait no longer waits for the retired systemd-resolved"
     if [[ -e /etc/resolv.conf || -L /etc/resolv.conf ]]; then
         mkdir -p "$BACKUP_DIR/etc"
         cp -aL /etc/resolv.conf "$BACKUP_DIR/etc/resolv.conf" 2>/dev/null || true
