@@ -2,10 +2,10 @@
 ###############################################################################
 #  run-qemu-test.sh - end-to-end QEMU test of the netinstall ISO (TEST variant)
 #  ---------------------------------------------------------------------------
-#    image/netinstall/build.sh --test
+#    image/netinstall/build.sh --test --wan-mac BC:24:11:00:00:01 --lan-mac BC:24:11:00:00:02
 #    image/netinstall/test/run-qemu-test.sh --iso out/tuxwall-netinstall-X-amd64-TEST.iso \
 #        --ubuntu-iso ~/.cache/tuxwall-netinstall/ubuntu-26.04.1/ubuntu-26.04.1-live-server-amd64.iso \
-#        --mode uefi|bios [--work DIR] [--mem MB] [--phase2-only]
+#        --mode uefi|bios [--work DIR] [--mem MB] [--phase2-only] [--wan-mac MAC] [--lan-mac MAC]
 #
 #  Phase 1 boots the TEST ISO: unattended install onto a blank 20 GB disk,
 #  the Ubuntu ISO file is found on a second (FAT) disk by iso-scan - the
@@ -29,6 +29,7 @@
 set -Eeuo pipefail
 
 ISO="" UISO="" MODE=uefi WORK="" MEM=4096 TIMEOUT1=5400 TIMEOUT2=5400 PHASE2_ONLY=0
+WAN_MAC="BC:24:11:00:00:01" LAN_MAC="BC:24:11:00:00:02"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --iso) ISO=$(readlink -f "$2"); shift 2 ;;
@@ -36,6 +37,8 @@ while [[ $# -gt 0 ]]; do
         --mode) MODE=$2; shift 2 ;;
         --work) WORK=$2; shift 2 ;;
         --mem) MEM=$2; shift 2 ;;
+        --wan-mac) WAN_MAC=$2; shift 2 ;;
+        --lan-mac) LAN_MAC=$2; shift 2 ;;
         --phase2-only) PHASE2_ONLY=1; shift ;;
         -h|--help) sed -n '2,30p' "$0" | sed 's/^#  \{0,1\}//'; exit 0 ;;
         *) echo "unknown option $1" >&2; exit 2 ;;
@@ -91,8 +94,8 @@ run_vm() {   # run_vm LOG TIMEOUT extra-args...
     rm -f "$log" "$WORK/qemu.pid" "$WORK/lan.sock" "$WORK/lan-nopeer.sock"
     nice -n 10 "$QEMU" "${datadirs[@]}" "${fw[@]}" -cpu host -smp 2 -m "$MEM" -display none -no-reboot \
         -drive "file=$WORK/disk.qcow2,if=virtio,format=qcow2" \
-        -netdev user,id=wan -device virtio-net-pci,netdev=wan,mac=52:54:00:12:34:01 \
-        -netdev "dgram,id=lan,local.type=unix,local.path=$WORK/lan.sock,remote.type=unix,remote.path=$WORK/lan-nopeer.sock" -device virtio-net-pci,netdev=lan,mac=52:54:00:12:34:02 \
+        -netdev user,id=wan -device virtio-net-pci,netdev=wan,mac="$WAN_MAC" \
+        -netdev "dgram,id=lan,local.type=unix,local.path=$WORK/lan.sock,remote.type=unix,remote.path=$WORK/lan-nopeer.sock" -device virtio-net-pci,netdev=lan,mac="$LAN_MAC" \
         -serial "file:$log" -pidfile "$WORK/qemu.pid" "$@" &
     local qpid=$! t=0
     while kill -0 "$qpid" 2>/dev/null; do

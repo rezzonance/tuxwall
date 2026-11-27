@@ -524,13 +524,13 @@ def check_wizard_firstboot_extras():
     with tempfile.TemporaryDirectory() as td:
         os.makedirs(os.path.join(td, "issue.d"))
         os.makedirs(os.path.join(td, "cloud.cfg.d"))
-        for n, mac in (("ens18", "52:54:00:12:34:01"), ("ens19", "52:54:00:12:34:02")):
+        for n, mac in (("ens18", "BC:24:11:00:00:01"), ("ens19", "BC:24:11:00:00:02")):
             os.makedirs(os.path.join(td, "net", n))
             with open(os.path.join(td, "net", n, "address"), "w") as f:
                 f.write(mac + "\n")
         with open(os.path.join(td, "50-cloud-init.yaml"), "w") as f:
-            f.write('network:\n  version: 2\n  ethernets:\n    eth0:\n      match:\n        macaddress: "52:54:00:12:34:01"\n'
-                    '      dhcp4: true\n      set-name: "eth0"\n    ens19:\n      match:\n        macaddress: "52:54:00:12:34:02"\n'
+            f.write('network:\n  version: 2\n  ethernets:\n    eth0:\n      match:\n        macaddress: "BC:24:11:00:00:01"\n'
+                    '      dhcp4: true\n      set-name: "eth0"\n    ens19:\n      match:\n        macaddress: "BC:24:11:00:00:02"\n'
                     '      set-name: "ens19"\n      dhcp4: false\n')
         r = subprocess.run(["bash", "-c", FIRSTBOOT_HARNESS], capture_output=True, text=True, timeout=60,
                            env=dict(os.environ, WIZ=WIZ, TD=td))
@@ -551,7 +551,7 @@ def check_wizard_firstboot_extras():
             import yaml
             d = yaml.safe_load(read(os.path.join(td, "50-cloud-init.yaml")))["network"]["ethernets"]
             check(sorted(d) == ["ens18", "ens19"] and "set-name" not in d["ens18"]
-                  and d["ens18"]["match"]["macaddress"] == "52:54:00:12:34:01" and d["ens18"]["dhcp4"] is True
+                  and d["ens18"]["match"]["macaddress"] == "BC:24:11:00:00:01" and d["ens18"]["dhcp4"] is True
                   and d["ens19"].get("set-name") == "ens19",
                   "cloud-init netplan: pending rename dropped, entry keyed by the current name, matching rename kept: %s" % d)
             check(os.path.exists(os.path.join(td, "50.orig")) and "eth0" in read(os.path.join(td, "50.orig")),
@@ -778,6 +778,39 @@ def check_shell():
         print("note: shellcheck not installed, skipped")
 
 
+def check_macs():
+    """The lab MACs are never hard-coded. The QEMU default 52:54:00:12:34:xx once
+    leased the Proxmox host's own static IP (192.168.1.86) from the live router
+    and cut the host off; lab VMs get unique Proxmox-style BC:24:11:... MACs and
+    the test answers / VM-image seed take those MACs as arguments."""
+    bad = re.compile(r"(?:WAN_MAC|LAN_MAC|macaddress|\bmac)\s*[=:]\s*[\"']?52:54:00:12:34", re.I)
+    for root, _dirs, fns in os.walk(ROOT):
+        if "/.git/" in root + "/" or "/out/" in root + "/":
+            continue
+        for fn in fns:
+            p = os.path.join(root, fn)
+            try:
+                with open(p, "rb") as f:
+                    b = f.read(8192)
+            except OSError:
+                continue
+            if b"\x00" in b:
+                continue
+            if bad.search(b.decode("utf-8", "replace")):
+                check(False, "no hard-coded lab MAC (52:54:00:12:34): " + os.path.relpath(p, ROOT))
+    sa = read(os.path.join(NI, "test", "setup-answers.test"))
+    check("@WAN_MAC@" in sa and "@LAN_MAC@" in sa, "test answers take WAN/LAN MACs as placeholders")
+    b = read(os.path.join(NI, "build.sh"))
+    check("--wan-mac" in b and "--lan-mac" in b and "@WAN_MAC@" in b and "@LAN_MAC@" in b,
+          "build.sh --test fills the MACs into the test answers")
+    ms = read(os.path.join(VM, "test", "make-test-seed.sh"))
+    check("--wan-mac" in ms and "--lan-mac" in ms and "@WAN_MAC@" in ms and "@LAN_MAC@" in ms,
+          "VM-image test seed takes the MACs and fills them into the answers")
+    rq = read(os.path.join(NI, "test", "run-qemu-test.sh"))
+    check("--wan-mac" in rq and "--lan-mac" in rq and 'mac="$WAN_MAC"' in rq and 'mac="$LAN_MAC"' in rq,
+          "QEMU test takes its NIC MACs as flags (never hard-coded)")
+
+
 def main():
     p = pins()
     check_pins(p)
@@ -792,6 +825,7 @@ def main():
     check_installer_bouncer_key()
     check_blocklist_save_race()
     check_secrets()
+    check_macs()
     check_shell()
     print("netinstall_check: {} passed, {} failed".format(PASS, FAIL))
     return 1 if FAIL else 0

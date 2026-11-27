@@ -29,6 +29,7 @@ OUT="$HERE/out"
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/tuxwall-netinstall"
 KEYRING=/usr/share/keyrings/ubuntu-archive-keyring.gpg
 TEST=0
+WAN_MAC="" LAN_MAC=""
 MAX_BYTES=$((2 * 1024 * 1024 * 1024 - 1))
 TARGET_BYTES=$((300 * 1024 * 1024))
 
@@ -42,6 +43,8 @@ while [[ $# -gt 0 ]]; do
         --out)     OUT="${2:?}"; shift 2 ;;
         --cache)   CACHE="${2:?}"; shift 2 ;;
         --keyring) KEYRING="${2:?}"; shift 2 ;;
+        --wan-mac) WAN_MAC="${2:?}"; shift 2 ;;
+        --lan-mac) LAN_MAC="${2:?}"; shift 2 ;;
         --test)    TEST=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) usage >&2; die "unknown option: $1" ;;
@@ -132,7 +135,11 @@ gpg --batch --yes --dearmor -o "$P/tuxwall-archive-keyring.gpg" "$REPO/apt-publi
 install -m 0755 "$REPO/image/common/install-firstboot.sh" "$P/install-firstboot.sh"
 install -m 0755 "$HERE/verify-ubuntu-iso.sh" "$P/verify-ubuntu-iso.sh"
 if (( TEST )); then
+    MAC_RE='^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'
+    [[ $WAN_MAC =~ $MAC_RE && $LAN_MAC =~ $MAC_RE ]] || die "--test needs --wan-mac/--lan-mac (the lab VM's unique MACs, e.g. BC:24:11:00:68:01)"
     install -m 0600 "$HERE/test/setup-answers.test" "$P/setup-answers.test"
+    sed -i "s/@WAN_MAC@/$WAN_MAC/g; s/@LAN_MAC@/$LAN_MAC/g" "$P/setup-answers.test"
+    grep -q '@[A-Z0-9_]*@' "$P/setup-answers.test" && die "unrendered placeholder in setup-answers.test" || true
     install -m 0755 "$HERE/test/test-report.sh" "$P/test-report.sh"
     install -m 0755 "$HERE/test/lan-gate.sh" "$P/lan-gate.sh"
     install -m 0644 "$HERE/test/lan-gate.service" "$P/lan-gate.service"

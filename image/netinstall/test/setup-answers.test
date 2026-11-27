@@ -1,9 +1,13 @@
-# TEST ONLY (QEMU, image/netinstall/test/run-qemu-test.sh): answers for an
-# unattended tuxwall-setup run. Ports by MAC: the test VM's NICs.
+# TEST ONLY (never shipped): answers for an unattended tuxwall-setup run. Ports
+# by MAC so the interface names may differ between machines. @WAN_MAC@ /
+# @LAN_MAC@ are filled in at build/seed time (build.sh --test --wan-mac/--lan-mac,
+# image/vm/test/make-test-seed.sh --wan-mac/--lan-mac): the lab VMs get unique
+# Proxmox-style MACs (BC:24:11:…), never the QEMU default 52:54:00:12:34:xx,
+# which once leased the Proxmox host's own IP and cut it off.
 ROLE=gateway
-WAN_MAC=52:54:00:12:34:01
+WAN_MAC=@WAN_MAC@
 WAN_MODE=dhcp
-LAN_MAC=52:54:00:12:34:02
+LAN_MAC=@LAN_MAC@
 LAN_SUBNET=172.31.250.1/24
 ADMIN_USER=admin
 ADMIN_PASSWORD_FILE=/etc/tuxwall/test-admin-password

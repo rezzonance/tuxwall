@@ -73,9 +73,14 @@ and initrd must come from the ISO the installer downloads).
 ## Test (QEMU, user-mode networking only)
 
 ```sh
-image/netinstall/build.sh --test                 # *-TEST.iso: unattended seed, never publish it
-image/netinstall/test/run-qemu-test.sh --iso out/…-TEST.iso --ubuntu-iso <cached ubuntu ISO> --mode uefi|bios
+image/netinstall/build.sh --test --wan-mac BC:24:11:00:00:01 --lan-mac BC:24:11:00:00:02   # *-TEST.iso: unattended seed, never publish it
+image/netinstall/test/run-qemu-test.sh --iso out/…-TEST.iso --ubuntu-iso <cached ubuntu ISO> --mode uefi|bios --wan-mac BC:24:11:00:00:01 --lan-mac BC:24:11:00:00:02
 ```
+
+The `--wan-mac`/`--lan-mac` are the test VM's NIC MACs (WAN = NIC 1, LAN = NIC
+2); use Proxmox-style `BC:24:11:…` MACs, never the QEMU default
+`52:54:00:12:34:xx` (which once leased the Proxmox host's own IP on a lab
+bridge).
 
 Phase 1 installs onto a blank 20 GB disk (Secure Boot OVMF with Microsoft keys
 in UEFI mode, SeaBIOS otherwise; Ubuntu ISO file on a second FAT disk), phase 2

@@ -56,12 +56,14 @@ and in `/etc/tuxwall/vm-image`). Bump `UBUNTU_CLOUD_SERIAL` +
 
 ## Test (Proxmox lab)
 
-`test/make-test-seed.sh --out DIR [--ssh-key FILE.pub]` makes a NoCloud seed
-ISO (TEST ONLY): a test user, the QEMU guest agent, the netinstall test
-answers (`image/netinstall/test/setup-answers.test`) as
-`/etc/tuxwall/setup-answers`, the LAN isolation gate (run by cloud-init's
-runcmd before the wizard may start; a drop-in makes the wizard refuse to run
-without its marker) and the netinstall test report (`test-report.sh`, with
-VM checks: cloud-init done, root file system grown, password file removed).
-Attach it as a CD next to the imported qcow2; MACs as in the answers file
-(WAN `52:54:00:12:34:01`, LAN `...:02`).
+`test/make-test-seed.sh --out DIR --wan-mac MAC --lan-mac MAC [--ssh-key FILE.pub]`
+makes a NoCloud seed ISO (TEST ONLY): a test user, the QEMU guest agent, the
+netinstall test answers (`image/netinstall/test/setup-answers.test`, WAN/LAN
+MACs filled from `--wan-mac`/`--lan-mac`) as `/etc/tuxwall/setup-answers`, the
+LAN isolation gate (run by cloud-init's runcmd before the wizard may start; a
+drop-in makes the wizard refuse to run without its marker) and the netinstall
+test report (`test-report.sh`, with VM checks: cloud-init done, root file
+system grown, password file removed). Attach it as a CD next to the imported
+qcow2 and give the VM's unique MACs: WAN `--wan-mac` = net0 (vmbr0), LAN
+`--lan-mac` = net1 (vmbr1). Use Proxmox-style `BC:24:11:…` MACs, never the
+QEMU default `52:54:00:12:34:xx`, which once leased the Proxmox host's own IP.
