@@ -1,7 +1,10 @@
 # TuxWall netinstall @TUXWALL_VERSION@ - Ubuntu @UBUNTU_VERSION@ LTS server installer.
 # Rendered by image/netinstall/build.sh. Used by both UEFI (Ubuntu's signed
 # shim + GRUB) and BIOS (Ubuntu's GRUB El Torito image) boots.
-set timeout=30
+# No auto-boot: the default entry downloads into RAM (6 GB+); on a smaller box
+# an unattended boot would end in a BusyBox shell. Wait for a choice.
+set timeout=-1
+set timeout_style=menu
 set default=0
 
 # Menu on the screen and the first serial port (headless boxes).

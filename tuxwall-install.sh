@@ -143,7 +143,14 @@ run_long() {
     ( trap - ERR; TERM=dumb NO_COLOR=1 "$@" ) >>"$LOG" 2>&1 &
     # shellcheck disable=SC1003
     local pid=$! i=0 rc=0 start=$SECONDS frames='|/-\' every=1 tty
-    [[ "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" =~ [Uu][Tt][Ff]-?8 ]] && frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    # Braille frames only on a UTF-8 terminal emulator: the Linux text console
+    # font (TERM=linux) and serial terminals (vt*) show them as '0'.
+    if [[ "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" =~ [Uu][Tt][Ff]-?8 ]]; then
+        case "${TERM:-dumb}" in
+            linux|vt*|dumb|ansi|cons*) ;;
+            *) frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' ;;
+        esac
+    fi
     # Serial console (first-boot wizard on ttyS0): a spinner frame every
     # 0.15 s floods the line and console logs - redraw every ~10 s instead.
     tty="$(readlink "/proc/$$/fd/1" 2>/dev/null || true)"

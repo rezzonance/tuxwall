@@ -224,6 +224,12 @@ def check_grub(p):
           "GRUB help entry explains the RAM failure and the low-RAM entries (boots nothing)")
     check(re.search(r'menuentry "Install TuxWall \(downloads[^"]*6 GB\+ RAM\)"', g) is not None,
           "download entry title states the RAM need")
+    head = g.split("menuentry", 1)[0]
+    check(re.search(r"^set timeout=-1$", head, re.M) is not None and "timeout_style=menu" in head
+          and re.search(r"^set default=0$", head, re.M) is not None,
+          "shipped GRUB waits for a choice (no auto-boot into the 6 GB download entry), default highlight = entry 0")
+    check(re.search(r"terminal_input console serial\s+terminal_output console serial", head) is not None,
+          "shipped GRUB menu also on the serial console")
     ver = read(os.path.join(NI, "verify-ubuntu-iso.sh"))
     check("PKNAME" in ver and 'head -c "$size" "/dev/$parent"' in ver,
           "ISO check: an ISO9660 partition of a dd'ed stick is checked as its whole disk")
@@ -568,6 +574,24 @@ def check_wizard_firstboot_extras():
     body = rl.group(1) if rl else ""
     check("/dev/ttyS*" in body and "every=67" in body and "(( i % every == 0 ))" in body,
           "installer spinner redraws every ~10 s on a serial console (no flood)")
+    check("frames='|/-\\'" in body and re.search(r'case "\$\{TERM:-dumb\}" in\s+linux\|vt\*\|dumb[^)]*\) ;;\s+\*\) frames=', body) is not None,
+          "installer spinner: ASCII frames on the Linux console / vt* / dumb (braille shows as '0')")
+    if shutil.which("script"):
+        with tempfile.TemporaryDirectory() as td:
+            h = os.path.join(td, "spin.sh")
+            with open(h, "w") as f:
+                f.write("LOG=/dev/null C_C= C_0= C_DIM=\n" + (rl.group(0) if rl else "") + "\nrun_long x sleep 0.5\n")
+            seen = {}
+            for t in ("linux", "vt220", "xterm-256color"):
+                env = dict(os.environ, TERM=t, LANG="C.UTF-8", LC_ALL="C.UTF-8")
+                r = subprocess.run(["script", "-qec", "bash " + h, "/dev/null"], capture_output=True, text=True,
+                                   env=env, timeout=30, errors="replace")
+                seen[t] = r.stdout
+            check("\u280b" not in seen["linux"] and "|" in seen["linux"] and "\u280b" not in seen["vt220"]
+                  and "\u280b" in seen["xterm-256color"],
+                  "installer spinner run: ASCII on TERM=linux/vt220, braille only on a UTF-8 terminal emulator")
+    else:
+        print("note: script(1) missing, spinner run skipped")
 
 
 def check_unit_and_package():
@@ -599,6 +623,8 @@ def check_unit_and_package():
     dc = read(os.path.join(ROOT, "tools", "deb_contents_check.py"))
     check("./usr/local/sbin/tuxwall-setup" in dc and "tuxwall-setup@.service" in dc, "deb_contents_check covers the wizard")
     wiz = read(WIZ)
+    check('say "$(summary_text)"' in wiz and "summary_text | tr" not in wiz,
+          "answers-file run prints the same aligned multi-line summary as the wizard (no ';'-joined line)")
     check("--answers" in wiz and "source \"$ANSWERS\"" not in wiz and ". \"$ANSWERS\"" not in wiz, "answers file is parsed, never sourced")
     check("/api/auth/setup" in wiz, "wizard can create the first admin through the API")
     check("tuxwall-tls status --json" in wiz, "wizard shows the CA fingerprint")

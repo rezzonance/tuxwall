@@ -999,7 +999,8 @@ main() {
     if [[ -n $ANSWERS ]]; then
         read_answers "$ANSWERS"
         local msg; msg="$(check_answers)" || die "$msg"
-        say "TuxWall setup (answers file): $(summary_text | tr '\n' ';')"
+        say "TuxWall setup (answers file):"
+        say "$(summary_text)"
         prepare_wan || say "warning: internet check failed; trying the install anyway"
         if ! run_install; then
             say "installer failed; log: $INSTALL_LOG"
