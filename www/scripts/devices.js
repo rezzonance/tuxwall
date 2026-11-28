@@ -1,22 +1,29 @@
 /* Device monitoring UI (3.3.7): the device panel and quarantine dialog on
    Clients (rows of the device table open it - dashboard.js merges the
-   inventory into the lease table and calls twDevices.open), the "Device
-   threats" card on Security, the "Flagged devices" figure on the Overview
-   Security monitor, and Settings > Threat: monitoring sources and their
-   warnings (Suricata without a LAN interface, Zeek without MACs / with bad
-   checksums), threat intelligence (feeds, abuse.ch Auth-Key, local
-   indicators); Settings > Alerts > Device alerts. The same source warnings
-   show on Clients and on the Security card, with a link to Settings > Threat
-   (links: [data-tw-settings="<pane>"] -> window.twSettings.open).
+   inventory into the lease table and calls twDevices.open), the "Flagged
+   devices" figure on the Overview Security monitor, and Security > Local:
+   status cards (Flagged, Quarantined, New 24 h, Active clients = seen in the
+   last 10 minutes, Threat feeds; clickable), the device threats table (with
+   "Show silenced"), silence rules (Silenced card + the Silence dialog, also
+   on the device panel's findings), monitoring sources and their warnings
+   (Suricata without a LAN interface, Zeek without MACs / with bad checksums;
+   the Zeek "Ignore checksums" switch), threat intelligence (feeds, abuse.ch
+   Auth-Key, local indicators). Settings > Alerts > Device alerts. The same
+   source warnings show on Clients with a link to Security > Local
+   ([data-tw-local="<card id>"] -> window.twSecurity.open; the old
+   Settings > Threat links land there too).
    Data: GET /api/devices/summary, /feeds (everyone), /api/devices/<id>,
-   /indicators, /alerts, /findings/recent (admin); POST /api/devices/<id>/{quarantine,
-   unquarantine,rename,expected,new-ack}, /api/devices/feeds/{update,key},
-   /api/devices/indicators, /api/devices/alerts (admin + same Origin).
+   /indicators, /alerts, /silence, /findings/recent[?silenced=1] (admin);
+   POST /api/devices/<id>/{quarantine,unquarantine,rename,expected,new-ack},
+   /api/devices/feeds/{update,key}, /api/devices/indicators, /alerts,
+   /silence, /zeek-checksums (admin + same Origin).
    The per-device outbound profile ("LAN Device Activity", formerly a
    Security card) comes from GET /api/security/zeek. Markup: index.html
-   (#dev-modal, #dev-q-modal, #dev-threat-card, #dev-threat-table, #dev-src-card, #dev-src-hint,
-   #ti-card, #ti-viewer-card, #dev-alerts-card, #ov-dev-flagged); shared classes only (card, modal, badge, dot, btn,
-   vl-info, alerts-grid, ov-kv, chart-legend, bw-canvas). */
+   (#dev-modal, #dev-q-modal, #dev-s-modal, #dev-stats, #dev-threat-card,
+   #dev-threat-table, #dev-silence-card, #dev-src-card, #dev-zeek-ck,
+   #dev-src-hint, #ti-card, #ti-viewer-card, #dev-alerts-card, #ov-dev-flagged);
+   shared classes only (card, modal, badge, dot, btn, stat-card, cs-set,
+   fw-switch, vl-info, alerts-grid, ov-kv, chart-legend, bw-canvas). */
 (() => {
   "use strict";
 
@@ -37,6 +44,7 @@
     dns_lookup: "Malware domain lookup", dns_blocked: "Blocked malware domain lookup", ids_alert: "IDS alert",
   };
   const EXPIRY_LABEL = { none: "No expiry", "1h": "1 hour", "24h": "24 hours", "7d": "7 days" };
+  const SILENCE_EXPIRY = { "7d": "7 days", "30d": "30 days", forever: "Forever" };
   const POLL_MS = 30000;
 
   let isAdmin = false;
@@ -46,6 +54,10 @@
   let current = null;           // {id, detail, zeek}
   let tiData = null;
   let recent = [];              // newest not-expected findings (admin), for the Security card + popup
+  let recentHidden = 0;         // silenced findings left out of `recent`
+  let showSilenced = false;
+  let silenceRules = null;
+  let zeekPoll = null;
 
   // ── helpers ──────────────────────────────────────────────────────────────
   async function getJSON(url, timeoutMs = 20000) {
@@ -105,7 +117,7 @@
     return `<div class="ov-kv-row"><span class="ov-kv-label">${esc(label)}</span><span class="ov-kv-value">${raw ? value : esc(value)}</span></div>`;
   }
 
-  // ── Security card + Overview figure ─────────────────────────────────────
+  // ── Security > Local status cards + Overview figure ─────────────────────
   async function loadSummary() {
     let s;
     try {
@@ -120,11 +132,13 @@
         ? `${num(s.flagged)} flagged · ${num(s.quarantined)} quarantined · ${num(s.devices)} devices`
         : "Device monitoring has no data yet";
     }
+    renderStats(s);
     renderThreatCard(s);
     renderSourceHint(s.warnings || []);
   }
 
-  const settingsLink = (pane, text) => `<a href="#settings/${pane}" data-tw-settings="${pane}">${esc(text)}</a>`;
+  // links to a card of Security > Local (formerly Settings > Threat)
+  const localLink = (card, text) => `<a href="#security/local" data-tw-local="${card}">${esc(text)}</a>`;
 
   function warningLines(list) {
     return list.map((w) => `<p>${esc(w.text)}.</p>`).join("");
@@ -135,7 +149,68 @@
     const el = $("dev-src-hint");
     if (!el) return;
     el.hidden = !list.length;
-    el.innerHTML = list.length ? `${warningLines(list)}<p>How to fix it: ${settingsLink("threat", "Settings → Threat")}.</p>` : "";
+    el.innerHTML = list.length ? `${warningLines(list)}<p>How to fix it: ${localLink("dev-src-card", "Security → Local → Monitoring sources")}.</p>` : "";
+  }
+
+  function untilText(ts) {
+    const d = Math.max(0, Math.floor(ts - Date.now() / 1000));
+    if (d < 3600) return `${Math.max(1, Math.floor(d / 60))} min`;
+    if (d < 86400) return `${Math.floor(d / 3600)} h`;
+    return `${Math.floor(d / 86400)} d`;
+  }
+
+  function setStat(key, value, sub, tone) {
+    const v = $(`dev-st-${key}`);
+    const sb = $(`dev-st-${key}-sub`);
+    const card = $(`dev-st-${key}-card`);
+    if (v) v.textContent = value;
+    if (sb) sb.textContent = sub || "";
+    if (card) {
+      if (tone) card.dataset.tone = tone;
+      else delete card.dataset.tone;
+    }
+  }
+
+  // Tripwire/Deception-style tiles; viewers get counts only (no device
+  // names or reasons in the sub-texts)
+  function renderStats(s) {
+    if (!$("dev-stats")) return;
+    if (!s.available) {
+      ["flagged", "quar", "new", "active"].forEach((k) => setStat(k, "—", k === "flagged" ? "no data yet" : ""));
+    } else {
+      const w = s.worst;
+      setStat("flagged", num(s.flagged),
+        s.flagged ? (isAdmin && w ? w.reason : `${num(s.critical)} critical · ${num(s.warning)} warning`)
+          : (s.findings_silenced ? `none · ${num(s.findings_silenced)} silenced` : "none"),
+        s.flagged ? "red" : "");
+      setStat("quar", num(s.quarantined),
+        !s.quarantined ? "none"
+          : s.quarantine_next_expiry ? `next ends in ${untilText(s.quarantine_next_expiry)}` : "no expiry",
+        s.quarantined ? "amber" : "");
+      const zones = Object.entries(s.new_zones || {});
+      setStat("new", num(s.new_24h),
+        !s.new_24h ? "none today" : zones.map(([z, n]) => `${num(n)} on ${z}`).join(" · "));
+      setStat("active", num(s.active != null ? s.active : s.online), `of ${num(s.devices)} known`);
+    }
+    setStat("feeds", s.feeds_total ? `${num(s.feeds_ok)}/${num(s.feeds_total)}` : "—",
+      s.key_missing ? "needs key" : s.key_set ? "key set" : s.feeds_total ? "current / enabled" : "",
+      s.feeds_total && (s.feeds_ok < s.feeds_total || s.key_missing) ? "amber" : "");
+    const live = $("dev-st-live");
+    if (live) live.textContent = s.available ? `${num(s.flagged)} flagged, ${num(s.quarantined)} quarantined, ${num(s.new_24h)} new, ${num(s.active)} active` : "";
+  }
+
+  function statClick(card) {
+    const k = card.dataset.devSt;
+    if (k === "flagged" || k === "quarantined") {
+      if (window.twClients) window.twClients.showFlagged(true);
+    } else if (k === "new") {
+      if (window.twClients && window.twClients.showNewest) window.twClients.showNewest();
+    } else if (k === "active") {
+      if (window.twClients) window.twClients.showFlagged(false);
+    } else if (k === "feeds") {
+      const t = isAdmin ? $("ti-card") : $("ti-viewer-card");
+      if (t && !t.hidden) t.scrollIntoView({ block: "start", behavior: "smooth" });
+    }
   }
 
   function renderThreatCard(s) {
@@ -146,34 +221,20 @@
     const hint = $("dev-threat-hint");
     if (!s.available) {
       if (hint) hint.textContent = "not running";
+      body.hidden = false;
       body.innerHTML = `<p class="vl-info">Device monitoring has no data yet — tuxwall-devicewatch.service is not running or has not finished its first pass.</p>`;
       return;
     }
-    if (hint) hint.textContent = s.running ? `${num(s.devices)} devices · ${num(s.online)} online` : "engine stalled — data may be old";
-    const w = s.worst;
-    const worst = w
-      ? `<div class="dev-threat-worst">${sevBadge(w.severity)} <span>${esc(w.reason)}</span>
-           <span class="muted">— ${esc(w.device_name || "device")}, ${esc(ago(w.last))}</span></div>`
-      : `<div class="dev-threat-worst muted">No device flagged. ${s.feeds_total ? (s.feeds_ok < s.feeds_total
-          ? settingsLink("threat", `${num(s.feeds_ok)} of ${num(s.feeds_total)} threat feeds current`) + "."
-          : `${num(s.feeds_ok)} of ${num(s.feeds_total)} threat feeds current.`) : ""}</div>`;
+    if (hint) hint.textContent = s.running ? `${num(s.devices)} devices · ${num(s.active != null ? s.active : s.online)} active` : "engine stalled — data may be old";
     const warn = (s.warnings || []).length
-      ? `<div class="vl-info">${warningLines(s.warnings)}<p>How to fix it: ${settingsLink("threat", "Settings → Threat")}.</p></div>` : "";
-    body.innerHTML = `
-      <div class="dev-threat-stats">
-        <div class="dev-threat-stat${s.flagged ? " is-bad" : ""}"><b>${num(s.flagged)}</b><small>flagged</small></div>
-        <div class="dev-threat-stat${s.quarantined ? " is-bad" : ""}"><b>${num(s.quarantined)}</b><small>quarantined</small></div>
-        <div class="dev-threat-stat"><b>${num(s.new_24h)}</b><small>new (24 h)</small></div>
-        ${worst}
-        <button class="btn btn-sm" type="button" id="dev-threat-review">Review devices</button>
-        ${isAdmin ? `<button class="btn btn-sm btn-ghost" type="button" data-tw-settings="threat">Threat settings</button>` : ""}
-      </div>${warn}
-      ${isAdmin ? "" : `<p class="muted dev-threat-recent">Details are for administrators</p>`}`;
+      ? `<div class="vl-info">${warningLines(s.warnings)}<p>How to fix it: ${localLink("dev-src-card", "Monitoring sources")} (below).</p></div>` : "";
+    const viewer = isAdmin ? "" : `<p class="muted dev-threat-recent">Details are for administrators</p>`;
+    body.innerHTML = `${warn}${viewer}`;
+    body.hidden = !(warn || viewer);
     const rec = $("dev-threat-recent");
     if (rec) rec.hidden = !isAdmin;
-    $("dev-threat-review").addEventListener("click", () => {
-      if (window.twClients) window.twClients.showFlagged(!!(s.flagged || s.quarantined));
-    });
+    const sw = $("dev-thr-silenced-wrap");
+    if (sw) sw.hidden = !isAdmin;
     if (isAdmin) {
       renderRecent();
       loadRecent();
@@ -185,8 +246,9 @@
   // row-cap helper can attach to it at page load.
   async function loadRecent() {
     try {
-      const d = await getJSON("/api/devices/findings/recent?limit=50");
+      const d = await getJSON(`/api/devices/findings/recent?limit=50${showSilenced ? "&silenced=1" : ""}`);
       recent = Array.isArray(d.findings) ? d.findings : [];
+      recentHidden = Number(d.silenced_hidden) || 0;
     } catch (_) {
       return;
     }
@@ -196,7 +258,7 @@
   const ACTION_LABEL = { blocked: "blocked", attempted: "attempted, no answer", lookup: "looked up", contacted: "contacted" };
 
   function recentRows(list) {
-    return list.map((x) => {
+    return list.map((x, i) => {
       // a new device (Inventory): no host involved, dismissed instead of marked expected
       const isNew = x.kind === "new_device";
       const host = isNew
@@ -204,14 +266,18 @@
         : `<span class="mono">${esc(x.indicator || "—")}</span><br><span class="muted">${esc(ACTION_LABEL[x.action] || x.action)}</span>`;
       const act = isNew
         ? `<button class="btn btn-sm btn-ghost" type="button" data-dev-new-ack="${esc(x.device)}" title="Dismiss: removes this new-device row">Dismiss</button>`
-        : `<button class="btn btn-sm btn-ghost" type="button" data-dev-thr-exp="${esc(x.id)}" data-dev="${esc(x.device)}" title="Mark as expected: stops counting toward health and stops its alerts">Mark expected</button>`;
-      return `<tr>
+        : x.silenced
+          ? `<span class="badge badge-static" title="Hidden by a silence rule (Silenced card below)">Silenced</span>
+             <button class="btn btn-sm btn-ghost" type="button" data-dev-unsilence="${esc(x.silenced)}" title="Remove the silence rule that hides this finding">Unsilence</button>`
+          : `<button class="btn btn-sm btn-ghost" type="button" data-dev-silence-row="${i}" title="Silence: a rule for this and similar findings (all devices, this device, a domain, a kind)">Silence</button>
+             <button class="btn btn-sm btn-ghost" type="button" data-dev-thr-exp="${esc(x.id)}" data-dev="${esc(x.device)}" title="Mark as expected: stops counting toward health and stops its alerts">Mark expected</button>`;
+      return `<tr class="${x.silenced ? "dev-f-expected" : ""}">
         <td>${sevBadge(x.severity)}</td>
         <td>${esc(x.feed)}</td>
         <td>${host}</td>
         <td><a href="#clients" data-dev-goto="${esc(x.device)}">${esc(x.device_name || x.device)}</a></td>
         <td title="${esc(when(x.ts))}">${esc(ago(x.ts))}</td>
-        <td class="td-right">${act}</td>
+        <td class="td-right dev-row-acts">${act}</td>
       </tr>`;
     }).join("");
   }
@@ -223,7 +289,12 @@
     const empty = $("dev-threat-empty");
     table.tBodies[0].innerHTML = recentRows(recent);
     if (wrap) wrap.hidden = !recent.length;
-    if (empty) empty.hidden = !!recent.length;
+    if (empty) {
+      empty.hidden = !!recent.length;
+      empty.textContent = recentHidden ? `No threats in the last 30 days except ${num(recentHidden)} silenced` : "No threats in the last 30 days";
+    }
+    const n = $("dev-thr-silenced-n");
+    if (n) n.textContent = !showSilenced && recentHidden ? `(${num(recentHidden)} hidden)` : "";
   }
 
   async function markExpected(btn) {
@@ -261,7 +332,9 @@
   function schedulePoll() {
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = null;
-    if (activeView === "overview" || activeView === "clients" || (activeView === "security" && localPaneVisible())) {
+    const local = activeView === "security" && localPaneVisible();
+    if (local) loadFeeds();
+    if (activeView === "overview" || activeView === "clients" || local) {
       loadSummary();
       pollTimer = setInterval(() => { if (!document.hidden) loadSummary(); }, POLL_MS);
     }
@@ -344,12 +417,17 @@
         det.query && det.query !== x.indicator ? `query <span class="mono">${esc(det.query)}</span>` : "",
         det.category ? esc(det.category) : "", det.listed_status ? esc(det.listed_status) : "",
         det.note ? esc(det.note) : ""].filter(Boolean).join(" · ");
-      return `<tr class="${x.expected ? "dev-f-expected" : ""}">
+      const silenced = x.silenced && !x.expected;
+      return `<tr class="${x.expected || silenced ? "dev-f-expected" : ""}">
         <td title="first ${esc(when(x.first))}">${esc(ago(x.last))}${x.count > 1 ? `<br><span class="muted">×${num(x.count)}</span>` : ""}</td>
         <td>${sevBadge(x.severity)}</td>
         <td>${esc(x.title || KIND_LABEL[x.kind] || x.kind)}<br><span class="muted">${esc(KIND_LABEL[x.kind] || x.kind)}</span></td>
         <td>${why || "—"}</td>
-        <td class="td-right"><button class="btn btn-sm btn-ghost" type="button" data-dev-exp="${esc(x.id)}" data-on="${x.expected ? 0 : 1}" title="${x.expected ? "Count this finding again" : "Mark as expected: stops counting toward health and stops its alerts"}">${x.expected ? "Unmark" : "Expected"}</button></td>
+        <td class="td-right dev-row-acts">${silenced
+          ? `<span class="badge badge-static" title="Hidden by a silence rule">Silenced</span>
+             <button class="btn btn-sm btn-ghost" type="button" data-dev-unsilence="${esc(x.silenced)}" title="Remove the silence rule that hides this finding">Unsilence</button>`
+          : `${x.expected ? "" : `<button class="btn btn-sm btn-ghost" type="button" data-dev-silence-f="${esc(x.id)}" title="Silence: a rule for this and similar findings">Silence</button>`}
+             <button class="btn btn-sm btn-ghost" type="button" data-dev-exp="${esc(x.id)}" data-on="${x.expected ? 0 : 1}" title="${x.expected ? "Count this finding again" : "Mark as expected: stops counting toward health and stops its alerts"}">${x.expected ? "Unmark" : "Expected"}</button>`}</td>
       </tr>`;
     }).join("");
     const tops = (d.top_destinations || []).map((t) => `<tr>
@@ -397,9 +475,9 @@
         </section>
       </div>
       <section class="dev-sec">
-        <h4>Findings <span class="muted">(${num((d.findings || {}).active)} active, ${num((d.findings || {}).expected)} expected)</span></h4>
+        <h4>Findings <span class="muted">(${num((d.findings || {}).active)} active, ${num((d.findings || {}).expected)} expected${(d.findings || {}).silenced ? `, ${num(d.findings.silenced)} silenced` : ""})</span></h4>
         ${f.length ? `<div class="table-wrap"><table class="dev-table"><thead><tr><th>When</th><th>Severity</th><th>What</th><th>Why (indicator, feed)</th><th></th></tr></thead><tbody>${fRows}</tbody></table></div>`
-          : `<p class="muted">No findings — nothing this device did matched a threat feed, a local indicator or an IDS signature (feeds, indicators and monitoring sources: ${settingsLink("threat", "Settings → Threat")}).</p>`}
+          : `<p class="muted">No findings — nothing this device did matched a threat feed, a local indicator or an IDS signature (feeds, indicators and monitoring sources: ${localLink("dev-src-card", "Security → Local")}).</p>`}
       </section>
       <div class="dev-grid">
         <section class="dev-sec">
@@ -462,6 +540,10 @@
       say("Renamed.");
       if (window.twClients) window.twClients.refresh();
     });
+    body.querySelectorAll("[data-dev-silence-f]").forEach((b) => b.addEventListener("click", () => {
+      const f = (current.detail.findings || []).find((x) => x.id === b.dataset.devSilenceF);
+      if (f) openSilence(Object.assign({}, f, { device_name: d.name || d.mac || d.id }), () => reload());
+    }));
     body.querySelectorAll("[data-dev-exp]").forEach((b) => b.addEventListener("click", async () => {
       const on = b.dataset.on === "1";
       if (on && !(await confirmDlg("Mark this finding as expected? It stops counting toward the device's health and stops its alerts. Unmark it any time."))) return;
@@ -600,7 +682,176 @@
     loadSummary();
   }
 
-  // ── Settings > Threat: monitoring sources + threat intelligence ────────
+  // ── silence rules: dialog (finding rows, device panel) + Silenced card ──
+  const DOMAIN_RE = /^(\*\.)?([a-z0-9_]([a-z0-9_-]*[a-z0-9_])?\.)+[a-z0-9-]{2,63}$/i;
+  const kindLabel = (k) => KIND_LABEL[k] || String(k || "").replace(/_/g, " ");
+
+  function findingDomain(f) {
+    const det = f.details || {};
+    for (const v of [f.indicator, f.query, det.query]) {
+      const d = String(v || "").trim().toLowerCase().replace(/\.$/, "");
+      if (d && DOMAIN_RE.test(d) && !/^[\d.]+$/.test(d)) return d.replace(/^\*\./, "");
+    }
+    return "";
+  }
+
+  function suffixGuess(domain) {
+    const parts = domain.split(".");
+    return parts.length > 2 ? parts.slice(1).join(".") : domain;
+  }
+
+  let silenceDone = null;
+
+  function openSilence(f, onDone) {
+    const m = $("dev-s-modal");
+    if (!m || !isAdmin) return;
+    silenceDone = onDone || null;
+    const isSig = String(f.indicator || "").startsWith("sid:");
+    const dom = findingDomain(f);
+    const crit = !!f.critical || f.kind === "c2_connection";
+    const kl = kindLabel(f.kind);
+    const dev = f.device_name || f.device;
+    const exp = Object.entries(SILENCE_EXPIRY).map(([k, v]) => `<option value="${k}"${k === "30d" ? " selected" : ""}>${esc(v)}</option>`).join("");
+    const opt = (val, checked, title, sub) => `<label class="dev-q-mode"><input type="radio" name="dev-s-scope" value="${val}"${checked ? " checked" : ""}>
+          <span><b>${title}</b><br><span class="muted">${sub}</span></span></label>`;
+    $("dev-s-body").innerHTML = `
+      <h3 id="dev-s-title">Silence findings</h3>
+      <p class="muted dev-small">${sevBadge(f.severity)} ${esc(f.title || kl)} — ${esc(dev)}${f.indicator ? ` · <span class="mono">${esc(f.indicator)}</span>` : ""}</p>
+      <div class="dev-q-modes">
+        ${f.indicator ? opt("indicator", true, isSig ? "This signature on all devices" : "This address or domain on all devices",
+          `<span class="mono">${esc(f.indicator)}</span>, whatever device it shows up on`) : ""}
+        ${opt("device_kind", !f.indicator, `${esc(dev)}: every “${esc(kl)}”`, "Only this device, every indicator of this kind")}
+        ${dom ? `<label class="dev-q-mode"><input type="radio" name="dev-s-scope" value="suffix">
+          <span><b>A domain and its subdomains, all devices</b><br>
+          <input type="text" id="dev-s-suffix" value="${esc(suffixGuess(dom))}" maxlength="253" autocomplete="off" spellcheck="false" aria-label="Domain suffix"></span></label>` : ""}
+        ${opt("kind", false, `Every “${esc(kl)}” on every device`, "Network-wide, for this finding kind")}
+      </div>
+      <div class="alerts-grid dev-q-grid">
+        <label class="fw-field"><span>Silence for</span><select id="dev-s-exp">${exp}</select></label>
+        <label class="fw-field"><span>Note (optional)</span><input type="text" id="dev-s-note" maxlength="200" autocomplete="off" placeholder="e.g. TV vendor telemetry"></label>
+      </div>
+      ${crit ? `<div class="vl-info dev-s-crit">
+          <p><b>This finding is critical</b> (a botnet C2 connection or an attack response the device sent). Silencing it means a compromised device may go unnoticed.</p>
+          <label class="alerts-check"><input type="checkbox" id="dev-s-crit"> Including critical findings — I know the cause</label>
+        </div>`
+        : `<p class="muted dev-small">Silenced findings stay recorded (Security → Local, “Show silenced”) but no longer count toward health or Flagged and send no alerts. Critical findings (botnet C2 connections, outbound attack responses) stay visible.</p>`}
+      <div class="login-error dev-q-err" id="dev-s-err" hidden></div>
+      <div class="vlan-modal-actions dev-q-actions">
+        <button class="btn btn-primary" type="button" id="dev-s-go">Silence</button>
+        <button class="btn" type="button" id="dev-s-cancel">Cancel</button>
+      </div>`;
+    m.hidden = false;
+    const sfx = $("dev-s-suffix");
+    if (sfx) sfx.addEventListener("focus", () => { const r = m.querySelector('input[name="dev-s-scope"][value="suffix"]'); if (r) r.checked = true; });
+    $("dev-s-cancel").addEventListener("click", closeSilence);
+    $("dev-s-go").addEventListener("click", () => submitSilence(f, crit));
+  }
+
+  function closeSilence() {
+    const m = $("dev-s-modal");
+    if (m) m.hidden = true;
+  }
+
+  async function submitSilence(f, crit) {
+    const err = $("dev-s-err");
+    const scope = (document.querySelector('input[name="dev-s-scope"]:checked') || {}).value;
+    const inclCrit = !!($("dev-s-crit") && $("dev-s-crit").checked);
+    err.hidden = true;
+    if (crit && !inclCrit) {
+      err.textContent = "This finding is critical: tick “Including critical findings”, or it stays visible.";
+      err.hidden = false;
+      return;
+    }
+    const rule = { scope, expires: $("dev-s-exp").value, note: $("dev-s-note").value, include_critical: inclCrit };
+    if (scope === "indicator") rule.indicator = f.indicator;
+    else if (scope === "device_kind") Object.assign(rule, { device: f.device, kind: f.kind });
+    else if (scope === "suffix") rule.suffix = ($("dev-s-suffix").value || "").trim();
+    else if (scope === "kind") rule.kind = f.kind;
+    const go = $("dev-s-go");
+    go.disabled = true;
+    const r = await post("/api/devices/silence", { action: "add", rule });
+    go.disabled = false;
+    if (!r.ok) {
+      err.textContent = r.data.error || `Not saved (HTTP ${r.status})`;
+      err.hidden = false;
+      return;
+    }
+    closeSilence();
+    silenceRules = r.data.rules || null;
+    afterSilenceChange();
+  }
+
+  function afterSilenceChange() {
+    renderSilence();
+    loadRecent();
+    loadSummary();
+    if (silenceDone) silenceDone();
+    if (current && $("dev-modal") && !$("dev-modal").hidden) reload();
+    if (window.twClients) window.twClients.refresh();
+  }
+
+  async function loadSilence() {
+    if (!$("dev-silence-card") || !isAdmin) return;
+    try {
+      silenceRules = (await getJSON("/api/devices/silence")).rules || [];
+    } catch (err) {
+      silenceRules = { error: err.message };
+    }
+    renderSilence();
+  }
+
+  function ruleText(r) {
+    const scope = {
+      indicator: () => `<span class="mono">${esc(r.indicator)}</span> on all devices`,
+      device_kind: () => `${esc(r.device_name || r.device)}: every “${esc(kindLabel(r.kind))}”`,
+      suffix: () => `<span class="mono">${esc(r.suffix)}</span> and its subdomains, all devices`,
+      kind: () => `Every “${esc(kindLabel(r.kind))}” on all devices`,
+    }[r.scope];
+    const only = r.kind && (r.scope === "indicator" || r.scope === "suffix") ? ` <span class="muted">(${esc(kindLabel(r.kind))} only)</span>` : "";
+    return (scope ? scope() : esc(r.scope)) + only + (r.include_critical ? ` <span class="badge badge-err" title="Also hides critical findings">incl. critical</span>` : "");
+  }
+
+  function renderSilence() {
+    const body = $("dev-silence-body");
+    const badge = $("dev-silence-badge");
+    if (!body || silenceRules == null) return;
+    if (silenceRules.error) {
+      body.innerHTML = `<p class="login-error">${esc(silenceRules.error)}</p>`;
+      return;
+    }
+    const rules = silenceRules;
+    const hidden = rules.reduce((a, r) => a + (r.hides || 0), 0);
+    if (badge) {
+      badge.textContent = rules.length ? `${num(rules.length)} rule${rules.length === 1 ? "" : "s"} · hides ${num(hidden)}` : "none";
+      badge.className = "badge " + (rules.length ? "badge-static" : "");
+    }
+    const rows = rules.map((r) => `<tr>
+        <td>${ruleText(r)}</td>
+        <td>${r.expires ? `<span title="${esc(when(r.expires))}">${r.expired ? "expired" : `${esc(untilText(r.expires))} left`}</span>` : "forever"}</td>
+        <td>${esc(r.note || "")}</td>
+        <td>hides ${num(r.hides)} finding${r.hides === 1 ? "" : "s"}${r.critical_visible ? `<br><span class="muted">${num(r.critical_visible)} critical stay visible</span>` : ""}</td>
+        <td title="${esc(when(r.at))}">${esc(r.at ? ago(r.at) : "")}${r.by ? ` · ${esc(r.by)}` : ""}</td>
+        <td class="td-right"><button class="btn btn-sm btn-ghost" type="button" data-dev-unsilence="${esc(r.id)}">Unsilence</button></td></tr>`).join("");
+    body.innerHTML = rules.length
+      ? `<div class="table-wrap"><table class="dev-table"><thead><tr><th>Rule</th><th>Expires</th><th>Note</th><th>Effect</th><th>Added</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+      : `<p class="muted dev-silence-empty">No silence rules.</p>`;
+  }
+
+  async function unsilence(btn) {
+    if (!(await confirmDlg("Remove this silence rule? The findings it hides count again (health, Flagged, alerts for new ones)."))) return;
+    btn.disabled = true;
+    const r = await post("/api/devices/silence", { action: "remove", id: btn.dataset.devUnsilence });
+    if (!r.ok) {
+      btn.disabled = false;
+      const msg = $("dev-thr-msg");
+      if (msg) msg.textContent = r.data.error || "Failed";
+      return;
+    }
+    silenceRules = r.data.rules || null;
+    afterSilenceChange();
+  }
+
+  // ── Security > Local: monitoring sources + threat intelligence ─────────
   const FEED_STATUS = {
     ok: ["Current", "badge-ok"], needs_key: ["Needs Auth-Key", "badge-static"], disabled: ["Off", "badge-static"],
     pending: ["Waiting", ""], error: ["Failed", "badge-err"], stale: ["Old", "sev-MEDIUM"],
@@ -608,6 +859,7 @@
 
   async function loadFeeds() {
     if (!$("dev-src-card") || !roleKnown) return;
+    if (isAdmin) loadSilence();
     try {
       const [feeds, ind] = await Promise.all([getJSON("/api/devices/feeds"),
         isAdmin ? getJSON("/api/devices/indicators") : Promise.resolve(null)]);
@@ -656,6 +908,68 @@
       </div>`).join("");
     body.innerHTML = `${wl}<div class="ov-kv">${rows.join("")}</div>
       <p class="muted dev-small">Unmatched addresses: LAN addresses seen in traffic that could not be tied to a device (typically IPv6 privacy addresses when Zeek logs no MAC addresses).</p>`;
+    renderZeekSwitch();
+  }
+
+  // Zeek "Ignore checksums" (redef ignore_checksums = T in the TuxWall site
+  // policy): state + the symptom it fixes; admins flip it (Zeek restarts)
+  function renderZeekSwitch(msg) {
+    const box = $("dev-zeek-ck");
+    if (!box || !tiData || tiData.error) return;
+    const z = tiData.feeds.zeek_checksums;
+    box.hidden = !z || !z.installed;
+    if (box.hidden) return;
+    const job = z.job || {};
+    const on = !!(z.enabled || z.elsewhere);
+    const input = $("dev-zeek-ck-in");
+    input.checked = job.running ? !!job.want : on;
+    input.disabled = !isAdmin || !!job.running || !z.supported || (z.elsewhere && !z.enabled);
+    const badge = $("dev-zeek-ck-badge");
+    const share = z.bad_share != null ? Math.round(z.bad_share * 100) : null;
+    const [st, label] = job.running ? ["warn", "applying"] : on ? ["on", "On"] : z.warning ? ["bad", "Off"] : ["off", "Off"];
+    badge.dataset.state = st;
+    badge.textContent = label;
+    const symptom = z.warning
+      ? `Zeek sees bad checksums on ${share != null ? `${share} %` : "most"} of TCP connections (last hour): completed connections count only as attempts.`
+      : share != null ? `${share} % of TCP connections in the last hour had bad checksums.` : "No TCP connections counted yet.";
+    const parts = [on ? "On — Zeek does not verify checksums." : "Off — Zeek drops packets with bad checksums.", symptom];
+    if (z.elsewhere && !z.enabled) parts.push("Set by hand in Zeek's local.zeek — change it there.");
+    if (!z.supported) parts.push("Needs a newer zeek-site-setup.sh (update TuxWall).");
+    if (!isAdmin) parts.push("Administrators can change this.");
+    $("dev-zeek-ck-status").textContent = parts.join(" ");
+    const m = $("dev-zeek-ck-msg");
+    if (msg != null) m.textContent = msg;
+    else if (job.running) m.textContent = "Applying — Zeek restarts, about 40 s without connection logs.";
+    else if (job.finished) m.textContent = `${job.ok ? "Done" : "Failed"}: ${job.message || ""}`;
+  }
+
+  async function toggleZeek() {
+    const input = $("dev-zeek-ck-in");
+    const want = input.checked;
+    if (!(await confirmDlg(`${want ? "Turn on" : "Turn off"} “Ignore checksums”? Zeek restarts — about 40 s without connection logs. A failed check restores the previous policy.`))) {
+      input.checked = !want;
+      return;
+    }
+    input.disabled = true;
+    const r = await post("/api/devices/zeek-checksums", { enabled: want });
+    if (!r.ok) {
+      input.checked = !want;
+      input.disabled = false;
+      renderZeekSwitch(r.data.error || `Not changed (HTTP ${r.status})`);
+      return;
+    }
+    renderZeekSwitch("Applying — Zeek restarts, about 40 s without connection logs.");
+    pollZeek(0);
+  }
+
+  function pollZeek(n) {
+    if (zeekPoll) clearTimeout(zeekPoll);
+    zeekPoll = setTimeout(async () => {
+      zeekPoll = null;
+      await loadFeeds();
+      const z = tiData && tiData.feeds && tiData.feeds.zeek_checksums;
+      if (z && z.job && z.job.running && n < 80) pollZeek(n + 1);
+    }, 5000);
   }
 
   function renderFeeds(msg) {
@@ -797,10 +1111,13 @@
     if (tv) tv.hidden = isAdmin;
     const al = $("dev-alerts-card");
     if (al) al.hidden = !isAdmin;
+    const sc = $("dev-silence-card");
+    if (sc) sc.hidden = !isAdmin;
     const card = $("dev-threat-card");
     if (card) card.hidden = false;
-    if (!isAdmin) { closePanel(); recent = []; renderRecent(); }
+    if (!isAdmin) { closePanel(); closeSilence(); recent = []; renderRecent(); }
     loadSummary();
+    if (localPaneVisible()) loadFeeds();
   }
 
   function init() {
@@ -820,7 +1137,30 @@
       if (x) markExpected(x);
       const n = e.target.closest && e.target.closest("[data-dev-new-ack]");
       if (n) dismissNew(n);
+      const sr = e.target.closest && e.target.closest("[data-dev-silence-row]");
+      if (sr && recent[Number(sr.dataset.devSilenceRow)]) openSilence(recent[Number(sr.dataset.devSilenceRow)]);
+      const us = e.target.closest && e.target.closest("[data-dev-unsilence]");
+      if (us) unsilence(us);
+      const st = e.target.closest && e.target.closest("#dev-stats [data-dev-st]");
+      if (st) statClick(st);
     });
+    const stats = $("dev-stats");
+    if (stats) stats.addEventListener("keydown", (e) => {
+      const st = e.target.closest && e.target.closest("[data-dev-st]");
+      if (st && (e.key === "Enter" || e.key === " ")) {
+        e.preventDefault();
+        statClick(st);
+      }
+    });
+    const shs = $("dev-thr-silenced");
+    if (shs) shs.addEventListener("change", () => { showSilenced = shs.checked; loadRecent(); });
+    const zin = $("dev-zeek-ck-in");
+    if (zin) zin.addEventListener("change", toggleZeek);
+    const sm = $("dev-s-modal");
+    if (sm) {
+      $("dev-s-close").addEventListener("click", closeSilence);
+      sm.addEventListener("click", (e) => { if (e.target === sm) closeSilence(); });
+    }
     const qm = $("dev-q-modal");
     if (qm) {
       $("dev-q-close").addEventListener("click", () => { qm.hidden = true; });
@@ -828,7 +1168,8 @@
     }
     document.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
-      if (qm && !qm.hidden) qm.hidden = true;
+      if (sm && !sm.hidden) closeSilence();
+      else if (qm && !qm.hidden) qm.hidden = true;
       else if (m && !m.hidden) closePanel();
     });
     const save = $("dev-al-save");
@@ -842,23 +1183,31 @@
   document.addEventListener("tw:view", (e) => {
     activeView = (e.detail && e.detail.view) || "";
     schedulePoll();
-    if (activeView === "settings") {
-      loadFeeds();
-      if (isAdmin) loadAlerts();
-    }
+    if (activeView === "settings" && isAdmin) loadAlerts();
   });
   document.addEventListener("click", (e) => {
     const t = e.target.closest && e.target.closest("#settings-subtabs [data-settings-pane]");
-    if (!t) return;
-    if (t.dataset.settingsPane === "threat") loadFeeds();
-    if (t.dataset.settingsPane === "alerts" && isAdmin) loadAlerts();
+    if (t && t.dataset.settingsPane === "alerts" && isAdmin) loadAlerts();
   });
-  // The Security card lives in the "Local" sub-tab: fetch only while it is shown
+  // Security > Local: fetch only while it is shown
   document.addEventListener("click", (e) => {
     if (e.target.closest && e.target.closest('#sec-subtabs [data-sec-pane]')) schedulePoll();
   });
-  // "Settings → Threat" links (Clients hint, Security card, the device panel)
+  // links to Security > Local cards (Clients hint, device panel) and to
+  // Settings panes; old links to the "threat" pane land on Local too
   document.addEventListener("click", (e) => {
+    const l = e.target.closest && e.target.closest("[data-tw-local]");
+    if (l && window.twSecurity) {
+      e.preventDefault();
+      closePanel();
+      if (activeView === "security" && localPaneVisible()) {
+        const c = $(l.dataset.twLocal);
+        if (c) c.scrollIntoView({ block: "start", behavior: "smooth" });
+      } else {
+        window.twSecurity.open("local", l.dataset.twLocal);
+      }
+      return;
+    }
     const a = e.target.closest && e.target.closest("[data-tw-settings]");
     if (!a || !window.twSettings) return;
     e.preventDefault();
@@ -868,5 +1217,5 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();
 
-  window.twDevices = { open, refreshSummary: loadSummary, reloadFeeds: loadFeeds, close: closePanel };
+  window.twDevices = { open, refreshSummary: loadSummary, reloadFeeds: loadFeeds, close: closePanel, silence: openSilence };
 })();

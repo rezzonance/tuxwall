@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
   <link rel="stylesheet" href="/css/style.css?v=202611210025">
-  <link rel="stylesheet" href="/css/polish.css?v=202611251721">
+  <link rel="stylesheet" href="/css/polish.css?v=202611281500">
   <link rel="stylesheet" href="/css/firewall.css?v=202611210025">
   <link rel="stylesheet" href="/css/bento.css?v=202611210025">
   <link rel="stylesheet" href="/css/heroes.css?v=202611210025">
@@ -1643,13 +1643,40 @@
         <span class="fw-subtabs-fill"></span>
       </div>
 
-      <!-- Pane: Local (device threats; scripts/devices.js) -->
-      <div class="fw-pane" data-sec-pane="local" hidden>
-      <!-- Device threats (scripts/devices.js; data: GET /api/devices/summary) -->
+      <!-- Pane: Local (device monitoring; scripts/devices.js): status cards
+           (data: GET /api/devices/summary), device threats, silence rules,
+           monitoring sources, threat intelligence (formerly Settings > Threat) -->
+      <div class="fw-pane local-pane" data-sec-pane="local" hidden>
+      <div class="stats-row dev-stats" id="dev-stats" role="group" aria-label="Device monitoring status">
+        <div class="stat-card stat-c stat-c-red" id="dev-st-flagged-card" data-dev-st="flagged" role="button" tabindex="0" title="Show the flagged devices on Clients">
+          <div class="stat-value" id="dev-st-flagged">&mdash;</div>
+          <div class="stat-label">Flagged <span class="dev-st-sub" id="dev-st-flagged-sub"></span></div>
+        </div>
+        <div class="stat-card stat-c stat-c-amber" id="dev-st-quar-card" data-dev-st="quarantined" role="button" tabindex="0" title="Show the quarantined devices on Clients">
+          <div class="stat-value" id="dev-st-quar">&mdash;</div>
+          <div class="stat-label">Quarantined <span class="dev-st-sub" id="dev-st-quar-sub"></span></div>
+        </div>
+        <div class="stat-card stat-c stat-c-blue" id="dev-st-new-card" data-dev-st="new" role="button" tabindex="0" title="Clients, newest first">
+          <div class="stat-value" id="dev-st-new">&mdash;</div>
+          <div class="stat-label">New (24 h) <span class="dev-st-sub" id="dev-st-new-sub"></span></div>
+        </div>
+        <div class="stat-card stat-c stat-c-green" id="dev-st-active-card" data-dev-st="active" role="button" tabindex="0" title="Seen in the last 10 minutes — open Clients">
+          <div class="stat-value" id="dev-st-active">&mdash;</div>
+          <div class="stat-label">Active clients <span class="dev-st-sub" id="dev-st-active-sub"></span></div>
+        </div>
+        <div class="stat-card stat-c stat-c-teal" id="dev-st-feeds-card" data-dev-st="feeds" role="button" tabindex="0" title="Threat intelligence feeds (below)">
+          <div class="stat-value" id="dev-st-feeds">&mdash;</div>
+          <div class="stat-label">Threat feeds <span class="dev-st-sub" id="dev-st-feeds-sub"></span></div>
+        </div>
+      </div>
+      <p class="bk-sr" id="dev-st-live" role="status" aria-live="polite"></p>
+
+      <!-- Device threats (scripts/devices.js; data: GET /api/devices/summary + /findings/recent) -->
       <div class="card dev-threat-card" id="dev-threat-card" hidden>
         <div class="card-head">
           <h2>Device threats</h2>
           <span class="muted" id="dev-threat-hint">LAN devices matched against threat intelligence and IDS alerts</span>
+          <label class="alerts-check dev-thr-silenced" id="dev-thr-silenced-wrap" hidden><input type="checkbox" id="dev-thr-silenced"> Show silenced <span class="muted" id="dev-thr-silenced-n"></span></label>
         </div>
         <div class="dev-threat-body" id="dev-threat-body"></div>
         <!-- Recent threats (admin): 25 rows, then the shared row-cap "Show all" bar -->
@@ -1663,6 +1690,61 @@
           <p class="muted" id="dev-threat-empty" hidden>No threats in the last 30 days</p>
           <p class="muted dev-small" id="dev-thr-msg" role="status" aria-live="polite"></p>
         </div>
+      </div>
+
+      <!-- Silence rules (admin; GET/POST /api/devices/silence) -->
+      <div class="card" id="dev-silence-card" hidden>
+        <div class="card-head">
+          <h2>Silenced</h2>
+          <span class="badge" id="dev-silence-badge">…</span>
+        </div>
+        <p class="vl-info">Rules for known chatty apps: matching findings are still recorded (tick <b>Show silenced</b> above to see them) but do not count toward a device's health or <b>Flagged</b>, and send no push or Home Assistant alerts. Create one with <b>Silence…</b> on a finding.</p>
+        <div id="dev-silence-body"></div>
+      </div>
+
+      <div class="card" id="dev-src-card">
+        <div class="card-head">
+          <h2>Monitoring sources</h2>
+          <span class="badge" id="dev-src-badge">…</span>
+        </div>
+        <div class="vl-info">
+          <p>The router watches what every LAN, VLAN and VPN device does through it — nothing is installed on the devices. Connections (Zeek) and DNS lookups are matched against the threat intelligence below, and Suricata IDS alerts are attributed to the device involved. Results show on the Clients page (Health column, device panel) and above (Device threats); push notifications are set under <a href="#settings" data-tw-settings="alerts">Settings → Alerts → Device alerts</a>.</p>
+          <p>The sources below decide what can be seen: without a LAN interface in Suricata's capture its alerts carry only the router's own address, and without MAC addresses in Zeek's log a reused or IPv6 privacy address is matched from the neighbour table alone.</p>
+        </div>
+        <div id="dev-src-body"></div>
+        <!-- Zeek checksum switch (admin POST /api/devices/zeek-checksums; state: GET /api/devices/feeds) -->
+        <div class="cs-set dev-zeek-set" id="dev-zeek-ck" hidden>
+          <div class="cs-set-row">
+            <div class="cs-set-copy">
+              <label class="cs-set-title" for="dev-zeek-ck-in">Ignore checksums</label>
+              <span class="cs-set-desc">Needed on virtual machines and on network cards with checksum offload — otherwise Zeek misses the router's own connections (they look like unanswered attempts).</span>
+              <span class="cs-set-status" id="dev-zeek-ck-status"></span>
+            </div>
+            <div class="cs-set-ctl">
+              <span class="cs-badge" id="dev-zeek-ck-badge" data-state="unknown">…</span>
+              <label class="fw-switch" title="Zeek: ignore checksums">
+                <input type="checkbox" id="dev-zeek-ck-in" aria-describedby="dev-zeek-ck-status">
+                <span class="fw-switch-slider"></span>
+              </label>
+            </div>
+          </div>
+          <p class="cs-set-msg" id="dev-zeek-ck-msg" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+      <div class="card" id="ti-card" hidden>
+        <div class="card-head">
+          <h2>Threat intelligence</h2>
+          <span class="badge" id="ti-badge">…</span>
+        </div>
+        <div class="vl-info">
+          <p>Device monitoring compares what LAN devices connect to and look up with lists of known malware servers. The lists are downloaded every 6 hours; only these downloads leave the router — no device data is sent anywhere.</p>
+          <p>Feodo Tracker works without an account. URLhaus and ThreatFox need a free abuse.ch <b>Auth-Key</b>: sign in at <a href="https://auth.abuse.ch/" target="_blank" rel="noopener">auth.abuse.ch</a> (GitHub, Google, LinkedIn or X account), open your profile and copy the Auth-Key. The key is stored on the router (root only) and never shown again.</p>
+        </div>
+        <div id="ti-body"></div>
+      </div>
+      <div class="card" id="ti-viewer-card" hidden>
+        <div class="card-head"><h2>Threat intelligence</h2></div>
+        <p class="vl-info">Feeds, the abuse.ch Auth-Key and the local indicator list are managed by administrators.</p>
       </div>
       </div>
 
@@ -3696,7 +3778,6 @@
         <button class="fw-subtab" type="button" data-settings-pane="map">Map</button>
         <button class="fw-subtab" type="button" data-settings-pane="users">Users</button>
         <button class="fw-subtab" type="button" data-settings-pane="security">Security</button>
-        <button class="fw-subtab" type="button" data-settings-pane="threat">Threat</button>
         <button class="fw-subtab" type="button" data-settings-pane="alerts">Alerts</button>
         <span class="fw-subtabs-fill"></span>
       </div>
@@ -3838,36 +3919,6 @@
         <div id="https-body"></div>
       </div>
 
-      </div>
-
-      <!-- ── Pane: Threat (device monitoring; scripts/devices.js) ──── -->
-      <div class="fw-pane" data-settings-pane="threat" hidden>
-      <div class="card" id="dev-src-card">
-        <div class="card-head">
-          <h2>Device monitoring</h2>
-          <span class="badge" id="dev-src-badge">…</span>
-        </div>
-        <div class="vl-info">
-          <p>The router watches what every LAN, VLAN and VPN device does through it — nothing is installed on the devices. Connections (Zeek) and DNS lookups are matched against the threat intelligence below, and Suricata IDS alerts are attributed to the device involved. Results show on the Clients page (Health column, device panel) and on Security (Device threats); push notifications are set under <a href="#settings" data-tw-settings="alerts">Alerts → Device alerts</a>.</p>
-          <p>The sources below decide what can be seen: without a LAN interface in Suricata's capture its alerts carry only the router's own address, and without MAC addresses in Zeek's log a reused or IPv6 privacy address is matched from the neighbour table alone.</p>
-        </div>
-        <div id="dev-src-body"></div>
-      </div>
-      <div class="card" id="ti-card" hidden>
-        <div class="card-head">
-          <h2>Threat intelligence</h2>
-          <span class="badge" id="ti-badge">…</span>
-        </div>
-        <div class="vl-info">
-          <p>Device monitoring compares what LAN devices connect to and look up with lists of known malware servers. The lists are downloaded every 6 hours; only these downloads leave the router — no device data is sent anywhere.</p>
-          <p>Feodo Tracker works without an account. URLhaus and ThreatFox need a free abuse.ch <b>Auth-Key</b>: sign in at <a href="https://auth.abuse.ch/" target="_blank" rel="noopener">auth.abuse.ch</a> (GitHub, Google, LinkedIn or X account), open your profile and copy the Auth-Key. The key is stored on the router (root only) and never shown again.</p>
-        </div>
-        <div id="ti-body"></div>
-      </div>
-      <div class="card" id="ti-viewer-card" hidden>
-        <div class="card-head"><h2>Threat intelligence</h2></div>
-        <p class="vl-info">Feeds, the abuse.ch Auth-Key and the local indicator list are managed by administrators.</p>
-      </div>
       </div>
 
       <!-- ── Pane: Alerts ─────────────────────────────────────────── -->
@@ -4211,6 +4262,13 @@
   });
 })();
 </script>
+<!-- Device finding silence dialog (global: Security > Local and the Clients device panel; scripts/devices.js) -->
+<div class="modal" id="dev-s-modal" hidden>
+  <div class="modal-box dev-q-box" role="dialog" aria-modal="true" aria-labelledby="dev-s-title">
+    <button type="button" class="modal-close" id="dev-s-close" aria-label="Close">&times;</button>
+    <div id="dev-s-body"></div>
+  </div>
+</div>
 <!-- CrowdSec local ban modal (global: used by Top Attackers and Community Bans).
      Must stay ABOVE the dashboard.js script tag: the els map resolves element
      IDs while the script loads, so anything placed after the script is not
@@ -4243,8 +4301,8 @@
 <script src="/scripts/worldmap.js?v=202611210025"></script>
 <script src="/scripts/community-settings.js?v=202611210025"></script>
 <script src="/scripts/https-settings.js?v=202611231900"></script>
-<script src="/scripts/devices.js?v=202611251815"></script>
-<script src="/scripts/dashboard.js?v=202611271200"></script>
+<script src="/scripts/devices.js?v=202611281500"></script>
+<script src="/scripts/dashboard.js?v=202611281500"></script>
 <script src="/scripts/enhance.js?v=202611210025"></script>
 <script src="/scripts/netmap.js?v=202611210025"></script>
 <script src="/scripts/insights.js?v=202611210025"></script>

@@ -1924,12 +1924,44 @@ html:not(#_tw#_x) #view-backups .act-btn.act-pin.is-on {
 
 .dev-threat-body { padding: 12px 16px 14px; }
 .dev-threat-body .vl-info { margin: 0; }
-.dev-threat-stats { display: flex; align-items: center; gap: 10px 22px; flex-wrap: wrap; }
-.dev-threat-stat { display: flex; flex-direction: column; min-width: 64px; }
-.dev-threat-stat b { font-size: 22px; line-height: 1.1; }
-.dev-threat-stat small { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
-.dev-threat-stat.is-bad b { color: var(--red); }
-.dev-threat-worst { flex: 1 1 260px; min-width: 0; font-size: 12.5px; line-height: 1.5; }
+.dev-threat-body > * + * { margin-top: 8px; }
+
+/* Security > Local (layout only; shared stat-card / card / cs-set components,
+   the same rhythm as the Tripwire and Deception panes) */
+#view-security .local-pane > .dev-stats { margin: 0 0 18px; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+#view-security .local-pane > * + * { margin-top: 18px; }
+#view-security .local-pane > .dev-stats + .bk-sr { margin: 0; }
+#view-security .local-pane > .bk-sr + * { margin-top: 0; }
+#view-security .local-pane > .card { margin-bottom: 0; }
+#view-security .dev-stats .stat-card[data-dev-st] { cursor: pointer; }
+#view-security .dev-stats .stat-card[data-dev-st]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#view-security .dev-stats .stat-value {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+#view-security .dev-st-sub {
+  display: block; margin-top: 3px;
+  font-size: .86em; font-weight: 400; letter-spacing: normal; text-transform: none;
+  color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#view-security .dev-stats .stat-card[data-tone="red"] .dev-st-sub,
+#view-security .dev-stats .stat-card[data-tone="amber"] .dev-st-sub { color: color-mix(in srgb, var(--stat-c) 75%, var(--text)); }
+@media (max-width: 1280px) {
+  #view-security .local-pane > .dev-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
+  #view-security .local-pane > .dev-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+}
+.dev-thr-silenced { margin-left: auto; white-space: nowrap; }
+.dev-row-acts { white-space: nowrap; }
+.dev-row-acts > * + * { margin-left: 6px; }
+#dev-silence-card > .vl-info { margin: 0 16px 10px; }
+#dev-silence-body { padding: 0 16px 14px; }
+.dev-silence-empty { margin: 0; }
+#dev-zeek-ck.cs-set { grid-template-columns: minmax(0, 1fr); padding: 0 16px 14px; }
+#dev-s-suffix { width: 100%; max-width: 320px; margin-top: 6px; }
+.dev-s-crit { margin: 10px 0; }
+.dev-s-crit .alerts-check { margin-top: 6px; }
 
 #ti-body .card-toolbar { padding-left: 16px; padding-right: 16px; }
 #ti-body > .table-wrap, #ti-body > .ti-sub, #ti-body > .ti-msg { margin-left: 16px; margin-right: 16px; }
@@ -1941,14 +1973,13 @@ html:not(#_tw#_x) #view-backups .act-btn.act-pin.is-on {
 .ti-add input[type="text"] { flex: 1 1 180px; }
 .ti-msg { font-size: 12px; min-height: 1em; margin-bottom: 12px; }
 
-/* Settings > Threat: monitoring sources (layout only; shared components) */
+/* Security > Local: monitoring sources (layout only; shared components) */
 #dev-src-body { padding: 0 16px 14px; }
 #dev-src-body .vl-info { margin: 0 0 10px; }
 #dev-src-body .ov-kv { padding: 0; }
 #dev-src-body .badge { vertical-align: 1px; }
 .dev-src-cmd { overflow-wrap: anywhere; font-size: 11.5px; }
 #dev-src-card a, #dev-src-hint a, #dev-threat-body a { color: var(--accent); }
-.dev-threat-stats + .vl-info { margin-top: 10px; }
 .dev-threat-recent { margin-top: 12px; }
 .dev-threat-recent > p { margin: 0; }
 .dev-threat-recent .table-wrap { margin-bottom: 10px; }
@@ -1956,4 +1987,9 @@ html:not(#_tw#_x) #view-backups .act-btn.act-pin.is-on {
 @media (max-width: 760px) {
   #dev-src-body .ov-kv-row { flex-direction: column; gap: 2px; }
   #dev-src-body .ov-kv-row .ov-kv-value { text-align: left; }
+}
+#dev-s-body .dev-q-mode:has(input:checked) { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+#dev-s-body .dev-q-mode input[type="radio"] { accent-color: var(--accent); }
+@media (max-width: 760px) {
+  #view-security .local-pane > .dev-stats > .stat-card:last-child { grid-column: 1 / -1; }
 }

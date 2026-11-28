@@ -121,7 +121,11 @@ VIEWER_OK = {
     # local indicator list stay admin-only (also GET /api/devices/findings/recent: destinations and
     # indicators, gated by ADMIN_GET_PREFIXES, so it needs no entry here); every POST is admin
     # (default: admin + same Origin), incl. POST /api/devices/<id>/new-ack (dismiss a new-device row
-    # of Security > Local; writes the expected-marks overlay) - deliberately not listed here
+    # of Security > Local; writes the expected-marks overlay) - deliberately not listed here.
+    # Silence rules (A7): GET /api/devices/silence is admin-only (ADMIN_GET_PREFIXES: it names devices and
+    # indicators), POST /api/devices/silence (add/remove a rule) and POST /api/devices/zeek-checksums (root
+    # runs zeek-site-setup.sh --checksums on|off; Zeek restarts) keep the default: admin + same Origin.
+    # The Zeek switch state rides on GET /api/devices/feeds (zeek_checksums: on/off + bad-checksum share).
     "GET /api/devices": "device list: identity, health, generic reason, today's traffic totals "
                         "(no findings, indicators or destinations for viewers)",
     "GET /api/devices/summary": "device-threat counts for the Security card / Overview / Home Assistant",

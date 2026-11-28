@@ -826,6 +826,9 @@
         return (hx - hy) * dir || compareIp(x.ip, y.ip);
       }
       if (key === "activity") return (devActivityTotal(x) - devActivityTotal(y)) * dir;
+      if (key === "first_seen") {
+        return (((x.dev && x.dev.first_seen) || 0) - ((y.dev && y.dev.first_seen) || 0)) * dir || compareIp(x.ip, y.ip);
+      }
       const a = String(x[key] ?? "").toLowerCase();
       const b = String(y[key] ?? "").toLowerCase();
       return a.localeCompare(b) * dir;
@@ -1297,6 +1300,17 @@
     showFlagged(on) {
       state.flaggedOnly = !!on;
       if (els.devFlaggedOnly) els.devFlaggedOnly.checked = !!on;
+      setDhcpTab("dynamic");
+      switchView("clients");
+      if (history.replaceState) history.replaceState(null, "", "#clients");
+      render();
+    },
+    // Security > Local "New (24 h)": every device, newest first
+    showNewest() {
+      state.flaggedOnly = false;
+      if (els.devFlaggedOnly) els.devFlaggedOnly.checked = false;
+      state.sortKey = "first_seen";
+      state.sortDir = -1;
       setDhcpTab("dynamic");
       switchView("clients");
       if (history.replaceState) history.replaceState(null, "", "#clients");
@@ -13054,10 +13068,15 @@
   document.querySelectorAll("#settings-subtabs .fw-subtab").forEach((btn) => {
     btn.addEventListener("click", () => setSettingsTab(btn.dataset.settingsPane));
   });
-  // Deep link into a Settings sub-tab (devices.js: "Settings → Threat" links;
-  // also #settings/threat). The click runs after switchView's restore of the
-  // remembered sub-tab, and is remembered itself.
+  // Deep link into a Settings sub-tab (e.g. #settings/alerts). The click runs
+  // after switchView's restore of the remembered sub-tab, and is remembered
+  // itself. The former Settings > Threat tab lives on Security > Local now:
+  // old links (#settings/threat, data-tw-settings="threat") land there.
   function openSettingsPane(pane) {
+    if (pane === "threat") {
+      openSecurityPane("local", "dev-src-card");
+      return;
+    }
     switchView("settings");
     if (history.replaceState) history.replaceState(null, "", "#settings");
     setTimeout(() => {
@@ -13069,6 +13088,21 @@
     }, 0);
   }
   window.twSettings = { open: openSettingsPane };
+
+  // Deep link into a Security sub-tab (#security/local), optionally scrolled
+  // to a card of that pane (devices.js: monitoring sources, threat feeds).
+  function openSecurityPane(pane, cardId) {
+    switchView("security");
+    if (history.replaceState) history.replaceState(null, "", "#security");
+    setTimeout(() => {
+      const tab = document.querySelector(`#sec-subtabs .fw-subtab[data-sec-pane="${pane}"]`);
+      if (tab) tab.click();
+      const card = cardId && document.getElementById(cardId);
+      if (card && !card.hidden) card.scrollIntoView({ block: "start", behavior: "smooth" });
+      else if (tab) tab.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }, 0);
+  }
+  window.twSecurity = { open: openSecurityPane };
 
   function bindSettings() {
     bindAvatarSettings();
@@ -13455,6 +13489,7 @@
     "Top Countries": "globe", "Top Attackers": "target", "Hits Over Time": "activity",
     "Zeek Notices": "file", "Devices": "users", "QUIC Connections": "activity",
     "Device threats": "shield", "Threat intelligence": "rss", "Device alerts": "bell",
+    "Monitoring sources": "activity", "Silenced": "bell",
     "File Integrity (AIDE)": "shield", "Traffic Monitor": "activity",
     "Diagnose Blocked Traffic": "search", "WireGuard VPN": "lock", "Clients": "users",
     "Active Decisions": "shield", "Bouncers (Remediation Components)": "server",
@@ -15950,7 +15985,9 @@
     if (!initial) initial = storedView || "overview";
     const viewKnown = (name) => !!name && (VIEW_TITLES[name] || name.startsWith("plugin:"));
     const settingsPane = /^settings\/([a-z]+)$/.exec(initial);
+    const securityPane = /^security\/([a-z]+)$/.exec(initial);
     if (settingsPane) openSettingsPane(settingsPane[1]);
+    else if (securityPane) openSecurityPane(securityPane[1]);
     else switchView(viewKnown(initial) ? initial : (viewKnown(storedView) ? storedView : "overview"));
 
     bindBlocklistActions();

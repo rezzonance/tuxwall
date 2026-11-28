@@ -6,6 +6,10 @@ Zeek site directory and a fake zeekctl / systemd-detect-virt (temp dirs only).
   backed up (.pre-tuxwall), zeekctl check then deploy while Zeek runs;
 - a second run changes nothing and calls no zeekctl;
 - ignore_checksums only on a VM or with --ignore-checksums (then kept);
+  --checksums on|off (the dashboard switch): explicit, off wins over the VM
+  default, mac-logging always stays, the previous policy kept as .prev;
+  a bad value / unknown option exits 2 without touching anything;
+- a failed `zeekctl deploy` restores both files and redeploys them (exit 2);
 - a failed `zeekctl check` restores both files (exit 1);
 - Zeek stopped / --no-deploy: files written, no deploy; no Zeek: exit 0.
 
@@ -29,7 +33,7 @@ case "$1" in
   status) [ -n "$FAKE_STOPPED" ] && { echo "worker-1 worker localhost stopped"; exit 1; }
           echo "worker-1 worker localhost running 123"; exit 0 ;;
   check) [ -n "$FAKE_CHECK_FAIL" ] && { echo "error in local.zeek"; exit 1; }; echo "worker-1 scripts are ok."; exit 0 ;;
-  deploy) exit 0 ;;
+  deploy) [ -n "$FAKE_DEPLOY_FAIL" ] && { echo "deploy failed"; exit 1; }; exit 0 ;;
 esac
 exit 0
 """
@@ -110,6 +114,38 @@ def main():
     rc, out, calls = run(d)
     check("redef ignore_checksums = T;" in read(d, "tuxwall-devicewatch.zeek") and not calls,
           "--ignore-checksums kept on later runs without the flag")
+    # the dashboard switch: --checksums on|off
+    d = site("switch")
+    run(d)
+    rc, out, calls = run(d, "--checksums", "on")
+    pol = read(d, "tuxwall-devicewatch.zeek")
+    check(rc == 0 and "redef ignore_checksums = T;" in pol and "mac-logging" in pol
+          and calls == ["zeekctl status", "zeekctl check", "zeekctl deploy"]
+          and "ignore_checksums" not in (read(d, "tuxwall-devicewatch.zeek.prev") or "x"),
+          "--checksums on: added, checked, deployed, previous policy kept as .prev (%r)" % out)
+    rc, out, calls = run(d, "--checksums", "off")
+    pol = read(d, "tuxwall-devicewatch.zeek")
+    check(rc == 0 and "ignore_checksums" not in pol and "@load policy/protocols/conn/mac-logging" in pol
+          and "zeekctl deploy" in calls, "--checksums off: removed again, mac-logging stays")
+    rc, out, calls = run(d, "--checksums=off")
+    check(rc == 0 and not calls and "up to date" in out, "--checksums=off again: nothing to do")
+    d = site("vmoff")
+    rc, out, _c = run(d, "--checksums", "off", env={"FAKE_VM": "1"})
+    check(rc == 0 and "ignore_checksums" not in read(d, "tuxwall-devicewatch.zeek"),
+          "--checksums off wins over the virtual-machine default")
+    d = site("badarg")
+    for args in (("--checksums", "maybe"), ("--checksums",), ("--bogus",)):
+        rc, out, calls = run(d, *args)
+        check(rc == 2 and not calls and read(d, "tuxwall-devicewatch.zeek") is None and read(d, "local.zeek") == LOCAL,
+              "%r: exit 2, nothing touched" % (args,))
+    # zeekctl deploy fails: files restored, the old policy deployed again
+    d = site("deployfail")
+    run(d)
+    before = (read(d, "local.zeek"), read(d, "tuxwall-devicewatch.zeek"))
+    rc, out, calls = run(d, "--checksums", "on", env={"FAKE_DEPLOY_FAIL": "1"})
+    check(rc == 2 and (read(d, "local.zeek"), read(d, "tuxwall-devicewatch.zeek")) == before
+          and calls.count("zeekctl deploy") == 2 and "restored" in out,
+          "failed deploy: previous files restored and redeployed (%r %r)" % (calls, out))
     # zeekctl check fails: both files restored
     d = site("fail")
     rc, out, calls = run(d, env={"FAKE_CHECK_FAIL": "1"})

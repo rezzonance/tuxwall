@@ -28,6 +28,13 @@ domains and made-up MACs; no command, network or real log is touched.
 - API (loopback harness): role-filtered list, admin-only detail and
   indicators, summary, rename, expected, indicators, key (0600, never
   echoed), WireGuard snapshot without private/preshared keys.
+- Silence rules (A7): validation, scopes (indicator / device+kind / domain
+  suffix / kind, generic for Phase 2 kinds), expiry, the critical guard,
+  health/summary/threat-table exclusion, no engine event and no push/HA
+  alert while silenced; the API routes (admin + same Origin).
+- Zeek checksum switch (A3): command building, policy/result parsing, the
+  state on GET /api/devices/feeds, POST gates + one job at a time (the
+  script itself: tools/zeek_site_check.py).
 - Units: sandbox directives, writable paths = the state dir only.
 """
 import base64
@@ -957,6 +964,118 @@ def t_score():
           "EUI-64 decode")
 
 
+# ── silence rules (A7) ──────────────────────────────────────────────────────
+
+def t_silence():
+    V = dw.validate_silence_rule
+    dev_a, dev_b = dw.mac_id(MAC_A), dw.mac_id(MAC_B)
+    r_ind = V({"scope": "indicator", "indicator": "Tracker.Vendor.Example", "expires": "7d", "note": " TV \x07 app "}, NOW)
+    check(r_ind["indicator"] == "tracker.vendor.example" and r_ind["expires"] == int(NOW + 7 * 86400)
+          and r_ind["note"] == "TV app" and r_ind["include_critical"] is False and dw.SILENCE_ID_RE.match(r_ind["id"]),
+          "validate: indicator rule normalised, 7-day expiry, note cleaned (%r)" % r_ind)
+    r_dk = V({"scope": "device_kind", "device": dev_b, "kind": "dns_blocked", "expires": "forever"}, NOW)
+    r_sfx = V({"scope": "suffix", "suffix": "*.Vendor-Telemetry.example.", "expires": "30d"}, NOW)
+    r_kind = V({"scope": "kind", "kind": "dns_blocked"}, NOW)
+    check(r_dk["expires"] == 0 and r_sfx["suffix"] == "vendor-telemetry.example" and r_kind["expires"] == int(NOW + 30 * 86400),
+          "validate: device+kind forever, suffix without *. and dot, default 30 days")
+    for bad, why in (({"scope": "everything"}, "scope"), ({"scope": "indicator"}, "indicator"),
+                     ({"scope": "device_kind", "device": dev_b}, "kind"), ({"scope": "device_kind", "kind": "dns_blocked"}, "device"),
+                     ({"scope": "suffix", "suffix": "com"}, "one-label suffix"), ({"scope": "suffix", "suffix": "a b.example"}, "space"),
+                     ({"scope": "kind"}, "kind"), ({"scope": "kind", "kind": "new_device"}, "new_device"),
+                     ({"scope": "kind", "kind": "Bad Kind!"}, "kind syntax"), ({"scope": "kind", "kind": "dns_blocked", "expires": "1y"}, "expiry"),
+                     ("x", "not an object")):
+        try:
+            V(bad, NOW)
+            check(False, "validate refuses %s" % why)
+        except ValueError:
+            check(True, "")
+    F = lambda **k: dict({"id": "f1", "device": dev_a, "kind": "dns_blocked", "indicator": "tracker.vendor.example",  # noqa: E731
+                          "indicator_type": "domain", "severity": "low", "title": "", "last": NOW, "details": {}}, **k)
+    m = dw.silence_match
+    check(m(F(), [r_ind], NOW) == r_ind["id"] and m(F(device=dev_b, kind="dns_lookup", severity="high"), [r_ind], NOW) == r_ind["id"],
+          "indicator scope: any device, any kind")
+    check(m(F(indicator="other.example"), [r_ind], NOW) is None, "indicator scope: other indicator not covered")
+    check(m(F(device=dev_b), [r_dk], NOW) == r_dk["id"] and m(F(), [r_dk], NOW) is None
+          and m(F(device=dev_b, kind="dns_lookup"), [r_dk], NOW) is None, "device+kind: only that device and kind")
+    check(m(F(indicator="a.b.vendor-telemetry.example"), [r_sfx], NOW) == r_sfx["id"]
+          and m(F(indicator="vendor-telemetry.example"), [r_sfx], NOW) == r_sfx["id"]
+          and m(F(indicator="*.vendor-telemetry.example", indicator_type="domain"), [r_sfx], NOW) == r_sfx["id"]
+          and m(F(indicator="listed.example", details={"query": "x.vendor-telemetry.example"}), [r_sfx], NOW) == r_sfx["id"],
+          "suffix: the domain, its subdomains, a wildcard indicator and the queried name")
+    check(m(F(indicator="evilvendor-telemetry.example"), [r_sfx], NOW) is None
+          and m(F(indicator="vendor-telemetry.example.evil.example"), [r_sfx], NOW) is None
+          and m(F(indicator=C2_IP, indicator_type="ip"), [r_sfx], NOW) is None, "suffix: label boundary, IPs never match")
+    check(m(F(device=dev_b), [r_kind], NOW) == r_kind["id"] and m(F(kind="intel_attempt", severity="medium"), [r_kind], NOW) is None,
+          "kind scope: that kind on every device")
+    check(m(F(kind="dns_blocked"), [dict(r_kind, kind="beacon_regular")], NOW) is None
+          and m(F(kind="beacon_regular", severity="medium", indicator="198.51.100.9:443"),
+                [V({"scope": "kind", "kind": "beacon_regular"}, NOW)], NOW), "generic: a Phase 2 detector kind works unchanged")
+    check(m(F(), [r_ind], NOW + 8 * 86400) is None and m(F(), [r_ind], NOW + 6 * 86400) == r_ind["id"],
+          "expiry: a 7-day rule stops after 7 days")
+    # critical guard
+    c2 = F(kind="c2_connection", indicator=C2_IP, indicator_type="ip", severity="critical")
+    ar = F(kind="ids_alert", indicator="sid:2100498", indicator_type="signature", severity="high",
+           title="GPL ATTACK_RESPONSE id check returned root", details={"category": "Potentially Bad Traffic", "direction": "outbound"})
+    succ = F(kind="ids_alert", indicator="sid:2019284", severity="medium", title="ET EXPLOIT x",
+             details={"category": "Successful Administrator Privilege Gain"})
+    inbound = F(kind="ids_alert", indicator="sid:2100498", severity="low", title="GPL ATTACK_RESPONSE id check returned root",
+                details={"direction": "inbound"})
+    check(all(dw.is_critical_finding(x) for x in (c2, ar, succ, F(severity="critical")))
+          and not any(dw.is_critical_finding(x) for x in (inbound, F(), F(kind="intel_connection", severity="high"))),
+          "critical: C2, outbound attack response, Successful ... gain, any critical severity - not inbound-only/low")
+    rk = V({"scope": "kind", "kind": "ids_alert"}, NOW)
+    rk_c = V({"scope": "kind", "kind": "ids_alert", "include_critical": True}, NOW)
+    ri_c2 = V({"scope": "indicator", "indicator": C2_IP}, NOW)
+    check(m(ar, [rk], NOW) is None and m(succ, [rk], NOW) is None and m(inbound, [rk], NOW) == rk["id"]
+          and m(ar, [rk, rk_c], NOW) == rk_c["id"] and m(c2, [ri_c2], NOW) is None
+          and m(c2, [dict(ri_c2, include_critical=True)], NOW) == ri_c2["id"],
+          "critical guard: only an include_critical rule silences critical findings")
+    check(m(F(kind="new_device"), [V({"scope": "indicator", "indicator": "tracker.vendor.example"}, NOW)], NOW) is None,
+          "new-device rows are never silenced")
+    rules = dw.silence_rules({"rules": [r_ind, {"id": "bad", "scope": "kind"}, dict(r_kind, scope="nope"), "x",
+                                        dict(r_kind, expires="soon"), dict(r_dk, include_critical="yes")]})
+    check([x["id"] for x in rules] == [r_ind["id"], r_dk["id"]] and rules[1]["include_critical"] is False,
+          "silence.json: malformed rules dropped, include_critical must be a real true")
+    # health + summary exclusion
+    dev = {"first_seen": NOW - 10 * 86400, "baseline": True}
+    hi = F(kind="dns_lookup", severity="high", last=NOW - 60)
+    check(dw.score_device(dev, [hi], NOW)[1] == "warning" and dw.score_device(dev, [dict(hi, silenced="s1")], NOW)[:2] == (0, "normal"),
+          "health: a silenced finding counts like an expected one")
+    devs = [{"id": dev_a, "name": "a", "health": "normal", "online": False, "last_seen": NOW - 300, "baseline": True},
+            {"id": dev_b, "name": "b", "health": "warning", "online": True, "last_seen": NOW - 3600, "baseline": True},
+            {"id": "m00005e0053cc", "name": "c", "health": "normal", "online": False, "last_seen": NOW - 4000, "baseline": False,
+             "first_seen": NOW - 3600, "zone_name": "IoT"}]
+    s = dw.summarize(devs, [dict(hi, silenced="s1"), dict(hi, id="f2", device=dev_b)], NOW)
+    check(s["findings_active"] == 1 and s["findings_silenced"] == 1 and s["worst"]["device"] == dev_b and s["flagged"] == 1
+          and s["active"] == 2 and s["new_24h"] == 1 and s["new_zones"] == {"IoT": 1},
+          "summary: silenced excluded, active = seen in 10 min, new per zone (%r)" % {k: s[k] for k in ("active", "new_zones")})
+    # engine: no alert event for a silenced finding; an escalation to critical leaves the rule; expiry re-applied
+    r = make_root("silence")
+    clock = Clock(NOW)
+    eng = dw.Engine(dw.Config(r), FakeSources(), clock)
+    w(r + "/etc/tuxwall/devices/silence.json", json.dumps({"version": 1, "rules": [
+        dict(r_dk, device=dev_a, kind="intel_attempt", expires=int(NOW + 600))]}))
+    eng.load_overlays()
+    spec = {"kind": "intel_attempt", "indicator": C2_IP, "indicator_type": "ip", "severity": "medium", "source": "feodo"}
+    f = eng.record_finding(dev_a, spec, NOW)
+    check(f["silenced"] == r_dk["id"] and not eng.events, "engine: silenced finding recorded, no alert event")
+    eng.record_finding(dev_a, dict(spec, severity="critical"), NOW + 5)
+    check(f["silenced"] is None and [e.get("escalated") for e in eng.events] == [True],
+          "engine: escalation to critical leaves the rule's reach and alerts")
+    f["severity"] = "medium"
+    eng.events = []
+    eng._apply_silence(NOW + 10)
+    check(f["silenced"] == r_dk["id"] and eng.silence_next_expiry == int(NOW + 600), "engine: rule applied, next expiry tracked")
+    clock.t = NOW + 601
+    eng.load_overlays()
+    check(f["silenced"] is None, "engine: an expired rule is dropped on the next cycle without a file change")
+    clock.t = NOW + 700
+    os.unlink(r + "/etc/tuxwall/devices/silence.json")
+    eng.load_overlays()
+    check(eng.overlay["silence"] == [] and eng.record_finding(dev_a, dict(spec, indicator=OLD_C2), NOW + 700)["silenced"] is None,
+          "engine: rules file removed -> nothing silenced")
+
+
 # ── API (loopback harness) ──────────────────────────────────────────────────
 
 def t_api():
@@ -1211,6 +1330,157 @@ def t_api():
               "new-ack: recorded in the expected overlay, the row is gone")
         check(H.request("POST", "/api/devices/m00005e0053fe/new-ack", role="admin", origin=H.SAME, body={}).status == 404,
               "new-ack: unknown device -> 404")
+        # silence rules (A7) through the API: gates, health/summary/table exclusion, critical guard
+        w(st + "/devices.json", json.dumps({"schema": 1, "generated_at": int(time.time()), "devices": [
+            dev, dict(dev, id=dw.mac_id(MAC_B), mac=MAC_B, name="tv-b", vendor="ICANN, IANA Department", type="tv")]}))
+        tnow = time.time()
+        f_tv = {"id": "e" * 16, "device": dw.mac_id(MAC_B), "kind": "dns_lookup", "indicator": "ads.tv-vendor.example",
+                "indicator_type": "domain", "severity": "high", "title": "Looked up a known malware domain (URLhaus)",
+                "source": "urlhaus", "first": tnow - 120, "last": tnow - 120, "count": 2, "details": {}}
+        w(st + "/findings.json", json.dumps({"schema": 1, "generated_at": int(tnow), "findings": [fnd, f_tv]}))
+        check(H.request("GET", "/api/devices/silence", role="viewer").status == 403
+              and H.request("GET", "/api/devices/silence", role=None).status == 401, "silence GET: viewer 403, no session 401")
+        rule = {"scope": "suffix", "suffix": "tv-vendor.example", "expires": "30d", "note": "TV telemetry"}
+        check(H.request("POST", "/api/devices/silence", role="viewer", origin=H.SAME, body={"action": "add", "rule": rule}).status == 403
+              and H.request("POST", "/api/devices/silence", role="admin", origin="https://evil.example.com",
+                            body={"action": "add", "rule": rule}).status == 403
+              and not os.path.exists(conf + "/silence.json"), "silence POST: viewer 403, foreign Origin 403, nothing written")
+        check(H.request("GET", "/api/devices/summary", role="viewer").json["flagged"] == 2, "silence: both devices flagged before")
+        r = H.request("POST", "/api/devices/silence", role="admin", origin=H.SAME, body={"action": "add", "rule": rule})
+        sil = json.load(open(conf + "/silence.json"))["rules"]
+        check(r.status == 200 and len(r.json["rules"]) == 1 and r.json["rules"][0]["hides"] == 1 and sil[0]["by"] == "boss"
+              and sil[0]["suffix"] == "tv-vendor.example" and os.stat(conf + "/silence.json").st_mode & 0o777 == 0o644,
+              "silence add: stored next to expected.json (0644, the engine reads it), hides 1 (%r)" % r.json)
+        s = H.request("GET", "/api/devices/summary", role="viewer").json
+        tvrow = [d for d in H.request("GET", "/api/devices", role="admin").json["devices"] if d["id"] == dw.mac_id(MAC_B)][0]
+        check(s["flagged"] == 1 and s["findings_silenced"] == 1 and tvrow["health"] == "normal"
+              and tvrow["findings"]["silenced"] == 1 and tvrow["findings"]["active"] == 0,
+              "silence: health/Flagged exclude the silenced finding (%r)" % tvrow["findings"])
+        rows = H.request("GET", "/api/devices/findings/recent?limit=50", role="admin").json
+        rows_all = H.request("GET", "/api/devices/findings/recent?limit=50&silenced=1", role="admin").json
+        check(f_tv["id"] not in [x["id"] for x in rows["findings"]] and rows["silenced_hidden"] == 1
+              and [x["silenced"] for x in rows_all["findings"] if x["id"] == f_tv["id"]] == [sil[0]["id"]]
+              and rows_all["silenced_hidden"] == 0, "silence: threat table hides it unless ?silenced=1 (marked)")
+        det = H.request("GET", "/api/devices/" + dw.mac_id(MAC_B), role="admin").json
+        check(det["findings"][0]["silenced"] == sil[0]["id"] and det["findings"][0]["critical"] is False,
+              "silence: device detail marks the finding")
+        # critical guard
+        r = H.request("POST", "/api/devices/silence", role="admin", origin=H.SAME,
+                      body={"action": "add", "rule": {"scope": "kind", "kind": "c2_connection"}})
+        check(r.status == 400 and r.json.get("code") == "critical", "silence: the C2 kind needs include_critical (%r)" % r.json)
+        r = H.request("POST", "/api/devices/silence", role="admin", origin=H.SAME,
+                      body={"action": "add", "rule": {"scope": "indicator", "indicator": C2_IP, "expires": "7d"}})
+        ri = [x for x in r.json["rules"] if x["scope"] == "indicator"][0]
+        check(r.status == 200 and ri["hides"] == 0 and ri["critical_visible"] == 1
+              and H.request("GET", "/api/devices/summary", role="viewer").json["critical"] == 1,
+              "silence: a rule without include_critical leaves the critical C2 finding visible (%r)" % ri)
+        r = H.request("POST", "/api/devices/silence", role="admin", origin=H.SAME,
+                      body={"action": "add", "rule": {"scope": "indicator", "indicator": C2_IP, "include_critical": True}})
+        check(r.status == 200 and len(r.json["rules"]) == 2
+              and [x for x in r.json["rules"] if x["scope"] == "indicator"][0]["hides"] == 1
+              and H.request("GET", "/api/devices/summary", role="viewer").json["flagged"] == 0,
+              "silence: the same scope again replaces the rule; include_critical hides the C2 finding")
+        check(H.request("POST", "/api/devices/silence", role="admin", origin=H.SAME,
+                        body={"action": "add", "rule": {"scope": "device_kind", "device": "m00005e0053fe", "kind": "dns_lookup"}}).status == 404
+              and H.request("POST", "/api/devices/silence", role="admin", origin=H.SAME,
+                            body={"action": "add", "rule": {"scope": "suffix", "suffix": "example"}}).status == 400
+              and H.request("POST", "/api/devices/silence", role="admin", origin=H.SAME, body={"action": "wipe"}).status == 400
+              and H.request("POST", "/api/devices/silence", role="admin", origin=H.SAME,
+                            body={"action": "remove", "id": "s000000000000"}).status == 404,
+              "silence: unknown device 404, too-broad suffix 400, bad action 400, unknown id 404")
+        # alerts: an event for a silenced finding sends nothing; after Unsilence it does
+        A.ALERT_CONFIG_FILE = os.path.join(H.scratch, "alerts.json")
+        A.DEVICE_ALERT_STATE = os.path.join(H.scratch, "device-alerts.json")
+        sent_a = []
+        real_send = A._device_alert_send
+        A._device_alert_send = lambda key, sev, title, detail, priority=None: sent_a.append(title)
+        try:
+            evp = st + "/events.jsonl"
+            open(evp, "a").close()
+            A.devices_alert_pass()
+            with open(evp, "a") as fh:
+                fh.write(json.dumps({"type": "finding", "device": dw.mac_id(MAC_B), "finding": f_tv["id"],
+                                     "severity": "high", "ts": int(tnow)}) + "\n")
+            n_sil = A.devices_alert_pass()
+            for x in H.request("GET", "/api/devices/silence", role="admin").json["rules"]:
+                rr = H.request("POST", "/api/devices/silence", role="admin", origin=H.SAME, body={"action": "remove", "id": x["id"]})
+            with open(evp, "a") as fh:
+                fh.write(json.dumps({"type": "finding", "device": dw.mac_id(MAC_B), "finding": f_tv["id"],
+                                     "severity": "high", "ts": int(tnow) + 1}) + "\n")
+            n_unsil = A.devices_alert_pass()
+        finally:
+            A._device_alert_send = real_send
+        check(n_sil == 0 and n_unsil == 1 and sent_a == ["Device flagged: tv-b"] and rr.status == 200
+              and rr.json["rules"] == [] and json.load(open(conf + "/silence.json"))["rules"] == [],
+              "alerts: silenced -> no push; Unsilence -> rules empty, the next event alerts (%r)" % sent_a)
+        integ = A._integ_devices_recent()[0]
+        check(any(x["id"] == f_tv["id"] for x in integ), "HA events: the finding is back after Unsilence")
+        w(conf + "/silence.json", json.dumps({"version": 1, "rules": [dict(dw.validate_silence_rule(rule, time.time()),
+                                                                           at=1, by="admin")]}))
+        check(all(x["id"] != f_tv["id"] for x in A._integ_devices_recent()[0]), "HA events: silenced findings left out")
+        os.unlink(conf + "/silence.json")
+        # summary extras for the Security > Local cards: counts only
+        s = H.request("GET", "/api/devices/summary", role="viewer").json
+        check({"active", "new_zones", "key_set", "key_missing", "quarantine_next_expiry", "findings_silenced"} <= set(s)
+              and "ads.tv-vendor.example" not in json.dumps(s) and C2_IP not in json.dumps(s),
+              "summary: active/new zones/feeds key/quarantine expiry, no indicator (%r)" % sorted(s))
+        # Zeek checksum switch: command building, result parsing, state (no zeekctl is ever run here)
+        check(A._zeek_checksums_cmd(True)[1:] == ["--checksums", "on"] and A._zeek_checksums_cmd(False)[1:] == ["--checksums", "off"]
+              and A._zeek_checksums_cmd(True)[0] == A.ZEEK_SITE_SETUP, "zeek: command per state")
+        check(A._zeek_checksums_policy("## x\n@load policy/protocols/conn/mac-logging\nredef ignore_checksums = T;\n")
+              and A._zeek_checksums_policy("  redef  ignore_checksums=T ;")
+              and not A._zeek_checksums_policy("# redef ignore_checksums = T;\n@load policy/protocols/conn/mac-logging")
+              and not A._zeek_checksums_policy("redef ignore_checksums = F;"), "zeek: policy parser (commented / F = off)")
+        ok, msg = A._zeek_checksums_result(0, "zeek: site policy deployed (mac-logging + ignore_checksums)\n")
+        ok1, msg1 = A._zeek_checksums_result(1, "zeek: 'zeekctl check' failed\n/opt/zeek/share/zeek/site/local.zeek, line 3\n")
+        ok2, _m2 = A._zeek_checksums_result(None, "")
+        check(ok and "deployed" in msg and not ok1 and "restored" in msg1 and "/opt" not in msg1 and not ok2,
+              "zeek: result parsing (deployed / check failed -> restored, no paths / timeout)")
+        site = os.path.join(H.scratch, "zeek-site")
+        os.makedirs(site)
+        w(site + "/local.zeek", "@load misc/loaded-scripts\n@load ./tuxwall-devicewatch.zeek\n")
+        w(site + "/tuxwall-devicewatch.zeek", "@load policy/protocols/conn/mac-logging\n")
+        script = os.path.join(H.scratch, "zeek-site-setup.sh")
+        w(script, "#!/bin/bash\n# zeek-site-setup.sh [--checksums on|off]\n")
+        A.ZEEK_SITE_DIRS, A.ZEEK_SITE_SETUP = (site,), script
+        w(st + "/status.json", json.dumps({"generated_at": int(time.time()), "warnings": [
+            {"code": "zeek_bad_checksums", "text": "Zeek sees bad checksums", "hint": "x"}],
+            "sources": {"zeek": {"lines": 900, "tcp": 400, "bad_checksum": 376, "l2": 900}}}))
+        r = H.request("GET", "/api/devices/feeds", role="viewer")
+        z = r.json["zeek_checksums"]
+        check(z["installed"] and z["enabled"] is False and z["supported"] and z["warning"] and z["bad_share"] == 0.94
+              and site not in r.body.decode(), "zeek: GET shows off + the bad-checksum symptom, no paths (%r)" % z)
+        w(site + "/tuxwall-devicewatch.zeek", "@load policy/protocols/conn/mac-logging\nredef ignore_checksums = T;\n")
+        check(H.request("GET", "/api/devices/feeds", role="viewer").json["zeek_checksums"]["enabled"] is True, "zeek: on detected")
+        check(H.request("POST", "/api/devices/zeek-checksums", role="viewer", origin=H.SAME, body={"enabled": True}).status == 403
+              and H.request("POST", "/api/devices/zeek-checksums", role="admin", origin="https://evil.example.com",
+                            body={"enabled": True}).status == 403
+              and H.request("POST", "/api/devices/zeek-checksums", role="admin", origin=H.SAME, body={"enabled": "yes"}).status == 400,
+              "zeek POST: viewer 403, foreign Origin 403, enabled must be a bool")
+        ran = []
+        real_run = A._zeek_checksums_run
+        A._zeek_checksums_run = lambda on, who: ran.append((on, who))
+        try:
+            A._ZEEK_CK_JOB.clear()
+            r = H.request("POST", "/api/devices/zeek-checksums", role="admin", origin=H.SAME, body={"enabled": False})
+            busy = H.request("POST", "/api/devices/zeek-checksums", role="admin", origin=H.SAME, body={"enabled": True})
+            for _i in range(50):
+                if ran:
+                    break
+                time.sleep(0.02)
+        finally:
+            A._zeek_checksums_run = real_run
+            A._ZEEK_CK_JOB.clear()
+            A._ZEEK_CK_JOB["running"] = False
+        check(r.status == 202 and r.json["started"] and busy.status == 409 and ran == [(False, "boss")],
+              "zeek POST: starts one background job, a second one while it runs -> 409 (%r)" % ran)
+        w(script, "#!/bin/bash\n# old script\n")
+        check(H.request("POST", "/api/devices/zeek-checksums", role="admin", origin=H.SAME, body={"enabled": True}).status == 409,
+              "zeek POST: an old zeek-site-setup.sh without --checksums -> 409")
+        A.ZEEK_SITE_DIRS = (os.path.join(H.scratch, "no-zeek"),)
+        check(H.request("GET", "/api/devices/feeds", role="viewer").json["zeek_checksums"]["installed"] is False
+              and H.request("POST", "/api/devices/zeek-checksums", role="admin", origin=H.SAME, body={"enabled": True}).status == 409,
+              "zeek: not installed -> hidden state, POST 409")
     finally:
         H.close()
 
@@ -1295,7 +1565,8 @@ def t_units():
           "analysis engine opens no network connection (feeds are a separate unit)")
 
 
-for t in (t_follower, t_feeds, t_engine, t_campaign4, t_false_positives, t_small_batch, t_score, t_units, t_api):
+for t in (t_follower, t_feeds, t_engine, t_campaign4, t_false_positives, t_small_batch, t_score, t_silence, t_units,
+          t_api):
     try:
         t()
     except Exception:

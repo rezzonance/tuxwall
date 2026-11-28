@@ -8,32 +8,48 @@
 #       addresses, IPv6 privacy addresses the neighbour table forgot).
 #   redef ignore_checksums = T;
 #       only on a virtual machine (systemd-detect-virt --vm) or with
-#       --ignore-checksums (kept on later runs): virtual NICs hand the capture
+#       --ignore-checksums / --checksums on (kept on later runs); --checksums
+#       off removes it (also on a VM): virtual NICs hand the capture
 #       packets whose checksums the host offloads and never fills in; Zeek
 #       drops them as bad and logs every completed connection as an
 #       unanswered attempt. Chosen over turning NIC checksum offload off: it
 #       changes nothing in the forwarding path, only what Zeek verifies.
 # Then, when Zeek runs: `zeekctl check`, and `zeekctl deploy` (Zeek restarts
-# for a few seconds). A failed check puts the previous files back.
+# for a few seconds). A failed check or deploy puts the previous files back
+# (a failed deploy is retried with them). The policy file's previous version
+# is kept as tuxwall-devicewatch.zeek.prev (not loaded by Zeek).
 #
-#   zeek-site-setup.sh [--ignore-checksums] [--no-deploy] [SITE_DIR]
+#   zeek-site-setup.sh [--ignore-checksums | --checksums on|off] [--no-deploy] [SITE_DIR]
 #
 # Zeek is optional and not installed by TuxWall: no site directory -> exit 0.
 # The postinst runs this on fresh installs; afterwards the dashboard
-# (Settings > Threat) shows the command when Zeek logs no MAC addresses.
+# (Security > Local > Monitoring sources) shows the command when Zeek logs no
+# MAC addresses, and its "Ignore checksums" switch runs --checksums on|off.
 # Exit: 0 done / nothing to do, 1 zeekctl check failed (restored), 2 error.
 set -u
 
 IGNORE=0
+FORCE_OFF=0
 DEPLOY=1
 SITE=""
-for a in "$@"; do
-  case "$a" in
+while (( $# )); do
+  case "$1" in
     --ignore-checksums) IGNORE=1 ;;
+    --checksums)
+      case "${2:-}" in
+        on) IGNORE=1; FORCE_OFF=0 ;;
+        off) IGNORE=0; FORCE_OFF=1 ;;
+        *) echo "zeek: --checksums needs on or off" >&2; exit 2 ;;
+      esac
+      shift ;;
+    --checksums=on) IGNORE=1; FORCE_OFF=0 ;;
+    --checksums=off) IGNORE=0; FORCE_OFF=1 ;;
     --no-deploy) DEPLOY=0 ;;
-    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
-    *) SITE=$a ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -*) echo "zeek: unknown option $1" >&2; exit 2 ;;
+    *) SITE=$1 ;;
   esac
+  shift
 done
 if [[ -z $SITE ]]; then
   for d in "${ZEEK_SITE:-}" /opt/zeek/share/zeek/site /usr/local/zeek/share/zeek/site /usr/share/zeek/site; do
@@ -53,7 +69,7 @@ fi
 
 POLICY=$SITE/tuxwall-devicewatch.zeek
 LOCAL=$SITE/local.zeek
-if (( ! IGNORE )); then
+if (( ! IGNORE && ! FORCE_OFF )); then
   if systemd-detect-virt --vm -q 2>/dev/null; then
     IGNORE=1
   elif [[ -f $POLICY ]] && grep -q '^redef ignore_checksums = T;' "$POLICY"; then
@@ -83,6 +99,7 @@ had_policy=0
 
 changed=0
 if [[ ! -f $POLICY ]] || [[ "$(cat "$POLICY")" != "$want" ]]; then
+  (( had_policy )) && cp -p "$POLICY" "$POLICY.prev"
   printf '%s\n' "$want" > "$POLICY.tmp" || exit 2
   chmod 0644 "$POLICY.tmp"
   chgrp --reference="$SITE" "$POLICY.tmp" 2>/dev/null || true
@@ -122,7 +139,9 @@ fi
 if "$ZEEKCTL" deploy >"$tmp/deploy.log" 2>&1; then
   echo "zeek: site policy deployed ($what)"
 else
-  echo "zeek: 'zeekctl deploy' reported a problem (see 'zeekctl status'):" >&2
+  restore
+  "$ZEEKCTL" deploy >"$tmp/redeploy.log" 2>&1
+  echo "zeek: 'zeekctl deploy' failed - previous policy restored and redeployed (see 'zeekctl status'):" >&2
   tail -n 5 "$tmp/deploy.log" >&2
   exit 2
 fi

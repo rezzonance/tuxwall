@@ -81,7 +81,17 @@ Risk score 0-100 = min(100, sum over active findings of
   weight(severity) x recency(last seen)),
   weights critical 60, high 35, medium 15, low 4; recency 1.0 (< 24 h),
   0.5 (< 7 days), 0.2 (older, until the 30-day retention drops it).
-  Findings marked "expected" do not count.
+  Findings marked "expected" do not count, nor do silenced ones.
+Silence rules (/etc/tuxwall/devices/silence.json, written by the API):
+  scope "indicator" (one indicator on every device, optionally one kind),
+  "device_kind" (one device + one finding kind), "suffix" (a domain and
+  its subdomains, optionally one kind), "kind" (a finding kind on every
+  device); optional expiry. A silenced finding is still recorded (marked
+  "silenced": rule id) but counts like an expected one: no risk, no
+  health, no alert event. Critical findings (c2_connection, outbound IDS
+  attack responses, anything of severity critical) are only silenced by
+  a rule with include_critical. silence_match() takes any finding dict,
+  so Phase 2 detector kinds work unchanged.
 Health: critical = an active critical finding seen in the last 7 days or
   risk >= 80; warning = an active high/medium finding in the last 7 days or
   risk >= 30; new = first seen in the last 24 h (not for devices present
@@ -1206,7 +1216,7 @@ def score_device(device, findings, now, new_seconds=NEW_DEVICE_SECONDS):
     worst = None
     recent_rank = 0
     for f in findings:
-        if f.get("expected"):
+        if suppressed(f):
             continue
         sev = f.get("severity") or "low"
         age = now - (f.get("last") or 0)
@@ -1312,7 +1322,8 @@ class Engine:
         self.wan_devs = set()
         self.topology_at = 0
         self.config = {}
-        self.overlay = {"names": {}, "expected": []}
+        self.overlay = {"names": {}, "expected": [], "silence": []}
+        self.silence_next_expiry = 0
         self.overlay_mtimes = {}
         self.last_save = 0
         self.started = clock()
@@ -1418,10 +1429,26 @@ class Engine:
             e = exp.get("entries") if isinstance(exp, dict) else None
             self.overlay["expected"] = [x for x in (e or []) if isinstance(x, dict) and x.get("indicator")]
             self._apply_expected()
+        sil, ch = self._load_if_changed("silence.json")
+        now = self.clock()
+        if ch:
+            self.overlay["silence"] = silence_rules(sil)
+        if ch or (self.silence_next_expiry and now >= self.silence_next_expiry):
+            self._apply_silence(now)
 
     def _apply_expected(self):
         for f in self.findings.values():
             f["expected"] = is_expected(f, self.overlay["expected"])
+
+    def _apply_silence(self, now=None):
+        """Mark every finding with the silence rule that covers it (expired
+        rules no longer count: re-applied when the next one expires)."""
+        now = self.clock() if now is None else now
+        rules = self.overlay["silence"]
+        for f in self.findings.values():
+            f["silenced"] = silence_match(f, rules, now)
+        self.silence_next_expiry = min((r["expires"] for r in rules if r.get("expires") and r["expires"] > now),
+                                       default=0)
 
     def retention_seconds(self):
         try:
@@ -1527,7 +1554,7 @@ class Engine:
 
     def warnings(self, now):
         """Source problems that make detections incomplete: [{code, text,
-        hint}] for status.json, the Threat settings and the Clients page."""
+        hint}] for status.json, Security > Local (Monitoring sources) and the Clients page."""
         out = []
         su = self.suricata_status()
         if su["lan_capture"] is False and self.config.get("suricata", True):
@@ -1546,7 +1573,7 @@ class Engine:
                 "code": "zeek_bad_checksums",
                 "text": "Zeek sees bad checksums on most connections (checksum offloading on a virtual network card?) "
                         "— completed connections count only as attempts",
-                "hint": "sudo /usr/local/share/tuxwall/scripts/zeek-site-setup.sh --ignore-checksums"})
+                "hint": "sudo /usr/local/share/tuxwall/scripts/zeek-site-setup.sh --checksums on (or the Ignore checksums switch below)"})
         if z["lines"] >= ZEEK_MIN_LINES and not z["l2"]:
             out.append({
                 "code": "zeek_no_mac",
@@ -2255,7 +2282,8 @@ class Engine:
                 "source": spec.get("source") or "", "first": ts, "last": ts, "count": 1,
                 "details": spec.get("details") or {}}
             f["expected"] = is_expected(f, self.overlay["expected"])
-            if not f["expected"]:
+            f["silenced"] = silence_match(f, self.overlay["silence"], now)
+            if not suppressed(f):
                 self._event({"type": "finding", "device": did, "finding": fid, "severity": f["severity"],
                              "kind": f["kind"], "source": f["source"]}, ts)
             return f
@@ -2268,7 +2296,9 @@ class Engine:
         if SEV_RANK.get(spec["severity"], 0) > SEV_RANK.get(f["severity"], 0):
             f["severity"] = spec["severity"]
             f["title"] = spec.get("title") or f["title"]
-            if not f.get("expected"):
+            # an escalation to critical may leave the rule's reach
+            f["silenced"] = silence_match(f, self.overlay["silence"], now)
+            if not suppressed(f):
                 self._event({"type": "finding", "device": did, "finding": fid, "severity": f["severity"],
                              "kind": f["kind"], "source": f["source"], "escalated": True}, ts)
         return f
@@ -2483,7 +2513,8 @@ class Engine:
                         "destinations": a["dl"].count()}
         else:
             activity = {"day": today, "bytes_in": 0, "bytes_out": 0, "conns": 0, "destinations": 0}
-        active = [f for f in flist if not f.get("expected")]
+        active = [f for f in flist if not suppressed(f)]
+        silenced = sum(1 for f in flist if f.get("silenced") and not f.get("expected"))
         return {
             "id": did, "kind": d.get("kind"), "name": name, "name_source": name_src,
             "mac": mac, "private_mac": bool(mac and is_private_mac(mac)), "vendor": vendor,
@@ -2498,7 +2529,8 @@ class Engine:
             "online": online, "neighbour_state": nstate, "baseline": bool(d.get("baseline")),
             "health": health, "risk": risk, "reason": reason,
             "worst_finding": worst["id"] if worst else None,
-            "findings": {"total": len(flist), "active": len(active), "expected": len(flist) - len(active)},
+            "findings": {"total": len(flist), "active": len(active), "expected": len(flist) - len(active) - silenced,
+                         "silenced": silenced},
             "activity": activity, "hourly": hourly,
             "top_destinations": dest_rows(0), "top_destinations_by_conns": dest_rows(1),
             "top_countries": [{"iso": iso, "bytes": e[0], "conns": e[1]}
@@ -2570,23 +2602,178 @@ def is_expected(f, entries):
     return False
 
 
+def suppressed(f):
+    """Marked expected or covered by a silence rule: no risk, no health,
+    no alert."""
+    return bool(f.get("expected") or f.get("silenced"))
+
+
+# ── silence rules (/etc/tuxwall/devices/silence.json) ───────────────────────
+
+SILENCE_SCOPES = ("indicator", "device_kind", "suffix", "kind")
+SILENCE_EXPIRY = {"7d": 7 * 86400, "30d": 30 * 86400, "forever": 0}
+SILENCE_MAX = 200
+SILENCE_ID_RE = re.compile(r"^s[0-9a-f]{12}$")
+KIND_RE = re.compile(r"^[a-z][a-z0-9_]{1,40}$")
+SUFFIX_RE = re.compile(r"^(?=.{3,253}$)([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z0-9-]{2,63}$")
+CRITICAL_KINDS = frozenset(("c2_connection",))
+NOT_SILENCEABLE = frozenset(("new_device",))
+
+
+def is_critical_finding(f):
+    """What a silence rule never covers without include_critical: a C2
+    connection, an outbound IDS attack response / "Successful ..." alert
+    the device sent, or any finding of severity critical."""
+    if f.get("severity") == "critical" or f.get("kind") in CRITICAL_KINDS:
+        return True
+    if f.get("kind") == "ids_alert" and f.get("severity") not in ("low", "info", None):
+        det = f.get("details") if isinstance(f.get("details"), dict) else {}
+        title = str(f.get("title") or "").upper()
+        return title.startswith(("ET ATTACK_RESPONSE", "GPL ATTACK_RESPONSE")) or \
+            str(det.get("category") or "").startswith("Successful")
+    return False
+
+
+def _finding_domains(f):
+    out = []
+    for v in (f.get("indicator"), ((f.get("details") or {}) if isinstance(f.get("details"), dict) else {}).get("query")):
+        v = str(v or "").strip().lower().rstrip(".")
+        if v.startswith("*."):
+            v = v[2:]
+        if v and not v.startswith("sid:") and v not in out:
+            out.append(v)
+    return out
+
+
+def silence_rule_covers(rule, f):
+    """Scope match only (no expiry, no critical guard)."""
+    scope = rule.get("scope")
+    kind = rule.get("kind")
+    if kind and kind != f.get("kind"):
+        return False
+    if scope == "indicator":
+        return str(f.get("indicator") or "").lower() == rule.get("indicator")
+    if scope == "device_kind":
+        return f.get("device") == rule.get("device") and bool(kind)
+    if scope == "suffix":
+        sfx = rule.get("suffix") or ""
+        return bool(sfx) and any(d == sfx or d.endswith("." + sfx) for d in _finding_domains(f))
+    if scope == "kind":
+        return bool(kind)
+    return False
+
+
+def silence_match(f, rules, now):
+    """Id of the first live rule that silences finding f, else None."""
+    if f.get("kind") in NOT_SILENCEABLE:
+        return None
+    crit = None
+    for r in rules or ():
+        exp = r.get("expires") or 0
+        if exp and exp <= now:
+            continue
+        if not silence_rule_covers(r, f):
+            continue
+        if crit is None:
+            crit = is_critical_finding(f)
+        if crit and not r.get("include_critical"):
+            continue
+        return r.get("id")
+    return None
+
+
+def silence_rules(data):
+    """The valid rules of a silence.json document (bad entries dropped)."""
+    raw = data.get("rules") if isinstance(data, dict) else None
+    out = []
+    for r in raw if isinstance(raw, list) else []:
+        if not isinstance(r, dict) or not SILENCE_ID_RE.match(str(r.get("id") or "")) \
+                or r.get("scope") not in SILENCE_SCOPES:
+            continue
+        try:
+            exp = int(r.get("expires") or 0)
+        except (TypeError, ValueError):
+            continue
+        out.append(dict(r, expires=exp, include_critical=r.get("include_critical") is True))
+        if len(out) >= SILENCE_MAX:
+            break
+    return out
+
+
+def validate_silence_rule(body, now, rid=None):
+    """A new rule from an admin request -> normalised dict, or ValueError
+    with a message for the dashboard."""
+    if not isinstance(body, dict):
+        raise ValueError("rule must be an object")
+    scope = body.get("scope")
+    if scope not in SILENCE_SCOPES:
+        raise ValueError("scope must be one of: " + ", ".join(SILENCE_SCOPES))
+    kind = str(body.get("kind") or "").strip().lower()
+    if kind and not KIND_RE.match(kind):
+        raise ValueError("Unknown finding kind")
+    if kind in NOT_SILENCEABLE:
+        raise ValueError("New-device rows are dismissed, not silenced")
+    rule = {"id": rid or "s" + hashlib.sha1(("%s|%r" % (now, sorted(body.items(), key=str))).encode()).hexdigest()[:12],
+            "scope": scope}
+    if scope == "indicator":
+        ind = str(body.get("indicator") or "").strip().lower()
+        if not ind or len(ind) > 255 or any(c.isspace() for c in ind):
+            raise ValueError("An indicator is required")
+        rule["indicator"] = ind
+    elif scope == "device_kind":
+        dev = str(body.get("device") or "")
+        if not DEVICE_ID_RE.match(dev):
+            raise ValueError("A device is required")
+        if not kind:
+            raise ValueError("A finding kind is required")
+        rule["device"] = dev
+    elif scope == "suffix":
+        sfx = str(body.get("suffix") or "").strip().lower().rstrip(".")
+        if sfx.startswith("*."):
+            sfx = sfx[2:]
+        if not SUFFIX_RE.match(sfx):
+            raise ValueError("A domain suffix such as telemetry.example.com is required (at least two labels)")
+        rule["suffix"] = sfx
+    elif not kind:
+        raise ValueError("A finding kind is required")
+    if kind:
+        rule["kind"] = kind
+    exp = body.get("expires", "30d")
+    if exp not in SILENCE_EXPIRY:
+        raise ValueError("expires must be 7d, 30d or forever")
+    rule["expires"] = int(now + SILENCE_EXPIRY[exp]) if SILENCE_EXPIRY[exp] else 0
+    rule["include_critical"] = body.get("include_critical") is True
+    rule["note"] = " ".join("".join(ch if ch.isprintable() else " " for ch in str(body.get("note") or "")).split())[:200]
+    return rule
+
+
 def summarize(devices, findings, now):
     flagged = [d for d in devices if d["health"] in ("warning", "critical")]
-    active = [f for f in findings if not f.get("expected")]
+    active = [f for f in findings if not suppressed(f)]
     worst = None
     for f in active:
         if worst is None or (SEV_RANK.get(f["severity"], 0), f["last"]) > (SEV_RANK.get(worst["severity"], 0), worst["last"]):
             worst = f
     names = {d["id"]: d["name"] for d in devices}
+    new = [d for d in devices if not d.get("baseline") and now - (d.get("first_seen") or 0) < NEW_DEVICE_SECONDS]
+    zones = {}
+    for d in new:
+        z = str(d.get("zone_name") or d.get("zone") or "other")[:32]
+        zones[z] = zones.get(z, 0) + 1
     return {
         "schema": SCHEMA, "generated_at": int(now),
         "devices": len(devices), "online": sum(1 for d in devices if d["online"]),
         # first seen in the last 24 h - whatever its health (a new device with
         # a finding is "warning", still new); not the devices of the first pass
-        "new_24h": sum(1 for d in devices if not d.get("baseline") and now - (d.get("first_seen") or 0) < NEW_DEVICE_SECONDS),
+        "new_24h": len(new),
+        # per network of the new devices (Security > Local: "2 on IoT")
+        "new_zones": dict(sorted(zones.items(), key=lambda kv: (-kv[1], kv[0]))[:3]),
+        # active clients: seen in the last 10 minutes (neighbour table, traffic, WireGuard handshake)
+        "active": sum(1 for d in devices if d.get("online") or now - (d.get("last_seen") or 0) < ONLINE_SECONDS),
         "flagged": len(flagged), "critical": sum(1 for d in devices if d["health"] == "critical"),
         "warning": sum(1 for d in devices if d["health"] == "warning"),
         "findings_active": len(active),
+        "findings_silenced": sum(1 for f in findings if f.get("silenced") and not f.get("expected")),
         "worst": {"severity": worst["severity"], "reason": public_reason(worst), "device": worst["device"],
                   "device_name": names.get(worst["device"], ""), "last": int(worst["last"])} if worst else None,
     }

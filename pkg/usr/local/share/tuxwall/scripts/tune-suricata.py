@@ -16,7 +16,7 @@ private IPv4 address), add a capture block for it with a cluster-id of its
 own, before the "default" template. Device monitoring needs it: on the WAN
 side every IPv4 alert carries the router's NAT address, so it can never be
 attributed to a device. Run by the installer on fresh installs and offered
-by the dashboard (Settings > Threat) otherwise. Never touches an IPS
+by the dashboard (Security > Local) otherwise. Never touches an IPS
 (copy-mode) setup, a LAN already captured (or its VLAN parent) or a file
 without an af-packet section (exit 1). Restart Suricata afterwards.
 

@@ -12430,6 +12430,7 @@ ADMIN_GET_PREFIXES = (
     "/api/devices/indicators",
     "/api/devices/alerts",
     "/api/devices/findings",
+    "/api/devices/silence",
 )
 
 
@@ -17680,9 +17681,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, build_integration_summary())
         elif path == "/api/devices/findings/recent":
             qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
-            self._send(*build_devices_findings_recent((qs.get("limit") or [""])[0]))
+            self._send(*build_devices_findings_recent((qs.get("limit") or [""])[0],
+                                                      (qs.get("silenced") or [""])[0] == "1"))
         elif path in ("/api/devices", "/api/devices/summary", "/api/devices/feeds", "/api/devices/indicators",
-                      "/api/devices/alerts") \
+                      "/api/devices/alerts", "/api/devices/silence") \
                 or re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})$", path):
             self._send(*devices_get(path, identity))
         elif path == "/api/crowdsec/blocklist":
@@ -19288,7 +19290,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(*interfaces_plan(body, _client_key(self)))
 
         elif path in ("/api/devices/feeds/update", "/api/devices/feeds/key", "/api/devices/indicators",
-                      "/api/devices/alerts") \
+                      "/api/devices/alerts", "/api/devices/silence", "/api/devices/zeek-checksums") \
                 or re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})/(rename|expected|new-ack|quarantine|unquarantine)$", path):
             self._send(*devices_post(path, body, identity, _client_key(self)))
         elif path in ("/api/https/settings", "/api/https/regenerate", "/api/https/custom-cert",
@@ -20366,12 +20368,14 @@ def _devices_state():
     names = (_dw_conf_read("names.json").get("names") or {})
     expected = [e for e in (_dw_conf_read("expected.json").get("entries") or [])
                 if isinstance(e, dict) and e.get("indicator")]
+    silence = _dw.silence_rules(_dw_conf_read("silence.json"))
     by_dev = {}
     flist = []
     for f in findings:
         if not isinstance(f, dict):
             continue
         f2 = dict(f, expected=_dw.is_expected(f, expected))
+        f2["silenced"] = _dw.silence_match(f2, silence, now)
         flist.append(f2)
         by_dev.setdefault(f2.get("device"), []).append(f2)
     out = []
@@ -20384,9 +20388,11 @@ def _devices_state():
             d2["name"], d2["name_source"] = user, "user"
         fl = by_dev.get(d2["id"], [])
         risk, health, reason, worst = _dw.score_device(d2, fl, now)
-        active = sum(1 for f in fl if not f["expected"])
+        active = sum(1 for f in fl if not _dw.suppressed(f))
+        silenced = sum(1 for f in fl if f["silenced"] and not f["expected"])
         d2.update(risk=risk, health=health, reason=reason, worst_finding=worst["id"] if worst else None,
-                  findings={"total": len(fl), "active": active, "expected": len(fl) - active})
+                  findings={"total": len(fl), "active": active, "expected": len(fl) - active - silenced,
+                            "silenced": silenced})
         out.append(d2)
     rank = {"critical": 3, "warning": 2, "new": 1}
     out.sort(key=lambda x: (-rank.get(x["health"], 0), -x["risk"], str(x.get("name") or "").lower()))
@@ -20422,8 +20428,8 @@ def build_device_detail(did):
     dev = next((d for d in devices if d["id"] == did), None)
     if dev is None:
         return 404, {"ok": False, "error": "Unknown device"}
-    fl = sorted((f for f in findings if f.get("device") == did),
-                key=lambda f: (bool(f.get("expected")), -_dw.SEV_RANK.get(f.get("severity"), 0), -(f.get("last") or 0)))
+    fl = sorted((dict(f, critical=_dw.is_critical_finding(f)) for f in findings if f.get("device") == did),
+                key=lambda f: (_dw.suppressed(f), -_dw.SEV_RANK.get(f.get("severity"), 0), -(f.get("last") or 0)))
     return 200, {"ok": True, "running": running, "generated_at": gen, "device": dev, "findings": fl,
                  "quarantine": _quar_detail(dev, devices)}
 
@@ -20487,9 +20493,10 @@ def _devices_new_rows(devices, now):
     return rows
 
 
-def build_devices_findings_recent(limit_raw):
-    """GET /api/devices/findings/recent?limit=N (admin: ADMIN_GET_PREFIXES).
-    Newest not-expected findings from the engine's findings.json plus the
+def build_devices_findings_recent(limit_raw, show_silenced=False):
+    """GET /api/devices/findings/recent?limit=N[&silenced=1] (admin:
+    ADMIN_GET_PREFIXES). Newest not-expected findings from the engine's
+    findings.json (silenced ones only with silenced=1, marked) plus the
     not-dismissed new devices of the last 30 days (events.jsonl), newest
     first; nothing is computed beyond the already-written state."""
     try:
@@ -20502,7 +20509,9 @@ def build_devices_findings_recent(limit_raw):
         return 200, {"ok": True, "available": False, "running": False, "findings": []}
     names = {d["id"]: (d.get("name") or d.get("mac") or d["id"]) for d in devices}
     rows = []
-    for f in sorted((x for x in findings if not x.get("expected")), key=lambda x: -(x.get("last") or 0))[:limit]:
+    hidden = sum(1 for x in findings if x.get("silenced") and not x.get("expected"))
+    for f in sorted((x for x in findings if not x.get("expected") and (show_silenced or not x.get("silenced"))),
+                    key=lambda x: -(x.get("last") or 0))[:limit]:
         kind = f.get("kind")
         det = f.get("details") if isinstance(f.get("details"), dict) else {}
         src = f.get("source") or ""
@@ -20529,33 +20538,46 @@ def build_devices_findings_recent(limit_raw):
             "indicator": indicator, "action": action,
             "device": f.get("device"), "device_name": names.get(f.get("device")) or f.get("device"),
             "ts": last, "iso": datetime.fromtimestamp(last, timezone.utc).isoformat(),
-            "count": f.get("count") or 1})
+            "count": f.get("count") or 1, "silenced": f.get("silenced"),
+            "critical": _dw.is_critical_finding(f),
+            "query": str(det.get("query") or "")[:255] if det.get("query") != f.get("indicator") else ""})
     try:
         rows += _devices_new_rows(devices, time.time())
     except Exception as exc:
         print("[devices] new-device rows: %r" % (exc,), flush=True)
     rows.sort(key=lambda r: -(r.get("ts") or 0))
-    return 200, {"ok": True, "available": True, "running": running, "generated_at": gen, "findings": rows[:limit]}
+    return 200, {"ok": True, "available": True, "running": running, "generated_at": gen, "findings": rows[:limit],
+                 "silenced_hidden": 0 if show_silenced else hidden}
 
 
 def build_devices_summary():
+    """Counts for Security > Local, the Overview and Home Assistant (viewer
+    route: no device detail beyond the worst finding's generic reason)."""
     devices, findings, gen, running = _devices_state()
     feeds_ok = feeds_total = 0
+    key_set = _devices_key_set()
+    needs_key = False
     if _dw is not None:
         st = _dw.feeds.load_state(os.path.join(DEVICES_STATE_DIR, "feeds"))
-        for name in _dw.feeds.FEEDS:
+        for name in _dw.feeds.enabled_feeds(_dw_conf_read("devicewatch.json")):
             feeds_total += 1
             feeds_ok += 1 if (st.get(name) or {}).get("status") == "ok" else 0
+            needs_key = needs_key or bool(_dw.feeds.FEEDS[name].get("needs_key"))
+    quar = _quar_map()
+    exps = [e["expires"] for e in quar.values() if e.get("expires")]
+    common = {"quarantined": len(quar), "quarantine_next_expiry": min(exps) if exps else None,
+              "quarantine_no_expiry": sum(1 for e in quar.values() if not e.get("expires")),
+              "feeds_ok": feeds_ok, "feeds_total": feeds_total, "key_set": key_set,
+              "key_missing": bool(needs_key and not key_set)}
     if devices is None:
-        return {"ok": True, "available": False, "running": False, "devices": 0, "online": 0, "new_24h": 0,
-                "flagged": 0, "critical": 0, "warning": 0, "quarantined": len(_quar_map()), "worst": None,
-                "feeds_ok": feeds_ok, "feeds_total": feeds_total, "warnings": []}
+        return dict(common, ok=True, available=False, running=False, devices=0, online=0, active=0, new_24h=0,
+                    new_zones={}, flagged=0, critical=0, warning=0, worst=None, findings_silenced=0, warnings=[])
     s = _dw.summarize(devices, findings, time.time())
-    return {"ok": True, "available": True, "running": running, "generated_at": gen,
-            "devices": s["devices"], "online": s["online"], "new_24h": s["new_24h"], "flagged": s["flagged"],
-            "critical": s["critical"], "warning": s["warning"], "quarantined": len(_quar_map()),
-            "findings_active": s["findings_active"], "worst": s["worst"],
-            "feeds_ok": feeds_ok, "feeds_total": feeds_total, "warnings": _devices_engine_status()[0]}
+    return dict(common, ok=True, available=True, running=running, generated_at=gen,
+                devices=s["devices"], online=s["online"], active=s["active"], new_24h=s["new_24h"],
+                new_zones=s["new_zones"], flagged=s["flagged"], critical=s["critical"], warning=s["warning"],
+                findings_active=s["findings_active"], findings_silenced=s["findings_silenced"], worst=s["worst"],
+                warnings=_devices_engine_status()[0])
 
 
 def _devices_key_set():
@@ -20600,7 +20622,7 @@ def build_devices_feeds():
     st = _dw.feeds.load_state(feeds_dir)
     warnings, sources = _devices_engine_status()
     return {"ok": True, "key_set": key_set, "updated_at": st.get("_updated"), "feeds": rows,
-            "warnings": warnings, "sources": sources,
+            "warnings": warnings, "sources": sources, "zeek_checksums": _zeek_checksums_state(),
             "note": "Threat-intel data: abuse.ch (CC0). Only feed downloads leave the router."}
 
 
@@ -20674,6 +20696,172 @@ def build_devices_indicators():
             "max": _dw.feeds.LOCAL_MAX if _dw is not None else 0}
 
 
+# Silence rules (A7): /etc/tuxwall/devices/silence.json next to the expected
+# marks, matched by devicewatch.silence_match() in the engine (alert events)
+# and here (instant health/summary/table/alert effect).
+def build_devices_silence():
+    """GET /api/devices/silence (admin: ADMIN_GET_PREFIXES): the rules, each
+    with how many findings it hides now (and how many critical ones it
+    leaves visible because include_critical is off)."""
+    rules = _dw.silence_rules(_dw_conf_read("silence.json"))
+    devices, findings, _gen, _run = _devices_state()
+    names = {d["id"]: (d.get("name") or d.get("mac") or d["id"]) for d in devices or []}
+    now = time.time()
+    out = []
+    for r in rules:
+        hides = sum(1 for f in findings if f.get("silenced") == r["id"] and not f.get("expected"))
+        crit = 0 if r.get("include_critical") else sum(
+            1 for f in findings if not f.get("expected") and _dw.silence_rule_covers(r, f) and _dw.is_critical_finding(f))
+        out.append(dict(r, hides=hides, critical_visible=crit, expired=bool(r["expires"] and r["expires"] <= now),
+                        device_name=names.get(r.get("device")) if r.get("device") else None))
+    return {"ok": True, "rules": out, "max": _dw.SILENCE_MAX, "expiry_options": list(_dw.SILENCE_EXPIRY)}
+
+
+def devices_silence_post(body, who):
+    action = str(body.get("action") or "")
+    now = time.time()
+    with _DEVICES_CONF_LOCK:
+        rules = [r for r in _dw.silence_rules(_dw_conf_read("silence.json"))
+                 if not (r["expires"] and r["expires"] <= now)]          # expired rules are dropped on every write
+        if action == "add":
+            try:
+                rule = _dw.validate_silence_rule(body.get("rule"), now)
+            except ValueError as exc:
+                return 400, {"ok": False, "error": str(exc)}
+            if (rule.get("kind") in _dw.CRITICAL_KINDS) and not rule["include_critical"]:
+                return 400, {"ok": False, "code": "critical",
+                             "error": "This kind is always critical: tick \"including critical\" to silence it"}
+            if rule.get("device") and not any(d["id"] == rule["device"] for d in (_devices_state()[0] or [])):
+                return 404, {"ok": False, "error": "Unknown device"}
+            same = ("scope", "kind", "indicator", "device", "suffix")
+            rules = [r for r in rules if any(r.get(k) != rule.get(k) for k in same)]
+            if len(rules) >= _dw.SILENCE_MAX:
+                return 400, {"ok": False, "error": "Too many silence rules (max %d)" % _dw.SILENCE_MAX}
+            rule.update(at=int(now), by=who)
+            rules.append(rule)
+        elif action == "remove":
+            rid = str(body.get("id") or "")
+            before = len(rules)
+            rules = [r for r in rules if r["id"] != rid]
+            if len(rules) == before:
+                return 404, {"ok": False, "error": "No such silence rule"}
+        else:
+            return 400, {"ok": False, "error": "action must be add or remove"}
+        _dw_conf_write("silence.json", {"version": 1, "rules": rules})
+    print("[devices] silence rule %s by %s" % ("added" if action == "add" else "removed", who), flush=True)
+    return 200, build_devices_silence()
+
+
+# Zeek checksum switch (A3): `redef ignore_checksums = T;` in the TuxWall
+# site policy, written by zeek-site-setup.sh --checksums on|off (backup,
+# zeekctl check + deploy, restore on failure; mac-logging stays). The API
+# runs the script in a background thread: Zeek restarts (~40 s without logs).
+ZEEK_SITE_SETUP = "/usr/local/share/tuxwall/scripts/zeek-site-setup.sh"
+ZEEK_SITE_DIRS = ("/opt/zeek/share/zeek/site", "/usr/local/zeek/share/zeek/site", "/usr/share/zeek/site")
+ZEEK_POLICY_NAME = "tuxwall-devicewatch.zeek"
+ZEEK_SETUP_TIMEOUT = 300
+_ZEEK_CK_RE = re.compile(r"^\s*redef\s+ignore_checksums\s*=\s*T\s*;", re.M)
+_ZEEK_CK_JOB = {"running": False}
+_ZEEK_CK_LOCK = threading.Lock()
+
+
+def _zeek_site_dir():
+    return next((d for d in ZEEK_SITE_DIRS if os.path.isfile(os.path.join(d, "local.zeek"))), None)
+
+
+def _zeek_checksums_policy(text):
+    """True when a Zeek script turns checksum verification off."""
+    return bool(_ZEEK_CK_RE.search(text or ""))
+
+
+def _zeek_checksums_cmd(on):
+    return [ZEEK_SITE_SETUP, "--checksums", "on" if on else "off"]
+
+
+def _zeek_checksums_result(rc, output):
+    """(ok, message) of a zeek-site-setup.sh run: exit 0 done or nothing to
+    do, 1 `zeekctl check` failed (files restored), else an error; the
+    message is the script's last "zeek: ..." line, never a path list."""
+    last = ""
+    for line in str(output or "").splitlines():
+        line = line.strip()
+        if line.startswith("zeek:"):
+            last = line[:200]
+    if rc == 0:
+        return True, last or "zeek: done"
+    if rc == 1:
+        return False, "Zeek rejected the change ('zeekctl check' failed) - the previous policy was restored"
+    if rc is None:
+        return False, "zeek-site-setup.sh did not finish in time - check 'zeekctl status'"
+    return False, (last or "zeek-site-setup.sh failed (exit %s)" % rc)
+
+
+def _zeek_checksums_supported():
+    try:
+        with open(ZEEK_SITE_SETUP, encoding="utf-8", errors="replace") as f:
+            return "--checksums" in f.read(65536)
+    except OSError:
+        return False
+
+
+def _zeek_checksums_state():
+    """State for the Monitoring sources card (viewer-safe: no paths)."""
+    site = _zeek_site_dir()
+    st = {"installed": bool(site), "enabled": None, "elsewhere": False, "supported": _zeek_checksums_supported()}
+    if site:
+        def _read(n):
+            try:
+                with open(os.path.join(site, n), encoding="utf-8", errors="replace") as f:
+                    return f.read(262144)
+            except OSError:
+                return ""
+        st["enabled"] = _zeek_checksums_policy(_read(ZEEK_POLICY_NAME))
+        st["elsewhere"] = _zeek_checksums_policy(_read("local.zeek"))
+    status = _dw_read("status.json")
+    z = ((status.get("sources") or {}).get("zeek") or {}) if isinstance(status, dict) else {}
+    tcp, bad = int(z.get("tcp") or 0), int(z.get("bad_checksum") or 0)
+    st["bad_share"] = round(bad / tcp, 3) if tcp else None
+    st["tcp_1h"] = tcp
+    st["warning"] = any(isinstance(w, dict) and w.get("code") == "zeek_bad_checksums"
+                        for w in ((status or {}).get("warnings") or [])) if isinstance(status, dict) else False
+    with _ZEEK_CK_LOCK:
+        st["job"] = {k: _ZEEK_CK_JOB.get(k) for k in ("running", "want", "started", "finished", "ok", "message")}
+    return st
+
+
+def _zeek_checksums_run(on, who):
+    rc, out = None, ""
+    try:
+        p = subprocess.run(_zeek_checksums_cmd(on), capture_output=True, text=True, timeout=ZEEK_SETUP_TIMEOUT,
+                           check=False)
+        rc, out = p.returncode, (p.stdout or "") + (p.stderr or "")
+    except subprocess.TimeoutExpired:
+        rc = None
+    except Exception as exc:
+        rc, out = 2, "zeek: could not run zeek-site-setup.sh (%s)" % exc.__class__.__name__
+    ok, msg = _zeek_checksums_result(rc, out)
+    print("[devices] zeek ignore_checksums %s by %s: %s" % ("on" if on else "off", who, msg), flush=True)
+    with _ZEEK_CK_LOCK:
+        _ZEEK_CK_JOB.update(running=False, finished=int(time.time()), ok=ok, message=msg)
+
+
+def devices_zeek_checksums_post(body, who):
+    on = body.get("enabled")
+    if not isinstance(on, bool):
+        return 400, {"ok": False, "error": "enabled must be true or false"}
+    if not _zeek_site_dir():
+        return 409, {"ok": False, "error": "Zeek is not installed"}
+    if not _zeek_checksums_supported():
+        return 409, {"ok": False, "error": "zeek-site-setup.sh is too old for this switch - update TuxWall"}
+    with _ZEEK_CK_LOCK:
+        if _ZEEK_CK_JOB.get("running"):
+            return 409, {"ok": False, "error": "A Zeek change is already running"}
+        _ZEEK_CK_JOB.clear()
+        _ZEEK_CK_JOB.update(running=True, want=on, started=int(time.time()), finished=None, ok=None, message="")
+    threading.Thread(target=_zeek_checksums_run, args=(on, who), name="zeek-checksums", daemon=True).start()
+    return 202, {"ok": True, "started": True, "enabled": on}
+
+
 def devices_get(path, identity):
     """GET /api/devices[/...]. Detail and indicators are admin-only
     (indicators also via ADMIN_GET_PREFIXES)."""
@@ -20691,6 +20879,10 @@ def devices_get(path, identity):
         if not _is_admin(identity):
             return 403, {"ok": False, "error": "Administrator role required"}
         return 200, {"ok": True, "config": _device_alert_config()}
+    if path == "/api/devices/silence":
+        if not _is_admin(identity):
+            return 403, {"ok": False, "error": "Administrator role required"}
+        return 200, build_devices_silence()
     m = re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})$", path)
     if m:
         if not _is_admin(identity):
@@ -20723,6 +20915,10 @@ def devices_post(path, body, identity, client_ip=""):
         except ValueError as exc:
             return 400, {"ok": False, "error": str(exc)}
         return 200, {"ok": True, "config": cfg}
+    if path == "/api/devices/silence":
+        return devices_silence_post(body, who)
+    if path == "/api/devices/zeek-checksums":
+        return devices_zeek_checksums_post(body, who)
     if path == "/api/devices/feeds/update":
         try:
             _devices_request_feed_update()
@@ -21357,7 +21553,7 @@ def devices_alert_pass():
                     continue
                 f = by_fid.get(ev.get("finding")) or {}
                 sev = f.get("severity") or ev.get("severity")
-                if _dw.SEV_RANK.get(sev, 0) < _dw.SEV_RANK[cfg["min_severity"]] or f.get("expected"):
+                if _dw.SEV_RANK.get(sev, 0) < _dw.SEV_RANK[cfg["min_severity"]] or _dw.suppressed(f):
                     continue
                 key = "f:%s" % ev.get("finding")
                 if key in sent_keys and not ev.get("escalated") and now - float(sent_keys[key]) < FINDING_REALERT:
@@ -21434,7 +21630,7 @@ def _integ_devices_recent():
     if devices is None:
         return [], []
     names = {d["id"]: d.get("name") or "" for d in devices}
-    act = sorted((f for f in findings if not f.get("expected") and f.get("id")),
+    act = sorted((f for f in findings if not _dw.suppressed(f) and f.get("id")),
                  key=lambda f: -(f.get("last") or 0))[:INTEG_DEVICES_RECENT]
     recent = [{"id": f["id"], "severity": f.get("severity"), "reason": _dw.public_reason(f),
                "device": f.get("device"), "device_name": names.get(f.get("device"), ""),
