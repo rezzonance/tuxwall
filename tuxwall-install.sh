@@ -129,19 +129,38 @@ step() {
 q() { "$@" >>"$LOG" 2>&1; }
 
 # Run a long command with a spinner and elapsed time; output goes to the log.
+# TERM=dumb NO_COLOR=1: the output is a log file, and apt hands maintainer
+# scripts a pty with our TERM. On a serial console (TERM=vt220, no colours)
+# CrowdSec's bouncer postinst (set -e; FG_RED=$(tput setaf 1)) dies silently
+# with exit 1, which left dpkg broken for every later apt-get.
 run_long() {
     local msg="$1"; shift
     log "RUN  $*"
     if [[ ! -t 1 ]]; then
-        "$@" >>"$LOG" 2>&1
+        TERM=dumb NO_COLOR=1 "$@" >>"$LOG" 2>&1
         return
     fi
-    ( trap - ERR; "$@" ) >>"$LOG" 2>&1 &
+    ( trap - ERR; TERM=dumb NO_COLOR=1 "$@" ) >>"$LOG" 2>&1 &
     # shellcheck disable=SC1003
-    local pid=$! i=0 rc=0 start=$SECONDS frames='|/-\'
-    [[ "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" =~ [Uu][Tt][Ff]-?8 ]] && frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local pid=$! i=0 rc=0 start=$SECONDS frames='|/-\' every=1 tty
+    # Braille frames only on a UTF-8 terminal emulator: the Linux text console
+    # font (TERM=linux) and serial terminals (vt*) show them as '0'.
+    if [[ "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" =~ [Uu][Tt][Ff]-?8 ]]; then
+        case "${TERM:-dumb}" in
+            linux|vt*|dumb|ansi|cons*) ;;
+            *) frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' ;;
+        esac
+    fi
+    # Serial console (first-boot wizard on ttyS0): a spinner frame every
+    # 0.15 s floods the line and console logs - redraw every ~10 s instead.
+    tty="$(readlink "/proc/$$/fd/1" 2>/dev/null || true)"
+    if [[ $tty == /dev/ttyS* || $tty == /dev/ttyAMA* || $tty == /dev/ttyUSB* || $tty == /dev/hvc* ]]; then
+        frames='.' every=67
+    fi
     while kill -0 "$pid" 2>/dev/null; do
-        printf '\r  %s%s%s %s %s(%ss)%s' "$C_C" "${frames:i%${#frames}:1}" "$C_0" "$msg" "$C_DIM" "$((SECONDS - start))" "$C_0"
+        if (( i % every == 0 )); then
+            printf '\r  %s%s%s %s %s(%ss)%s' "$C_C" "${frames:i/every%${#frames}:1}" "$C_0" "$msg" "$C_DIM" "$((SECONDS - start))" "$C_0"
+        fi
         i=$((i + 1))
         sleep 0.15
     done
@@ -865,8 +884,6 @@ review() {
     hr
 
     if [[ $ROLE == gateway ]]; then
-        [[ $NET_CIDR != 192.168.1.0/24 ]] && \
-            warn "Port forwarding and DMZ in this dashboard version still assume a 192.168.1.0/24 LAN."
         [[ $KEA_ACTION == keep ]] && warn "Keeping your Kea config: its subnet must match $NET_CIDR for DHCP to work."
     fi
     return 0
@@ -937,17 +954,42 @@ step_crowdsec() {
     if run_long "Installing CrowdSec + firewall bouncer" \
            apt-get install "${APT_OPTS[@]}" crowdsec "$bouncer"; then
         ok "CrowdSec installed (packagecloud, ${bouncer#crowdsec-firewall-bouncer-} bouncer)"
-    elif [[ $bouncer != crowdsec-firewall-bouncer-iptables ]] && run_long "Installing CrowdSec + iptables bouncer" \
+    elif crowdsec_drop_broken && [[ $bouncer != crowdsec-firewall-bouncer-iptables ]] \
+           && run_long "Installing CrowdSec + iptables bouncer" \
            apt-get install "${APT_OPTS[@]}" crowdsec crowdsec-firewall-bouncer-iptables; then
         ok "CrowdSec installed (packagecloud, iptables bouncer)"
-    elif run_long "Installing CrowdSec from the Ubuntu archive" \
+    elif crowdsec_drop_broken && run_long "Installing CrowdSec from the Ubuntu archive" \
            apt-get install "${APT_OPTS[@]}" crowdsec crowdsec-firewall-bouncer; then
         ok "CrowdSec installed (Ubuntu archive)"
     else
+        crowdsec_drop_broken
         warn "CrowdSec could not be installed; the dashboard works without it."
         return 0
     fi
     configure_bouncer
+}
+
+# A failed CrowdSec attempt must not leave dpkg broken: apt-get refuses every
+# later install while a package is half-configured ("1 not fully installed"),
+# so the next attempt - and the TuxWall package itself - would fail too.
+# Purges the CrowdSec packages that are not fully installed. Always returns 0.
+crowdsec_drop_broken() {
+    local -a broken=()
+    local pkg st
+    # db:Status-Abbrev = want, state, error flag: U/F/H = unpacked,
+    # half-configured, half-installed; R = reinstallation required
+    while read -r pkg st; do
+        [[ -n $pkg ]] || continue
+        if [[ ${st:1:1} == [UFH] || ${st:2:1} == R ]]; then broken+=("$pkg"); fi
+    done < <(dpkg-query -W -f='${Package} ${db:Status-Abbrev}\n' 'crowdsec*' 2>/dev/null)
+    (( ${#broken[@]} )) || return 0
+    log "INFO CrowdSec: purging packages left half-installed: ${broken[*]}"
+    run_long "Removing the half-installed CrowdSec packages" \
+        apt-get purge -y -q -o DPkg::Lock::Timeout=600 "${broken[@]}" \
+        || run_long "Removing the half-installed CrowdSec packages (dpkg)" \
+               dpkg --purge --force-remove-reinstreq "${broken[@]}" \
+        || true
+    return 0
 }
 
 bouncer_nft_usable() {
@@ -996,10 +1038,46 @@ PY
         warn "Could not adjust the bouncer config (left as installed)"
         return 0
     fi
+    bouncer_ensure_key "$cfg"
     if systemctl restart crowdsec-firewall-bouncer >>"$LOG" 2>&1; then
         ok "Firewall bouncer: $mode mode, input hook, priority -10"
     else
         warn "Firewall bouncer did not restart; check: journalctl -u crowdsec-firewall-bouncer"
+    fi
+}
+
+# The bouncer's postinst registers its LAPI key only when CrowdSec is already
+# configured, but apt configures the two packages of one transaction in either
+# order: bouncer first = no key ("API error: access forbidden", restart loop,
+# no ban enforced; seen on a fresh 26.04 netinstall). Register one then - only
+# when CrowdSec knows no bouncer at all.
+bouncer_ensure_key() {
+    local cfg=$1 name key
+    command -v cscli >/dev/null 2>&1 || return 0
+    [[ "$(cscli bouncers list -o json 2>>"$LOG" | tr -d '[:space:]')" == "[]" ]] || return 0
+    name="cs-firewall-bouncer-$(date +%s)"
+    if ! key="$(cscli bouncers add "$name" -o raw 2>>"$LOG")" || [[ -z $key ]]; then
+        warn "Could not register the firewall bouncer with CrowdSec (cscli bouncers add)"
+        return 0
+    fi
+    if TUXWALL_BOUNCER_KEY="$key" python3 - "$cfg" >>"$LOG" 2>&1 <<'PY'
+import os
+import re
+import sys
+
+path = sys.argv[1]
+s = open(path).read()
+line = "api_key: " + os.environ["TUXWALL_BOUNCER_KEY"].strip()
+if re.search(r"(?m)^api_key:.*$", s):
+    s = re.sub(r"(?m)^api_key:.*$", lambda m: line, s, count=1)
+else:
+    s = s.rstrip("\n") + "\n" + line + "\n"
+open(path, "w").write(s)
+PY
+    then
+        ok "Firewall bouncer registered with CrowdSec ($name; the package could not do it)"
+    else
+        warn "Could not write the bouncer key; run: cscli bouncers add NAME, then set api_key in $cfg"
     fi
 }
 
@@ -1376,6 +1454,15 @@ step_gateway_config() {
 step_dns() {
     q systemctl disable --now systemd-resolved.service || true
     q systemctl disable --now systemd-resolved-varlink.socket systemd-resolved-monitor.socket || true
+    # netplan's generated systemd-networkd-wait-online drop-in waits with --dns
+    # (it pings io.systemd.Resolve.Monitor). Once resolved is retired the wait
+    # fails on every boot ("Failed to connect to io.systemd.Resolve.Monitor") -
+    # cosmetic (network-online.target is still reached) but it leaves a red
+    # failed unit. Re-run the same wait without --dns.
+    mkdir -p /etc/systemd/system/systemd-networkd-wait-online.service.d
+    printf '[Service]\nExecStart=\nExecStart=/lib/systemd/systemd-networkd-wait-online --any -o routable -i %s\n' \
+        "$WAN" >/etc/systemd/system/systemd-networkd-wait-online.service.d/tuxwall.conf
+    ok "network-online wait no longer waits for the retired systemd-resolved"
     if [[ -e /etc/resolv.conf || -L /etc/resolv.conf ]]; then
         mkdir -p "$BACKUP_DIR/etc"
         cp -aL /etc/resolv.conf "$BACKUP_DIR/etc/resolv.conf" 2>/dev/null || true
@@ -1703,6 +1790,14 @@ step_services() {
                 q systemctl restart "$svc" || warn "$svc did not start (systemctl status $svc)"
             fi
         done
+    fi
+    # The LAN has its address and role now (the package's postinst may have
+    # run before the network was applied): make Suricata capture it too, so
+    # device monitoring can attribute IDS alerts to LAN devices. Untouched
+    # when it already does, for IPS setups, or when no LAN is known.
+    local tune=/usr/local/share/tuxwall/scripts/tune-suricata.py
+    if [[ -f /etc/suricata/suricata.yaml && -f $tune ]] && q python3 "$tune" --add-lan /etc/suricata/suricata.yaml; then
+        ok "Suricata also captures the LAN interface (device monitoring)"
     fi
     q systemctl enable suricata || true
     q systemctl restart suricata || info "Suricata is not running yet (it starts once rules are downloaded)"
