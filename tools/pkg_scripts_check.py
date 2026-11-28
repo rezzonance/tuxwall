@@ -51,13 +51,22 @@ a fake `systemctl` (first in PATH, records its calls) and a temp marker:
   (readable by every local user via systemctl show) -> the shipped setup
   script's --password-only (real script, temp root, dummy values): new
   password in the root-only env file, drop-ins EnvironmentFile= only,
-  daemon-reload + agent restart; runs in step 7 before the dashboard
+  daemon-reload + agent restart; runs in step 14 before the dashboard
   restart; idempotent (second run: nothing restarted); no agent -> nothing;
   failures are warnings, never a postinst failure.
 - devicewatch_setup (3.3.7): system user created once, added only to the
   groups that exist (zeek, _kea, systemd-journal), units enabled ONCE
   (marker) and the first feed download started without blocking; upgrades
   only try-restart; a failed useradd/enable never fails the postinst.
+- install/upgrade output (3.3.9): steps numbered 1..N (no 6b-style ids),
+  one line each with a mark (done / skipped + reason / note / problem) and
+  the duration, details below wrapped to the width; header and summary box
+  (dashboard address true for the box, re-login, services, changes, tips,
+  log); colours only on a terminal (not NO_COLOR / TERM=dumb), ASCII on the
+  Linux console, serial terminals and C locales; the full text in
+  /var/log/tuxwall/<kind>-<date>.log (0640, 10 kept); every helper returns
+  0 on bad input; an early stop keeps its exit code and shows the step;
+  the old footer (<this-host>, llm.json, ...) is gone.
 """
 import json
 import os
@@ -200,7 +209,7 @@ def t_bouncer():
     finally:
         shutil.rmtree(d)
     body = SRC.split('case "$1" in', 1)[1]
-    check('bouncer_migration "${2:-}"' in body and body.index("bouncer_migration") < body.index("step 7 "),
+    check('bouncer_migration "${2:-}"' in body and body.index("bouncer_migration") < body.index("step 14 "),
           "configure runs the migration before the dashboard restart")
     check(re.search(r"^STEP_TOTAL=(\d+)", SRC, re.M).group(1) == str(len(re.findall(r"^    step \S+ ", SRC, re.M))),
           "STEP_TOTAL matches the number of steps")
@@ -583,7 +592,7 @@ def t_kea_hook():
         shutil.rmtree(d)
     body = SRC.split('case "$1" in\n  configure)', 1)[1]
     check('{ "library": "$KEA_LEASE_CMDS_LIB" }' in body, "postinst fresh Kea config uses KEA_LEASE_CMDS_LIB")
-    check("kea_hook_migration" in body and body.index("kea_hook_migration") < body.index("step 7 "),
+    check("kea_hook_migration" in body and body.index("kea_hook_migration") < body.index("step 14 "),
           "configure runs the Kea hook migration before the dashboard restart")
 
 
@@ -825,9 +834,9 @@ def t_nginx_listen_render():
     fn = func("nginx_listen_render")
     check("nginx_listen_render()" in fn, "postinst defines nginx_listen_render")
     body = SRC.split('case "$1" in\n  configure)', 1)[1]
-    step5 = body[body.index('step 5 '):body.index('step 6 ')]
-    check("nginx_listen_render" in step5 and step5.index("nginx_listen_render") < step5.index("if nginx -t"),
-          "step 5 renders the listen include before nginx -t / reload")
+    step7 = body[body.index('step 7 '):body.index('step 8 ')]
+    check("nginx_listen_render" in step7 and step7.index("nginx_listen_render") < step7.index("if nginx -t"),
+          "step 7 renders the listen include before nginx -t / reload")
     d = tempfile.mkdtemp(prefix="pkg-nginx-")
     try:
         fakebin(d, {"nginx": "#!/bin/sh\nexit 0\n"})
@@ -937,13 +946,13 @@ def t_agent_setup_step():
     check("agent_setup_step()" in fn and "AGENT_SETUP=/usr/local/share/tuxwall/scripts/setup-opencode-agent.sh" in SRC
           and "AGENT_BIN=/home/tuxwall-agent/.opencode/bin/opencode" in SRC, "postinst defines agent_setup_step")
     body = SRC.split('case "$1" in\n  configure)', 1)[1]
-    step9 = body[body.index('step 9 '):]
-    check("agent_setup_step" in step9 and "agents_md_install" in step9
-          and step9.index("agent_setup_step") < step9.index("agents_md_install") < step9.index("api.token"),
-          "step 9: agent setup, then AGENTS.md, then the token group")
+    step16 = body[body.index('step 16 '):]
+    check("agent_setup_step" in step16 and "agents_md_install" in step16
+          and step16.index("agent_setup_step") < step16.index("agents_md_install") < step16.index("api.token"),
+          "step 16: agent setup, then AGENTS.md, then the token group")
     check("setup-opencode-agent.sh not shipped" not in SRC and "already active; no action needed" not in SRC
           and "/var/www/html/scripts/setup-opencode-agent.sh" not in SRC, "no misleading SKIP message / web-root lookup")
-    check(not re.search(r"^\s+agents_md_install\b|AGENTS_DST_DIR|install [^\n]*AGENTS\.md", body[:body.index('step 9 ')], re.M),
+    check(not re.search(r"^\s+agents_md_install\b|AGENTS_DST_DIR|install [^\n]*AGENTS\.md", body[:body.index('step 16 ')], re.M),
           "AGENTS.md is not installed before the agent user exists")
     d = tempfile.mkdtemp(prefix="pkg-agent-")
     try:
@@ -997,11 +1006,11 @@ def t_agent_password_migration():
     fn = func("agent_password_migration")
     check("agent_password_migration()" in fn, "postinst defines agent_password_migration")
     body = SRC.split('case "$1" in\n  configure)', 1)[1]
-    step7 = body[body.index('step 7 '):body.index('step 8 ')]
-    check("agent_password_migration" in step7
-          and step7.index("agent_password_migration") < step7.index("systemctl daemon-reload")
-          < step7.index("systemctl restart tuxwall.service"),
-          "step 7: password migration before daemon-reload and the dashboard restart")
+    step14 = body[body.index('step 14 '):body.index('step 15 ')]
+    check("agent_password_migration" in step14
+          and step14.index("agent_password_migration") < step14.index("systemctl daemon-reload")
+          < step14.index("systemctl restart tuxwall.service"),
+          "step 14: password migration before daemon-reload and the dashboard restart")
     old_pw = "0123456789abcdef" * 3          # dummy fixture value
     d = tempfile.mkdtemp(prefix="pkg-agentpw-")
     try:
@@ -1207,7 +1216,7 @@ DW_FAKES = {
 def t_devicewatch_setup():
     fn = func("devicewatch_setup")
     check("devicewatch_setup()" in fn, "postinst defines devicewatch_setup")
-    body = SRC[SRC.index('step 7 "'):]
+    body = SRC[SRC.index('step 14 "'):]
     check('devicewatch_setup "$STATE_DIR/.devicewatch-enabled-once"' in body,
           "configure runs devicewatch_setup with the enable-once marker")
 
@@ -1266,7 +1275,7 @@ def t_devicewatch_setup():
 def t_quarantine_unit():
     fn = func("quarantine_unit_setup")
     check("quarantine_unit_setup()" in fn, "postinst defines quarantine_unit_setup")
-    body = SRC[SRC.index('step 7 "'):]
+    body = SRC[SRC.index('step 14 "'):]
     check("$(quarantine_unit_setup)" in body, "configure runs quarantine_unit_setup")
     for fail, want in (("", "table loaded"), ("1", "not loaded")):
         d = tempfile.mkdtemp(prefix="pkg-q-")
@@ -1285,10 +1294,253 @@ def t_quarantine_unit():
           and "CapabilityBoundingSet=CAP_NET_ADMIN" in unit, "quarantine unit: before the network, restore, NET_ADMIN only")
 
 
+# ── install/upgrade output (3.3.9) ───────────────────────────────────────────
+UI_STALE = ("<this-host>", "AI threat summaries", "llm.json", "Optional extras", "dig adnxs.com",
+            "Kea DHCP leases page", "Watch blocklist progress", "[%s/9]", "\u2588", "\u2591", "tuxwall installed. Dashboard")
+
+
+def ui_cut(root):
+    """The UI helpers (+ https_serving), constants pointed at a scratch root."""
+    a, b = SRC.find("# ── Install/upgrade output"), SRC.find("# Tripwire unit: the package enables it ONCE")
+    if a < 0 or b < a:
+        return ""
+    ui = SRC[a:b]
+    for k in ("UI_LOG_DIR=/var/log/tuxwall", "UI_LISTEN_SNIPPET=/etc/nginx/snippets/tuxwall-listen.conf",
+              "UI_TLS_BIN=/usr/local/sbin/tuxwall-tls", "UI_GEOIP_DB=/var/lib/tuxwall/dbip-city-lite.mmdb"):
+        if k not in ui:
+            return ""
+        n, v = k.split("=", 1)
+        ui = ui.replace(k, "%s=%s%s" % (n, root, v))
+    return ui + "HTTPS_SNIPPET=%s/etc/nginx/snippets/tuxwall-tls.conf\n" % root + func("https_serving")
+
+
+UI_SYSTEMCTL = """#!/bin/sh
+echo "systemctl $*" >> "$FAKE_LOG"
+for u in $FAKE_DOWN; do
+  if [ "$1" = is-active ] && [ "$2" = "$u" ]; then echo failed; exit 3; fi
+done
+case "$1" in
+  is-enabled) exit 0 ;;
+  is-active) echo active; exit 0 ;;
+  show) echo yes; exit 0 ;;
+esac
+exit 0
+"""
+
+UI_RUN = r"""
+LAN_IP=192.168.1.1/24
+ui_begin "$PREV"
+step 1 "First step"
+echo "   short detail"
+step 2 "Second step"
+echo "   %s"
+echo "   WARNING: something to look at"
+echo "     a continuation line of the warning"
+printf '\033[31mcoloured\033[0m tool output\r\n'
+echo "stderr line" >&2
+step 3 "Third step"
+ui_skip "not needed here" "full reason for the log"
+step 4 "Fourth step"
+ui_problem "it broke"
+ui_change "AI assistant: new password set (security fix)"
+ui_tip "Speedtest (traffic shaping): sudo bash /x/install-speedtest.sh"
+ui_summary
+echo done
+"""
+UI_LONG = "long detail " + " ".join("word%02d" % i for i in range(60)) + " END-OF-LONG-LINE"
+
+
+def ui_pty(cmd, env, cols=100):
+    """Run cmd with stdout/stderr on a pseudo terminal of COLS columns -> output bytes."""
+    import fcntl
+    import pty
+    import struct
+    import termios
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, cols, 0, 0))
+    p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=slave, stderr=slave, env=env, close_fds=True)
+    os.close(slave)
+    out = b""
+    while True:
+        try:
+            chunk = os.read(master, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+    os.close(master)
+    p.wait(timeout=60)
+    return p.returncode, out
+
+
+def t_ui():
+    body = SRC.split('case "$1" in\n  configure)', 1)[1]
+    ids = re.findall(r"^    step (\S+) ", body, re.M)
+    total = re.search(r"^STEP_TOTAL=(\d+)$", SRC, re.M)
+    check(ids == [str(i) for i in range(1, len(ids) + 1)] and total and int(total.group(1)) == len(ids),
+          "steps numbered 1..N in order, STEP_TOTAL == N (%s)" % ids)
+    check(not re.search(r"^\s*step\s+\d+[a-z]\b", SRC, re.M) and "[%s/9]" not in SRC, "no 6b-style sub-step ids")
+    check(all(x not in SRC for x in UI_STALE), "stale footer lines gone (%s)" % [x for x in UI_STALE if x in SRC])
+    check("ui_begin" in body and "ui_summary" in body and body.index("ui_begin") < body.index("step 1 ")
+          and body.index("ui_summary") > body.index("step %d " % len(ids)), "header before step 1, summary box after the last step")
+    check(re.search(r"^\s+step \d+ \"[^\"]*\.\.\.\"", SRC, re.M) is None, "short step titles (no trailing ...)")
+    d = tempfile.mkdtemp(prefix="pkg-ui-")
+    try:
+        root = d + "/root"
+        for p in ("/etc/nginx/snippets", "/var/lib/tuxwall", "/var/log", "/usr/local/sbin"):
+            os.makedirs(root + p)
+        fakebin(d, {"systemctl": UI_SYSTEMCTL,
+                    "dpkg-query": "#!/bin/sh\necho 9.9.9\n"})
+        ui = ui_cut(root)
+        check(ui != "", "postinst has the UI block with its path constants")
+        script = d + "/run.sh"
+        with open(script, "w") as f:
+            f.write("set -euo pipefail\n" + ui + UI_RUN % UI_LONG)
+        logdir = root + "/var/log/tuxwall"
+
+        def env(**kw):
+            e = dict(os.environ, PATH=d + "/fbin:" + os.environ.get("PATH", ""), FAKE_LOG=d + "/calls",
+                     PREV="3.3.7", LANG="C.UTF-8", TERM="xterm-256color", FAKE_DOWN="")
+            e.pop("NO_COLOR", None)
+            e.pop("COLUMNS", None)
+            e.update(kw)
+            return e
+
+        def logs():
+            return sorted(os.listdir(logdir)) if os.path.isdir(logdir) else []
+
+        def plain(clean=True, **kw):
+            for f in logs() if clean else ():
+                os.unlink(os.path.join(logdir, f))
+            p = subprocess.run(["bash", script], env=env(**kw), capture_output=True, timeout=60)
+            return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
+
+        # plain (no terminal): no escape codes, sequential [n/N], marks, wrapped to the width
+        rc, out, err = plain(COLUMNS="72")
+        lines = out.splitlines()
+        check(rc == 0 and out.rstrip().endswith("done") and "\x1b" not in out + err, "plain mode: no ESC bytes (%r)" % out[:300])
+        check(lines[0] == "TuxWall 9.9.9 \u2014 upgrading from 3.3.7" and set(lines[1]) == {"\u2500"},
+              "header: TuxWall <new> - upgrading from <old>, thin rule (%r)" % lines[:2])
+        steps = [x for x in lines if re.match(r"\[ ?\d+/\d+\]", x)]
+        check([x[:7] for x in steps] == ["[ 1/17]", "[ 2/17]", "[ 3/17]", "[ 4/17]"], "step lines [ n/N] in order (%s)" % steps)
+        check(steps and steps[0].startswith("[ 1/17] \u2713 First step") and re.search(r"\d+\.\ds$", steps[0])
+              and steps[1].startswith("[ 2/17] ! Second step") and steps[2].startswith("[ 3/17] \u21b7 Third step \u2014 not needed here")
+              and steps[3].startswith("[ 4/17] \u2717 Fourth step"), "marks: done / note / skipped+reason / problem, duration right")
+        check(all(len(x) <= 72 for x in lines), "every line fits COLUMNS=72 (%s)" % max(len(x) for x in lines))
+        check("        \u00b7 short detail" in lines and any(x.startswith("        ! WARNING: something") for x in lines)
+              and "          a continuation line of the warning" in lines and "        \u00b7 coloured tool output" in lines
+              and "        \u00b7 stderr line" in lines and "        \u2717 it broke" in lines,
+              "detail lines: '\u00b7' info, '!' note, continuation, captured stdout/stderr (ESC stripped)")
+        longl = [x for x in lines if x.startswith(("        \u00b7 long detail", "          word"))]
+        check(len(longl) == 4 and longl[-1].endswith("\u2026") and "END-OF-LONG-LINE" not in out,
+              "a long detail is wrapped (4 lines max, truncated on screen) (%s)" % longl)
+        check(lines.index([x for x in steps if "Second" in x][0]) < lines.index("        \u00b7 stderr line"),
+              "details follow their step line")
+        box = out[out.index("\u256d"):out.index("\u256f") + 1]
+        flat = " ".join(" ".join(x.strip("\u2502 ") for x in box.splitlines()).split())
+        check(re.search(r"\u2717 TuxWall 9\.9\.9 upgraded from 3\.3\.7 \u2014 4 steps in \S+ \(1 skipped\), 1 note, 1 problem", flat),
+              "summary: problem mark with the counts (%s)" % flat[:200])
+        check("Dashboard  http://192.168.1.1/" in box and "log in again: the dashboard restarted" in box
+              and "Services   8/8 active" in box and "AI assistant: new password set (security fix)" in box
+              and "Speedtest (traffic shaping)" in box and "Full log   " + logdir[:30] in box
+              and box.rstrip().endswith("\u256f"), "summary box: dashboard, re-login, services, changes, tips, log (%s)" % box)
+        check(all(len(x) == 72 for x in box.splitlines() if x[:1] in "\u256d\u2502\u2570"), "summary box is aligned to the width")
+        # the log: complete text, 0640, no escape codes
+        lf = logs()
+        check(len(lf) == 1 and re.match(r"upgrade-\d{8}-\d{6}\.log$", lf[0]), "log /var/log/tuxwall/upgrade-<date>.log (%s)" % lf)
+        if lf:
+            path = os.path.join(logdir, lf[0])
+            txt = open(path, encoding="utf-8").read()
+            check(os.stat(path).st_mode & 0o777 == 0o640, "log file mode 0640 (%o)" % (os.stat(path).st_mode & 0o777))
+            check(UI_LONG in txt and "full reason for the log" in txt and "\x1b" not in txt and "Third step" in txt
+                  and "\u2570" in txt, "log: full untruncated details, skip reasons, summary, no ESC")
+        # TTY: colours (stdout is a terminal), width from the terminal, log still plain
+        rc, raw = ui_pty(["bash", script], env(), cols=90)
+        tout = raw.decode("utf-8", "replace")
+        check(rc == 0 and "\x1b[32m\u2713" in tout and "\x1b[31m\u2717" in tout and "done" in tout, "TTY: coloured marks")
+        vis = [re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", x).split("\r")[-1] for x in tout.replace("\r\n", "\n").split("\n")]
+        check(all(len(x) <= 90 for x in vis) and any(len(x) == 90 for x in vis), "TTY: lines fit the terminal's 90 columns")
+        lf = logs()
+        check(lf and "\x1b" not in open(os.path.join(logdir, lf[-1]), encoding="utf-8").read(), "TTY: log without escape codes")
+        for kw, why in (({"NO_COLOR": "1"}, "NO_COLOR"), ({"TERM": "dumb"}, "TERM=dumb")):
+            rc, raw = ui_pty(["bash", script], env(**kw))
+            check(rc == 0 and b"\x1b" not in raw and b"done" in raw, "TTY + %s: no escape codes" % why)
+        # ASCII marks on the Linux console / serial terminals / non-UTF-8 locales
+        for kw in ({"TERM": "linux"}, {"TERM": "vt220"}, {"LANG": "C", "LC_ALL": "C"}):
+            rc, out, err = plain(**kw)
+            check(rc == 0 and all(ord(c) < 128 for c in out) and "[ 1/17] OK First step" in out
+                  and "[ 3/17] -- Third step - not needed here" in out and "[ 2/17] !! Second step" in out
+                  and "[ 4/17] XX Fourth step" in out and "+----" in out, "ASCII output for %s" % kw)
+        # fresh install header/summary; a core unit down -> problem, named
+        rc, out, err = plain(PREV="", FAKE_DOWN="tuxwall-agent.service")
+        check(rc == 0 and out.startswith("TuxWall 9.9.9 \u2014 installing") and "9.9.9 installed" in out
+              and "create the administrator" in out and "7/8 active (not running: tuxwall-agent)" in out
+              and logs() and logs()[0].startswith("install-"), "fresh install wording, a stopped unit is reported")
+        # dashboard address: TuxWall HTTPS / owner-managed / http
+        with open(root + "/etc/nginx/snippets/tuxwall-tls.conf", "w") as f:
+            f.write("listen 192.0.2.10:443 ssl default_server;\n")
+        rc, out, err = plain()
+        check("Dashboard  https://192.0.2.10/" in out, "dashboard https://<address nginx listens on>/ when TuxWall HTTPS serves it")
+        os.unlink(root + "/etc/nginx/snippets/tuxwall-tls.conf")
+        with open(root + "/usr/local/sbin/tuxwall-tls", "w") as f:
+            f.write("#!/bin/sh\necho owner-managed\n")
+        rc, out, err = plain()
+        check("Dashboard  served by your own nginx/HTTPS site" in out and "http://" not in out.split("Dashboard", 1)[1].split("\n")[0],
+              "owner-managed HTTPS: no made-up URL")
+        os.unlink(root + "/usr/local/sbin/tuxwall-tls")
+        with open(root + "/etc/nginx/snippets/tuxwall-listen.conf", "w") as f:
+            f.write("listen 198.51.100.7:80 default_server;\n")
+        rc, out, err = plain()
+        check("Dashboard  http://198.51.100.7/" in out, "http only when HTTPS is off: the listen include's address")
+        # only the 10 newest logs are kept
+        for i in range(12):
+            open(os.path.join(logdir, "upgrade-2020010%d-0000%02d.log" % (i % 9 + 1, i)), "w").close()
+        subprocess.run(["bash", script], env=env(), capture_output=True, timeout=60)
+        check(len(logs()) == 10, "log rotation keeps 10 (%s)" % logs())
+        # no log dir / no buffer: still works, still exit 0
+        rc, out, err = plain(TMPDIR="/nonexistent")
+        check(rc == 0 and "done" in out, "works without TMPDIR")
+        # helpers return 0 on bad input / without ui_begin
+        bad = ("_ui_wrap\n_ui_wrap x ''\n_ui_wrap -5 '*'\n_ui_dur\n_ui_dur abc\n_ui_rep\n_ui_rep - -3\n_ui_level\n"
+               "step\nstep 6b\nstep x \"$(printf 'a\\tb\\001c')\"\nui_skip\nui_note\nui_problem\nui_change\nui_tip\n"
+               "_ui_end_step\n_ui_end_step\n_ui_put\n_ui_log\n_ui_box_row\n_ui_dashboard\nui_summary\nui_summary\n"
+               "COLUMNS=abc ui_begin\nui_begin '' ''\nstep 999999999999999999999 ''\nui_summary\n_ui_exit\n_ui_exit x\necho done\n")
+        with open(d + "/bad.sh", "w") as f:
+            f.write("set -euo pipefail\n" + ui + bad)
+        p = subprocess.run(["bash", d + "/bad.sh"], env=env(), capture_output=True, timeout=60)
+        check(p.returncode == 0 and p.stdout.decode("utf-8", "replace").rstrip().endswith("done"),
+              "every UI helper returns 0 on bad input (rc %d, %r)" % (p.returncode, p.stderr[-300:]))
+        os.chmod(logdir, 0o500)
+        try:
+            if os.geteuid() == 0:
+                raise FileNotFoundError     # root writes anyway: nothing to test
+            rc, out, err = plain(clean=False)
+            check(rc == 0 and "done" in out and "Full log" not in out, "unwritable log dir: no log line, still exit 0")
+        except FileNotFoundError:
+            pass
+        finally:
+            os.chmod(logdir, 0o755)
+        # a failing command inside a step: exit code kept, the step shown as a problem
+        with open(d + "/fail.sh", "w") as f:
+            f.write("set -euo pipefail\n" + ui + 'ui_begin 3.3.7 3.3.9\nstep 1 "ok"\nstep 2 "breaks"\necho "   before"\n'
+                    'false\necho never\n')
+        p = subprocess.run(["bash", d + "/fail.sh"], env=env(), capture_output=True, timeout=60)
+        o = p.stdout.decode("utf-8", "replace")
+        check(p.returncode == 1 and "[ 2/17] \u2717 breaks" in o and "\u00b7 before" in o and "stopped here (exit 1)" in o
+              and "stopped at step 2/17 (exit 1)" in o and "never" not in o, "early stop: exit code kept, step flushed (%r)" % o)
+        check(not [x for x in os.listdir("/tmp") if x.startswith("tuxwall-postinst.") and
+                   os.stat("/tmp/" + x).st_uid == os.getuid() and os.stat("/tmp/" + x).st_mtime > os.stat(script).st_mtime],
+              "step buffer removed")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main():
     for p in (POSTINST, PRERM, os.path.join(ROOT_DIR, "pkg", "DEBIAN", "postrm")):
         r = subprocess.run(["bash", "-n", p], capture_output=True, text=True)
         check(r.returncode == 0, "bash -n %s %s" % (os.path.basename(p), r.stderr))
+    t_ui()
     t_tripwire()
     t_bouncer()
     t_prerm()

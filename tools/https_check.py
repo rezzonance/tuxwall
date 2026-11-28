@@ -930,9 +930,9 @@ def t_postinst():
     fns = "".join(func(n) for n in ("fw_lan_ifaces", "fw_has_port_rule", "fw_fresh_allow", "https_fw_allow",
                                     "https_setup"))
     check(all(func(n) for n in ("https_fw_allow", "https_setup")), "postinst defines https_fw_allow + https_setup")
-    step5 = SRC[SRC.index('step 5 "'):SRC.index('step 6 "')]
-    check("https_setup" in step5 and step5.index("nginx_listen_render") < step5.index("https_setup")
-          < step5.index("if nginx -t"), "postinst: listen include, then HTTPS, then nginx -t + reload")
+    step7 = SRC[SRC.index('step 7 "'):SRC.index('step 8 "')]
+    check("https_setup" in step7 and step7.index("nginx_listen_render") < step7.index("https_setup")
+          < step7.index("if nginx -t"), "postinst: listen include, then HTTPS, then nginx -t + reload")
     check("systemctl enable --now tuxwall-tls-renew.timer" in SRC, "postinst enables the renewal timer")
     d = tempfile.mkdtemp(prefix="https-postinst-")
     try:
@@ -1010,10 +1010,10 @@ def t_announce():
     """Upgrade notice: postinst https_announce decides, https_tls reads/dismisses."""
     fns = func("https_serving") + func("https_announce")
     check(func("https_serving") and func("https_announce"), "postinst defines https_serving + https_announce")
-    step5 = SRC[SRC.index('step 5 "'):SRC.index('step 6 "')]
+    step7 = SRC[SRC.index('step 7 "'):SRC.index('step 8 "')]
     check(re.search(r"_https_was=no\n\s*https_serving && _https_was=yes\n\s*https_setup [^\n]*\n"
-                    r"\s*https_announce \"\$\{2:-\}\" \"\$_https_was\"", step5),
-          "postinst step 5: serving state read before https_setup, https_announce right after (prev version)")
+                    r"\s*_https_msg=\"\$\(https_announce \"\$\{2:-\}\" \"\$_https_was\"\)\"", step7),
+          "postinst step 7: serving state read before https_setup, https_announce right after (prev version)")
     d = tempfile.mkdtemp(prefix="https-announce-")
     try:
         active = H.render_snippet(H.Env(tls_dir="/etc/tuxwall/tls", nginx_version="1.28.0"), dec(),

@@ -5,23 +5,401 @@ set -euo pipefail
 WWW=/var/www/html
 STATE_DIR=/var/lib/tuxwall
 
-# ── Step progress bar ─────────────────────────────────────────────────────
-# Prints each step with a filled bar so the install shows visual progress:
-#   [██████████░░░░░░░░░░░░░░░░] [6d/9] Enabling daily Suricata rule ...
-# Pure block characters, no ANSI cursor tricks - renders identically on a
-# terminal, in apt/dpkg logs, and under unattended-upgrades. Built with bash
-# string appends (not tr) because tr is byte-oriented and mangles UTF-8.
-STEP_TOTAL=14
-STEP_NOW=0
-step() {
-  local label="$1" text="$2" width=24 i
-  STEP_NOW=$((STEP_NOW + 1))
-  local filled=$(( STEP_NOW * width / STEP_TOTAL ))
-  (( filled > width )) && filled=$width
-  local bar="" empty=""
-  for ((i = 0; i < filled; i++)); do bar+="█"; done
-  for ((i = filled; i < width; i++)); do empty+="░"; done
-  printf '[%s%s] [%s/9] %s\n' "$bar" "$empty" "$label" "$text"
+# ── Install/upgrade output ────────────────────────────────────────────────
+# Looks like tuxwall-install.sh: a header, one line per step
+#   [ 3/17] ✓ Unbound: blocklists and base config                 0.1s
+#           · rsyslog rule: ... up to date
+# (✓ done, ↷ skipped, ! note, ✗ problem), then a summary box (dashboard
+# address, services, changes, notes, log). While a step runs its stdout and
+# stderr go to a buffer that becomes the step's detail lines when it ends
+# (wrapped to the terminal width); an EXIT trap prints it if the postinst
+# stops early. The complete text goes to /var/log/tuxwall/<kind>-<date>.log
+# (root 0640, the 10 newest kept). Colours only on a terminal (not
+# TERM=dumb, not NO_COLOR) - unattended-upgrades, logs and the installer
+# (TERM=dumb NO_COLOR=1) get plain text. ASCII marks on the Linux console,
+# serial terminals and non-UTF-8 locales (as the installer's run_long).
+# Every ui_* helper returns 0: the output never fails the postinst.
+# `step N "title"`: N documents the order (sequential, checked by
+# tools/pkg_scripts_check.py, which also runs these helpers).
+STEP_TOTAL=17
+UI_LOG_DIR=/var/log/tuxwall
+UI_LISTEN_SNIPPET=/etc/nginx/snippets/tuxwall-listen.conf
+UI_TLS_BIN=/usr/local/sbin/tuxwall-tls
+UI_GEOIP_DB=/var/lib/tuxwall/dbip-city-lite.mmdb
+UI_CORE_UNITS="tuxwall.service nginx.service unbound.service tuxwall-nat.service tuxwall-agent.service
+               tuxwall-devicewatch.service tuxwall-tripwire.service tuxwall-quarantine.service"
+UI_ON=0 UI_COLOR=0 UI_UTF8=0 UI_W=100 UI_OPEN=0 UI_DONE=0
+UI_LOG="" UI_BUF="" UI_OUT="" UI_ERR="" UI_FROM="" UI_VER="" UI_TITLE="" UI_SKIP=""
+UI_SEQ=0 UI_SKIPS=0 UI_NOTES=0 UI_PROBLEMS=0 UI_S_NOTES=0 UI_S_PROBLEMS=0
+UI_T0=0 UI_START=0 UI_NOW=0 UI_LVL=info UI_HTTPS_NEW=0
+UI_CHANGES=() UI_ATTN=() UI_TIPS=() UI_LINES=()
+C_R="" C_G="" C_Y="" C_C="" C_BOLD="" C_DIM="" C_0=""
+UI_OK=OK UI_SKIPM=-- UI_NOTEM='!!' UI_BAD=XX UI_DOT=- UI_HR=- UI_DASH=- UI_RUN=...
+UI_BOX=(+ + + + - '|')
+UI_NOTE_RE='WARNING|NOTE|[Ww]arning|did not|[Ff]ailed|fails|rejected|not loaded|NOT restarted|could not|cannot|missing|rolled back|left on |left as it was'
+UI_BAD_RE='(^|[^[:alpha:]])(ERROR|FATAL|FAILED)([^[:alpha:]]|$)|\[emerg\]'
+
+_ui_now() { local -; set +eu +o pipefail; local t=${EPOCHREALTIME:-}; t=${t//[!0-9]/}; UI_NOW=${t:-$((SECONDS * 1000000))}; return 0; }
+_ui_dur() {                 # _ui_dur MICROSECONDS -> UI_DUR ("0.4s", "12s", "1m05s")
+  local -; set +eu +o pipefail
+  local us=${1:-0}
+  [[ $us =~ ^[0-9]+$ ]] || us=0
+  if (( us < 10000000 )); then UI_DUR="$((us / 1000000)).$((us / 100000 % 10))s"
+  elif (( us < 60000000 )); then UI_DUR="$((us / 1000000))s"
+  else printf -v UI_DUR '%dm%02ds' $((us / 60000000)) $((us / 1000000 % 60)); fi
+  return 0
+}
+_ui_rep() {                 # _ui_rep CHAR N -> UI_REP
+  local -; set +eu +o pipefail
+  local n=${2:-0}
+  [[ $n =~ ^[0-9]+$ ]] || n=0
+  printf -v UI_REP '%*s' "$n" ''
+  UI_REP=${UI_REP// /${1:--}}
+  return 0
+}
+_ui_wrap() {                # _ui_wrap WIDTH TEXT -> UI_LINES (word wrap, long words split)
+  local -; set +eu +o pipefail
+  local w=${1:-80} word line=""
+  local -a words=()
+  UI_LINES=()
+  [[ $w =~ ^[0-9]+$ ]] && (( w >= 10 )) || w=10
+  read -r -a words <<<"${2:-}" || true
+  for word in "${words[@]}"; do
+    while (( ${#word} > w )); do
+      [[ -n $line ]] && UI_LINES+=("$line") && line=""
+      UI_LINES+=("${word:0:w}"); word=${word:w}
+    done
+    if [[ -z $line ]]; then line=$word
+    elif (( ${#line} + 1 + ${#word} <= w )); then line+=" $word"
+    else UI_LINES+=("$line"); line=$word
+    fi
+  done
+  [[ -n $line ]] && UI_LINES+=("$line")
+  return 0
+}
+_ui_put() {                 # _ui_put SCREEN_TEXT [LOG_TEXT]: screen (original stdout) + log
+  local -; set +eu +o pipefail
+  if [[ -n $UI_OUT ]]; then printf '%s\n' "${1:-}" >&"$UI_OUT"; else printf '%s\n' "${1:-}"; fi
+  [[ -n $UI_LOG ]] && printf '%s\n' "${2-${1:-}}" 2>/dev/null >>"$UI_LOG"
+  return 0
+}
+_ui_log() { [[ -n $UI_LOG ]] && printf '%s\n' "${1:-}" 2>/dev/null >>"$UI_LOG"; return 0; }
+_ui_level() {               # _ui_level TEXT -> UI_LVL info|note|problem
+  local -; set +eu +o pipefail
+  UI_LVL=info
+  if [[ ${1:-} =~ $UI_BAD_RE ]]; then UI_LVL=problem
+  elif [[ ${1:-} =~ $UI_NOTE_RE ]]; then UI_LVL=note
+  fi
+  return 0
+}
+
+ui_begin() {                # ui_begin PREV_VERSION [NEW_VERSION] -> header, log, buffer, EXIT trap
+  local -; set +eu +o pipefail
+  local t='✓' cols="" kind=upgrade stamp d head f
+  (( UI_ON )) && return 0
+  UI_FROM=${1:-}; UI_VER=${2:-}
+  [[ -n $UI_VER ]] || UI_VER="$(dpkg-query -W -f='${Version}' tuxwall 2>/dev/null)" || UI_VER=""
+  if [[ -t 1 && -z ${NO_COLOR:-} && ${TERM:-dumb} != dumb ]]; then
+    UI_COLOR=1
+    C_R=$'\e[31m' C_G=$'\e[32m' C_Y=$'\e[33m' C_C=$'\e[36m' C_BOLD=$'\e[1m' C_DIM=$'\e[2m' C_0=$'\e[0m'
+  fi
+  if [[ "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" =~ [Uu][Tt][Ff]-?8 ]] && (( ${#t} == 1 )); then
+    case "${TERM:-dumb}" in
+      linux|vt*|dumb|ansi|cons*) ;;
+      *) UI_UTF8=1 UI_OK=✓ UI_SKIPM=↷ UI_NOTEM='!' UI_BAD=✗ UI_DOT=· UI_HR=─ UI_DASH=— UI_RUN=…
+         UI_BOX=(╭ ╮ ╰ ╯ ─ │) ;;
+    esac
+  fi
+  exec {UI_OUT}>&1 {UI_ERR}>&2 || { UI_OUT=""; UI_ERR=""; }
+  if [[ ${COLUMNS:-} =~ ^[0-9]+$ ]]; then cols=$COLUMNS
+  elif [[ -t 1 ]]; then
+    [[ -n $UI_OUT ]] && cols="$(stty size 2>/dev/null <&"$UI_OUT")" && cols=${cols#* }
+    [[ $cols =~ ^[0-9]+$ ]] && (( cols > 0 )) || cols="$(tput cols 2>/dev/null)"
+  fi
+  [[ $cols =~ ^[0-9]+$ ]] && (( cols > 0 )) || cols=100
+  (( cols > 100 )) && cols=100
+  (( cols < 40 )) && cols=40
+  UI_W=$cols
+  [[ -z $UI_FROM ]] && kind=install
+  stamp="$(date +%Y%m%d-%H%M%S 2>/dev/null)" || stamp=""
+  if [[ -n $stamp ]] && mkdir -p "$UI_LOG_DIR" 2>/dev/null; then
+    UI_LOG="$UI_LOG_DIR/$kind-$stamp.log"
+    [[ -e $UI_LOG ]] && UI_LOG="$UI_LOG_DIR/$kind-$stamp-$$.log"
+    if ( umask 077; : >"$UI_LOG" ) 2>/dev/null && chmod 0640 "$UI_LOG" 2>/dev/null; then
+      ls -1t "$UI_LOG_DIR"/install-2*.log "$UI_LOG_DIR"/upgrade-2*.log 2>/dev/null | grep -vxF "$UI_LOG" | tail -n +10 |
+        while IFS= read -r f; do rm -f -- "$f"; done
+    else
+      UI_LOG=""
+    fi
+  fi
+  for d in /run /tmp; do
+    UI_BUF="$(mktemp "$d/tuxwall-postinst.XXXXXX" 2>/dev/null)" && break
+    UI_BUF=""
+  done
+  [[ -n $UI_OUT ]] || UI_BUF=""
+  trap '_ui_exit $?' EXIT
+  UI_ON=1
+  _ui_now; UI_START=$UI_NOW
+  if [[ -z $UI_FROM ]]; then head="installing"
+  elif [[ $UI_FROM == "$UI_VER" ]]; then head="reconfiguring"
+  else head="upgrading from $UI_FROM"
+  fi
+  head="TuxWall${UI_VER:+ $UI_VER} $UI_DASH $head"
+  _ui_rep "$UI_HR" "$UI_W"
+  _ui_log "$(date '+%F %T' 2>/dev/null) $head"
+  _ui_put "${C_BOLD}${head}${C_0}" ""
+  _ui_put "${C_DIM}${UI_REP}${C_0}" "$UI_REP"
+  return 0
+}
+
+step() {                    # step N "title": ends the running step, starts the next
+  local -; set +eu +o pipefail
+  _ui_end_step
+  UI_SEQ=$((UI_SEQ + 1)); UI_TITLE=${2:-step $UI_SEQ}; UI_SKIP=""; UI_NOTES=0; UI_PROBLEMS=0
+  _ui_now; UI_T0=$UI_NOW
+  UI_OPEN=1
+  if [[ -n $UI_BUF && -n $UI_OUT ]] && : 2>/dev/null >"$UI_BUF"; then
+    exec 1>>"$UI_BUF" 2>&1 || true
+    if (( UI_COLOR )); then
+      printf '%s[%2d/%d]%s %s%s %s%s' "$C_C" "$UI_SEQ" "$STEP_TOTAL" "$C_0" "$C_DIM" "$UI_RUN" "$UI_TITLE" "$C_0" >&"$UI_OUT"
+    fi
+  fi
+  return 0
+}
+ui_skip() {                 # ui_skip "short reason" ["full message" (log only)]
+  UI_SKIP=${1:-skipped}
+  [[ -n ${2:-} ]] && _ui_log "        ${2}"
+  return 0
+}
+ui_note() { _ui_mark note "${1:-}"; return 0; }
+ui_problem() { _ui_mark problem "${1:-}"; return 0; }
+_ui_mark() {                # detail line with a fixed level (in the step's buffer, in order)
+  local -; set +eu +o pipefail
+  if (( UI_OPEN )) && [[ -n $UI_BUF && -n $UI_OUT ]]; then
+    printf '\037%s\037%s\n' "$1" "${2//$'\n'/ }" >>"$UI_BUF" 2>/dev/null || true
+  else
+    printf '   %s: %s\n' "${1^^}" "${2:-}"
+  fi
+  return 0
+}
+ui_change() { [[ -n ${1:-} ]] && UI_CHANGES+=("$1"); return 0; }  # notable change for the summary
+ui_tip() { [[ -n ${1:-} ]] && UI_TIPS+=("$1"); return 0; }        # optional hint for the summary
+
+_ui_end_step() {            # restore stdout/stderr, print the step line + its details
+  local -; set +eu +o pipefail
+  (( UI_OPEN )) || return 0
+  UI_OPEN=0
+  local raw text lvl ind i j n mark mc left right pad dot shown=0 hidden=0 w
+  local -a lv=() tx=() ct=()
+  if [[ -n $UI_OUT ]]; then exec 1>&"$UI_OUT" 2>&"$UI_ERR" || true; fi
+  if [[ -n $UI_BUF && -s $UI_BUF ]]; then
+    while IFS= read -r raw; do
+      if [[ $raw == $'\037'*$'\037'* ]]; then
+        lvl=${raw#$'\037'}; text=${lvl#*$'\037'}; lvl=${lvl%%$'\037'*}; ind=0
+        [[ $lvl == note || $lvl == problem ]] || lvl=info
+      else
+        raw=${raw//$'\037'/}
+        text="${raw#"${raw%%[![:space:]]*}"}"
+        ind=$(( ${#raw} - ${#text} ))
+        _ui_level "$text"; lvl=$UI_LVL
+      fi
+      text="${text%"${text##*[![:space:]]}"}"
+      [[ -n $text ]] || continue
+      if (( ind > 3 && ${#tx[@]} > 0 )); then
+        ct+=(1); lv+=("${lv[-1]}")
+      else
+        ct+=(0); lv+=("$lvl")
+        case $lvl in
+          note) UI_NOTES=$((UI_NOTES + 1)); UI_ATTN+=("[$UI_SEQ] $text") ;;
+          problem) UI_PROBLEMS=$((UI_PROBLEMS + 1)); UI_ATTN+=("[$UI_SEQ] $text") ;;
+        esac
+      fi
+      tx+=("$text")
+    done < <(tr -d '\000' <"$UI_BUF" 2>/dev/null |
+             LC_ALL=C sed -E 's/\r$//; s/.*\r//; s#\x1b\[[0-9;?]*[ -/]*[@-~]##g; s/[\x01-\x08\x0b-\x1e\x7f]//g' 2>/dev/null)
+  fi
+  UI_S_NOTES=$((UI_S_NOTES + UI_NOTES)); UI_S_PROBLEMS=$((UI_S_PROBLEMS + UI_PROBLEMS))
+  if (( UI_PROBLEMS )); then mark=$UI_BAD mc=$C_R
+  elif (( UI_NOTES )); then mark=$UI_NOTEM mc=$C_Y
+  elif [[ -n $UI_SKIP ]]; then mark=$UI_SKIPM mc=$C_DIM
+  else mark=$UI_OK mc=$C_G
+  fi
+  [[ -n $UI_SKIP ]] && UI_SKIPS=$((UI_SKIPS + 1))
+  _ui_now; _ui_dur $((UI_NOW - UI_T0)); right=$UI_DUR
+  printf -v left '[%2d/%d]' "$UI_SEQ" "$STEP_TOTAL"
+  text=$UI_TITLE
+  [[ -n $UI_SKIP ]] && text+=" $UI_DASH $UI_SKIP"
+  _ui_log "$left $mark $text  ($right)"
+  w=$(( UI_W - ${#left} - ${#mark} - 2 - ${#right} - 2 ))
+  (( w < 10 )) && w=10
+  (( ${#text} > w )) && text="${text:0:w-${#UI_RUN}}$UI_RUN"
+  pad=$(( UI_W - ${#left} - ${#mark} - 2 - ${#text} - ${#right} ))
+  (( pad < 1 )) && pad=1
+  _ui_rep ' ' "$pad"
+  if [[ -n $UI_SKIP && ${#text} -gt ${#UI_TITLE} ]]; then
+    text="$UI_TITLE${C_DIM}${text:${#UI_TITLE}}${C_0}"
+  fi
+  (( UI_COLOR )) && printf '\r\e[K' >&"${UI_OUT:-1}"
+  if [[ -n $UI_OUT ]]; then
+    printf '%s%s%s %s%s%s %s%s%s%s%s\n' "$C_C" "$left" "$C_0" "$mc" "$mark" "$C_0" "$text" "$UI_REP" "$C_DIM" "$right" "$C_0" >&"$UI_OUT"
+  else
+    printf '%s %s %s%s%s\n' "$left" "$mark" "$text" "$UI_REP" "$right"
+  fi
+  w=$(( UI_W - 10 ))
+  for ((i = 0; i < ${#tx[@]}; i++)); do
+    case ${lv[i]} in
+      problem) dot=$UI_BAD mc=$C_R ;; note) dot=$UI_NOTEM mc=$C_Y ;; *) dot=$UI_DOT mc=$C_DIM ;;
+    esac
+    (( UI_UTF8 )) || { [[ ${lv[i]} == problem ]] && dot=x; [[ ${lv[i]} == note ]] && dot='!'; }
+    if (( ct[i] )); then _ui_log "          ${tx[i]}"; else _ui_log "        $dot ${tx[i]}"; fi
+    if [[ ${lv[i]} == info ]]; then
+      if (( shown >= 8 )); then hidden=$((hidden + 1)); continue; fi
+      shown=$((shown + 1))
+    fi
+    _ui_wrap "$w" "${tx[i]}"
+    n=${#UI_LINES[@]}
+    if (( n > 4 )); then
+      n=4; UI_LINES[3]="${UI_LINES[3]:0:w-${#UI_RUN}}$UI_RUN"
+    fi
+    for ((j = 0; j < n; j++)); do
+      if (( j == 0 && ! ct[i] )); then
+        raw="        $mc$dot$C_0 "
+      else
+        raw="          "
+      fi
+      if [[ ${lv[i]} == info ]]; then raw+="$C_DIM${UI_LINES[j]}$C_0"; else raw+="${UI_LINES[j]}"; fi
+      if [[ -n $UI_OUT ]]; then printf '%s\n' "$raw" >&"$UI_OUT"; else printf '%s\n' "$raw"; fi
+    done
+  done
+  if (( hidden )); then
+    raw="        $C_DIM$UI_DOT $hidden more line(s) in the full log$C_0"
+    if [[ -n $UI_OUT ]]; then printf '%s\n' "$raw" >&"$UI_OUT"; else printf '%s\n' "$raw"; fi
+  fi
+  [[ -n $UI_BUF ]] && : 2>/dev/null >"$UI_BUF"
+  return 0
+}
+
+_ui_unit_ok() {             # _ui_unit_ok UNIT -> 0 counted+running, 1 counted+down, 2 not counted
+  local -; set +eu +o pipefail
+  local u=$1 st
+  systemctl is-enabled --quiet "$u" 2>/dev/null || return 2
+  [[ "$(systemctl show -p ConditionResult --value "$u" 2>/dev/null)" == no ]] && return 2
+  st="$(systemctl is-active "$u" 2>/dev/null)"
+  case $st in active|activating|reloading) return 0 ;; esac
+  return 1
+}
+_ui_box_row() {             # _ui_box_row KEY TEXT [COLOUR]: wrapped inside the box
+  local -; set +eu +o pipefail
+  local key=${1:-} c=${3:-} iw=$(( UI_W - 4 )) kw=11 j raw
+  _ui_wrap $(( iw - kw )) "${2:-}"
+  (( ${#UI_LINES[@]} )) || UI_LINES=("")
+  for ((j = 0; j < ${#UI_LINES[@]}; j++)); do
+    (( j )) && key=""
+    printf -v raw '%-*s%s' "$kw" "$key" "${UI_LINES[j]}"
+    _ui_rep ' ' $(( iw - ${#raw} ))
+    _ui_put "$C_DIM${UI_BOX[5]}$C_0 $C_DIM$(printf '%-*s' "$kw" "$key")$C_0$c${UI_LINES[j]}$C_0$UI_REP $C_DIM${UI_BOX[5]}$C_0" \
+            "${UI_BOX[5]} $raw$UI_REP ${UI_BOX[5]}"
+  done
+  return 0
+}
+_ui_dashboard() {           # -> UI_URL, UI_URL_NOTE
+  local -; set +eu +o pipefail
+  local ip="" mode=""
+  UI_URL="" UI_URL_NOTE=""
+  if https_serving 2>/dev/null; then
+    ip="$(sed -nE 's/^listen ([0-9.]+):443[ ;].*/\1/p' "$HTTPS_SNIPPET" 2>/dev/null | head -n 1)"
+    UI_URL="https://${ip:-${LAN_IP%/*}}/"
+  else
+    mode="$(sh "$UI_TLS_BIN" decide 2>/dev/null)" || mode=""
+    if [[ $mode == owner-managed ]]; then
+      UI_URL_NOTE="served by your own nginx/HTTPS site (TuxWall left it alone)"
+      return 0
+    fi
+    ip="$(sed -nE 's/^listen ([0-9.]+):80[ ;].*/\1/p' "$UI_LISTEN_SNIPPET" 2>/dev/null | head -n 1)"
+    UI_URL="http://${ip:-${LAN_IP%/*}}/"
+  fi
+  [[ $UI_URL == http*:/// ]] && UI_URL="${UI_URL%//}//<router's LAN address>/"
+  return 0
+}
+ui_summary() {              # ends the last step, prints the summary box
+  local -; set +eu +o pipefail
+  local u rc up=0 all=0 down="" status mc mark iw x
+  _ui_end_step
+  for u in $UI_CORE_UNITS; do
+    _ui_unit_ok "$u"; rc=$?
+    (( rc == 2 )) && continue
+    all=$((all + 1))
+    if (( rc == 0 )); then up=$((up + 1)); else down+=" ${u%.service}"; fi
+  done
+  if [[ -n $down ]]; then
+    UI_S_PROBLEMS=$((UI_S_PROBLEMS + 1))
+    _ui_log "attention: not running:$down"
+  fi
+  _ui_now; _ui_dur $((UI_NOW - UI_START))
+  status="TuxWall${UI_VER:+ $UI_VER}"
+  if [[ -z $UI_FROM ]]; then status+=" installed"
+  elif [[ $UI_FROM == "$UI_VER" ]]; then status+=" reconfigured"
+  else status+=" upgraded from $UI_FROM"
+  fi
+  status+=" $UI_DASH $UI_SEQ steps in $UI_DUR"
+  (( UI_SKIPS )) && status+=" ($UI_SKIPS skipped)"
+  status+=", $UI_S_NOTES note$( ((UI_S_NOTES == 1)) || echo s), $UI_S_PROBLEMS problem$( ((UI_S_PROBLEMS == 1)) || echo s)"
+  if (( UI_S_PROBLEMS )); then mark=$UI_BAD mc=$C_R
+  elif (( UI_S_NOTES )); then mark=$UI_NOTEM mc=$C_Y
+  else mark=$UI_OK mc=$C_G
+  fi
+  iw=$(( UI_W - 4 ))
+  _ui_dashboard
+  _ui_put ""
+  _ui_rep "${UI_BOX[4]}" $(( UI_W - 2 ))
+  _ui_put "$C_DIM${UI_BOX[0]}$UI_REP${UI_BOX[1]}$C_0" "${UI_BOX[0]}$UI_REP${UI_BOX[1]}"
+  _ui_wrap $(( iw - ${#mark} - 1 )) "$status"
+  for ((x = 0; x < ${#UI_LINES[@]}; x++)); do
+    if (( x == 0 )); then u="$mark ${UI_LINES[x]}"; else _ui_rep ' ' $(( ${#mark} + 1 )); u="$UI_REP${UI_LINES[x]}"; fi
+    _ui_rep ' ' $(( iw - ${#u} ))
+    _ui_put "$C_DIM${UI_BOX[5]}$C_0 $mc$C_BOLD${u:0:${#mark}}$C_0$C_BOLD${u:${#mark}}$C_0$UI_REP $C_DIM${UI_BOX[5]}$C_0" \
+            "${UI_BOX[5]} $u$UI_REP ${UI_BOX[5]}"
+  done
+  _ui_box_row "" ""
+  if [[ -n $UI_URL ]]; then _ui_box_row Dashboard "$UI_URL" "$C_BOLD"
+  else _ui_box_row Dashboard "$UI_URL_NOTE"
+  fi
+  if [[ -z $UI_FROM ]]; then _ui_box_row "" "first visit: create the administrator account"
+  else _ui_box_row "" "log in again: the dashboard restarted"
+  fi
+  (( all )) && _ui_box_row Services "$up/$all active${down:+ (not running:$down)}" "$( [[ -n $down ]] && printf '%s' "$C_R")"
+  for ((x = 0; x < ${#UI_CHANGES[@]}; x++)); do
+    _ui_box_row "$( ((x)) || echo Changes)" "${UI_CHANGES[x]}"
+  done
+  for ((x = 0; x < ${#UI_ATTN[@]} && x < 5; x++)); do
+    _ui_box_row "$( ((x)) || echo Notes)" "${UI_ATTN[x]}" "$C_Y"
+  done
+  (( ${#UI_ATTN[@]} > 5 )) && _ui_box_row "" "+$(( ${#UI_ATTN[@]} - 5 )) more in the full log"
+  for ((x = 0; x < ${#UI_TIPS[@]}; x++)); do
+    _ui_box_row "$( ((x)) || echo Tips)" "${UI_TIPS[x]}"
+  done
+  [[ -n $UI_LOG ]] && _ui_box_row "Full log" "$UI_LOG"
+  _ui_rep "${UI_BOX[4]}" $(( UI_W - 2 ))
+  _ui_put "$C_DIM${UI_BOX[2]}$UI_REP${UI_BOX[3]}$C_0" "${UI_BOX[2]}$UI_REP${UI_BOX[3]}"
+  for ((x = 0; x < ${#UI_ATTN[@]}; x++)); do _ui_log "attention: ${UI_ATTN[x]}"; done
+  UI_DONE=1
+  [[ -n $UI_BUF ]] && rm -f "$UI_BUF"
+  return 0
+}
+_ui_exit() {                # EXIT trap: a postinst that stops early still shows its step
+  local -; set +eu +o pipefail
+  local rc=${1:-0}
+  if (( ! UI_DONE && UI_ON )); then
+    if (( UI_OPEN )); then
+      _ui_mark problem "the package configuration stopped here (exit $rc)"
+      _ui_end_step
+    fi
+    _ui_put "${C_R}${UI_BAD}${C_0} ${C_BOLD}TuxWall configuration stopped at step $UI_SEQ/$STEP_TOTAL (exit $rc)${C_0}" \
+            "$UI_BAD TuxWall configuration stopped at step $UI_SEQ/$STEP_TOTAL (exit $rc)"
+    [[ -n $UI_LOG ]] && _ui_put "  Full log: $UI_LOG"
+  fi
+  [[ -n $UI_BUF ]] && rm -f "$UI_BUF"
+  return 0
 }
 
 # Tripwire unit: the package enables it ONCE (marker file), whatever
@@ -633,7 +1011,7 @@ agent_config_split() {      # agent_config_split [HELPER] -> status lines, never
 # /etc/tuxwall/agent-password.env and rewrites both drop-ins with
 # EnvironmentFile= (no secret). Runs only where the agent was set up (a
 # password drop-in or the env file exists). rc 10 (changed) -> daemon-reload
-# + agent restart here; step 7 restarts the dashboard right after, so both
+# + agent restart here; step 14 restarts the dashboard right after, so both
 # use the new password. Idempotent; never fails.
 agent_password_migration() {   # agent_password_migration [SCRIPT] [ROOT] -> one status line, never fails
   local script=${1:-$AGENT_SETUP} root=${2:-} env=/etc/tuxwall/agent-password.env rc=0
@@ -668,15 +1046,14 @@ agents_md_install() {       # agents_md_install [SRC] [HOME] [USER]
 case "$1" in
   configure)
     FRESH_INSTALL=0; [[ -z ${2:-} ]] && FRESH_INSTALL=1     # no previously configured version
+    ui_begin "${2:-}"
 
-    step 1 "Creating state directory ($STATE_DIR)..."
+    step 1 "State directories ($STATE_DIR, /etc/tuxwall)"
     mkdir -p "$STATE_DIR"
     chmod 755 "$STATE_DIR"
-
-    step 2 "Ensuring /etc/tuxwall exists..."
     mkdir -p /etc/tuxwall
 
-    step 3 "Creating empty blocklist configs (so Unbound includes are valid)..."
+    step 2 "Blocklist files for Unbound"
     # Every unbound file written below is backed up first (unbound_backup);
     # unbound_apply restarts unbound only on a config that passes
     # unbound-checkconf, else it puts the previous files back.
@@ -696,7 +1073,7 @@ server:
 EOF
     fi
 
-    step 4 "Wiring blocklists into Unbound..."
+    step 3 "Unbound: blocklists and base config"
     unbound_backup /etc/unbound/unbound.conf.d/99-blocklists.conf
     cat > /etc/unbound/unbound.conf.d/99-blocklists.conf <<'EOF'
 # Managed by the tuxwall Blocklists page - DO NOT EDIT
@@ -724,7 +1101,7 @@ EOF
     # unbound's block notices: kept out of /var/log/syslog (journald only)
     echo "   $(rsyslog_unbound_rule "${2:-}")"
 
-    # AGENTS.md for the agent: installed in step 9, after the agent setup has
+    # AGENTS.md for the agent: installed in step 16, after the agent setup has
     # created the tuxwall-agent user (agents_md_install).
 
     # Resilience drop-in: unbound must never hit systemd's start limit.
@@ -741,6 +1118,7 @@ EOF
       echo "   installed unbound start-limit resilience override"
     fi
 
+    step 4 "LAN services: Kea DHCP and radvd"
     # Basic working Kea DHCP + radvd (IPv6 RA) configs for fresh installs -
     # the same install-if-absent rule as router-dns.conf and the universal
     # unbound configs. Both detect the LAN interface; the dashboard's DHCP
@@ -853,12 +1231,14 @@ RADVD
     # radvd config path: /etc/radvd.conf -> /etc/tuxwall/radvd.conf (see radvd_migration)
     _radvd_msg="$(radvd_migration)"
     echo "   $_radvd_msg"
+    [[ $_radvd_msg == "radvd: now reads"* ]] && ui_change "radvd: config now in $RADVD_NEW"
     mkdir -p /var/log/tuxwall
     printf '%s %s\n' "$(date '+%F %T')" "$_radvd_msg" >> /var/log/tuxwall/radvd-migration.log 2>/dev/null || true
     if (( RADVD_FRESH )); then
       systemctl enable --now radvd >/dev/null 2>&1 || true
     fi
 
+    step 5 "Routing: forwarding and WAN NAT"
     # Router base: resolv.conf + forwarding + WAN NAT. Same guarded
     # style as everything above: each piece only lands when absent or
     # still in the stock state, never over an admin's deliberate change.
@@ -919,6 +1299,7 @@ RADVD
       sed -i '/^\*nat$/,/^COMMIT$/d' /etc/ufw/before.rules
       ufw reload >/dev/null 2>&1 || true
       echo "   legacy *nat stanza removed from before.rules (tuxwall-nat owns NAT)"
+      ui_change "ufw: legacy *nat stanza removed (tuxwall-nat owns NAT)"
     fi
     # exec-bit insurance: a shipped script without the git +x bit installs
     # non-executable via dpkg and its unit dies with 203/EXEC on the next
@@ -930,6 +1311,7 @@ RADVD
     systemctl restart tuxwall-nat.service >/dev/null 2>&1 || true
     echo "   WAN masquerade: tuxwall-nat service ($WAN_IF)"
 
+    step 6 "Unbound: config check and restart"
     # Forwarder for fresh installs only. Never touch an existing
     # router-dns.conf - it may hold a full hand-tuned server config.
     if ! grep -qs '^forward-zone:' /etc/unbound/unbound.conf.d/*.conf /etc/unbound/unbound.conf 2>/dev/null; then
@@ -953,13 +1335,13 @@ EOF
     mkdir -p /var/log/tuxwall
     printf '%s %s\n' "$(date '+%F %T')" "$_unbound_msg" >> /var/log/tuxwall/unbound-postinst.log 2>/dev/null || true
 
+    step 7 "Web server: nginx and HTTPS"
     # Cache-bust dashboard assets on every package upgrade: browsers cache
     # ?v= URLs hard, so a fresh stamp guarantees the shipped JS/CSS is
     # actually fetched (installers always did; a bare apt path did not).
     ASSET_V="$(date +%Y%m%d%H%M)"
     sed -i -E "s/\.(js|css)\?v=[-A-Za-z0-9._]+/.\1?v=${ASSET_V}/g" /var/www/html/index.html 2>/dev/null || true
 
-    step 5 "Configuring nginx reverse proxy..."
     # Only manage the bundled vhost on fresh installs. If an enabled site
     # already serves the web root (custom router setup with SSL/vhosts),
     # leave nginx alone.
@@ -978,16 +1360,17 @@ EOF
     _https_was=no
     https_serving && _https_was=yes
     https_setup "$WAN_IF_D" "$LAN_IF_D" | sed 's/^/   /'
-    https_announce "${2:-}" "$_https_was" | sed 's/^/   /'
+    _https_msg="$(https_announce "${2:-}" "$_https_was")"
+    [[ -n $_https_msg ]] && echo "   $_https_msg" && UI_HTTPS_NEW=1 && ui_change "Dashboard: now served over HTTPS (one-time notice in the dashboard)"
     if nginx -t >/dev/null 2>&1; then
       systemctl enable --now nginx >/dev/null 2>&1 || true
       systemctl reload nginx || true
     else
-      echo "   WARNING: nginx config test failed - fix /etc/nginx/sites-available/tuxwall and reload nginx."
+      ui_problem "nginx config test failed - fix /etc/nginx/sites-available/tuxwall and reload nginx."
       nginx -t || true
     fi
 
-    step 6 "Setting up firewall (ufw)..."
+    step 8 "Firewall (ufw)"
     # tuxwall-install.sh sets the baseline itself (SSH from the LAN only,
     # dashboard on the LAN) and exports TUXWALL_INSTALLER_FIREWALL=1. A plain
     # apt install gets the same baseline here, on fresh installs only (3.3.3:
@@ -1044,8 +1427,9 @@ EOF
       PYTHONDONTWRITEBYTECODE=1 python3 "$WWW/includes/canary_egress.py" --apply >/dev/null 2>&1 || true
     fi
 
-    step 6b "Configuring Avahi mDNS reflector (Music Assistant discovery)..."
+    step 9 "mDNS reflector (Avahi, Music Assistant discovery)"
     # Best-effort: avahi-daemon is a hard Depends, but don't fail upgrades.
+    [[ -f /etc/avahi/avahi-daemon.conf ]] || ui_skip "avahi-daemon.conf not found"
     if [[ -f /etc/avahi/avahi-daemon.conf ]]; then
       WAN_IF="$(ip route show default 2>/dev/null | awk '{print $5}' | head -n1)"
       _avahi_bak="$(mktemp /etc/avahi/.avahi-daemon.conf.tuxwall-prev.XXXXXX 2>/dev/null)" \
@@ -1099,7 +1483,7 @@ PY
       PYTHONDONTWRITEBYTECODE=1 python3 "$WWW/includes/topology.py" --write >/dev/null 2>&1 || true
     fi
 
-    step 6c "Provisioning Suricata (guarded af-packet/HOME_NET tune)..."
+    step 10 "Suricata IDS: capture interfaces and HOME_NET"
     # Stock suricata.yaml ships placeholder NIC names that fail to bind on a
     # fresh install, so suricata.service can exit immediately. The guarded
     # tuner rewrites af-packet to the detected WAN/LAN interfaces and HOME_NET
@@ -1108,6 +1492,7 @@ PY
     if [[ -f /etc/suricata/suricata.yaml && -f /usr/local/share/tuxwall/scripts/tune-suricata.py ]]; then
       if python3 /usr/local/share/tuxwall/scripts/tune-suricata.py /etc/suricata/suricata.yaml >/dev/null 2>&1; then
         echo "   Suricata af-packet rebound to detected WAN/LAN interfaces."
+        ui_change "Suricata: capture rebound to the detected WAN/LAN interfaces"
         systemctl enable suricata >/dev/null 2>&1 || true
         systemctl restart suricata >/dev/null 2>&1 || true
       else
@@ -1122,9 +1507,11 @@ PY
         echo "   Suricata also captures the LAN interface (device monitoring)."
         systemctl try-restart suricata >/dev/null 2>&1 || true
       fi
+    else
+      ui_skip "Suricata or the tuner not installed"
     fi
 
-    step 6d "Enabling daily Suricata rule updates (suricata-update)..."
+    step 11 "Suricata: daily rule updates (suricata-update)"
     # Ubuntu's suricata-update package ships no systemd timer, so rule sets
     # are fetched never or once and go stale. Enable our daily timer and pull
     # a first ruleset now (best-effort; Suricata live-reloads via its socket).
@@ -1137,18 +1524,38 @@ PY
       systemctl daemon-reload >/dev/null 2>&1 || true
       systemctl enable --now suricata-update.timer >/dev/null 2>&1 || true
       systemctl start --no-block suricata-update.service >/dev/null 2>&1 || true
+      echo "   daily timer enabled; a rule update runs in the background"
+    else
+      ui_skip "suricata-update.timer not installed"
     fi
 
-    step 6e "CrowdSec bouncer: nftables migration (upgrades; skipped when not applicable)..."
-    bouncer_migration "${2:-}"
+    step 12 "CrowdSec bouncer: nftables migration"
+    _bm_msg="$(bouncer_migration "${2:-}")"
+    if [[ -z ${2:-} ]]; then
+      ui_skip "fresh install"
+    elif [[ -z $_bm_msg ]]; then
+      ui_skip "not installed or already in nftables mode"
+    elif [[ $_bm_msg != *$'\n'* && $_bm_msg == *"bouncer-migration: skipped: "* ]]; then
+      ui_skip "${_bm_msg#*skipped: }" "$_bm_msg"
+    else
+      echo "$_bm_msg"
+      [[ $_bm_msg == *"bouncer-migration: done:"* ]] && ui_change "CrowdSec bouncer: now in nftables mode (full ban durations)"
+    fi
 
-    step 6f "Kea DHCP: lease_cmds hook for installer-written configs (skipped when not applicable)..."
+    step 13 "Kea DHCP: lease_cmds hook (installer-written configs)"
     _kea_msg="$(kea_hook_migration)"
-    echo "   $_kea_msg"
+    case $_kea_msg in
+      *"hook added"*) echo "   $_kea_msg"; ui_change "Kea DHCP: lease_cmds hook added (leases page)" ;;
+      *"hook already loaded") ui_skip "hook already loaded" "$_kea_msg" ;;
+      *"not written by the TuxWall installer"*) ui_skip "own Kea config, left as it was" "$_kea_msg" ;;
+      "kea: no config, nothing to do") ui_skip "no Kea config" "$_kea_msg" ;;
+      *"not installed, config left as it was") ui_skip "Kea or its lease_cmds library not installed" "$_kea_msg" ;;
+      *) ui_note "$_kea_msg" ;;
+    esac
     mkdir -p /var/log/tuxwall
     printf '%s %s\n' "$(date '+%F %T')" "$_kea_msg" >> /var/log/tuxwall/kea-hook-migration.log 2>/dev/null || true
 
-    step 7 "Enabling dashboard service and daily blocklist updates..."
+    step 14 "Dashboard service, timers and background services"
     # tuxwall.service's sandbox ReadWritePaths includes optional
     # directories (cloudflared on boxes that run a tunnel, wireguard).
     # systemd fails the whole namespace setup when any listed path is
@@ -1160,7 +1567,9 @@ PY
     mkdir -p /var/lib/tuxwall
     # AI agent password out of systemd's Environment= (3.3.8), before the
     # dashboard restart below so both sides use the new one
-    echo "   $(agent_password_migration)"
+    _pw_msg="$(agent_password_migration)"
+    echo "   $_pw_msg"
+    [[ $_pw_msg == "agent password: new password"* ]] && ui_change "AI assistant: new password set (security fix)"
     systemctl daemon-reload
     systemctl enable tuxwall.service >/dev/null 2>&1 || true
     systemctl enable tuxwall-blocklist-update.timer >/dev/null 2>&1 || true
@@ -1199,16 +1608,19 @@ PY
     fi
     echo "   $(quarantine_unit_setup)"
 
-    step 8 "Triggering initial blocklist download (background)..."
+    step 15 "Blocklist update (background)"
     sleep 2
     curl -s -X POST http://127.0.0.1:8008/api/blocklists/update >/dev/null 2>&1 || true
+    echo "   requested from the dashboard API; the Blocklists page shows its progress"
 
-    step 9 "Setting up the opencode AI agent (dashboard AI assistant)..."
+    step 16 "AI assistant (opencode agent)"
     # Best-effort: needs internet for the opencode download (fresh installs
     # only). The dashboard works fine without it.
     agent_setup_step
     agents_md_install
-    agent_config_split
+    _oc_msg="$(agent_config_split)"
+    echo "$_oc_msg"
+    [[ $_oc_msg == *"owner settings now in"* ]] && ui_change "AI agent: your providers/default model moved to opencode.local.json"
     # Read-only TuxWall MCP tool for the agent: the API creates
     # /etc/tuxwall/agent/api.token at start (root:tuxwall-agent 0640) - make
     # sure the group is right now that the agent user exists.
@@ -1223,17 +1635,8 @@ PY
       fi
     fi
 
-    echo
-    if [[ "$(sh /usr/local/sbin/tuxwall-tls decide 2>/dev/null)" == active ]]; then
-      echo "tuxwall installed. Dashboard: https://<this-host>/ (http redirects; trust the router's CA:"
-      echo "    http://<this-host>/tuxwall-ca.crt or Settings -> Security -> HTTPS)"
-    else
-      echo "tuxwall installed. Dashboard: http://<this-host>/"
-    fi
-    echo "Watch blocklist progress on the Blocklists page, then verify:"
-    echo "    dig adnxs.com @<this-host>   (should return NXDOMAIN)"
-    echo
-    echo "Guided SQM speedtest (official Ookla tarball, no snap/apt repo)..."
+    step 17 "Speedtest for traffic shaping (optional)"
+    # Guided SQM speedtest: official Ookla tarball, no snap/apt repo.
     # Ookla's packagecloud repo ends at jammy (404 on noble+); the snap is
     # an unofficial wrapper. Best-effort tarball install; the dashboard
     # degrades to manual caps with an install hint when absent.
@@ -1243,20 +1646,20 @@ PY
       [[ -f "$cand" ]] && SPEEDTEST_SETUP="$cand" && break
     done
     if command -v speedtest >/dev/null 2>&1; then
-      echo "  speedtest already present ($(speedtest --version 2>/dev/null | head -n1))"
+      echo "   speedtest already present ($(speedtest --version 2>/dev/null | head -n1))"
     elif [[ -n "$SPEEDTEST_SETUP" ]] && bash "$SPEEDTEST_SETUP" >/dev/null 2>&1; then
-      echo "  speedtest installed ($(speedtest --version 2>/dev/null | head -n1))"
+      echo "   speedtest installed ($(speedtest --version 2>/dev/null | head -n1))"
     else
-      echo "  SKIP: speedtest not installed — System > Traffic Shaping shows a hint."
-      echo "        Re-run later: sudo bash /var/www/html/scripts/install-speedtest.sh"
+      ui_skip "not installed"
+      ui_tip "Speedtest (traffic shaping): sudo bash /var/www/html/scripts/install-speedtest.sh"
     fi
-    echo
-    echo "Optional extras:"
-    echo "  - Security (attack map):   sudo bash /var/www/html/scripts/geoip-setup.sh"
-    echo "  - AI threat summaries:     edit /etc/tuxwall/llm.json"
-    echo "  - Kea DHCP leases page:    auto-configured on fresh installs (pool .100-.199);"
-    echo "                              manage it from the dashboard DHCP page"
-    echo
+
+    # optional extras, only when they are missing
+    [[ -e $UI_GEOIP_DB ]] || ui_tip "Attack map locations (GeoIP): sudo bash /var/www/html/scripts/geoip-setup.sh"
+    if (( FRESH_INSTALL || UI_HTTPS_NEW )) && https_serving; then
+      ui_tip "Trust the router's CA once: Settings > Security > HTTPS (or /tuxwall-ca.crt over http)"
+    fi
+    ui_summary
     ;;
 esac
 
