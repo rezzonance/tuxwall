@@ -167,15 +167,6 @@ KNOWN_GAPS = {
     "/etc/rsyslog.d/45-tuxwall-unbound.conf": "postinst-owned since 3.3.5 (rsyslog_unbound_rule); the API "
                                               "re-creates it only after a delete, and under the sandbox "
                                               "that write fails - skipped quietly, logged once",
-    # Zeek checksum switch (3.3.7): the API runs zeek-site-setup.sh, which
-    # edits the site dir of the Zeek install it finds. The binary packages'
-    # /opt/zeek is writable under ProtectSystem=full; source/distro layouts
-    # under /usr are not - the job fails with the script's message and the
-    # script still works from a root shell
-    "/usr/local/zeek/share/zeek/site": "Zeek checksum switch: a Zeek under /usr is read-only in the sandbox; "
-                                       "the job reports the error (run zeek-site-setup.sh as root instead)",
-    "/usr/share/zeek/site": "Zeek checksum switch: a Zeek under /usr is read-only in the sandbox; "
-                            "the job reports the error (run zeek-site-setup.sh as root instead)",
 }
 
 # /etc, /usr, /boot literals in the API code that are only read (or are
@@ -190,6 +181,10 @@ READ_ONLY = {
     "/usr/bin:/bin", "/usr/bin:/bin:/usr/local/bin", "/usr/sbin:/usr/bin:/sbin:/bin",
     "/usr/lib/systemd/system/tuxwall-agent.service.d/20-local-config.conf",
     "/usr/local/share/tuxwall/scripts/zeek-site-setup.sh",  # executed by the Zeek checksum switch
+    # Zeek checksum switch (3.3.8): the API only reads these site dirs; the
+    # script that edits them (and zeekctl deploy, spool, logs) runs as a
+    # transient unit via systemd-run, outside the sandbox (t_zeek_switch)
+    "/usr/bin/systemd-run", "/usr/local/zeek/share/zeek/site", "/usr/share/zeek/site",
     "/etc",  # https_tls._path_ok: an owner-provided certificate must live under /etc (prefix test only)
 }
 
@@ -412,6 +407,22 @@ def t_static():
         check("/" + os.path.relpath(p, os.path.join(ROOT_DIR, "pkg")) in conf, "%s listed in conffiles" % p)
 
 
+def t_zeek_switch():
+    """The Zeek checksum switch runs zeek-site-setup.sh through systemd-run
+    (a transient unit outside ProtectSystem=full), so a Zeek under /usr
+    works too (3.3.7 known gap, fixed in 3.3.8)."""
+    src = open(os.path.join(INC, "api_server.py")).read()
+    tree = ast.parse(src)
+    fn = next((n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_zeek_checksums_cmd"), None)
+    body = ast.get_source_segment(src, fn) if fn else ""
+    api = api_constants()
+    check(api.get("ZEEK_SYSTEMD_RUN") == "/usr/bin/systemd-run" and "ZEEK_SYSTEMD_RUN" in body and '"--wait"' in body
+          and '"--pipe"' in body and "--unit=" in body and "ZEEK_SITE_SETUP" in body,
+          "Zeek switch: zeek-site-setup.sh runs via systemd-run --wait --pipe (outside the sandbox)")
+    for d in ("/usr/local/zeek/share/zeek/site", "/usr/share/zeek/site"):
+        check(d not in KNOWN_GAPS, "Zeek switch: %s is no longer a known gap" % d)
+
+
 def t_restore_refusal():
     import backups as B
     real = B._atomic_write_at
@@ -626,6 +637,7 @@ def t_sandbox(scratch):
 
 def main():
     t_static()
+    t_zeek_switch()
     t_restore_refusal()
     if "--sandbox" in sys.argv:
         if os.geteuid() != 0 or not shutil.which("systemd-run"):

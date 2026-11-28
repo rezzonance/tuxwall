@@ -17040,6 +17040,7 @@
     "sec-honey-table",
     "sec-canary-table",
     "dev-threat-table",
+    "dev-tune-table",
   ];
 
   const expanded = new Map();   // tableId -> bool

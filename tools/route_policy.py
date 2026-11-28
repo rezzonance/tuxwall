@@ -129,6 +129,9 @@ VIEWER_OK = {
     # indicators), POST /api/devices/silence (add/remove a rule) and POST /api/devices/zeek-checksums (root
     # runs zeek-site-setup.sh --checksums on|off; Zeek restarts) keep the default: admin + same Origin.
     # The Zeek switch state rides on GET /api/devices/feeds (zeek_checksums: on/off + bad-checksum share).
+    # Behaviour detection (3.3.8): GET /api/devices/detectors is admin-only (ADMIN_GET_PREFIXES: shadow findings
+    # name devices and destinations), POST /api/devices/detectors (mode off|shadow|on per detector, written to
+    # devicewatch.json) keeps the default: admin + same Origin.
     "GET /api/devices": "device list: identity, health, generic reason, today's traffic totals "
                         "(no findings, indicators or destinations for viewers)",
     "GET /api/devices/summary": "device-threat counts for the Security card / Overview / Home Assistant",

@@ -160,8 +160,8 @@ def main():
         check("dev-threat-stat" not in src, "%s: the old .dev-threat-stats counters are gone" % name)
 
     # cards of the Local pane and their order
-    order = ["dev-stats", "dev-threat-card", "dev-threat-table", "dev-silence-card", "dev-src-card", "ti-card",
-             "ti-viewer-card"]
+    order = ["dev-stats", "dev-threat-card", "dev-threat-table", "dev-silence-card", "dev-tune-card", "dev-src-card",
+             "ti-card", "ti-viewer-card"]
     for i in order:
         check(inside(i), "#%s is inside Security > Local" % i)
     seq = [ids[i].order for i in order if i in ids]
@@ -292,6 +292,30 @@ def main():
           and "guideRow(gid, x.guidance, 5)" in dev, "devices.js: guidance rows in the Local table (6 cols) and panel (5 cols)")
     check('!r.classList.contains("tw-detail-row")' in dash and "function capRow(r, on)" in dash,
           "row cap: detail rows follow their parent row, never counted")
+
+    # Phase 2 (3.3.8): Detector tuning card (behaviour detectors, shadow mode)
+    tune = ids.get("dev-tune-card")
+    check(tune is not None and "card" in tune.cls() and "hidden" in tune.attrs,
+          "#dev-tune-card: a card, hidden until an admin role is known")
+    for i in ("dev-tune-badge", "dev-tune-set", "dev-tune-msg", "dev-tune-rows", "dev-tune-table", "dev-tune-empty"):
+        check(i in ids and tune in ids[i].ancestors(), "#%s inside the Detector tuning card" % i)
+    check(ids.get("dev-tune-set") is not None and "cs-set" in ids["dev-tune-set"].cls()
+          and "dev-table" in (ids.get("dev-tune-table") or Node("x", {}, None, 0)).cls(),
+          "Detector tuning: shared cs-set rows + dev-table")
+    check(re.search(r'<thead><tr><th>Severity</th><th>Detector</th><th>Would report</th><th>Client</th><th>Seen</th><th></th></tr></thead>', html),
+          "Detector tuning table columns")
+    check("Shadow</b> mode" in html and "no push or Home Assistant alert" in html, "Detector tuning: shadow mode explained")
+    check('class="seg-btns" role="group"' in dev and "data-dev-tune-mode" in dev and 'getJSON("/api/devices/detectors")' in dev
+          and 'post("/api/devices/detectors"' in dev, "devices.js: modes as shared seg-btns, GET/POST /api/devices/detectors")
+    check("data-dev-tune-exp" in dev and "data-dev-tune-silence" in dev and "guideRow(gid, r.guidance, 6)" in dev
+          and "openSilence(tuneRows[" in dev, "devices.js: tuning rows with What to do, Silence, Mark expected / Unmark")
+    check('const tc = $("dev-tune-card");' in dev and "if (tc) tc.hidden = !isAdmin;" in dev,
+          "devices.js: the tuning card is admin-only")
+    check('"dev-tune-table",' in dash, "row cap: the tuning table gets the shared Show all bar")
+    check('"/api/devices/detectors"' in api and '"/api/devices/detectors",' in api,
+          "API: /api/devices/detectors routed (GET admin prefix + POST)")
+    for k in ("beaconing", "dns_bypass", "internal_scan"):
+        check(re.search(r"\b%s: \"" % k, dev), "devices.js: label for %s" % k)
 
     # cache-busters
     for asset in ("/scripts/devices.js", "/scripts/dashboard.js", "/css/polish.css", "/scripts/suricata-suppress.js",

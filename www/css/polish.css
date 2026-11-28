@@ -1960,6 +1960,18 @@ html:not(#_tw#_x) #view-backups .act-btn.act-pin.is-on {
 #dev-silence-body { padding: 0 16px 14px; }
 .dev-silence-empty { margin: 0; }
 #dev-zeek-ck.cs-set { grid-template-columns: minmax(0, 1fr); padding: 0 16px 14px; }
+/* Detector tuning (behaviour detectors, 3.3.8; shared cs-set / seg-btns / dev-table) */
+#dev-tune-card > .vl-info { margin: 0 16px 10px; }
+#dev-tune-set.cs-set { grid-template-columns: minmax(0, 1fr); padding: 0 16px 10px; }
+#dev-tune-set .cs-set-ctl .seg-btns { flex: none; }
+#dev-tune-set .dev-tune-learn { margin: 0; }
+#dev-tune-card > .cs-set-msg { padding: 0 16px 8px; }
+#dev-tune-rows { padding: 0 16px 14px; }
+#dev-tune-rows .table-wrap { margin-bottom: 10px; }
+.dev-tune-empty { margin: 0; padding: 0 16px 14px; }
+@media (max-width: 760px) {
+  #dev-tune-table tbody tr.tw-row-capped { display: none; }
+}
 #dev-s-suffix { width: 100%; max-width: 320px; margin-top: 6px; }
 .dev-s-crit { margin: 10px 0; }
 .dev-s-crit .alerts-check { margin-top: 6px; }

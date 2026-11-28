@@ -185,6 +185,68 @@ GUIDANCE = {
         },
         "expected_hint": "Yours? Dismiss the row on Security > Local.",
     },
+    # Phase 2 behaviour detectors (3.3.8)
+    "beaconing": {
+        "meaning": "This device contacts the same server at very regular intervals all day, and almost no other "
+                   "device uses that server. Malware checks in like this; so do some apps, clouds and update tools.",
+        "steps": {
+            "default": ["Look at the destination: do you recognise the name (an app, a vendor cloud, a backup tool)?",
+                        "Not recognised: check installed programs and browser extensions, then " + _SCAN_PC[0].lower()
+                        + _SCAN_PC[1:],
+                        "If it keeps happening and you cannot explain it, quarantine the device until it is clean."],
+            "phone": ["Look at the destination: does it belong to an app you use?",
+                      "Not recognised: remove apps you do not know or installed recently and update the system.",
+                      "If it keeps happening, quarantine the phone until it is clean."],
+            "iot": ["Look at the destination: is it the maker's cloud (the name often contains the brand)?",
+                    "Not the maker: " + _FW_IOT[0].lower() + _FW_IOT[1:], _PW_IOT,
+                    "If it continues, quarantine it (Isolate)."],
+            "vpn": ["Check the device behind this VPN peer: which app or service talks to that server?",
+                    "If nobody can explain it, quarantine or disable the peer."],
+            "unknown": [_WHO, "Look at the destination; if you cannot explain it, quarantine the device."],
+        },
+        "expected_hint": "A known app, vendor cloud or backup? Mark expected, or Silence the destination.",
+    },
+    "dns_bypass": {
+        "meaning": {
+            "default": "This device sends its DNS lookups encrypted to a public resolver instead of the router, so "
+                       "the router's DNS blocklists and lookup checks do not see them.",
+            "computer": "This device sends DNS lookups encrypted to a public resolver - usually a browser with "
+                        "secure DNS turned on. The router's DNS blocklists do not see those lookups.",
+            "phone": "This phone sends DNS lookups encrypted to a public resolver - usually private DNS or a browser "
+                     "setting. The router's DNS blocklists do not see those lookups.",
+        },
+        "steps": {
+            "default": ["Usually harmless: a browser or system setting (secure DNS, private DNS).",
+                        "To keep the router's blocklists in effect, turn it off or set it to automatic on the device.",
+                        "Known and wanted? Mark expected."],
+            "iot": ["A smart device that brings its own DNS can hide what it talks to - find out if the maker "
+                    "documents it.",
+                    "Update the firmware; if you cannot switch it off, put the device on an IoT VLAN.",
+                    "Known and accepted? Mark expected."],
+            "unknown": [_WHO, "Computer or phone: usually a browser setting (secure DNS). Smart device: check "
+                              "the maker's documentation and firmware."],
+        },
+        "expected_hint": "Your own setting? Mark expected, or Silence this provider for the device.",
+    },
+    "internal_scan": {
+        "meaning": "This device tried to reach many other devices, or many ports on one device or the router, in a "
+                   "few minutes. That is how malware spreads; network tools and some apps scan too.",
+        "steps": {
+            "default": ["Was a network scanner, a printer or media search, or a setup app running on it at the time?",
+                        "No: " + _SCAN_PC[0].lower() + _SCAN_PC[1:],
+                        "If it repeats without a reason, quarantine it (Isolate) until it is clean."],
+            "phone": ["Was a network or setup app running (scanner, smart-home or casting setup)?",
+                      "No: remove apps you do not know and update the system.",
+                      "If it repeats, quarantine the phone (Isolate)."],
+            "iot": ["A smart device should not scan your network: quarantine it (Isolate).", _FW_IOT, _PW_IOT],
+            "vpn": ["Check the device behind this VPN peer for scanning tools or malware.",
+                    "If nobody can explain it, quarantine or disable the peer."],
+            "unknown": ["Quarantine it (Isolate).", _WHO,
+                        "Not yours: keep it blocked and change the Wi-Fi password."],
+        },
+        "expected_hint": "A NAS, backup server or network tool that scans on purpose? Mark expected, or Silence "
+                         "the kind for this device.",
+    },
     "_generic": {
         "meaning": "A detector flagged unusual activity on this device.",
         "steps": {

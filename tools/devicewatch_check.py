@@ -42,6 +42,19 @@ domains and made-up MACs; no command, network or real log is touched.
   detail, the Security > Local rows, the push text ("What to do:" line)
   and Home Assistant (first step only, never an indicator).
 - Units: sandbox directives, writable paths = the state dir only.
+- Behaviour detection (Phase 2, 3.3.8): beaconing (a regular beacon named
+  by DNS and one named by the TLS server name; NTP, OS update checks, Home
+  Assistant cloud, push, shared vendor telemetry, browsing, DoH never
+  fire), DNS bypass (browser DoH on a phone info, DoH/DoT from IoT medium,
+  unlisted DoT, unanswered attempts ignored), internal scanning (a VLAN
+  sweep and a VPN peer's router port scan; Home Assistant polling, a
+  backup job and the router's DNS/DHCP/NTP/dashboard/ping do not fire);
+  shadow by default (nothing in findings/events/health), mode on with a
+  learning vs an established device, mode off, the medium cap and the
+  intel exception, expected marks / silence rules on detector keys,
+  baseline bounds and retention, restart persistence; the API's Detector
+  tuning routes (admin + same Origin), shadow rows kept out of summary,
+  threat table, device detail and Home Assistant.
 """
 import base64
 import configparser
@@ -1489,8 +1502,22 @@ def t_api():
               and "ads.tv-vendor.example" not in json.dumps(s) and C2_IP not in json.dumps(s),
               "summary: active/new zones/feeds key/quarantine expiry, no indicator (%r)" % sorted(s))
         # Zeek checksum switch: command building, result parsing, state (no zeekctl is ever run here)
-        check(A._zeek_checksums_cmd(True)[1:] == ["--checksums", "on"] and A._zeek_checksums_cmd(False)[1:] == ["--checksums", "off"]
-              and A._zeek_checksums_cmd(True)[0] == A.ZEEK_SITE_SETUP, "zeek: command per state")
+        real_sr = A.ZEEK_SYSTEMD_RUN
+        try:
+            A.ZEEK_SYSTEMD_RUN = os.path.join(H.scratch, "no-systemd-run")
+            direct = (A._zeek_checksums_cmd(True), A._zeek_checksums_cmd(False))
+            A.ZEEK_SYSTEMD_RUN = sys.executable          # any existing file stands in for systemd-run
+            via = A._zeek_checksums_cmd(True) if os.path.isdir("/run/systemd/system") else None
+        finally:
+            A.ZEEK_SYSTEMD_RUN = real_sr
+        check(direct[0] == [A.ZEEK_SITE_SETUP, "--checksums", "on"] and direct[1][-1] == "off",
+              "zeek: command per state (no systemd: the script directly)")
+        check(via is None or (via[0] == sys.executable and "--wait" in via and "--pipe" in via
+                              and "--unit=" + A.ZEEK_SETUP_UNIT in via and via[-3:] == [A.ZEEK_SITE_SETUP, "--checksums", "on"]),
+              "zeek: on systemd the script runs as a transient unit outside the API sandbox (%r)" % via)
+        okb, msgb = A._zeek_checksums_result(1, "Failed to start transient service unit: Unit %s.service was already loaded "
+                                                "or has a fragment file.\n" % A.ZEEK_SETUP_UNIT)
+        check(not okb and "already running" in msgb, "zeek: a second transient run -> 'already running'")
         check(A._zeek_checksums_policy("## x\n@load policy/protocols/conn/mac-logging\nredef ignore_checksums = T;\n")
               and A._zeek_checksums_policy("  redef  ignore_checksums=T ;")
               and not A._zeek_checksums_policy("# redef ignore_checksums = T;\n@load policy/protocols/conn/mac-logging")
@@ -1545,6 +1572,352 @@ def t_api():
         check(H.request("GET", "/api/devices/feeds", role="viewer").json["zeek_checksums"]["installed"] is False
               and H.request("POST", "/api/devices/zeek-checksums", role="admin", origin=H.SAME, body={"enabled": True}).status == 409,
               "zeek: not installed -> hidden state, POST 409")
+    finally:
+        H.close()
+
+
+# ── behaviour detection (Phase 2, 3.3.8) ────────────────────────────────────
+
+MAC_L, MAC_P, MAC_I, MAC_N, MAC_H = ("00:00:5e:00:53:21", "02:00:5e:10:00:22", "00:00:5e:00:53:23",
+                                     "00:00:5e:00:53:24", "00:00:5e:00:53:25")
+BEACON_DOM = "update.rare-cdn.example"
+BEACON_IP = "198.51.100.77"
+
+
+def beh_root(name, config=None):
+    """An engine root with a laptop, a phone, an IoT device on the VLAN, a
+    NAS, a Home Assistant box and a WireGuard peer."""
+    r = make_root(name)
+    w(r + "/var/lib/kea/kea-leases4.csv", leases_csv([
+        ("192.0.2.10", MAC_L, "laptop-l", NOW + 9000), ("192.0.2.11", MAC_P, "phone-p", NOW + 9000),
+        ("192.0.2.70", MAC_I, "esp-a1b2c3", NOW + 9000), ("192.0.2.12", MAC_N, "nas-1", NOW + 9000),
+        ("192.0.2.13", MAC_H, "ha-box", NOW + 9000)]))
+    w(r + "/var/lib/tuxwall/wg-peers.json", json.dumps({"schema": 1, "iface": "wg0", "peers": [
+        {"public_key": WG_PK, "name": "Laptop VPN", "allowed_ips": ["192.0.2.130/32"], "last_handshake": NOW - 30}]}))
+    if config is not None:
+        w(r + "/etc/tuxwall/devices/devicewatch.json", json.dumps(config))
+    src = FakeSources()
+    src.neigh = [{"dst": ip, "dev": dev, "lladdr": mac, "state": ["REACHABLE"]} for ip, dev, mac in (
+        ("192.0.2.10", "lan0", MAC_L), ("192.0.2.11", "lan0", MAC_P), ("192.0.2.70", "lan0.10", MAC_I),
+        ("192.0.2.12", "lan0", MAC_N), ("192.0.2.13", "lan0", MAC_H))]
+    return r, src
+
+
+def beh_logs(r, start):
+    """Twelve hours of traffic: one real beacon, the benign look-alikes, DoH /
+    DoT, a LAN sweep, a router port scan, Home Assistant polling and a backup."""
+    import random
+    rnd = random.Random(5)
+    conns, dnsl, ssl = [], [], []
+    dnsl.append(dns(start, "192.0.2.10", BEACON_DOM, [BEACON_IP], tid=1))
+    dnsl.append(dns(start, "192.0.2.10", "ctldl.windowsupdate.com", ["198.51.100.31"], tid=2))
+    dnsl.append(dns(start, "192.0.2.13", "remote.nabucasa.com", ["198.51.100.32"], tid=3))
+    dnsl.append(dns(start, "192.0.2.11", "api.push.apple.com", ["198.51.100.33"], tid=4))
+    dnsl.append(dns(start, "192.0.2.11", "telemetry.vendor-x.example", ["198.51.100.34"], tid=5))
+    dnsl.append(dns(start, "192.0.2.70", "dns.google", ["8.8.8.8"], tid=6))
+    ssl.append(jl({"ts": start, "id.orig_h": "192.0.2.70", "id.resp_h": "198.51.100.88", "id.resp_p": 443,
+                   "server_name": "Beacon-Two.Example.NET", "established": True}))
+    span = 12 * 3600
+    for k in range(span // 300):                       # the beacon: every 300 s +- 3 s, same size
+        conns.append(conn(start + 60 + k * 300 + rnd.uniform(-3, 3), "192.0.2.10", BEACON_IP, ob=420, rb=900))
+    for k in range(span // 240):                       # a beacon named only by TLS SNI (IoT, every 4 min)
+        conns.append(conn(start + 90 + k * 240 + rnd.uniform(-2, 2), "192.0.2.70", "198.51.100.88", ob=300, rb=500))
+    for k in range(span // 64):                        # NTP every 64 s (port 123: never a beacon)
+        conns.append(conn(start + k * 64, "192.0.2.10", "203.0.113.123", rp=123, proto="udp", ob=76, rb=76))
+    for k in range(span // 900):                       # OS update check every 15 min (allow-list)
+        conns.append(conn(start + 30 + k * 900, "192.0.2.10", "198.51.100.31", ob=800, rb=1500))
+    for k in range(span // 60):                        # Home Assistant cloud keepalive every minute
+        conns.append(conn(start + 5 + k * 60, "192.0.2.13", "198.51.100.32", ob=200, rb=200))
+    for k in range(span // 600):                       # push service every 10 min on 5223
+        conns.append(conn(start + 7 + k * 600, "192.0.2.11", "198.51.100.33", rp=5223, ob=150, rb=150))
+    for ip in ("192.0.2.10", "192.0.2.11", "192.0.2.12"):  # one vendor telemetry used by three devices
+        for k in range(span // 600):
+            conns.append(conn(start + 11 + k * 600 + rnd.uniform(-1, 1), ip, "198.51.100.34", ob=500, rb=500))
+    for k in range(80):                                # irregular browsing to one site
+        conns.append(conn(start + rnd.uniform(0, span), "192.0.2.10", "198.51.100.35"))
+    for k in range(span // 30):                        # Home Assistant polls the IoT device every 30 s (LAN -> VLAN)
+        conns.append(conn(start + 3 + k * 30, "192.0.2.13", "192.0.2.70", rp=80))
+    for k in range(span // 60):                        # VPN laptop backup job: one NAS port, every minute
+        conns.append(conn(start + 13 + k * 60, "192.0.2.130", "192.0.2.12", rp=445, ob=900000, rb=4000))
+    for k in range(200):                               # devices -> the router's own services (DNS, DHCP, NTP, dashboard)
+        ip = ("192.0.2.10", "192.0.2.11", "192.0.2.70")[k % 3]
+        rp, proto = ((53, "udp"), (67, "udp"), (123, "udp"), (443, "tcp"), (53, "tcp"))[k % 5]
+        conns.append(conn(start + 100 + k * 20, ip, "192.0.2.65" if ip == "192.0.2.70" else "192.0.2.1", rp=rp,
+                          proto=proto))
+    conns.append(conn(start + 200, "192.0.2.10", "192.0.2.1", rp=0, proto="icmp"))   # ping the router
+    for k in range(span // 600):                       # browser DoH on the phone (regular, but DNS: never a beacon)
+        conns.append(conn(start + 400 + k * 600, "192.0.2.11", "1.1.1.1", ob=900, rb=3000))
+        conns.append(conn(start + 430 + k * 600, "192.0.2.11", "1.1.1.1", ob=900, rb=3000))
+    conns.append(conn(start + 500, "192.0.2.70", "8.8.8.8", ob=900, rb=3000))
+    conns.append(conn(start + 520, "192.0.2.70", "9.9.9.9", rp=853, ob=900, rb=3000))
+    conns.append(conn(start + 540, "192.0.2.70", "45.90.28.7", rp=853, state="S0", rb=0, hist="S"))   # no answer
+    conns.append(conn(start + 560, "192.0.2.10", "198.51.100.99", rp=853, ob=700, rb=900))           # unlisted DoT
+    sweep = start + 6 * 3600
+    for j in range(2, 40):                             # the IoT device sweeps the LAN on telnet
+        conns.append(conn(sweep + j * 2, "192.0.2.70", "192.0.2.%d" % j, rp=23, state="S0", rb=0, hist="S"))
+    for p in range(1, 31):                             # the VPN peer port-scans the router
+        conns.append(conn(sweep + 300 + p, "192.0.2.130", "192.0.2.129", rp=1000 + p, state="REJ", rb=0, hist="Sr"))
+    conns.sort(key=lambda x: json.loads(x)["ts"])
+    zeek(r, "dns", "".join(dnsl))
+    w(r + "/opt/zeek/spool/manager/ssl.log", "".join(ssl), "a")
+    zeek(r, "conn", "".join(conns))
+
+
+def t_behaviour():
+    L, P, I, N, H = (dw.mac_id(m) for m in (MAC_L, MAC_P, MAC_I, MAC_N, MAC_H))
+    G = dw.wg_id(WG_PK)
+    # detector maths
+    bd = dw.BeaconDetector()
+    reg = [1000 + k * 300 + (k % 3) for k in range(90)]
+    jit = []
+    t = 1000
+    import random
+    rnd = random.Random(3)
+    for k in range(60):
+        t += rnd.uniform(30, 1500)
+        jit.append(int(t))
+    s_reg = bd.score(reg, [420] * 90)
+    s_rnd = bd.score(jit, [rnd.randrange(100, 5000) for _ in jit])
+    check(s_reg and s_reg[0] >= 0.9 and 299 <= s_reg[1]["interval_s"] <= 301 and (s_rnd is None or s_rnd[0] < bd.SCORE_MIN),
+          "beaconing score: regular every 300 s with small jitter >= 0.9, random visits below the threshold (%r / %r)"
+          % (s_reg and s_reg[0], s_rnd and s_rnd[0]))
+    check(bd.score(reg[:20], [1] * 20) is None and bd.score(reg[:30], [1] * 30) is None,
+          "beaconing score: fewer than 24 check-ins or less than 6 h span -> not scored")
+    check(dw.doh_provider("45.90.28.5") == "nextdns" and dw.doh_provider("198.51.100.9", "abc.dns.nextdns.io") == "nextdns"
+          and dw.doh_provider("2606:4700:4700::1111") == "cloudflare" and dw.doh_provider("198.51.100.9", "example.com") is None,
+          "DoH providers: address, network and host-name matches")
+    check(dw.name_in("ctldl.windowsupdate.com", dw.BEACON_ALLOW) and not dw.name_in("windowsupdate.com.evil.example", dw.BEACON_ALLOW)
+          and dw.detector_modes({"detectors": {"beaconing": "on", "dns_bypass": "bogus"}})
+          == {"beaconing": "on", "dns_bypass": "shadow", "internal_scan": "shadow"},
+          "allow-list suffix match at label boundaries; modes default to shadow")
+    sd = dw.ScanDetector()
+    fl = [(NOW + k, "192.0.2.%d" % k, 80, "tcp", False) for k in range(2, 40)]     # answered polls of 38 hosts
+    check(sd.evaluate(fl) == [], "scan: 38 hosts all answered (< 64) is not a sweep")
+    check([k for k, _d in sd.evaluate([(NOW + k, "192.0.2.%d" % k, 22, "tcp", True) for k in range(2, 30)])] == ["hosts:tcp/22"]
+          and [k for k, _d in sd.evaluate([(NOW + k, "192.0.2.50", 1000 + k, "tcp", True) for k in range(20)])] == ["ports:192.0.2.50"]
+          and sd.evaluate([(NOW + k * 60, "192.0.2.%d" % k, 22, "tcp", True) for k in range(2, 30)]) == [],
+          "scan: 28 unanswered hosts / 20 unanswered ports in 10 min fire; the same spread over 28 min does not")
+
+    # the engine, every detector in its default (shadow) mode
+    r, src = beh_root("beh")
+    clock = Clock(NOW - 13 * 3600)
+    eng = dw.Engine(dw.Config(r), src, clock)
+    eng.cycle()                                        # inventory first (baseline devices)
+    beh_logs(r, NOW - 12 * 3600)
+    clock.t = NOW
+    eng.cycle()
+    sh = {(f["device"], f["kind"], f["indicator"]): f for f in eng.shadow.values()}
+    check(set(eng.modes.values()) == {"shadow"}, "defaults: every behaviour detector in shadow mode")
+    b = sh.get((L, "beaconing", BEACON_DOM))
+    check(b is not None and b["reason"] == "shadow" and b["severity"] == "medium" and b["details"]["interval_s"] in (299, 300, 301)
+          and b["details"]["devices"] == 1 and b["details"]["checkins"] >= 140,
+          "D1: a regular beacon to a rare destination (named by DNS) -> shadow row, key = destination (%r)" % (b and b["details"]))
+    b2 = sh.get((I, "beaconing", "beacon-two.example.net"))
+    check(b2 is not None and b2["indicator_type"] == "domain", "D1: destination named by the TLS server name (ssl.log)")
+    beac = [k for k in sh if k[1] == "beaconing"]
+    check(len(beac) == 2, "D1: NTP, OS update checks, HA cloud, push, shared vendor telemetry, browsing -> no beacon (%r)"
+          % beac)
+    d_p = sh.get((P, "dns_bypass", "cloudflare"))
+    d_i = sh.get((I, "dns_bypass", "google"))
+    d_q = sh.get((I, "dns_bypass", "quad9"))
+    d_u = sh.get((L, "dns_bypass", "unlisted"))
+    check(d_p is not None and d_p["severity"] == "info" and d_i is not None and d_i["severity"] == "medium"
+          and d_q is not None and d_q["details"]["protocol"] == "DoT" and d_u is not None and d_u["severity"] == "info"
+          and (I, "dns_bypass", "nextdns") not in sh,
+          "D2: browser DoH on a phone info, DoH/DoT from IoT medium, unlisted DoT from a laptop info, no answer -> nothing")
+    check(d_p["count"] <= 72 and len([k for k in sh if k[0] == P and k[1] == "dns_bypass"]) == 1,
+          "D2: one row per device + provider, counted at most once per 10 min (%d)" % d_p["count"])
+    s_i = sh.get((I, "internal_scan", "hosts:tcp/23"))
+    s_g = sh.get((G, "internal_scan", "ports:router"))
+    check(s_i is not None and s_i["details"]["hosts"] >= 30 and s_g is not None and s_g["details"]["ports"] == 30,
+          "D3: a VLAN device sweeping the LAN and a VPN peer port-scanning the router (%r)" % sorted(k for k in sh if k[1] == "internal_scan"))
+    check(not [k for k in sh if k[1] == "internal_scan" and k[0] in (H, L, P)] and (G, "internal_scan", "hosts:tcp/445") not in sh,
+          "D3: Home Assistant polling, the backup job and router DNS/DHCP/NTP/dashboard/ping -> no scan finding")
+    evp = r + "/var/lib/tuxwall/devices/events.jsonl"
+    evs = [json.loads(x) for x in open(evp)] if os.path.exists(evp) else []
+    check(not any(f["kind"] in dw.BEHAVIOUR_DETECTORS for f in eng.findings.values())
+          and not [e for e in evs + eng.events if e.get("kind") in dw.BEHAVIOUR_DETECTORS],
+          "shadow: nothing in findings.json, no alert event")
+    out = json.load(open(r + "/var/lib/tuxwall/devices/shadow.json"))
+    summ = json.load(open(r + "/var/lib/tuxwall/devices/summary.json"))
+    devs = {d["id"]: d for d in json.load(open(r + "/var/lib/tuxwall/devices/devices.json"))["devices"]}
+    check(len(out["findings"]) == len(eng.shadow) and out["modes"]["beaconing"] == "shadow" and summ["flagged"] == 0
+          and all(d["health"] == "normal" for d in devs.values()),
+          "shadow.json written; health and Flagged unchanged")
+    st = json.load(open(r + "/var/lib/tuxwall/devices/status.json"))
+    check(st["detectors"]["beaconing"]["mode"] == "shadow" and st["detectors"]["beaconing"]["pairs"] > 0
+          and st["baselines"]["devices"] >= 5 and st["baselines"]["established"] == 0,
+          "status: detector stats + baseline counts (%r)" % st["baselines"])
+    # expected / silence with detector keys
+    ent = [{"device": L, "kind": "beaconing", "indicator": BEACON_DOM}]
+    check(dw.is_expected(b, ent) and not dw.is_expected(b2, ent), "expected: device + detector + key")
+    V = dw.validate_silence_rule
+    check(dw.silence_match(b, [V({"scope": "suffix", "suffix": "rare-cdn.example"}, NOW)], NOW)
+          and dw.silence_match(s_i, [V({"scope": "device_kind", "device": I, "kind": "internal_scan"}, NOW)], NOW)
+          and dw.silence_match(d_p, [V({"scope": "indicator", "indicator": "cloudflare", "kind": "dns_bypass"}, NOW)], NOW)
+          and not dw.silence_match(d_i, [V({"scope": "indicator", "indicator": "cloudflare"}, NOW)], NOW),
+          "silence: domain suffix, device + kind and provider rules match detector keys")
+    # restart persistence
+    eng.save_state()
+    for n in ("baselines.json", "detectors.json", "engine.json"):
+        check(os.stat(r + "/var/lib/tuxwall/devices/" + n).st_mode & 0o777 == 0o600, "%s private (0600)" % n)
+    eng2 = dw.Engine(dw.Config(r), src, Clock(NOW + 30))
+    eng2.load_state()
+    bd2 = [d for d in eng2.detectors if d.name == "beaconing"][0]
+    check(set(eng2.shadow) == set(eng.shadow) and set(eng2.baselines.devs) == set(eng.baselines.devs)
+          and (L, BEACON_DOM) in bd2.pairs and len(bd2.pairs[(L, BEACON_DOM)][0]) >= 140
+          and eng2.baselines.devs[L]["hours"] == eng.baselines.devs[L]["hours"],
+          "restart: shadow rows, baselines and beaconing check-ins restored")
+    p = bd2.pairs[(L, BEACON_DOM)]
+    check(p[5] > 0 and bd2.on_cycle(eng2, NOW + 3000) == [], "restart: a reported pair is not reported again within 6 h")
+
+    # mode on: learning devices stay in shadow, established ones become findings (capped at medium)
+    r, src = beh_root("beh-on", {"detectors": {"beaconing": "on", "dns_bypass": "on", "internal_scan": "off"}})
+    clock = Clock(NOW - 13 * 3600)
+    eng = dw.Engine(dw.Config(r), src, clock)
+    eng.cycle()
+    beh_logs(r, NOW - 12 * 3600)
+    clock.t = NOW
+    eng.baselines.devs[I] = dict(eng.baselines._rec(I, NOW - 9 * 86400), start=int(NOW - 9 * 86400), hours=60)
+    eng.cycle()
+    f_i = [f for f in eng.findings.values() if f["device"] == I and f["kind"] == "dns_bypass"]
+    f_l = [f for f in eng.findings.values() if f["device"] == L]
+    evs = [json.loads(x) for x in open(r + "/var/lib/tuxwall/devices/events.jsonl")]
+    check(f_i and all(f["severity"] == "medium" for f in f_i) and [e["kind"] for e in evs if e.get("device") == I
+                                                                    and e.get("kind") == "dns_bypass"]
+          and any(f["kind"] == "beaconing" for f in eng.findings.values() if f["device"] == I),
+          "mode on + established device: normal findings with alert events")
+    check(not f_l and eng.shadow and all(f["reason"] == "learning" for f in eng.shadow.values())
+          and any(f["device"] == L and f["kind"] == "beaconing" for f in eng.shadow.values()),
+          "mode on: a device still learning never alerts (shadow row, reason learning)")
+    check(not any(f["kind"] == "internal_scan" for f in list(eng.findings.values()) + list(eng.shadow.values()))
+          and [d for d in eng.detectors if d.name == "internal_scan"][0].ev == {},
+          "mode off: no finding, no state kept")
+    spec = {"kind": "beaconing", "indicator": "x.example", "indicator_type": "domain", "severity": "high", "title": "t"}
+    det = [d for d in eng.detectors if d.name == "beaconing"][0]
+    check(eng.record_behaviour(det, I, dict(spec), NOW)["severity"] == "medium"
+          and eng.record_behaviour(det, I, dict(spec, indicator="y.example", intel=True), NOW)["severity"] == "high",
+          "severity capped at medium unless combined with a threat-intel hit")
+    devs = {d["id"]: d for d in json.load(open(r + "/var/lib/tuxwall/devices/devices.json"))["devices"]}
+    check(devs[I]["health"] == "warning", "mode on: the established IoT device's medium findings count toward health")
+
+    # baselines: bounds and retention
+    bl = dw.Baselines()
+    for day in range(45):
+        for h in range(0, 24, 6):
+            ts = (NOW // 86400) * 86400 - (44 - day) * 86400 + h * 3600 + 60
+            bl.flow(L, ts, "198.51.100.%d" % (day % 200), 100, 50, "C%d" % (day % 90), 1000 + day * 7 + h)
+            bl.dns(L, ts, "abc%d.example" % h, "NXDOMAIN" if h else "NOERROR")
+    rec = bl.devs[L]
+    check(len(rec["days"]) <= dw.BASELINE_DAYS + 1 and len(rec["ports"]) <= dw.BASELINE_PORTS_MAX
+          and len(rec["cty"]) <= dw.BASELINE_COUNTRIES_MAX and rec["hours"] == 45 * 4,
+          "baselines: <= 31 daily buckets, bounded ports/countries, active hours counted (%d days)" % len(rec["days"]))
+    bl.fold()
+    today = rec["days"][max(rec["days"])]
+    check(today["n"] == 4 and today["q"] == 4 and today["nx"] == 3 and today["dst"] >= 1 and sum(today["ent"]) == 4
+          and today["pt"] == 4, "baselines: daily flows, DNS/NXDOMAIN, entropy histogram, distinct counts (%r)" % today)
+    check(bl.established(L, NOW) and not bl.established(P, NOW), "baselines: established after 7 days with enough active hours")
+    bl.flow(P, NOW - 8 * 86400, "198.51.100.1", 1, 1, "", 443)
+    check(not bl.established(P, NOW), "baselines: 7 days old but only one active hour -> still learning")
+    j = json.loads(json.dumps(bl.to_json()))
+    bl2 = dw.Baselines()
+    bl2.from_json(j)
+    check(bl2.devs[L]["hours"] == rec["hours"] and set(bl2.devs[L]["days"]) == set(rec["days"]) and not json.dumps(j).count("198.51.100"),
+          "baselines: JSON round trip, aggregates only (no destination stored)")
+    bl2.prune(NOW + 31 * 86400)
+    check(L not in bl2.devs and not bl2.cur, "baselines: a device not seen for 30 days is dropped (retention)")
+
+
+def t_behaviour_api():
+    import api_harness
+    H = api_harness.Harness()
+    A = H.mod
+    try:
+        st = os.path.join(H.scratch, "dw-state")
+        conf = os.path.join(H.scratch, "dw-conf")
+        os.makedirs(st)
+        os.makedirs(conf)
+        A.DEVICES_STATE_DIR, A.DEVICES_CONF_DIR = st, conf
+        now = time.time()
+        dev = {"id": dw.mac_id(MAC_I), "kind": "mac", "name": "esp-a1b2c3", "mac": MAC_I, "type": "iot",
+               "first_seen": int(now - 86400 * 9), "last_seen": int(now), "online": True, "baseline": True,
+               "health": "normal", "risk": 0, "reason": "", "zone": "opt1", "activity": {}}
+        w(st + "/devices.json", json.dumps({"schema": 1, "generated_at": int(now), "devices": [dev]}))
+        w(st + "/findings.json", json.dumps({"schema": 1, "generated_at": int(now), "findings": []}))
+        day = str(int(now // 86400))
+        rows = [{"id": "a" * 16, "device": dev["id"], "kind": "beaconing", "indicator": BEACON_DOM, "indicator_type": "domain",
+                 "severity": "medium", "title": "Regular check-ins every 5 min to " + BEACON_DOM, "source": "beaconing",
+                 "first": now - 7200, "last": now - 60, "count": 3, "details": {"interval_s": 300, "checkins": 140},
+                 "shadow": True, "reason": "shadow", "detector": "beaconing", "days": {day: 3}},
+                {"id": "b" * 16, "device": dev["id"], "kind": "internal_scan", "indicator": "hosts:tcp/23",
+                 "indicator_type": "pattern", "severity": "medium", "title": "Contacted 38 devices in 10 min (tcp/23)",
+                 "source": "internal_scan", "first": now - 9 * 86400, "last": now - 9 * 86400, "count": 1, "details": {},
+                 "shadow": True, "reason": "shadow", "detector": "internal_scan", "days": {}}]
+        w(st + "/shadow.json", json.dumps({"schema": 1, "generated_at": int(now), "findings": rows}))
+        w(st + "/status.json", json.dumps({"generated_at": int(now), "baselines": {"devices": 5, "established": 1, "learning": 4},
+                                           "detectors": {"beaconing": {"mode": "shadow", "pairs": 10}}}))
+        check(H.request("GET", "/api/devices/detectors", role=None).status == 401
+              and H.request("GET", "/api/devices/detectors", role="viewer").status == 403,
+              "tuning GET: no session 401, viewer 403")
+        r = H.request("GET", "/api/devices/detectors", role="admin")
+        d = {x["name"]: x for x in r.json["detectors"]}
+        check(r.status == 200 and [x["name"] for x in r.json["detectors"]] == list(dw.BEHAVIOUR_DETECTORS)
+              and all(x["mode"] == "shadow" for x in d.values()) and d["beaconing"]["counts"]["h24"] == 1
+              and d["beaconing"]["counts"]["hits_7d"] == 3 and d["internal_scan"]["counts"] == dict(
+                  d["internal_scan"]["counts"], h24=0, d7=0, total=1)
+              and d["beaconing"]["top"][0]["key"] == BEACON_DOM and d["beaconing"]["rows"][0]["guidance"]["key"] == "beaconing"
+              and d["beaconing"]["rows"][0]["guidance"]["device_class"] == "iot" and r.json["baselines"]["learning"] == 4,
+              "tuning GET: modes (default shadow), 24 h / 7 d counts, top keys, rows with guidance, baselines (%r)"
+              % {k: v["counts"] for k, v in d.items()})
+        # shadow rows never reach the summary, the threat table, the device detail or Home Assistant
+        s = H.request("GET", "/api/devices/summary", role="viewer").json
+        rec = H.request("GET", "/api/devices/findings/recent?limit=50&silenced=1", role="admin").json
+        det = H.request("GET", "/api/devices/" + dev["id"], role="admin").json
+        A.build_devices_summary.__globals__["_INTEG_CACHES"]["devices"].drop()
+        integ = A._integ_devices()
+        check(s["flagged"] == 0 and s["findings_active"] == 0 and not [x for x in rec["findings"] if x["kind"] == "beaconing"]
+              and det["findings"] == [] and det["device"]["health"] == "normal" and integ["findings"] == []
+              and BEACON_DOM not in json.dumps(integ),
+              "shadow rows: not in health/Flagged, threat table, device detail or Home Assistant")
+        # mode changes: admin + same Origin, validated, merged into devicewatch.json
+        w(conf + "/devicewatch.json", json.dumps({"retention_days": 30, "detectors": {"dns_bypass": "off", "junk": "on"}}))
+        check(H.request("POST", "/api/devices/detectors", role="viewer", origin=H.SAME,
+                        body={"detector": "beaconing", "mode": "on"}).status == 403
+              and H.request("POST", "/api/devices/detectors", role="admin", origin="https://evil.example.com",
+                            body={"detector": "beaconing", "mode": "on"}).status == 403
+              and H.request("POST", "/api/devices/detectors", role="admin", origin=H.SAME,
+                            body={"detector": "beaconing", "mode": "loud"}).status == 400
+              and H.request("POST", "/api/devices/detectors", role="admin", origin=H.SAME,
+                            body={"detector": "nope", "mode": "on"}).status == 400
+              and json.load(open(conf + "/devicewatch.json"))["detectors"]["dns_bypass"] == "off",
+              "tuning POST: viewer 403, foreign Origin 403, bad mode / detector 400, nothing written")
+        r = H.request("POST", "/api/devices/detectors", role="admin", origin=H.SAME, body={"detector": "beaconing", "mode": "on"})
+        cfg = json.load(open(conf + "/devicewatch.json"))
+        check(r.status == 200 and cfg == {"retention_days": 30, "detectors": {"beaconing": "on", "dns_bypass": "off"}}
+              and {x["name"]: x["mode"] for x in r.json["detectors"]} == {"beaconing": "on", "dns_bypass": "off",
+                                                                          "internal_scan": "shadow"}
+              and os.stat(conf + "/devicewatch.json").st_mode & 0o777 == 0o644,
+              "tuning POST: mode stored (other settings kept, junk dropped, 0644 for the engine) (%r)" % cfg)
+        # Mark expected / Silence on a shadow row
+        r = H.request("POST", "/api/devices/%s/expected" % dev["id"], role="admin", origin=H.SAME,
+                      body={"finding": "a" * 16, "expected": True})
+        ent = json.load(open(conf + "/expected.json"))["entries"]
+        rows2 = {x["id"]: x for x in H.request("GET", "/api/devices/detectors", role="admin").json["detectors"][0]["rows"]}
+        check(r.status == 200 and ent[0]["kind"] == "beaconing" and ent[0]["indicator"] == BEACON_DOM
+              and rows2["a" * 16]["expected"] is True, "Mark expected works on a shadow row (device + detector + key)")
+        r = H.request("POST", "/api/devices/silence", role="admin", origin=H.SAME,
+                      body={"action": "add", "rule": {"scope": "device_kind", "device": dev["id"], "kind": "internal_scan"}})
+        rows3 = {x["id"]: x for x in H.request("GET", "/api/devices/detectors", role="admin").json["detectors"][2]["rows"]}
+        check(r.status == 200 and rows3["b" * 16]["silenced"], "a silence rule for the device + detector covers its shadow row")
+        r = H.request("GET", "/api/devices/findings/recent", role="admin")
+        check(r.status == 200, "recent rows still answer")
+        # mode on: a behaviour finding in findings.json gets its label / action / guidance in the threat table
+        f_on = dict(rows[0], id="c" * 16, indicator="other.rare-cdn.example", shadow=None, reason=None)
+        w(st + "/findings.json", json.dumps({"schema": 1, "generated_at": int(now), "findings": [f_on]}))
+        x = [x for x in H.request("GET", "/api/devices/findings/recent?silenced=1", role="admin").json["findings"]
+             if x["id"] == "c" * 16]
+        check(x and x[0]["feed"] == "Behaviour: beaconing" and x[0]["action"] == "beacon" and x[0]["guidance"]["key"] == "beaconing",
+              "mode on: behaviour findings in the threat table (label, action, guidance)")
     finally:
         H.close()
 
@@ -1630,7 +2003,7 @@ def t_units():
 
 
 for t in (t_follower, t_feeds, t_engine, t_campaign4, t_false_positives, t_small_batch, t_score, t_silence, t_units,
-          t_guidance, t_api):
+          t_guidance, t_behaviour, t_api, t_behaviour_api):
     try:
         t()
     except Exception:

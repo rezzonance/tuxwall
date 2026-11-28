@@ -5,7 +5,9 @@
    status cards (Flagged, Quarantined, New 24 h, Active clients = seen in the
    last 10 minutes, Threat feeds; clickable), the device threats table (with
    "Show silenced"), silence rules (Silenced card + the Silence dialog, also
-   on the device panel's findings), monitoring sources and their warnings
+   on the device panel's findings), Detector tuning (behaviour detectors:
+   Off / Shadow / On, their shadow findings with Silence / Mark expected),
+   monitoring sources and their warnings
    (Suricata without a LAN interface, Zeek without MACs / with bad checksums;
    the Zeek "Ignore checksums" switch), threat intelligence (feeds, abuse.ch
    Auth-Key, local indicators). Settings > Alerts > Device alerts. The same
@@ -16,14 +18,15 @@
    guidance (finding kind x device type); IDS findings in the panel also
    "Suppress rule" (window.twSuricataSuppress, scripts/suricata-suppress.js).
    Data: GET /api/devices/summary, /feeds (everyone), /api/devices/<id>,
-   /indicators, /alerts, /silence, /findings/recent[?silenced=1] (admin);
+   /indicators, /alerts, /silence, /detectors, /findings/recent[?silenced=1] (admin);
    POST /api/devices/<id>/{quarantine,unquarantine,rename,expected,new-ack},
    /api/devices/feeds/{update,key}, /api/devices/indicators, /alerts,
-   /silence, /zeek-checksums (admin + same Origin).
+   /silence, /zeek-checksums, /detectors (admin + same Origin).
    The per-device outbound profile ("LAN Device Activity", formerly a
    Security card) comes from GET /api/security/zeek. Markup: index.html
    (#dev-modal, #dev-q-modal, #dev-s-modal, #dev-stats, #dev-threat-card,
-   #dev-threat-table, #dev-silence-card, #dev-src-card, #dev-zeek-ck,
+   #dev-threat-table, #dev-silence-card, #dev-tune-card, #dev-tune-table,
+   #dev-src-card, #dev-zeek-ck,
    #dev-src-hint, #ti-card, #ti-viewer-card, #dev-alerts-card, #ov-dev-flagged);
    shared classes only (card, modal, badge, dot, btn, stat-card, cs-set,
    fw-switch, vl-info, alerts-grid, ov-kv, chart-legend, bw-canvas). */
@@ -45,6 +48,7 @@
     c2_connection: "Botnet C2 connection", intel_connection: "Malware host connection",
     intel_attempt: "Blocked/failed connection attempt", intel_inbound: "Inbound from a listed host",
     dns_lookup: "Malware domain lookup", dns_blocked: "Blocked malware domain lookup", ids_alert: "IDS alert",
+    beaconing: "Beaconing", dns_bypass: "DNS bypass", internal_scan: "Internal scanning",
   };
   const EXPIRY_LABEL = { none: "No expiry", "1h": "1 hour", "24h": "24 hours", "7d": "7 days" };
   const SILENCE_EXPIRY = { "7d": "7 days", "30d": "30 days", forever: "Forever" };
@@ -288,7 +292,10 @@
     renderRecent();
   }
 
-  const ACTION_LABEL = { blocked: "blocked", attempted: "attempted, no answer", lookup: "looked up", contacted: "contacted" };
+  const ACTION_LABEL = {
+    blocked: "blocked", attempted: "attempted, no answer", lookup: "looked up", contacted: "contacted",
+    beacon: "regular check-ins", dns: "own encrypted DNS", scanned: "scan pattern",
+  };
 
   function recentRows(list) {
     return list.map((x, i) => {
@@ -755,6 +762,7 @@
     if (!m || !isAdmin) return;
     silenceDone = onDone || null;
     const isSig = String(f.indicator || "").startsWith("sid:");
+    const isKey = f.indicator_type === "provider" || f.indicator_type === "pattern";   // behaviour detector keys
     const dom = findingDomain(f);
     const crit = !!f.critical || f.kind === "c2_connection";
     const kl = kindLabel(f.kind);
@@ -766,7 +774,7 @@
       <h3 id="dev-s-title">Silence findings</h3>
       <p class="muted dev-small">${sevBadge(f.severity)} ${esc(f.title || kl)} — ${esc(dev)}${f.indicator ? ` · <span class="mono">${esc(f.indicator)}</span>` : ""}</p>
       <div class="dev-q-modes">
-        ${f.indicator ? opt("indicator", true, isSig ? "This signature on all devices" : "This address or domain on all devices",
+        ${f.indicator ? opt("indicator", true, isSig ? "This signature on all devices" : isKey ? `This ${f.indicator_type} on all devices` : "This address or domain on all devices",
           `<span class="mono">${esc(f.indicator)}</span>, whatever device it shows up on`) : ""}
         ${opt("device_kind", !f.indicator, `${esc(dev)}: every “${esc(kl)}”`, "Only this device, every indicator of this kind")}
         ${dom ? `<label class="dev-q-mode"><input type="radio" name="dev-s-scope" value="suffix">
@@ -831,6 +839,7 @@
 
   function afterSilenceChange() {
     renderSilence();
+    loadTune();
     loadRecent();
     loadSummary();
     if (silenceDone) silenceDone();
@@ -899,6 +908,148 @@
     afterSilenceChange();
   }
 
+  // ── Security > Local: Detector tuning (behaviour detectors, shadow mode) ─
+  // Modes Off / Shadow / On (shared seg-btns), counts of the would-be
+  // findings (24 h / 7 days), top keys, and the shadow rows with Silence /
+  // Mark expected; nothing here counts toward health or sends alerts.
+  const MODE_LABEL = { off: "Off", shadow: "Shadow", on: "On" };
+  const MODE_STATE = { off: "off", shadow: "warn", on: "on" };
+  let tuneData = null;
+  let tuneRows = [];             // the table's rows (Silence opens the dialog with one)
+
+  async function loadTune() {
+    if (!$("dev-tune-card") || !isAdmin) return;
+    try {
+      tuneData = await getJSON("/api/devices/detectors");
+    } catch (err) {
+      tuneData = { error: err.message };
+    }
+    renderTune();
+  }
+
+  function tuneDetail(r) {
+    const d = r.details || {};
+    if (r.kind === "beaconing") {
+      return [d.interval_s != null ? `every ${d.interval_s < 120 ? `${d.interval_s} s` : `${Math.round(d.interval_s / 60)} min`}` : "",
+        d.checkins ? `${num(d.checkins)} check-ins over ${d.span_h} h` : "", d.score != null ? `score ${d.score}` : "",
+        d.devices > 1 ? `${num(d.devices)} devices use it` : ""].filter(Boolean).join(" · ");
+    }
+    if (r.kind === "dns_bypass") return [d.protocol, d.server || d.peer].filter(Boolean).join(" · ");
+    if (r.kind === "internal_scan") {
+      return d.pattern === "hosts" ? `${num(d.hosts)} hosts in ${d.window_min} min · ${Math.round((d.failed_share || 0) * 100)} % unanswered`
+        : `${num(d.ports)} ports in ${d.window_min} min · ${Math.round((d.failed_share || 0) * 100)} % unanswered`;
+    }
+    return "";
+  }
+
+  function renderTune(msg) {
+    const set = $("dev-tune-set");
+    const badge = $("dev-tune-badge");
+    const table = $("dev-tune-table");
+    if (!set || !tuneData) return;
+    const m = $("dev-tune-msg");
+    if (m && msg != null) m.textContent = msg;
+    if (tuneData.error) {
+      set.innerHTML = `<p class="login-error">${esc(tuneData.error)}</p>`;
+      return;
+    }
+    const dets = tuneData.detectors || [];
+    const d7 = dets.reduce((a, d) => a + ((d.counts || {}).d7 || 0), 0);
+    if (badge) {
+      const modes = dets.map((d) => d.mode);
+      const sh = modes.filter((x) => x === "shadow").length;
+      const on = modes.filter((x) => x === "on").length;
+      badge.textContent = [sh ? `${sh} in shadow` : "", on ? `${on} on` : "", `${num(d7)} in 7 days`].filter(Boolean).join(" · ");
+      badge.className = "badge " + (on ? "badge-ok" : "badge-static");
+    }
+    const bl = tuneData.baselines || {};
+    set.innerHTML = dets.map((d) => {
+      const c = d.counts || {};
+      const seg = (tuneData.modes || ["off", "shadow", "on"]).map((x) => `<button type="button" class="seg-btn${x === d.mode ? " active" : ""}" data-dev-tune-mode="${esc(x)}" data-dev-tune-det="${esc(d.name)}" aria-pressed="${x === d.mode}">${esc(MODE_LABEL[x] || x)}</button>`).join("");
+      const top = (d.top || []).slice(0, 3).map((k) => `<span class="mono">${esc(k.key)}</span> (${num(k.devices)} device${k.devices === 1 ? "" : "s"}, ${num(k.hits)}×)`).join(", ");
+      const status = [`${num(c.h24)} in 24 h · ${num(c.d7)} in 7 days (${num(c.hits_7d)} time${c.hits_7d === 1 ? "" : "s"})`,
+        c.expected || c.silenced ? `${num(c.expected)} expected · ${num(c.silenced)} silenced` : "",
+        c.learning ? `${num(c.learning)} held back while devices learn` : ""].filter(Boolean).join(" · ");
+      return `<div class="cs-set-row" data-dev-tune="${esc(d.name)}">
+          <div class="cs-set-copy">
+            <span class="cs-set-title">${esc(d.title)}</span>
+            <span class="cs-set-desc">${esc(d.description)}</span>
+            <span class="cs-set-status">${esc(status)}</span>
+            ${top ? `<span class="cs-set-desc">Top: ${top}</span>` : ""}
+          </div>
+          <div class="cs-set-ctl">
+            <span class="cs-badge" data-state="${MODE_STATE[d.mode] || "unknown"}">${esc(MODE_LABEL[d.mode] || d.mode)}</span>
+            <div class="seg-btns" role="group" aria-label="${esc(d.title)} mode">${seg}</div>
+          </div>
+        </div>`;
+    }).join("") + `<p class="cs-set-desc dev-tune-learn">Baselines: ${num(bl.established)} of ${num(bl.devices)} devices established, ${num(bl.learning)} still learning (${num(tuneData.learn_days)} days and ${num(tuneData.learn_min_hours)} active hours each).</p>`;
+    const rows = [];
+    dets.forEach((d) => (d.rows || []).forEach((r) => rows.push(Object.assign({ detector_title: d.title }, r))));
+    rows.sort((a, b) => (b.last || 0) - (a.last || 0));
+    tuneRows = rows;
+    if (table) {
+      table.tBodies[0].innerHTML = rows.map((r, i) => {
+        const gid = guideId("t", r.id);
+        const act = r.expected
+          ? `<span class="badge badge-static" title="Marked expected">Expected</span>
+             <button class="btn btn-sm btn-ghost" type="button" data-dev-tune-exp="${esc(r.id)}" data-dev="${esc(r.device)}" data-unmark="1" title="Remove the expected mark">Unmark</button>`
+          : r.silenced
+            ? `<span class="badge badge-static" title="Hidden by a silence rule">Silenced</span>
+               <button class="btn btn-sm btn-ghost" type="button" data-dev-unsilence="${esc(r.silenced)}">Unsilence</button>`
+            : `<button class="btn btn-sm btn-ghost" type="button" data-dev-tune-silence="${i}" title="Silence: a rule for this and similar findings">Silence</button>
+               <button class="btn btn-sm btn-ghost" type="button" data-dev-tune-exp="${esc(r.id)}" data-dev="${esc(r.device)}" title="Mark as expected: also once the detector is on">Mark expected</button>`;
+        const det = tuneDetail(r);
+        return `<tr class="${r.expected || r.silenced ? "dev-f-expected" : ""}">
+          <td>${sevBadge(r.severity)}${r.reason === "learning" ? `<br><span class="muted" title="Detector on, but the device is still learning">learning</span>` : ""}</td>
+          <td>${esc(r.detector_title)}</td>
+          <td>${esc(r.title)}<br><span class="mono">${esc(r.indicator)}</span>${det ? `<br><span class="muted">${esc(det)}</span>` : ""}</td>
+          <td><a href="#clients" data-dev-goto="${esc(r.device)}">${esc(r.device_name || r.device)}</a></td>
+          <td title="${esc(when(r.last))}">${esc(ago(r.last))}<br><span class="muted">${num(r.count)}×</span></td>
+          <td class="td-right dev-row-acts">${guideBtn(gid, r.guidance)}${act}</td>
+        </tr>${guideRow(gid, r.guidance, 6)}`;
+      }).join("");
+    }
+    const wrap = $("dev-tune-rows");
+    if (wrap) wrap.hidden = !rows.length;
+    const empty = $("dev-tune-empty");
+    if (empty) empty.hidden = !!rows.length;
+  }
+
+  async function setTuneMode(btn) {
+    const det = btn.dataset.devTuneDet;
+    const mode = btn.dataset.devTuneMode;
+    const d = ((tuneData && tuneData.detectors) || []).find((x) => x.name === det);
+    if (!d || d.mode === mode) return;
+    const what = {
+      on: `Switch “${d.title}” on? Its findings then count toward device health and Flagged and send alerts (at most medium unless a threat feed lists the server; devices still learning stay in shadow).`,
+      shadow: `Put “${d.title}” in shadow mode? It keeps recording here only — no health change and no alerts.`,
+      off: `Switch “${d.title}” off? It stops looking; its recorded shadow findings stay until they age out.`,
+    }[mode];
+    if (!(await confirmDlg(what))) return;
+    btn.disabled = true;
+    const r = await post("/api/devices/detectors", { detector: det, mode });
+    btn.disabled = false;
+    if (!r.ok) {
+      renderTune(r.data.error || `Not changed (HTTP ${r.status})`);
+      return;
+    }
+    tuneData = r.data;
+    renderTune(`${d.title}: ${MODE_LABEL[mode]} — the engine applies it within a minute.`);
+  }
+
+  async function tuneExpected(btn) {
+    const mark = !btn.dataset.unmark;
+    if (mark && !(await confirmDlg("Mark this as expected? It is greyed out here and never alerts once the detector is on. Unmark it here any time."))) return;
+    btn.disabled = true;
+    const r = await post(`/api/devices/${btn.dataset.dev}/expected`, { finding: btn.dataset.devTuneExp, expected: mark });
+    if (!r.ok) {
+      btn.disabled = false;
+      renderTune(r.data.error || "Failed");
+      return;
+    }
+    await loadTune();
+  }
+
   // ── Security > Local: monitoring sources + threat intelligence ─────────
   const FEED_STATUS = {
     ok: ["Current", "badge-ok"], needs_key: ["Needs Auth-Key", "badge-static"], disabled: ["Off", "badge-static"],
@@ -907,7 +1058,7 @@
 
   async function loadFeeds() {
     if (!$("dev-src-card") || !roleKnown) return;
-    if (isAdmin) loadSilence();
+    if (isAdmin) { loadSilence(); loadTune(); }
     try {
       const [feeds, ind] = await Promise.all([getJSON("/api/devices/feeds"),
         isAdmin ? getJSON("/api/devices/indicators") : Promise.resolve(null)]);
@@ -1161,6 +1312,8 @@
     if (al) al.hidden = !isAdmin;
     const sc = $("dev-silence-card");
     if (sc) sc.hidden = !isAdmin;
+    const tc = $("dev-tune-card");
+    if (tc) tc.hidden = !isAdmin;
     const card = $("dev-threat-card");
     if (card) card.hidden = false;
     if (!isAdmin) { closePanel(); closeSilence(); recent = []; renderRecent(); }
@@ -1189,6 +1342,12 @@
       if (sr && recent[Number(sr.dataset.devSilenceRow)]) openSilence(recent[Number(sr.dataset.devSilenceRow)]);
       const us = e.target.closest && e.target.closest("[data-dev-unsilence]");
       if (us) unsilence(us);
+      const tm = e.target.closest && e.target.closest("[data-dev-tune-mode]");
+      if (tm) setTuneMode(tm);
+      const te = e.target.closest && e.target.closest("[data-dev-tune-exp]");
+      if (te) tuneExpected(te);
+      const ts = e.target.closest && e.target.closest("[data-dev-tune-silence]");
+      if (ts && tuneRows[Number(ts.dataset.devTuneSilence)]) openSilence(tuneRows[Number(ts.dataset.devTuneSilence)]);
       const st = e.target.closest && e.target.closest("#dev-stats [data-dev-st]");
       if (st) statClick(st);
       const gb = e.target.closest && e.target.closest("[data-dev-guide]");

@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
   <link rel="stylesheet" href="/css/style.css?v=202611210025">
-  <link rel="stylesheet" href="/css/polish.css?v=202611280828">
+  <link rel="stylesheet" href="/css/polish.css?v=202611282230">
   <link rel="stylesheet" href="/css/firewall.css?v=202611210025">
   <link rel="stylesheet" href="/css/bento.css?v=202611210025">
   <link rel="stylesheet" href="/css/heroes.css?v=202611210025">
@@ -1725,6 +1725,27 @@
         </div>
         <p class="vl-info">Rules for known chatty apps: matching findings are still recorded (tick <b>Show silenced</b> above to see them) but do not count toward a device's health or <b>Flagged</b>, and send no push or Home Assistant alerts. Create one with <b>Silence…</b> on a finding.</p>
         <div id="dev-silence-body"></div>
+      </div>
+
+      <!-- Detector tuning (admin; GET/POST /api/devices/detectors): behaviour
+           detectors' modes (Off / Shadow / On) and their shadow findings -->
+      <div class="card" id="dev-tune-card" hidden>
+        <div class="card-head">
+          <h2>Detector tuning</h2>
+          <span class="badge" id="dev-tune-badge">…</span>
+        </div>
+        <p class="vl-info">Behaviour detectors look for what threat lists cannot know: regular check-ins to a rarely used server, encrypted DNS that bypasses the router, a device scanning the network. They start in <b>Shadow</b> mode: what they would report is listed only here — no health change, no <b>Flagged</b>, no push or Home Assistant alert. Review the list for about a week, mark known causes expected or silence them, then switch a detector <b>On</b>. Even then each device first learns for 7 days, and these findings stay at most medium unless a threat feed lists the same server.</p>
+        <div class="cs-set dev-tune-set" id="dev-tune-set"></div>
+        <p class="cs-set-msg" id="dev-tune-msg" role="status" aria-live="polite"></p>
+        <div class="dev-tune-rows" id="dev-tune-rows" hidden>
+          <div class="table-wrap">
+            <table class="dev-table" id="dev-tune-table">
+              <thead><tr><th>Severity</th><th>Detector</th><th>Would report</th><th>Client</th><th>Seen</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <p class="muted dev-tune-empty" id="dev-tune-empty" hidden>No shadow findings yet.</p>
       </div>
 
       <div class="card" id="dev-src-card">
@@ -4315,9 +4336,9 @@
 <script src="/scripts/worldmap.js?v=202611210025"></script>
 <script src="/scripts/community-settings.js?v=202611281900"></script>
 <script src="/scripts/https-settings.js?v=202611231900"></script>
-<script src="/scripts/devices.js?v=202611281900"></script>
+<script src="/scripts/devices.js?v=202611282230"></script>
 <script src="/scripts/suricata-suppress.js?v=202611281900"></script>
-<script src="/scripts/dashboard.js?v=202611281900"></script>
+<script src="/scripts/dashboard.js?v=202611282230"></script>
 <script src="/scripts/enhance.js?v=202611281900"></script>
 <script src="/scripts/netmap.js?v=202611210025"></script>
 <script src="/scripts/insights.js?v=202611210025"></script>

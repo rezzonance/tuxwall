@@ -494,6 +494,21 @@ abuse.ch data is CC0 (attribution: abuse.ch). Since 21 October 2026 URLhaus and 
 
 **Limits**: only traffic that passes the router is seen (two devices on the same switch talking directly are invisible), encrypted traffic is metadata only (who, when, how much - not content), Zeek and Suricata must be running for connection and IDS data, and threat-intel matching only finds *known* bad infrastructure.
 
+### Behaviour detection (shadow mode)
+
+Threat lists only know known-bad servers. Behaviour detectors look for what a compromised device *does*, from the same connection metadata (no content, nothing leaves the router):
+
+| Detector | Looks for | Ignores | Severity | Key (for *Mark expected* / *Silence*) |
+|---|---|---|---|---|
+| **Beaconing** | at least 24 check-ins in 24 h, spread over 6 h or more, to one destination at very regular intervals (median interval, jitter, share of regular intervals, request size) | time (NTP), DNS, mDNS, private addresses, a curated list of periodic services (OS updates and telemetry, Apple/Google/Microsoft push and connectivity checks, Home Assistant cloud, big media/messaging apps, common smart-home clouds), the shared platforms, public DNS resolvers, and destinations used by 3 or more devices (10 % of the fleet on larger networks) | low; medium for a near-perfect beacon no other device uses | the destination (TLS server name or DNS name, else the address) |
+| **DNS bypass** | completed connections to public DoH resolvers (Cloudflare, Google, Quad9, NextDNS, AdGuard, OpenDNS, Mullvad, Control D, CleanBrowsing, DNS.SB, Yandex, AliDNS, Xfinity; curated list of host names and addresses) on 443 (TCP or QUIC), or anything on 853 (DoT/DoQ) | the router's own resolver; attempts that got no answer | info for computers, phones/tablets and VPN peers (usually a browser's secure DNS); medium for IoT and unknown devices | the provider |
+| **Internal scanning** | within 10 minutes, one device trying 20+ other hosts (mostly unanswered) or 64+ hosts at all, or 15+ ports on one host or the router (mostly unanswered) or 100+ ports - from flows that pass the router (VLAN ↔ LAN, VPN ↔ LAN, device → router) | the router's services in normal use (DNS, DHCP, NTP, the dashboard, DoT to the router, mDNS/SSDP, ping); polling or backups to a few hosts | medium | the pattern: `hosts:<proto>/<port>` or `ports:<host>` (`ports:router`) |
+
+- **Modes** (Security → Local → *Detector tuning*, admin): **Off**, **Shadow** (default for every new detector) and **On**. In shadow mode, results are listed only in the tuning card - per detector the counts of the last 24 h and 7 days, the top keys and the rows with *What to do*, *Silence* and *Mark expected* - and never change health, *Flagged*, the device threats table, push alerts or Home Assistant. Leave a detector in shadow mode for about a week, mark known causes expected (or silence them; both carry over when it is switched on), then switch it on. The mode is stored in `/etc/tuxwall/devices/devicewatch.json` (`"detectors": {"beaconing": "shadow", ...}`).
+- **On**: findings count like any other, but stay at most *medium* unless a threat feed lists the same destination (then *high*).
+- **Learning period**: each device builds a baseline first - 7 days with at least 24 active hours (hours with traffic). Until then its behaviour results stay in the tuning card (marked *learning*), also with the detector on. Baselines are aggregates only (per day: traffic in/out, connections, distinct destinations/ports/countries, DNS queries, NXDOMAIN share, a name-entropy histogram), kept 30 days in `/var/lib/tuxwall/devices/baselines.json` (0600); devices not seen for 30 days start again.
+- **Resources**: within +50 % of the threat-intel engine's CPU and memory at a busy home network's volume (`tools/devicewatch_perf.py`).
+
 ## Updating and removing
 
 Update an APT install:

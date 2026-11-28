@@ -12579,6 +12579,8 @@ ADMIN_GET_PREFIXES = (
     "/api/devices/alerts",
     "/api/devices/findings",
     "/api/devices/silence",
+    # behaviour detection (3.3.8): shadow findings name devices and destinations
+    "/api/devices/detectors",
     # Suricata rule suppression (3.3.7): names devices and their addresses
     "/api/security/suricata/suppress",
 )
@@ -17836,7 +17838,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(*build_devices_findings_recent((qs.get("limit") or [""])[0],
                                                       (qs.get("silenced") or [""])[0] == "1"))
         elif path in ("/api/devices", "/api/devices/summary", "/api/devices/feeds", "/api/devices/indicators",
-                      "/api/devices/alerts", "/api/devices/silence") \
+                      "/api/devices/alerts", "/api/devices/silence", "/api/devices/detectors") \
                 or re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})$", path):
             self._send(*devices_get(path, identity))
         elif path == "/api/crowdsec/blocklist":
@@ -19445,7 +19447,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(*interfaces_plan(body, _client_key(self)))
 
         elif path in ("/api/devices/feeds/update", "/api/devices/feeds/key", "/api/devices/indicators",
-                      "/api/devices/alerts", "/api/devices/silence", "/api/devices/zeek-checksums") \
+                      "/api/devices/alerts", "/api/devices/silence", "/api/devices/zeek-checksums",
+                      "/api/devices/detectors") \
                 or re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})/(rename|expected|new-ack|quarantine|unquarantine)$", path):
             self._send(*devices_post(path, body, identity, _client_key(self)))
         elif path in ("/api/https/settings", "/api/https/regenerate", "/api/https/custom-cert",
@@ -20605,7 +20608,8 @@ def build_device_detail(did):
 DEVICES_RECENT_DEFAULT = 10
 DEVICES_RECENT_MAX = 50
 DEVICES_FEED_LABELS = {"feodo": "Feodo Tracker", "urlhaus": "URLhaus", "threatfox": "ThreatFox",
-                       "local": "Local list"}
+                       "local": "Local list", "beaconing": "Behaviour: beaconing",
+                       "dns_bypass": "Behaviour: DNS bypass", "internal_scan": "Behaviour: internal scanning"}
 
 
 DEVICES_NEW_ROWS_DAYS = 30
@@ -20700,6 +20704,12 @@ def build_devices_findings_recent(limit_raw, show_silenced=False):
             action = "attempted"
         elif kind == "dns_lookup":
             action = "lookup"
+        elif kind == "internal_scan":
+            action = "scanned"
+        elif kind == "dns_bypass":
+            action = "dns"
+        elif kind == "beaconing":
+            action = "beacon"
         else:
             action = "contacted"
         last = int(f.get("last") or 0)
@@ -20888,6 +20898,116 @@ def build_devices_silence():
     return {"ok": True, "rules": out, "max": _dw.SILENCE_MAX, "expiry_options": list(_dw.SILENCE_EXPIRY)}
 
 
+# Behaviour detection (Phase 2, 3.3.8): per-detector mode off|shadow|on in
+# DEVICES_CONF_DIR/devicewatch.json "detectors" (default shadow). Shadow
+# results (and, in mode on, results for devices still learning) are in the
+# engine's shadow.json - a separate file, so they never reach health,
+# Flagged, the threat table, alerts or Home Assistant. Only the admin
+# "Detector tuning" card (Security > Local) shows them.
+DEVICES_TUNING_ROWS = 50
+DEVICES_TUNING_TOP = 5
+
+
+def _devices_shadow(devices=None):
+    """Shadow rows of shadow.json with the expected / silence overlays."""
+    raw = _dw_read("shadow.json")
+    rows = raw.get("findings") if isinstance(raw, dict) and isinstance(raw.get("findings"), list) else []
+    expected = [e for e in (_dw_conf_read("expected.json").get("entries") or [])
+                if isinstance(e, dict) and e.get("indicator")]
+    silence = _dw.silence_rules(_dw_conf_read("silence.json"))
+    now = time.time()
+    out = []
+    for f in rows:
+        if not isinstance(f, dict) or not f.get("id") or f.get("kind") not in _dw.KIND_TEXT:
+            continue
+        f2 = dict(f, expected=_dw.is_expected(f, expected))
+        f2["silenced"] = _dw.silence_match(f2, silence, now)
+        out.append(f2)
+    return out, (raw.get("generated_at") if isinstance(raw, dict) else None)
+
+
+def build_devices_detectors():
+    """GET /api/devices/detectors (admin: ADMIN_GET_PREFIXES): per behaviour
+    detector its configured mode, the counts of its shadow rows (last 24 h
+    / 7 days), the top keys and the newest rows; baseline counts."""
+    if _dw is None:
+        return {"ok": False, "error": "devicewatch module unavailable", "detectors": []}
+    modes = _dw.detector_modes(_dw_conf_read("devicewatch.json"))
+    devices, _f, _gen, running = _devices_state()
+    names = {d["id"]: (d.get("name") or d.get("mac") or d["id"]) for d in devices or []}
+    types = {d["id"]: d.get("type") for d in devices or []}
+    shadow, sgen = _devices_shadow()
+    st = _dw_read("status.json")
+    st = st if isinstance(st, dict) else {}
+    engine = st.get("detectors") if isinstance(st.get("detectors"), dict) else {}
+    now = time.time()
+    day0 = int(now // 86400)
+    out = []
+    for name in _dw.BEHAVIOUR_DETECTORS:
+        rows = [f for f in shadow if f.get("detector") == name or (not f.get("detector") and f.get("kind") == name)]
+        h24 = [f for f in rows if (f.get("last") or 0) >= now - 86400]
+        d7 = [f for f in rows if (f.get("last") or 0) >= now - 7 * 86400]
+        hits7 = 0
+        for f in d7:
+            days = f.get("days") if isinstance(f.get("days"), dict) else {}
+            n = sum(int(v or 0) for k, v in days.items() if str(k).lstrip("-").isdigit() and int(k) > day0 - 7)
+            hits7 += n or 1
+        keys = {}
+        for f in d7:
+            k = keys.setdefault(f.get("indicator") or "", {"key": f.get("indicator") or "", "devices": set(), "hits": 0,
+                                                           "last": 0})
+            k["devices"].add(f.get("device"))
+            k["hits"] += int(f.get("count") or 1)
+            k["last"] = max(k["last"], int(f.get("last") or 0))
+        top = sorted(keys.values(), key=lambda k: (-len(k["devices"]), -k["hits"], k["key"]))[:DEVICES_TUNING_TOP]
+        recent = sorted(rows, key=lambda f: -(f.get("last") or 0))[:DEVICES_TUNING_ROWS]
+        eng = engine.get(name) if isinstance(engine.get(name), dict) else {}
+        title, desc = _dw.DETECTOR_INFO.get(name, (name, ""))
+        out.append({
+            "name": name, "title": title, "description": desc, "mode": modes[name],
+            "engine_mode": eng.get("mode"), "default": _dw.DETECTOR_DEFAULT_MODE,
+            "counts": {"h24": len(h24), "d7": len(d7), "hits_7d": hits7, "total": len(rows),
+                       "learning": sum(1 for f in rows if f.get("reason") == "learning"),
+                       "expected": sum(1 for f in rows if f.get("expected")),
+                       "silenced": sum(1 for f in rows if f.get("silenced") and not f.get("expected"))},
+            "top": [{"key": k["key"], "devices": len(k["devices"]), "hits": k["hits"], "last": k["last"]} for k in top],
+            "rows": [{"id": f["id"], "device": f.get("device"), "device_name": names.get(f.get("device")) or f.get("device"),
+                      "kind": f.get("kind"), "indicator": f.get("indicator"), "indicator_type": f.get("indicator_type"),
+                      "severity": f.get("severity"), "title": f.get("title"), "reason": f.get("reason") or "shadow",
+                      "first": int(f.get("first") or 0), "last": int(f.get("last") or 0), "count": int(f.get("count") or 1),
+                      "details": f.get("details") if isinstance(f.get("details"), dict) else {},
+                      "expected": bool(f.get("expected")), "silenced": f.get("silenced"),
+                      "critical": _dw.is_critical_finding(f),
+                      "guidance": _devices_guidance(f, types.get(f.get("device")))} for f in recent],
+        })
+    bl = st.get("baselines") if isinstance(st.get("baselines"), dict) else {}
+    return {"ok": True, "available": devices is not None, "running": running, "generated_at": sgen,
+            "modes": list(_dw.DETECTOR_MODES), "detectors": out,
+            "baselines": {k: int(bl.get(k) or 0) for k in ("devices", "established", "learning")},
+            "learn_days": _dw.LEARN_DAYS, "learn_min_hours": _dw.LEARN_MIN_HOURS,
+            "severity_cap": _dw.BEHAVIOUR_SEV_CAP}
+
+
+def devices_detectors_post(body, who):
+    """POST /api/devices/detectors {detector, mode} (admin + same Origin):
+    the mode lands in devicewatch.json; the engine applies it next cycle."""
+    name = body.get("detector")
+    mode = body.get("mode")
+    if name not in _dw.BEHAVIOUR_DETECTORS:
+        return 400, {"ok": False, "error": "Unknown detector"}
+    if mode not in _dw.DETECTOR_MODES:
+        return 400, {"ok": False, "error": "mode must be one of: " + ", ".join(_dw.DETECTOR_MODES)}
+    with _DEVICES_CONF_LOCK:
+        data = _dw_conf_read("devicewatch.json")
+        det = data.get("detectors") if isinstance(data.get("detectors"), dict) else {}
+        det = {k: v for k, v in det.items() if k in _dw.BEHAVIOUR_DETECTORS and v in _dw.DETECTOR_MODES}
+        det[name] = mode
+        data["detectors"] = det
+        _dw_conf_write("devicewatch.json", data)
+    print("[devices] detector %s -> %s by %s" % (name, mode, who), flush=True)
+    return 200, build_devices_detectors()
+
+
 def devices_silence_post(body, who):
     action = str(body.get("action") or "")
     now = time.time()
@@ -20926,11 +21046,15 @@ def devices_silence_post(body, who):
 # Zeek checksum switch (A3): `redef ignore_checksums = T;` in the TuxWall
 # site policy, written by zeek-site-setup.sh --checksums on|off (backup,
 # zeekctl check + deploy, restore on failure; mac-logging stays). The API
-# runs the script in a background thread: Zeek restarts (~40 s without logs).
+# runs the script in a background thread as a transient systemd unit (see
+# _zeek_checksums_cmd: a Zeek under /usr is read-only in this sandbox):
+# Zeek restarts (~40 s without logs).
 ZEEK_SITE_SETUP = "/usr/local/share/tuxwall/scripts/zeek-site-setup.sh"
 ZEEK_SITE_DIRS = ("/opt/zeek/share/zeek/site", "/usr/local/zeek/share/zeek/site", "/usr/share/zeek/site")
 ZEEK_POLICY_NAME = "tuxwall-devicewatch.zeek"
 ZEEK_SETUP_TIMEOUT = 300
+ZEEK_SYSTEMD_RUN = "/usr/bin/systemd-run"
+ZEEK_SETUP_UNIT = "tuxwall-zeek-checksums"
 _ZEEK_CK_RE = re.compile(r"^\s*redef\s+ignore_checksums\s*=\s*T\s*;", re.M)
 _ZEEK_CK_JOB = {"running": False}
 _ZEEK_CK_LOCK = threading.Lock()
@@ -20946,7 +21070,17 @@ def _zeek_checksums_policy(text):
 
 
 def _zeek_checksums_cmd(on):
-    return [ZEEK_SITE_SETUP, "--checksums", "on" if on else "off"]
+    """The script runs as a transient systemd unit, outside this service's
+    sandbox (ProtectSystem=full makes /usr read-only here, and a Zeek built
+    from source or from distro packages keeps its site policy, spool and
+    logs under /usr). systemd-run --wait --pipe passes the output and the
+    exit code through; the fixed unit name makes a second run fail instead
+    of racing. Without systemd-run (not a systemd box) it runs directly."""
+    cmd = [ZEEK_SITE_SETUP, "--checksums", "on" if on else "off"]
+    if os.path.exists(ZEEK_SYSTEMD_RUN) and os.path.isdir("/run/systemd/system"):
+        return [ZEEK_SYSTEMD_RUN, "--wait", "--pipe", "--collect", "--quiet", "--unit=" + ZEEK_SETUP_UNIT,
+                "--description=TuxWall: Zeek checksum switch", "-p", "RuntimeMaxSec=%d" % ZEEK_SETUP_TIMEOUT] + cmd
+    return cmd
 
 
 def _zeek_checksums_result(rc, output):
@@ -20960,6 +21094,8 @@ def _zeek_checksums_result(rc, output):
             last = line[:200]
     if rc == 0:
         return True, last or "zeek: done"
+    if rc and not last and ZEEK_SETUP_UNIT in str(output or "") and "already" in str(output or ""):
+        return False, "A Zeek change is already running"
     if rc == 1:
         return False, "Zeek rejected the change ('zeekctl check' failed) - the previous policy was restored"
     if rc is None:
@@ -21003,7 +21139,7 @@ def _zeek_checksums_state():
 def _zeek_checksums_run(on, who):
     rc, out = None, ""
     try:
-        p = subprocess.run(_zeek_checksums_cmd(on), capture_output=True, text=True, timeout=ZEEK_SETUP_TIMEOUT,
+        p = subprocess.run(_zeek_checksums_cmd(on), capture_output=True, text=True, timeout=ZEEK_SETUP_TIMEOUT + 30,
                            check=False)
         rc, out = p.returncode, (p.stdout or "") + (p.stderr or "")
     except subprocess.TimeoutExpired:
@@ -21054,6 +21190,10 @@ def devices_get(path, identity):
         if not _is_admin(identity):
             return 403, {"ok": False, "error": "Administrator role required"}
         return 200, build_devices_silence()
+    if path == "/api/devices/detectors":
+        if not _is_admin(identity):
+            return 403, {"ok": False, "error": "Administrator role required"}
+        return 200, build_devices_detectors()
     m = re.match(r"^/api/devices/([mwi][0-9a-f]{12,16})$", path)
     if m:
         if not _is_admin(identity):
@@ -21090,6 +21230,8 @@ def devices_post(path, body, identity, client_ip=""):
         return devices_silence_post(body, who)
     if path == "/api/devices/zeek-checksums":
         return devices_zeek_checksums_post(body, who)
+    if path == "/api/devices/detectors":
+        return devices_detectors_post(body, who)
     if path == "/api/devices/feeds/update":
         try:
             _devices_request_feed_update()
@@ -21188,6 +21330,8 @@ def devices_post(path, body, identity, client_ip=""):
         return 200, {"ok": True, "id": did, "dismissed": True}
     fid = str(body.get("finding") or "")
     f = next((x for x in findings if x.get("id") == fid and x.get("device") == did), None)
+    if f is None:       # a behaviour detector's shadow row (Detector tuning card)
+        f = next((x for x in _devices_shadow()[0] if x.get("id") == fid and x.get("device") == did), None)
     if f is None:
         return 404, {"ok": False, "error": "Unknown finding for this device"}
     mark = bool(body.get("expected", True))
