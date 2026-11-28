@@ -167,6 +167,15 @@ KNOWN_GAPS = {
     "/etc/rsyslog.d/45-tuxwall-unbound.conf": "postinst-owned since 3.3.5 (rsyslog_unbound_rule); the API "
                                               "re-creates it only after a delete, and under the sandbox "
                                               "that write fails - skipped quietly, logged once",
+    # Zeek checksum switch (3.3.7): the API runs zeek-site-setup.sh, which
+    # edits the site dir of the Zeek install it finds. The binary packages'
+    # /opt/zeek is writable under ProtectSystem=full; source/distro layouts
+    # under /usr are not - the job fails with the script's message and the
+    # script still works from a root shell
+    "/usr/local/zeek/share/zeek/site": "Zeek checksum switch: a Zeek under /usr is read-only in the sandbox; "
+                                       "the job reports the error (run zeek-site-setup.sh as root instead)",
+    "/usr/share/zeek/site": "Zeek checksum switch: a Zeek under /usr is read-only in the sandbox; "
+                            "the job reports the error (run zeek-site-setup.sh as root instead)",
 }
 
 # /etc, /usr, /boot literals in the API code that are only read (or are
@@ -180,6 +189,7 @@ READ_ONLY = {
     "/usr/share/ieee-data/oui.txt",  # devicewatch.py vendor lookup (the engine's own unit, read-only)
     "/usr/bin:/bin", "/usr/bin:/bin:/usr/local/bin", "/usr/sbin:/usr/bin:/sbin:/bin",
     "/usr/lib/systemd/system/tuxwall-agent.service.d/20-local-config.conf",
+    "/usr/local/share/tuxwall/scripts/zeek-site-setup.sh",  # executed by the Zeek checksum switch
     "/etc",  # https_tls._path_ok: an owner-provided certificate must live under /etc (prefix test only)
 }
 
