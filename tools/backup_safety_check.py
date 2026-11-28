@@ -204,6 +204,8 @@ def synthetic_members():
         ("./etc/tuxwall/", None),
         ("./etc/tuxwall/internal-token", sv("internal").encode()),
         ("./etc/tuxwall/agent-token", sv("agenttok").encode()),
+        ("./etc/tuxwall/agent-password.env", ("OPENCODE_SERVER_PASSWORD=%s\nTUXWALL_AGENT_PASSWORD=%s\n"
+                                               % (sv("agentpw"), sv("agentpw"))).encode()),
         ("./etc/tuxwall/auth.json", json.dumps({"users": [{"name": "a", "hash": sv("authhash")}]}).encode()),
         ("./etc/tuxwall/llm.json", json.dumps({"api_key": sv("llm")}).encode()),
         ("./etc/tuxwall/agent/api.token", sv("apitoken").encode()),
@@ -315,7 +317,8 @@ def t_sanitizer(root):
     for k in keep:
         check(k in names, "non-secret config kept: %s" % k)
     for gone in ("var/www/html/includes/api_server.py", "var/lib/kea/kea-leases4.csv", "usr/local/bin/blob",
-                 "etc/tuxwall/internal-token", "etc/tuxwall/agent-token", "etc/cloudflared/token",
+                 "etc/tuxwall/internal-token", "etc/tuxwall/agent-token", "etc/tuxwall/agent-password.env",
+                 "etc/cloudflared/token",
                  "etc/ssh/ssh_host_ed25519_key", "etc/letsencrypt/accounts/acme/x/private_key.json"):
         check(gone not in names, "not in export: %s" % gone)
     check(not any(".." in n for n in names), "traversal member never exported")

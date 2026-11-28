@@ -626,6 +626,32 @@ agent_config_split() {      # agent_config_split [HELPER] -> status lines, never
   esac
   return 0
 }
+# AI agent password (3.3.8): until 3.3.7 setup-opencode-agent.sh wrote the
+# shared dashboard <-> agent password into Environment= drop-ins, and systemd
+# shows Environment= to every local user (systemctl show). The setup script's
+# --password-only puts a NEW password into the root-only
+# /etc/tuxwall/agent-password.env and rewrites both drop-ins with
+# EnvironmentFile= (no secret). Runs only where the agent was set up (a
+# password drop-in or the env file exists). rc 10 (changed) -> daemon-reload
+# + agent restart here; step 7 restarts the dashboard right after, so both
+# use the new password. Idempotent; never fails.
+agent_password_migration() {   # agent_password_migration [SCRIPT] [ROOT] -> one status line, never fails
+  local script=${1:-$AGENT_SETUP} root=${2:-} env=/etc/tuxwall/agent-password.env rc=0
+  if [[ ! -e $root/etc/systemd/system/tuxwall-agent.service.d/password.conf \
+        && ! -e $root/etc/systemd/system/tuxwall.service.d/agent-password.conf && ! -e $root$env ]]; then
+    echo "agent password: AI assistant not set up - nothing to do"; return 0
+  fi
+  [[ -f $script ]] || { echo "agent password: WARNING: $script missing - not checked"; return 0; }
+  bash "$script" --password-only ${root:+"$root"} >/dev/null 2>&1 || rc=$?
+  case $rc in
+    0)  echo "agent password: in $env (root-only) - unchanged" ;;
+    10) systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl try-restart tuxwall-agent.service >/dev/null 2>&1 || true
+        echo "agent password: new password in $env (root-only, no longer visible via systemctl show); agent restarted, dashboard restarts next (log in again)" ;;
+    *)  echo "agent password: WARNING: not updated (rc $rc) - re-run: sudo bash $script --password-only" ;;
+  esac
+  return 0
+}
 # AGENTS.md (agent context) install-if-absent for the agent user; needs the
 # user, so it runs after the agent setup (which creates it). Never clobbers
 # an edited copy; creates only missing directories, owned by the agent.
@@ -1132,6 +1158,9 @@ PY
     # blocklists.json.tmp into it and died with ENOENT on fresh
     # installs when it did not exist yet.
     mkdir -p /var/lib/tuxwall
+    # AI agent password out of systemd's Environment= (3.3.8), before the
+    # dashboard restart below so both sides use the new one
+    echo "   $(agent_password_migration)"
     systemctl daemon-reload
     systemctl enable tuxwall.service >/dev/null 2>&1 || true
     systemctl enable tuxwall-blocklist-update.timer >/dev/null 2>&1 || true

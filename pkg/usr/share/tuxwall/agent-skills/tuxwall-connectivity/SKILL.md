@@ -54,7 +54,10 @@ Severity order: no-internet > dns-dead > dhcp-fail > dashboard-down > slow > wir
 - A segment with "no link" in the facts (e.g. a dedicated work-PC port) simply has no clients right now - not a fault.
 
 ## IPv6
-- `ip -6 route show default` (finite expiry), `journalctl -u sync-ipv6-pd -u radvd -n 30`. Prefix rotated -> `sudo systemctl start sync-ipv6-pd`.
+- `ip -6 route show default` (finite expiry), `journalctl -u radvd -n 30`.
+- sync-ipv6-pd is an optional local helper (not part of TuxWall). Only if `systemctl status sync-ipv6-pd` finds the unit:
+  `journalctl -u sync-ipv6-pd -n 30`; prefix rotated -> `sudo systemctl start sync-ipv6-pd`. Without it the LAN prefix
+  comes from the netplan/networkd config (DHCPv6-PD in networkd, or a static prefix) - check `ip -6 addr` on the LAN.
 
 ## WireGuard
 - `sudo wg show`: handshake < 3 min = connected. No handshake: UDP 51820 allowed on the WAN? WAN IP changed (client endpoint stale)?

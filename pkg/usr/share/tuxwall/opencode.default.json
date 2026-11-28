@@ -20,7 +20,12 @@
     },
     {
       "action": "shell",
-      "resource": "systemctl show *",
+      "resource": "systemctl is-enabled *",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "systemctl is-failed *",
       "effect": "allow"
     },
     {
@@ -60,7 +65,52 @@
     },
     {
       "action": "shell",
-      "resource": "cat /etc/tuxwall/*",
+      "resource": "cat /etc/tuxwall/interfaces.json",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "cat /etc/tuxwall/vlans.json",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "cat /etc/tuxwall/sqm.conf",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "cat /etc/tuxwall/radvd.conf",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "cat /etc/tuxwall/ui.json",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "cat /etc/tuxwall/custom-blocklist.txt",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "cat /etc/tuxwall/opencode.json",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "cat /etc/tuxwall/incidents.json",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "cat /etc/tuxwall/tripwire-state.json",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "cat /etc/tuxwall/community-auto.json",
       "effect": "allow"
     },
     {
@@ -391,6 +441,16 @@
     {
       "action": "shell",
       "resource": "*/etc/tuxwall/agent/*",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "/etc/tuxwall/agent-password.env",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*agent-password.env*",
       "effect": "deny"
     },
     {

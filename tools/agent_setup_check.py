@@ -20,6 +20,17 @@
 - the dashboard API reports installed:false + the install command when the
   binary is missing.
 - bash -n on the script and the installer.
+- agent password (3.3.8): no unit, drop-in, maintainer script, installer or
+  helper puts a secret-looking variable (PASSWORD|SECRET|TOKEN|KEY) into an
+  Environment= line (systemd shows Environment= to every local user via
+  `systemctl show`). agent_password_setup (fixtures under a temp root,
+  dummy values only): one root-only env file (0600) with the same value for
+  OPENCODE_SERVER_PASSWORD and TUXWALL_AGENT_PASSWORD, both drop-ins only
+  EnvironmentFile= (the agent's without "-": no start without a password);
+  3.3.7's Environment= drop-ins -> a NEW password, old drop-ins and
+  agent-token gone, the old value nowhere under the root; idempotent
+  (second run rc 0, value kept); bad modes / mismatched values repaired;
+  the password is never printed; --password-only needs root (or a test root).
 """
 import hashlib
 import importlib.util
@@ -269,6 +280,220 @@ def t_setup_script():
         shutil.rmtree(d)
 
 
+# ── (b2) agent password: never in Environment= ─────────────────────────────
+SECRET_ENV_RE = re.compile(r"Environment=[\"']?(?:[A-Za-z0-9_]+=\S*\s+)*[A-Za-z0-9_]*"
+                           r"(?:PASSWORD|PASSWD|SECRET|TOKEN|KEY)[A-Za-z0-9_]*=", re.I)
+SECRET_ENV_SOURCES = ("pkg", "systemd", "scripts", "image", "www/includes", "www/scripts", "tuxwall-install.sh")
+PW_ENV = "/etc/tuxwall/agent-password.env"
+PW_DROPINS = {"agent": "/etc/systemd/system/tuxwall-agent.service.d/password.conf",
+              "dashboard": "/etc/systemd/system/tuxwall.service.d/agent-password.conf"}
+
+
+def secret_environment_lines(text):
+    """Lines (not comments) that put a secret-looking variable into Environment=."""
+    out = []
+    for n, ln in enumerate(text.splitlines(), 1):
+        if ln.lstrip().startswith(("#", ";", "//")):
+            continue
+        if SECRET_ENV_RE.search(ln):
+            out.append((n, ln.strip()[:120]))
+    return out
+
+
+def t_no_secret_environment():
+    # the detector itself
+    for bad in ("Environment=OPENCODE_SERVER_PASSWORD=x", "Environment=\"API_TOKEN=x\"",
+                "Environment=A=1 MY_SECRET=2", "printf '[Service]\\nEnvironment=TUXWALL_AGENT_PASSWORD=%s\\n'",
+                "Environment=abuse_key=x"):
+        check(secret_environment_lines(bad), "detector flags %r" % bad)
+    for ok in ("EnvironmentFile=/etc/tuxwall/agent-password.env", "Environment=OPENCODE_CONFIG=/etc/tuxwall/opencode.json",
+               "# Environment=FOO_TOKEN=x (comment)", "Environment=PYTHONUNBUFFERED=1"):
+        check(not secret_environment_lines(ok), "detector leaves %r alone" % ok)
+    files = []
+    for rel in SECRET_ENV_SOURCES:
+        p = os.path.join(ROOT, rel)
+        if os.path.isfile(p):
+            files.append(p)
+        for dp, dn, fn in os.walk(p):
+            dn[:] = [x for x in dn if x not in ("__pycache__", ".git", "node_modules")]
+            files += [os.path.join(dp, f) for f in fn]
+    scanned = 0
+    for f in sorted(files):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                text = fh.read()
+        except (UnicodeDecodeError, OSError):
+            continue
+        scanned += 1
+        for n, ln in secret_environment_lines(text):
+            check(False, "%s:%d puts a secret into Environment= (readable by every local user "
+                         "via systemctl show; use a root-only EnvironmentFile=): %s" % (os.path.relpath(f, ROOT), n, ln))
+    check(scanned > 100, "secret-in-Environment= scan covered the units and scripts (%d files)" % scanned)
+
+
+def pw_tree(root):
+    """{relative path: bytes} of every file under root."""
+    out = {}
+    for dp, dn, fn in os.walk(root):
+        for f in fn:
+            p = os.path.join(dp, f)
+            with open(p, "rb") as fh:
+                out[os.path.relpath(p, root)] = fh.read()
+    return out
+
+
+def pw_env(root):
+    try:
+        text = read(root + PW_ENV)
+    except OSError:
+        return None, None
+    a = re.findall(r"^OPENCODE_SERVER_PASSWORD=(.*)$", text, re.M)
+    b = re.findall(r"^TUXWALL_AGENT_PASSWORD=(.*)$", text, re.M)
+    return (a[0] if len(a) == 1 else None), (b[0] if len(b) == 1 else None)
+
+
+def pw_state_ok(root, label):
+    """env file 0600 with one shared value, drop-ins EnvironmentFile= only -> the value."""
+    a, b = pw_env(root)
+    check(a is not None and a == b and re.fullmatch(r"[0-9a-f]{48}", a or "") is not None,
+          "%s: env file has one 48-hex value for both variables" % label)
+    st = os.stat(root + PW_ENV) if os.path.exists(root + PW_ENV) else None
+    check(st is not None and st.st_mode & 0o777 == 0o600 and st.st_uid == os.geteuid(),
+          "%s: env file 0600, owned by the caller (root on a router)" % label)
+    for who, path in PW_DROPINS.items():
+        body = read(root + path) if os.path.exists(root + path) else ""
+        lines = [ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+        want = "EnvironmentFile=%s%s" % ("" if who == "agent" else "-", PW_ENV)
+        check(lines == ["[Service]", want], "%s: %s drop-in is [Service] %s (%s)" % (label, who, want, lines))
+        check(not secret_environment_lines(body) and (a or "x") not in body, "%s: %s drop-in holds no secret" % (label, who))
+        check(os.stat(root + path).st_mode & 0o777 == 0o644 if body else False, "%s: %s drop-in 0644" % (label, who))
+    leftovers = [p for p in pw_tree(root) if re.search(r"\.[A-Za-z0-9]{6}$", p) and not p.endswith((".token", ".json"))]
+    check(not leftovers, "%s: no temp files left (%s)" % (label, leftovers))
+    return a
+
+
+def t_agent_password():
+    src = read(SCRIPT)
+    check(not re.search(r"Environment=(OPENCODE_SERVER|TUXWALL_AGENT)_PASSWORD", src),
+          "setup script no longer writes the password into Environment=")
+    old_pw = "0123456789abcdef" * 3             # dummy fixture values, not a real password
+    old_tok = "fedcba9876543210" * 2
+    d = tempfile.mkdtemp(prefix="agent-pw-")
+    try:
+        os.makedirs(d + "/fbin")
+        os.makedirs(d + "/tmp")
+
+        def run(root, fake_openssl=None):
+            env = {}
+            ob = d + "/fbin/openssl"
+            if os.path.exists(ob):
+                os.unlink(ob)
+            if fake_openssl is not None:
+                with open(ob, "w") as f:
+                    f.write(fake_openssl)
+                os.chmod(ob, 0o755)
+            return run_fn(d, 'agent_password_setup "%s"' % root, env)
+
+        def legacy(root, with_env=None):
+            for who, path in PW_DROPINS.items():
+                os.makedirs(os.path.dirname(root + path), exist_ok=True)
+                var = "OPENCODE_SERVER_PASSWORD" if who == "agent" else "TUXWALL_AGENT_PASSWORD"
+                with open(root + path, "w") as f:
+                    f.write("[Service]\nEnvironment=%s=%s\n" % (var, old_pw))
+                os.chmod(root + path, 0o600)
+            os.makedirs(root + "/etc/tuxwall", exist_ok=True)
+            with open(root + "/etc/tuxwall/agent-token", "w") as f:
+                f.write(old_tok)
+            if with_env:
+                with open(root + PW_ENV, "w") as f:
+                    f.write(with_env)
+
+        # fresh: nothing there yet
+        r1 = d + "/fresh"
+        os.makedirs(r1)
+        rc, _, out = run(r1)
+        check(rc == 10, "fresh: rc 10 (written) (%s)" % out.strip())
+        pw1 = pw_state_ok(r1, "fresh")
+        check(pw1 is not None and pw1 not in out, "fresh: password not printed")
+        before = pw_tree(r1)
+        rc, _, out = run(r1)
+        check(rc == 0 and pw_tree(r1) == before, "fresh: second run rc 0, nothing changed (%s)" % out.strip())
+
+        # 3.3.7 install: Environment= drop-ins + agent-token -> rotated
+        r2 = d + "/legacy"
+        legacy(r2)
+        rc, _, out = run(r2)
+        check(rc == 10, "legacy: rc 10 (%s)" % out.strip())
+        pw2 = pw_state_ok(r2, "legacy")
+        check(pw2 is not None and pw2 != old_pw and pw2 != old_tok, "legacy: a NEW password (old one was readable)")
+        check(not os.path.exists(r2 + "/etc/tuxwall/agent-token"), "legacy: old agent-token removed")
+        tree = pw_tree(r2)
+        check(not any(old_pw.encode() in v or old_tok.encode() in v for v in tree.values()),
+              "legacy: the old value is nowhere under the root (no backups)")
+        check(pw2 not in out and old_pw not in out, "legacy: no password printed")
+        rc, _, out = run(r2)
+        check(rc == 0 and pw_tree(r2) == tree, "legacy: second run idempotent (rc %d)" % rc)
+
+        # legacy drop-ins next to a valid env file: still rotated (the value may be the leaked one)
+        r3 = d + "/legacy-env"
+        legacy(r3, "OPENCODE_SERVER_PASSWORD=%s\nTUXWALL_AGENT_PASSWORD=%s\n" % (old_pw, old_pw))
+        rc, _, out = run(r3)
+        pw3 = pw_state_ok(r3, "legacy+env")
+        check(rc == 10 and pw3 != old_pw, "legacy drop-ins + env file -> rotated anyway")
+
+        # repairs without rotation: modes, a missing / edited drop-in
+        os.chmod(r1 + PW_ENV, 0o644)
+        os.unlink(r1 + PW_DROPINS["dashboard"])
+        with open(r1 + PW_DROPINS["agent"], "a") as f:
+            f.write("# edited\n")
+        rc, _, out = run(r1)
+        check(rc == 10 and pw_state_ok(r1, "repair") == pw1, "drop-ins rewritten, mode fixed, password kept")
+        os.chmod(r1 + PW_ENV, 0o640)
+        rc, _, out = run(r1)
+        check(rc == 0 and os.stat(r1 + PW_ENV).st_mode & 0o777 == 0o600, "mode-only repair: rc 0, 0600 again")
+
+        # mismatched / short values -> new password
+        for bad in ("OPENCODE_SERVER_PASSWORD=%s\nTUXWALL_AGENT_PASSWORD=%s\n" % (old_pw, old_tok),
+                    "OPENCODE_SERVER_PASSWORD=short\nTUXWALL_AGENT_PASSWORD=short\n", ""):
+            with open(r1 + PW_ENV, "w") as f:
+                f.write(bad)
+            rc, _, out = run(r1)
+            pwx = pw_state_ok(r1, "bad env %r" % bad[:30])
+            check(rc == 10 and pwx not in (old_pw, old_tok, "short"), "bad env file %r -> new password" % bad[:30])
+
+        # no usable openssl -> /dev/urandom fallback, still 48 hex
+        r4 = d + "/noopenssl"
+        os.makedirs(r4)
+        rc, _, out = run(r4, "#!/bin/sh\nexit 1\n")
+        check(rc == 10 and pw_state_ok(r4, "no openssl") is not None, "openssl failing -> urandom fallback")
+
+        # unwritable root -> rc 1 (the postinst turns it into a warning)
+        r5 = d + "/ro"
+        os.makedirs(r5 + "/etc")
+        os.chmod(r5 + "/etc", 0o555)
+        if os.geteuid() != 0:
+            rc, _, out = run(r5)
+            check(rc == 1, "unwritable -> rc 1 (%s)" % rc)
+        os.chmod(r5 + "/etc", 0o755)
+
+        # executed: --password-only with a test root works as non-root, without one it needs root
+        r6 = d + "/exec"
+        legacy(r6)
+        p = subprocess.run(["bash", SCRIPT, "--password-only", r6], capture_output=True, text=True, timeout=30)
+        check(p.returncode == 10 and pw_state_ok(r6, "exec") not in (None, old_pw), "--password-only ROOT -> rc 10")
+        check(pw_env(r6)[0] not in p.stdout + p.stderr, "--password-only prints no password")
+        if os.geteuid() != 0:
+            p = subprocess.run(["bash", SCRIPT, "--password-only"], capture_output=True, text=True, timeout=30)
+            check(p.returncode == 1 and "Run as root" in p.stdout, "--password-only without root refused")
+        check('agent_password_setup || pw_rc=$?' in src and src.index("agent_password_setup || pw_rc") < src.index("systemctl restart tuxwall-agent.service"),
+              "main() writes the password before it (re)starts the agent")
+    finally:
+        for dp, dn, fn in os.walk(d):
+            for x in dn:
+                os.chmod(os.path.join(dp, x), 0o755)
+        shutil.rmtree(d)
+
+
 # ── (c) unit drop-in ──────────────────────────────────────────────────────
 def t_dropin():
     check(os.path.isfile(DROPIN), "drop-in shipped: /usr/lib/systemd/system/tuxwall-agent.service.d/10-installed.conf")
@@ -332,6 +557,8 @@ def t_installer():
 def main():
     t_packaging()
     t_setup_script()
+    t_no_secret_environment()
+    t_agent_password()
     t_dropin()
     t_api()
     t_installer()

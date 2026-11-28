@@ -26,7 +26,8 @@ interfaces.json, netplan or networkd files to "apply" a plan yourself. Present t
 - DNS: unbound `access-control:` for the subnet; an `interface:` bind only if the interface is always present.
   A single-client port (e.g. a work PC on its own NIC) must NOT be bound - its address vanishes when the
   PC is off and unbound then crash-loops (precedent: `/etc/unbound/unbound.conf.d/89-worknet-dns.conf` uses access-control only).
-- IPv6: radvd only where `ra: true`; sync-ipv6-pd for the LAN GUA prefix.
+- IPv6: radvd only where `ra: true`; the LAN GUA prefix comes from networkd (DHCPv6-PD / static) or, where it is
+  installed (optional local helper, not shipped by TuxWall - `systemctl status sync-ipv6-pd` finds the unit), sync-ipv6-pd.
 - Firewall zones: ufw rules on the device (`in on <dev>`, `route ... in on <a> out on <b>`) with comments; NAT is the single
   `-o <wan> -j MASQUERADE` from tuxwall-nat (covers every internal subnet). mDNS reflector (avahi), Suricata HOME_NET, SQM WAN.
 - `policy.wg_raw_forward=false`: VPN forwarding is ufw route rules only - no raw FORWARD ACCEPTs in wg0.conf PostUp.

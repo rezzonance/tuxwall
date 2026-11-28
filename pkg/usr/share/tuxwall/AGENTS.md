@@ -109,8 +109,9 @@ ask instead of guessing.
    troubleshoot — target the specific host/domain instead.
 5. Never echo public IPs, keys, or peer configs into anything web-served
    under /var/www/html. Never print secrets into the chat either: no
-   `systemctl show tuxwall|tuxwall-agent -p Environment`, no cat of the
-   agent-token or the password drop-ins - compare sha256 hashes instead.
+   `systemctl show ... -p Environment`, no cat of
+   /etc/tuxwall/agent-password.env (root-only; the dashboard <-> agent
+   password) or other token/key files - compare sha256 hashes instead.
 6. Read the current ruleset/config first and modify incrementally — never
    regenerate a whole ruleset or config from scratch unless asked.
 

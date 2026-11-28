@@ -7,18 +7,22 @@
 #    2. opencode binary (pinned release, SHA-256 verified)
 #    3. /etc/tuxwall/opencode.json (models + permission allowlist)
 #    4. tuxwall-agent.service listening on 127.0.0.1:4096
-#    5. Shared auth token between dashboard API and agent (root-only drop-ins)
+#    5. Shared password between dashboard API and agent: root-only
+#       /etc/tuxwall/agent-password.env, loaded by both units (EnvironmentFile=)
 #    6. Web root writable by the agent - only with TUXWALL_AGENT_EDIT_WEBROOT=1
 #       (tuxwall-install.sh --agent-edit-webroot); by default it stays root's
 #    7. Restricted sudo so the agent can run read-only gateway diagnostics
 #
 #  Shipped in the package (/usr/local/share/tuxwall/scripts/); the postinst
 #  runs it when the opencode binary is missing (fresh installs).
-#  Idempotent: safe to re-run (existing token/config/unit are preserved, an
+#  Idempotent: safe to re-run (existing password/config/unit are preserved, an
 #  installed opencode binary is not downloaded again).
 #
 #  Usage:
 #    sudo bash setup-opencode-agent.sh [opencode.json] [tuxwall-agent.service]
+#    sudo bash setup-opencode-agent.sh --password-only
+#                             only create / repair the shared password (the
+#                             postinst moves 3.3.7's Environment= drop-ins)
 #
 #    opencode.json            installed as /etc/tuxwall/opencode.json only
 #                             when that file does not exist yet
@@ -143,6 +147,105 @@ ensure_opencode() {
     return "$rc"
 }
 
+# ── Shared password (dashboard API <-> agent server) ────────────────────────
+# 3.3.8: ONE root-only env file (0600) that both units load with
+# EnvironmentFile= - systemd reads it as root before the service starts and
+# `systemctl show` only names the path. Until 3.3.7 the password sat in
+# Environment= drop-ins, which systemd shows to every local user over D-Bus:
+# an install that still has them gets a NEW password (the old one was
+# readable), the drop-ins are rewritten without it and the old
+# /etc/tuxwall/agent-token is removed. Never prints the password.
+AGENT_PW_ENV=/etc/tuxwall/agent-password.env
+AGENT_PW_DROPIN=/etc/systemd/system/tuxwall-agent.service.d/password.conf
+DASH_PW_DROPIN=/etc/systemd/system/tuxwall.service.d/agent-password.conf
+AGENT_PW_LEGACY_TOKEN=/etc/tuxwall/agent-token
+
+agent_pw_new() {   # -> 48 random hex characters on stdout
+    local pw
+    pw="$(openssl rand -hex 24 2>/dev/null)" || pw=""
+    [[ $pw =~ ^[0-9a-f]{48}$ ]] || pw="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    [[ $pw =~ ^[0-9a-f]{48}$ ]] || return 1
+    printf '%s' "$pw"
+}
+
+# agent_pw_dropin_body agent|dashboard [ENV_FILE] -> drop-in text (no secret)
+agent_pw_dropin_body() {
+    local env=${2:-$AGENT_PW_ENV}
+    printf '%s\n' "# TuxWall: the agent password is in $env (root:root 0600)." \
+        "# systemd reads it as root before the service starts; \`systemctl show\`" \
+        "# names only the file. Written by setup-opencode-agent.sh - never put" \
+        "# the password into an Environment= line (readable by every local user)."
+    if [[ $1 == agent ]]; then
+        printf '%s\n' "# No \"-\": without the file the agent does not start (never unprotected)." \
+            "[Service]" "EnvironmentFile=$env"
+    else
+        printf '%s\n' "# \"-\": the dashboard starts without it (the AI assistant then cannot log in)." \
+            "[Service]" "EnvironmentFile=-$env"
+    fi
+}
+
+agent_pw_write_dropin() {   # agent_pw_write_dropin FILE BODY -> 0 unchanged, 10 written, 1 failed
+    local f=$1 body=$2 tmp
+    if [[ -f $f && ! -L $f && "$(cat "$f")" == "$body" ]]; then
+        chmod 644 "$f" 2>/dev/null || true
+        return 0
+    fi
+    install -d -m 0755 "$(dirname "$f")" || return 1
+    tmp="$(mktemp "$f.XXXXXX")" || return 1
+    if ! { printf '%s\n' "$body" > "$tmp" && chmod 644 "$tmp" && mv -f "$tmp" "$f"; }; then
+        rm -f "$tmp"
+        return 1
+    fi
+    return 10
+}
+
+# agent_password_setup [ROOT] -> 0 nothing changed, 10 written (restart
+# tuxwall-agent + tuxwall), 1 failed. ROOT prefixes every path (tests).
+agent_password_setup() {
+    local root=${1:-} env drop_a drop_d pw="" a="" b="" legacy=0 changed=0 f tmp r
+    env=$root$AGENT_PW_ENV
+    drop_a=$root$AGENT_PW_DROPIN
+    drop_d=$root$DASH_PW_DROPIN
+    for f in "$drop_a" "$drop_d"; do
+        if [[ -f $f ]] && grep -Eq '^[[:space:]]*Environment[[:space:]]*=.*(PASSWORD|SECRET|TOKEN|KEY)' "$f"; then
+            legacy=1
+        fi
+    done
+    if (( ! legacy )) && [[ -f $env && ! -L $env ]]; then
+        a="$(sed -n 's/^OPENCODE_SERVER_PASSWORD=//p' "$env" | head -n 1)"
+        b="$(sed -n 's/^TUXWALL_AGENT_PASSWORD=//p' "$env" | head -n 1)"
+        [[ $a =~ ^[A-Za-z0-9]{32,}$ && $a == "$b" ]] && pw=$a
+    fi
+    if [[ -z $pw ]]; then
+        pw="$(agent_pw_new)" || return 1
+        install -d -m 0755 "$(dirname "$env")" || return 1
+        tmp="$(mktemp "$env.XXXXXX")" || return 1
+        if ! { chmod 600 "$tmp" \
+                && { chown 0:0 "$tmp" 2>/dev/null || (( EUID != 0 )); } \
+                && printf '# TuxWall AI agent password (root-only). Loaded by tuxwall-agent.service and\n# tuxwall.service (EnvironmentFile=); written by setup-opencode-agent.sh.\nOPENCODE_SERVER_PASSWORD=%s\nTUXWALL_AGENT_PASSWORD=%s\n' "$pw" "$pw" > "$tmp" \
+                && mv -f "$tmp" "$env"; }; then
+            rm -f "$tmp"
+            return 1
+        fi
+        changed=1
+    fi
+    pw=""
+    chmod 600 "$env" || return 1
+    chown 0:0 "$env" 2>/dev/null || (( EUID != 0 )) || return 1
+
+    r=0; agent_pw_write_dropin "$drop_a" "$(agent_pw_dropin_body agent)" || r=$?
+    (( r == 10 )) && changed=1
+    (( r == 0 || r == 10 )) || return 1
+    r=0; agent_pw_write_dropin "$drop_d" "$(agent_pw_dropin_body dashboard)" || r=$?
+    (( r == 10 )) && changed=1
+    (( r == 0 || r == 10 )) || return 1
+
+    # the old token file held the same (readable) value on most installs
+    rm -f "$root$AGENT_PW_LEGACY_TOKEN"
+    if (( changed )); then return 10; fi
+    return 0
+}
+
 main() {
     [[ $EUID -eq 0 ]] || { echo "[!] Run as root: $SELF_CMD"; exit 1; }
     local cfg_src="${1:-}" unit_src="${2:-}" rc=0
@@ -186,22 +289,13 @@ main() {
         exit 1
     }
 
-    # ── 5. Shared auth token (dashboard API <-> agent server) ───────────────
-    local token_file="/etc/tuxwall/agent-token" agent_pw
-    if [[ ! -s "$token_file" ]]; then
-        ( umask 077; head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$token_file" )
+    # ── 5. Shared password (dashboard API <-> agent server) ─────────────────
+    local pw_rc=0
+    agent_password_setup || pw_rc=$?
+    if (( pw_rc != 0 && pw_rc != 10 )); then
+        echo "[!] could not write the agent password file $AGENT_PW_ENV"
+        exit 1
     fi
-    chmod 600 "$token_file"
-    agent_pw="$(cat "$token_file")"
-
-    install -d -m 755 /etc/systemd/system/tuxwall-agent.service.d /etc/systemd/system/tuxwall.service.d
-    ( umask 077
-      printf '[Service]\nEnvironment=OPENCODE_SERVER_PASSWORD=%s\n' "$agent_pw" \
-          > /etc/systemd/system/tuxwall-agent.service.d/password.conf
-      printf '[Service]\nEnvironment=TUXWALL_AGENT_PASSWORD=%s\n' "$agent_pw" \
-          > /etc/systemd/system/tuxwall.service.d/agent-password.conf )
-    chmod 600 /etc/systemd/system/tuxwall-agent.service.d/password.conf \
-              /etc/systemd/system/tuxwall.service.d/agent-password.conf
 
     # ── 6. Web root: root-owned unless explicitly opted in ──────────────────
     # The installer's default (and every apt install) keeps the dashboard
@@ -246,9 +340,17 @@ EOF
     systemctl try-restart tuxwall.service >/dev/null 2>&1 || true
 
     echo "[+] opencode agent ready (127.0.0.1:4096)"
-    echo "    token stored at $token_file (root-only)"
+    echo "    password stored in $AGENT_PW_ENV (root-only)"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    if [[ ${1:-} == --password-only ]]; then
+        # postinst (3.3.8): move/repair the shared password only.
+        # 2nd argument: a root prefix for sandboxed tests.
+        [[ $EUID -eq 0 || -n ${2:-} ]] || { echo "[!] Run as root: $SELF_CMD --password-only"; exit 1; }
+        pw_rc=0
+        agent_password_setup "${2:-}" || pw_rc=$?
+        exit "$pw_rc"
+    fi
     main "$@"
 fi

@@ -47,6 +47,13 @@ a fake `systemctl` (first in PATH, records its calls) and a temp marker:
 - agent_config_split (3.3.5): runs opencode_config.py migrate; restarts the
   agent only after a move (rc 10); a left-alone config is a note, a helper
   failure a warning; never fails the postinst.
+- agent_password_migration (3.3.8): 3.3.7's Environment= password drop-ins
+  (readable by every local user via systemctl show) -> the shipped setup
+  script's --password-only (real script, temp root, dummy values): new
+  password in the root-only env file, drop-ins EnvironmentFile= only,
+  daemon-reload + agent restart; runs in step 7 before the dashboard
+  restart; idempotent (second run: nothing restarted); no agent -> nothing;
+  failures are warnings, never a postinst failure.
 - devicewatch_setup (3.3.7): system user created once, added only to the
   groups that exist (zeek, _kea, systemd-journal), units enabled ONCE
   (marker) and the first feed download started without blocking; upgrades
@@ -981,6 +988,72 @@ def t_agent_setup_step():
         shutil.rmtree(d)
 
 
+AGENT_SCRIPT = os.path.join(ROOT_DIR, "pkg", "usr", "local", "share", "tuxwall", "scripts", "setup-opencode-agent.sh")
+PW_DROPINS = {"OPENCODE_SERVER_PASSWORD": "/etc/systemd/system/tuxwall-agent.service.d/password.conf",
+              "TUXWALL_AGENT_PASSWORD": "/etc/systemd/system/tuxwall.service.d/agent-password.conf"}
+
+
+def t_agent_password_migration():
+    fn = func("agent_password_migration")
+    check("agent_password_migration()" in fn, "postinst defines agent_password_migration")
+    body = SRC.split('case "$1" in\n  configure)', 1)[1]
+    step7 = body[body.index('step 7 '):body.index('step 8 ')]
+    check("agent_password_migration" in step7
+          and step7.index("agent_password_migration") < step7.index("systemctl daemon-reload")
+          < step7.index("systemctl restart tuxwall.service"),
+          "step 7: password migration before daemon-reload and the dashboard restart")
+    old_pw = "0123456789abcdef" * 3          # dummy fixture value
+    d = tempfile.mkdtemp(prefix="pkg-agentpw-")
+    try:
+        fakebin(d, {"systemctl": '#!/bin/sh\necho "systemctl $*" >> "$FAKE_LOG"\nexit 0\n'})
+        root = d + "/root"
+
+        def legacy():
+            for var, path in PW_DROPINS.items():
+                os.makedirs(os.path.dirname(root + path), exist_ok=True)
+                with open(root + path, "w") as f:
+                    f.write("[Service]\nEnvironment=%s=%s\n" % (var, old_pw))
+                os.chmod(root + path, 0o600)
+            os.makedirs(root + "/etc/tuxwall", exist_ok=True)
+
+        def go(script=AGENT_SCRIPT):
+            return bash_run(d, fn + 'agent_password_migration "%s" "%s"\necho done\n' % (script, root))
+
+        # not set up -> nothing
+        os.makedirs(root)
+        rc, calls, out, err = go()
+        check(rc == 0 and not calls and "nothing to do" in out and not os.listdir(root), "no agent -> nothing (%s)" % out.strip())
+        # 3.3.7 install
+        legacy()
+        rc, calls, out, err = go()
+        env = open(root + "/etc/tuxwall/agent-password.env").read()
+        vals = re.findall(r"^(OPENCODE_SERVER_PASSWORD|TUXWALL_AGENT_PASSWORD)=([0-9a-f]{48})$", env, re.M)
+        check(rc == 0 and calls == ["systemctl daemon-reload", "systemctl try-restart tuxwall-agent.service"]
+              and "new password" in out and out.rstrip().endswith("done"),
+              "legacy -> migrated, daemon-reload + agent restart (%s / %s)" % (calls, out.strip()))
+        check(len(vals) == 2 and vals[0][1] == vals[1][1] and vals[0][1] != old_pw,
+              "legacy -> one NEW value for both variables")
+        check(os.stat(root + "/etc/tuxwall/agent-password.env").st_mode & 0o777 == 0o600, "env file 0600")
+        for path in PW_DROPINS.values():
+            txt = open(root + path).read()
+            check("EnvironmentFile=" in txt and old_pw not in txt and not re.search(r"^Environment=", txt, re.M),
+                  "%s: EnvironmentFile= only, no secret" % path)
+        check(vals and vals[0][1] not in out + err and old_pw not in out + err, "no password in the output")
+        # second run: unchanged, nothing restarted
+        rc, calls, out, err = go()
+        check(rc == 0 and not calls and "unchanged" in out, "second run -> unchanged, no restart (%s)" % calls)
+        # script missing / failing -> warning, postinst goes on
+        rc, calls, out, err = go(d + "/none.sh")
+        check(rc == 0 and "WARNING" in out and out.rstrip().endswith("done") and not calls, "script missing -> warning")
+        with open(d + "/fail.sh", "w") as f:
+            f.write("exit 1\n")
+        rc, calls, out, err = go(d + "/fail.sh")
+        check(rc == 0 and "WARNING: not updated" in out and "--password-only" in out and not calls
+              and out.rstrip().endswith("done"), "script failure -> warning + command, no restart")
+    finally:
+        shutil.rmtree(d)
+
+
 def t_agents_md_install():
     fn = func("agents_md_install")
     check("agents_md_install()" in fn, "postinst defines agents_md_install")
@@ -1230,6 +1303,7 @@ def main():
     t_agents_md_install()
     t_rsyslog_rule()
     t_agent_config_split()
+    t_agent_password_migration()
     t_devicewatch_setup()
     t_quarantine_unit()
     print("pkg_scripts_check: %d passed, %d failed" % (PASS, FAIL))
