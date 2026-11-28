@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/images/tux-logo.png">
   <link rel="stylesheet" href="/css/leaflet.css">
   <link rel="stylesheet" href="/css/style.css?v=202611210025">
-  <link rel="stylesheet" href="/css/polish.css?v=202611281900">
+  <link rel="stylesheet" href="/css/polish.css?v=202611280828">
   <link rel="stylesheet" href="/css/firewall.css?v=202611210025">
   <link rel="stylesheet" href="/css/bento.css?v=202611210025">
   <link rel="stylesheet" href="/css/heroes.css?v=202611210025">
@@ -1701,7 +1701,7 @@
         <div class="card-head">
           <h2>Device threats</h2>
           <span class="muted" id="dev-threat-hint">LAN devices matched against threat intelligence and IDS alerts</span>
-          <label class="alerts-check dev-thr-silenced" id="dev-thr-silenced-wrap" hidden><input type="checkbox" id="dev-thr-silenced"> Show silenced <span class="muted" id="dev-thr-silenced-n"></span></label>
+          <label class="trip-wan dev-thr-silenced" id="dev-thr-silenced-wrap" title="Also list findings hidden by silence rules" hidden><span class="fw-switch trip-switch-sm"><input type="checkbox" id="dev-thr-silenced"><span class="fw-switch-slider"></span></span> Show silenced <span class="muted" id="dev-thr-silenced-n"></span></label>
         </div>
         <div class="dev-threat-body" id="dev-threat-body"></div>
         <!-- Recent threats (admin): 25 rows, then the shared row-cap "Show all" bar -->

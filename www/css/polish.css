@@ -1953,6 +1953,7 @@ html:not(#_tw#_x) #view-backups .act-btn.act-pin.is-on {
   #view-security .local-pane > .dev-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 }
 .dev-thr-silenced { margin-left: auto; white-space: nowrap; }
+.dev-thr-silenced[hidden] { display: none; }
 .dev-row-acts { white-space: nowrap; }
 .dev-row-acts > * + * { margin-left: 6px; }
 #dev-silence-card > .vl-info { margin: 0 16px 10px; }
