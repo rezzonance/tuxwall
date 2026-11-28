@@ -20,6 +20,21 @@ Settings:
 Scripts: no "Settings → Threat" link left; button labels never end in "…"
 (buttons.js shows such a button as busy); every POST URL devices.js uses is
 routed by api_server.py; changed assets carry a ?v= cache-buster.
+Session 2 (A4/A5/A8/B):
+- DHCP Pools: a third sub-tab "Pools" on the DHCP page (after Devices,
+  Static; icon key `pools`) with the pools card (#sys-pools, Add pool, raw
+  Kea edit) in its pane; gone from System (no data-sys-pane="dhcp");
+  setDhcpTab refreshes the pools; #clients/<pane> and the old #system/dhcp
+  deep links land on it;
+- CrowdSec > Community Bans: no community switches (no data-community-
+  settings mount, no switch explanation) but the ban list, a state line and
+  a link to Security > Deception > Community; the Deception card no longer
+  says "the same switches as CrowdSec";
+- Suricata suppression: "Suppress rule" on Sensors alert rows and on IDS
+  findings in the device panel, the global #sur-s-modal, the Suppressed
+  rules card (#sur-sup-card) on the Sensors pane, the API route;
+- "What to do": guidance rows in the device panel and the Security > Local
+  table (shared chevron button + detail row the row cap keeps with its row).
 
     python3 tools/ui_structure_check.py
 """
@@ -194,8 +209,93 @@ def main():
         check('"%s"' % url in api, "devices.js POST %s is routed by api_server.py" % url)
     check('"/api/devices/silence"' in api and '"/api/devices/zeek-checksums"' in api, "API routes for silence + Zeek switch")
 
+    # A4: DHCP Pools on the DHCP page
+    strip = ids.get("dhcp-subtabs")
+    tabs = [c.attrs.get("data-dhcp-pane") for c in (strip.children if strip else []) if "fw-subtab" in c.cls()]
+    check(tabs == ["dynamic", "static", "pools"], "DHCP sub-tabs: Devices, Static, Pools (%r)" % tabs)
+    ptab = [c for c in (strip.children if strip else []) if c.attrs.get("data-dhcp-pane") == "pools"]
+    check(bool(re.search(r'data-dhcp-pane="pools">Pools</button>', html)), "DHCP: the tab reads 'Pools'")
+    pane = [n for n in t.root.walk() if n.attrs.get("data-dhcp-pane") == "pools" and "fw-pane" in n.cls()]
+    clients = ids.get("view-clients")
+    check(len(pane) == 1 and clients in pane[0].ancestors() and "hidden" in pane[0].attrs, "Pools pane inside #view-clients, hidden by default")
+    for i in ("sys-pools", "sys-pools-note", "sys-pool-add", "sys-edit-kea"):
+        check(i in ids and pane and pane[0] in ids[i].ancestors(), "#%s lives in the DHCP Pools pane" % i)
+    check(not [n for n in t.root.walk() if n.attrs.get("data-sys-pane") == "dhcp"]
+          and "DHCP Pools</button>" not in html, "System: the DHCP Pools sub-tab and pane are gone")
+    system = ids.get("view-system")
+    check(system is not None and not any(system in ids[i].ancestors() for i in ("sys-pools", "sys-pool-add") if i in ids),
+          "System: no pools elements left")
+    cfg = ids.get("cfg-modal")
+    check(cfg is not None and not any("view" in a.cls() for a in cfg.ancestors()) and "dhcp-f-iface" in ids,
+          "the pool form (#cfg-modal) stays global, so it opens from the DHCP page")
+    m = re.search(r"const SUBTAB_ICONS = \{(.*?)\n  \};", dash, re.S)
+    check(bool(m) and re.search(r"\n    pools: '", m.group(1)) and not re.search(r"\n    dhcp: '", m.group(1)),
+          "SUBTAB_ICONS: icon key 'pools' (no stale 'dhcp')")
+    m = re.search(r"function setDhcpTab\(pane\) \{(.*?)\n  \}", dash, re.S)
+    check(bool(m) and 'if (pane === "pools") refreshPools();' in m.group(1), "setDhcpTab refreshes the pools when opened")
+    check("function openClientsPane(pane)" in dash and 'initial === "system/dhcp" ? [initial, "pools"]' in dash
+          and "openClientsPane(clientsPane[1])" in dash and "/^clients\\/([a-z]+)$/.exec(initial)" in dash,
+          "deep links: #clients/<pane>, #system/dhcp -> DHCP > Pools")
+    enh = read(os.path.join(ROOT, "www", "scripts", "enhance.js"))
+    check('"system/dhcp": "clients/pools"' in enh and "s = MOVED[s] || s;" in enh,
+          "enhance.js: #system/dhcp (load and in-page hash change) -> #clients/pools")
+    m = re.search(r"async function refreshSystem\(\) \{(.*?)\n  \}", dash, re.S)
+    check(bool(m) and "refreshPools" not in m.group(1), "refreshSystem no longer loads the pools")
+    check(len(ptab) == 1, "one Pools tab")
+
+    # A5: CrowdSec > Community Bans without the switches
+    cpane = [n for n in t.root.walk() if n.attrs.get("data-cs-pane") == "community" and "fw-pane" in n.cls()]
+    check(len(cpane) == 1, "one CrowdSec Community Bans pane")
+    cp = cpane[0] if cpane else Node("x", {}, None, 0)
+    check(not [n for n in cp.walk() if "data-community-settings" in n.attrs], "Community Bans: no community switches mounted")
+    cps = html[html.find('data-cs-pane="community" hidden'):html.find('<section id="view-bandwidth"')]
+    check("Use community bans</b> &mdash;" not in cps and "Report catches to the community</b> &mdash;" not in cps
+          and "The same two switches" not in cps, "Community Bans: the switch explanation is gone")
+    for i in ("cban-table", "cban-body", "cban-ban-all", "cban-generated", "cban-settings-line", "cban-settings-state"):
+        check(i in ids and cp in ids[i].ancestors(), "Community Bans keeps #%s" % i)
+    link = [n for n in cp.walk() if "data-tw-community-settings" in n.attrs]
+    check(len(link) == 1 and link[0].tag == "a" and link[0].attrs.get("href") == "#security/deception"
+          and "Security &rsaquo; Deception &rsaquo; Community" in cps, "Community Bans: link to Security > Deception > Community")
+    check('openSecurityPane("deception", "dec-community-card")' in dash and "renderCbanSettingsLine" in dash,
+          "dashboard.js: the link opens the Deception Community card; the state line is rendered")
+    dec = [n for n in t.root.walk() if n.attrs.get("data-community-settings") == "dec-cs"]
+    check(len(dec) == 1 and ids.get("dec-community-card") in dec[0].ancestors(), "Deception keeps the shared switches")
+    check("the same switches as CrowdSec" not in html and "(or on CrowdSec &rsaquo; Community Bans)" not in html,
+          "Deception texts no longer point at switches on CrowdSec")
+
+    # A8: Suricata rule suppression
+    supjs = read(os.path.join(ROOT, "www", "scripts", "suricata-suppress.js"))
+    smod = ids.get("sur-s-modal")
+    check(smod is not None and "modal" in smod.cls() and not any("view" in a.cls() for a in smod.ancestors()),
+          "#sur-s-modal: a global modal")
+    sens = [n for n in t.root.walk() if n.attrs.get("data-sec-pane") == "sensors" and "fw-pane" in n.cls()]
+    check(len(sens) == 1 and "sur-sup-card" in ids and sens[0] in ids["sur-sup-card"].ancestors()
+          and ids["sur-sup-card"].order > ids["sec-suricata-table"].order and "hidden" in ids["sur-sup-card"].attrs,
+          "Suppressed rules card on the Sensors pane, after the alerts table, hidden until the role is known")
+    check(re.search(r'<thead><tr><th>Time</th><th>Signature</th><th>Severity</th><th>Source</th><th>Destination</th><th></th></tr></thead>', html),
+          "Sensors table: an action column")
+    check("data-sur-suppress" in dash and "window.twSuricataSuppress.open(" in dash and "Suppress rule</button>" in dash,
+          "Sensors rows: Suppress rule button")
+    check("data-dev-suppress" in dev and "window.twSuricataSuppress.open(" in dev and 'x.kind === "ids_alert"' in dev,
+          "device panel: Suppress rule on IDS findings")
+    check('/api/security/suricata/suppress' in supjs and '"/api/security/suricata/suppress"' in api
+          and '"/api/security/suricata/suppress",' in api, "API route (GET admin prefix + POST) for suppression")
+    check("Addresses change" in supjs and "not an INFO or POLICY rule" in supjs and 'opt("network", true' in supjs,
+          "suppress dialog: network-wide default, address warning, non-INFO warning")
+    check("Hits / 24 h before" in supjs and "Unsuppress" in supjs and "data-sur-unsup" in supjs,
+          "Suppressed rules list: hits before + Unsuppress")
+    for lab in re.findall(r"<button[^>]*>([^<${}]*)</button>", supjs) + re.findall(r"<button[^>]*>([^<${}]*)</button>", dash):
+        check(not lab.strip().endswith("…"), "button label %r ends in …" % lab.strip())
+
+    # B: "What to do"
+    check("data-dev-guide" in dev and "dev-guide-row tw-detail-row" in dev and "guideRow(gid, x.guidance, 6)" in dev
+          and "guideRow(gid, x.guidance, 5)" in dev, "devices.js: guidance rows in the Local table (6 cols) and panel (5 cols)")
+    check('!r.classList.contains("tw-detail-row")' in dash and "function capRow(r, on)" in dash,
+          "row cap: detail rows follow their parent row, never counted")
+
     # cache-busters
-    for asset in ("/scripts/devices.js", "/scripts/dashboard.js", "/css/polish.css"):
+    for asset in ("/scripts/devices.js", "/scripts/dashboard.js", "/css/polish.css", "/scripts/suricata-suppress.js",
+                  "/scripts/community-settings.js", "/scripts/enhance.js"):
         check(re.search(re.escape(asset) + r"\?v=\d{12}\"", html), "index.html: %s has a ?v= cache-buster" % asset)
 
     print("ui_structure_check: %d passed, %d failed" % (PASS, FAIL))

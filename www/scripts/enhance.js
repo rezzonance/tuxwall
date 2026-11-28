@@ -414,8 +414,11 @@
     var pane = strip ? paneOf(strip.querySelector(".fw-subtab.active")) : "";
     return "#" + v + (pane ? "/" + pane : "");
   }
+  // Panes that moved (3.3.7): old deep links land on the new place.
+  var MOVED = { "system/dhcp": "clients/pools", "settings/threat": "security/local" };
   function parseHash(h) {
     var s = decodeURIComponent((h || "").replace(/^#/, ""));
+    s = MOVED[s] || s;
     var i = s.indexOf("/");
     return i === -1 ? { view: s, sub: "" } : { view: s.slice(0, i), sub: s.slice(i + 1) };
   }

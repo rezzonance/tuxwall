@@ -125,7 +125,7 @@ Home Assistant start only records them, so a restart never replays old ones):
    every file and adding the new ones (1.2.0 adds `entity.py`,
    `summary_data.py`, `update.py`, `icons.json`; 1.2.1 `brand/`). With the
    *Terminal & SSH* add-on:
-   `rm -rf /config/custom_components/tuxwall && tar -xzf tuxwall-ha-1.3.0.tar.gz -C /config`
+   `rm -rf /config/custom_components/tuxwall && tar -xzf tuxwall-ha-1.3.1.tar.gz -C /config`
    (the archive holds `custom_components/tuxwall/`). Over the *Samba share*
    add-on: replace the `config/custom_components/tuxwall` folder.
 2. Restart Home Assistant (**Settings → System → Restart**). The config
@@ -138,6 +138,10 @@ Home Assistant start only records them, so a restart never replays old ones):
 
 ## Changelog
 
+- **1.3.1** — "What to do": `tuxwall_device_finding` and `tuxwall_new_device`
+  events carry `guidance` (the first recommended step, one plain sentence)
+  and the *Flagged devices* sensor a `worst_guidance` attribute (TuxWall
+  3.3.7 routers; older routers: `null`). Nothing else changed.
 - **1.3.0** — Device monitoring (TuxWall 3.3.7): *Flagged devices* sensor
   (attributes: quarantined count, worst finding as a generic reason, critical
   / warning counts) and *Device threat* binary sensor (problem), read from

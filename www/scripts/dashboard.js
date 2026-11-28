@@ -1181,6 +1181,17 @@
     document.querySelectorAll("#view-clients .fw-pane[data-dhcp-pane]").forEach((p) => {
       p.hidden = p.dataset.dhcpPane !== pane;
     });
+    // DHCP pools per interface (moved here from System in 3.3.7)
+    if (pane === "pools") refreshPools();
+  }
+  // #clients/<pane> deep links (#system/dhcp, the old pools location, lands here too)
+  function openClientsPane(pane) {
+    switchView("clients");
+    if (history.replaceState) history.replaceState(null, "", "#clients");
+    setTimeout(() => {
+      const tab = document.querySelector(`#dhcp-subtabs .fw-subtab[data-dhcp-pane="${pane}"]`);
+      if (tab) tab.click();
+    }, 0);
   }
   document.querySelectorAll("#dhcp-subtabs .fw-subtab").forEach((btn) => {
     btn.addEventListener("click", () => setDhcpTab(btn.dataset.dhcpPane));
@@ -3900,7 +3911,7 @@
     if (!d.enabled) {
       els.secSuricataHint.textContent = "not running";
       els.secSuricataBody.innerHTML =
-        `<tr><td colspan="5" class="empty">${esc(d.hint || "Suricata not available.")}</td></tr>`;
+        `<tr><td colspan="6" class="empty">${esc(d.hint || "Suricata not available.")}</td></tr>`;
       return;
     }
     const alerts = d.alerts || [];
@@ -3916,16 +3927,46 @@
     });
     els.secSuricataHint.textContent = `${formatNumber(d.count_24h)} alerts in last 24h`;
     const shown = alerts.filter((a) => a.severity === sev);
-    els.secSuricataBody.innerHTML = shown.map((a) => `
+    state.suricataShown = shown;
+    // "Suppress rule" (admin; scripts/suricata-suppress.js): network-wide or
+    // for the LAN device of the alert (its private address, if any)
+    const canSuppress = isAdminUser() && !!window.twSuricataSuppress;
+    els.secSuricataBody.innerHTML = shown.map((a, i) => `
       <tr>
         <td class="mono">${formatTime(a.ts)}</td>
-        <td><b>${esc(a.sig)}</b></td>
+        <td><b>${esc(a.sig)}</b>${a.sid ? `<br><span class="muted mono">SID ${esc(a.sid)}</span>` : ""}</td>
         <td><span class="badge sev-${esc(a.severity)}">${esc(a.severity)}</span></td>
         <td class="mono">${esc(a.src)}${a.sport ? ":" + esc(a.sport) : ""}</td>
         <td class="mono">${esc(a.dst)}${a.dport ? ":" + esc(a.dport) : ""}</td>
+        <td class="td-right">${canSuppress && a.sid ? `<button class="btn btn-sm btn-ghost" type="button" data-sur-suppress="${i}" title="Stop Suricata raising this alert (network-wide or for one device)">Suppress rule</button>` : ""}</td>
       </tr>`).join("")
-      || `<tr><td colspan="5" class="empty">No ${esc(sev)} alerts in the last 24h.</td></tr>`;
+      || `<tr><td colspan="6" class="empty">No ${esc(sev)} alerts in the last 24h.</td></tr>`;
   }
+
+  // The LAN device of an alert: a known device (inventory) holding the source
+  // or destination address, else a private address on either side.
+  function suricataLanSide(a) {
+    const holds = (d, ip) => !!ip && [...(d.current_ips || []), ...(d.ips || []), ...(d.ipv6 || [])].includes(ip);
+    for (const ip of [a.src, a.dst]) {
+      const d = (state.devices || []).find((x) => holds(x, ip));
+      if (d) {
+        return { ip, device: d.id, device_name: d.name || d.mac || d.id,
+          addrs: (d.current_ips || []).filter((x) => !String(x).includes("/")) };
+      }
+    }
+    const priv = (ip) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|f[cd][0-9a-f]{2}:)/i.test(String(ip || ""));
+    const ip = priv(a.src) ? a.src : priv(a.dst) ? a.dst : "";
+    return ip ? { ip, addrs: [ip] } : {};
+  }
+
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest && e.target.closest("[data-sur-suppress]");
+    if (!b || !window.twSuricataSuppress) return;
+    const a = (state.suricataShown || [])[Number(b.dataset.surSuppress)];
+    if (!a) return;
+    window.twSuricataSuppress.open(Object.assign({ sid: a.sid, sig: a.sig, category: a.category, severity: a.severity },
+      suricataLanSide(a)));
+  });
 
   async function refreshSuricata() {
     try {
@@ -3935,6 +3976,7 @@
       showBanner(true, "Suricata error: " + err.message);
     }
   }
+  window.twRefreshSuricata = refreshSuricata;
 
   function renderZeek(d) {
     if (!d.ok) {
@@ -6762,11 +6804,26 @@
   }
 
   // The two community switches (report catches / use community bans) live
-  // in the shared module (community-settings.js), rendered here and on
-  // Security > Deception; it owns the tuxwall-cban-auto cache and tells us
-  // when the auto-ban state changes.
+  // in the shared module (community-settings.js), rendered on Security >
+  // Deception only (3.3.7); it owns the tuxwall-cban-auto cache and tells us
+  // when the auto-ban state changes. This pane shows their state in one line
+  // with a link to the switches.
+  function renderCbanSettingsLine(d) {
+    const el = document.getElementById("cban-settings-state");
+    if (!el) return;
+    if (!d || !d.auto_ban) {
+      el.textContent = isAdminUser() ? "Community settings: unavailable right now." : "Community settings: administrators only.";
+      return;
+    }
+    const r = d.reporting || {};
+    el.textContent = `Automatic community bans: ${d.auto_ban.enabled
+      ? "on (every medium-or-higher IP is banned locally for 90 days; the bulk-ban button is hidden)"
+      : "off (ban IPs per row or with Ban all shown)"} · Reporting catches: ${r.enabled ? "on" : "off"}.`;
+  }
+
   document.addEventListener("tw:community-settings", (e) => {
     const d = e.detail;
+    renderCbanSettingsLine(d);
     if (!d || !d.auto_ban) return;
     const was = communityBans.auto && communityBans.auto.enabled;
     communityBans.auto = d.auto_ban;
@@ -6875,6 +6932,12 @@
   }
 
   function bindCommunityBans() {
+    document.querySelectorAll("[data-tw-community-settings]").forEach((a) => {
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        openSecurityPane("deception", "dec-community-card");
+      });
+    });
     // Guard: never let a missing element kill the boot chain.
     if (!els.cbanBody || !els.cbanBanAll) return;
     document.querySelectorAll("[data-cban-sev]").forEach((btn) => {
@@ -6939,7 +7002,9 @@
     // banlist tab refetches so timed bans/expiry are fresh.
     if (pane === "community") {
       refreshCommunityBans();
-      if (window.twCommunitySettings) window.twCommunitySettings.refresh(10000);
+      if (window.twCommunitySettings) {
+        window.twCommunitySettings.refresh(10000).then((d) => renderCbanSettingsLine(d || window.twCommunitySettings.data));
+      }
     }
     if (pane === "blocklist") refreshCustomBlocklist();
   }
@@ -7867,7 +7932,6 @@
       showBanner(true, "System info error: " + err.message);
     }
     refreshSqm();
-    refreshPools();
   }
 
   async function refreshSqm() {
@@ -13361,7 +13425,7 @@
     clients: '<circle cx="9" cy="8" r="3.2"/><path d="M2.6 20a6.4 6.4 0 0 1 12.8 0M15.6 5.3a3.2 3.2 0 0 1 0 5.4M18.9 20a6.4 6.4 0 0 0-2.8-5.3"/>',
     status: '<path d="M4 18a9 9 0 1 1 16 0"/><path d="m12 13 4.5-4.5"/><circle cx="12" cy="13" r="1.3"/>',
     shaping: '<path d="M4 7h9M19 7h1M4 12h3M13 12h7M4 17h11M21 17h-1"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="17" r="2"/>',
-    dhcp: '<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h6M12 17.5h6"/>',
+    pools: '<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h6M12 17.5h6"/>',
     maintenance: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94z"/>',
     appearance: '<path d="M12 3a9 9 0 0 0 0 18c1 0 1.7-.8 1.7-1.7 0-.5-.2-.9-.5-1.2-.3-.3-.4-.7-.4-1.1 0-1 .8-1.7 1.7-1.7H16a5 5 0 0 0 5-5c0-4.1-4-7.3-9-7.3z"/><circle cx="7.6" cy="11" r="1.15"/><circle cx="10" cy="7.6" r="1.15"/><circle cx="14.4" cy="7.6" r="1.15"/><circle cx="17" cy="11" r="1.15"/>',
     map: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.8 2.6 15.2 0 18M12 3c-2.6 2.8-2.6 15.2 0 18"/>',
@@ -14067,6 +14131,7 @@
       }
       if (view === "firewall") { refreshFirewall(); refreshPortForward(); refreshDmz(); }
       if (view === "vlans") refreshVlans();
+      if (view === "clients" && document.querySelector('#dhcp-subtabs [data-dhcp-pane="pools"].active')) refreshPools();
       if (view === "domains") refreshDomains();
       if (view === "security") {
         initSecurityMap();
@@ -15986,8 +16051,10 @@
     const viewKnown = (name) => !!name && (VIEW_TITLES[name] || name.startsWith("plugin:"));
     const settingsPane = /^settings\/([a-z]+)$/.exec(initial);
     const securityPane = /^security\/([a-z]+)$/.exec(initial);
+    const clientsPane = initial === "system/dhcp" ? [initial, "pools"] : /^clients\/([a-z]+)$/.exec(initial);
     if (settingsPane) openSettingsPane(settingsPane[1]);
     else if (securityPane) openSecurityPane(securityPane[1]);
+    else if (clientsPane) openClientsPane(clientsPane[1]);
     else switchView(viewKnown(initial) ? initial : (viewKnown(storedView) ? storedView : "overview"));
 
     bindBlocklistActions();
@@ -16979,8 +17046,15 @@
   const scheduled = new WeakSet();
 
   function rowsOf(tbody) {
-    // The "showing N of M" footer row is never capped away.
-    return Array.from(tbody.rows).filter((r) => !r.classList.contains("cs-more-row"));
+    // The "showing N of M" footer row is never capped away; an expandable
+    // detail row (.tw-detail-row, e.g. "What to do") follows its parent row.
+    return Array.from(tbody.rows).filter((r) => !r.classList.contains("cs-more-row") && !r.classList.contains("tw-detail-row"));
+  }
+
+  function capRow(r, on) {
+    r.classList.toggle("tw-row-capped", on);
+    const next = r.nextElementSibling;
+    if (next && next.classList.contains("tw-detail-row")) next.classList.toggle("tw-row-capped", on);
   }
 
   function apply(table, cap) {
@@ -16994,14 +17068,14 @@
     if (!bar) return;
 
     if (rows.length <= cap) {
-      rows.forEach((r) => r.classList.remove("tw-row-capped"));
+      rows.forEach((r) => capRow(r, false));
       bar.hidden = true;
       return;
     }
 
     bar.hidden = false;
     rows.forEach((r, i) => {
-      r.classList.toggle("tw-row-capped", !isOpen && i >= cap);
+      capRow(r, !isOpen && i >= cap);
     });
 
     const btn = bar.querySelector(".tw-more-btn");

@@ -1993,3 +1993,41 @@ html:not(#_tw#_x) #view-backups .act-btn.act-pin.is-on {
 @media (max-width: 760px) {
   #view-security .local-pane > .dev-stats > .stat-card:last-child { grid-column: 1 / -1; }
 }
+
+/* DHCP > Pools (moved from System, 3.3.7): same spacing the System page gave the card */
+#view-clients .sys-dhcp-card { margin-bottom: 18px; }
+#view-clients .sys-dhcp-card .sqm-note { padding: 12px 16px; margin: 0; }
+
+/* CrowdSec > Community Bans: state of the community switches + link (the switches are on Security > Deception) */
+#view-crowdsec .cban-settings-line { margin: 0; padding: 10px 16px; font-size: 12px; border-bottom: 1px solid var(--border); }
+#view-crowdsec .cban-settings-line a { color: var(--accent); white-space: nowrap; }
+
+/* "What to do" detail rows (device panel + Security > Local; layout only, shared colours) */
+.dev-guide-btn { display: inline-flex; align-items: center; gap: 5px; }
+.dev-guide-btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform var(--transition); }
+.dev-guide-btn[aria-expanded="true"] svg { transform: rotate(180deg); }
+.dev-table tr.dev-guide-row[hidden] { display: none; }
+.dev-table tr.dev-guide-row > td { padding: 4px 14px 12px; background: color-mix(in srgb, var(--accent) 6%, transparent); white-space: normal; }
+.dev-guide { font-size: 12.5px; line-height: 1.5; max-width: 860px; }
+.dev-guide p { margin: 6px 0 0; }
+.dev-guide ol { margin: 4px 0 0; padding-left: 20px; }
+.dev-guide li + li { margin-top: 2px; }
+.dev-guide .muted { font-size: 12px; }
+@media (prefers-reduced-motion: reduce) { .dev-guide-btn svg { transition: none; } }
+@media (max-width: 760px) {
+  .dev-table tr.dev-guide-row { padding: 0 0 8px; }
+  .dev-table tr.dev-guide-row > td { padding: 8px 10px; border-radius: 8px; }
+  .dev-row-acts { white-space: normal; }
+  .dev-row-acts > * { margin: 4px 6px 0 0; }
+  .dev-row-acts > * + * { margin-left: 0; }
+}
+
+/* Security > Sensors: suppressed Suricata rules */
+#sur-sup-card > .vl-info { margin: 0 16px 10px; }
+#sur-sup-body { padding: 0 16px 14px; }
+#sur-sup-card .sur-sup-job { margin: 0 16px 8px; font-size: 12px; min-height: 1em; }
+.sur-sup-empty, .sur-sup-hand { margin: 0; font-size: 12px; }
+.sur-sup-hand { margin-top: 8px; }
+#sec-suricata-table td:last-child { white-space: nowrap; }
+#sur-s-body .dev-q-grid { grid-template-columns: 1fr; }
+#sur-sup-table td.mono { white-space: nowrap; overflow-wrap: normal; }

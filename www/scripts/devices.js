@@ -11,7 +11,10 @@
    Auth-Key, local indicators). Settings > Alerts > Device alerts. The same
    source warnings show on Clients with a link to Security > Local
    ([data-tw-local="<card id>"] -> window.twSecurity.open; the old
-   Settings > Threat links land there too).
+   Settings > Threat links land there too). Every finding row (device panel,
+   Security > Local table) has a "What to do" detail row from the server's
+   guidance (finding kind x device type); IDS findings in the panel also
+   "Suppress rule" (window.twSuricataSuppress, scripts/suricata-suppress.js).
    Data: GET /api/devices/summary, /feeds (everyone), /api/devices/<id>,
    /indicators, /alerts, /silence, /findings/recent[?silenced=1] (admin);
    POST /api/devices/<id>/{quarantine,unquarantine,rename,expected,new-ack},
@@ -58,6 +61,7 @@
   let showSilenced = false;
   let silenceRules = null;
   let zeekPoll = null;
+  const openGuides = new Set();  // "What to do" rows left open (survive re-renders)
 
   // ── helpers ──────────────────────────────────────────────────────────────
   async function getJSON(url, timeoutMs = 20000) {
@@ -115,6 +119,35 @@
   }
   function kv(label, value, raw) {
     return `<div class="ov-kv-row"><span class="ov-kv-label">${esc(label)}</span><span class="ov-kv-value">${raw ? value : esc(value)}</span></div>`;
+  }
+
+  // ── "What to do" (server-side guidance per finding kind x device type) ───
+  // A ghost button with the shared chevron opens a detail row under the
+  // finding (Security > Local table and the device panel).
+  const CHEV = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
+  function guideId(scope, fid) {
+    return `dev-g-${scope}-${String(fid || "").replace(/[^A-Za-z0-9_-]/g, "_")}`;
+  }
+  function guideBtn(id, g) {
+    if (!g) return "";
+    const open = openGuides.has(id);
+    return `<button class="btn btn-sm btn-ghost dev-guide-btn" type="button" data-dev-guide="${esc(id)}" aria-expanded="${open}" aria-controls="${esc(id)}" title="What this means and what to do">${CHEV}<span>What to do</span></button>`;
+  }
+  function guideRow(id, g, cols) {
+    if (!g) return "";
+    const steps = (g.steps || []).map((x) => `<li>${esc(x)}</li>`).join("");
+    return `<tr class="dev-guide-row tw-detail-row" id="${esc(id)}"${openGuides.has(id) ? "" : " hidden"}><td colspan="${cols}">
+        <div class="dev-guide"><p><b>What this means:</b> ${esc(g.meaning)}</p>
+        <p class="dev-guide-h"><b>What to do</b></p><ol>${steps}</ol>
+        ${g.expected_hint ? `<p class="muted">${esc(g.expected_hint)}</p>` : ""}</div></td></tr>`;
+  }
+  function toggleGuide(btn) {
+    const id = btn.dataset.devGuide;
+    const row = $(id);
+    if (!row) return;
+    row.hidden = !row.hidden;
+    if (row.hidden) openGuides.delete(id); else openGuides.add(id);
+    btn.setAttribute("aria-expanded", row.hidden ? "false" : "true");
   }
 
   // ── Security > Local status cards + Overview figure ─────────────────────
@@ -271,14 +304,15 @@
              <button class="btn btn-sm btn-ghost" type="button" data-dev-unsilence="${esc(x.silenced)}" title="Remove the silence rule that hides this finding">Unsilence</button>`
           : `<button class="btn btn-sm btn-ghost" type="button" data-dev-silence-row="${i}" title="Silence: a rule for this and similar findings (all devices, this device, a domain, a kind)">Silence</button>
              <button class="btn btn-sm btn-ghost" type="button" data-dev-thr-exp="${esc(x.id)}" data-dev="${esc(x.device)}" title="Mark as expected: stops counting toward health and stops its alerts">Mark expected</button>`;
+      const gid = guideId("r", x.id);
       return `<tr class="${x.silenced ? "dev-f-expected" : ""}">
         <td>${sevBadge(x.severity)}</td>
         <td>${esc(x.feed)}</td>
         <td>${host}</td>
         <td><a href="#clients" data-dev-goto="${esc(x.device)}">${esc(x.device_name || x.device)}</a></td>
         <td title="${esc(when(x.ts))}">${esc(ago(x.ts))}</td>
-        <td class="td-right dev-row-acts">${act}</td>
-      </tr>`;
+        <td class="td-right dev-row-acts">${guideBtn(gid, x.guidance)}${act}</td>
+      </tr>${guideRow(gid, x.guidance, 6)}`;
     }).join("");
   }
 
@@ -418,17 +452,21 @@
         det.category ? esc(det.category) : "", det.listed_status ? esc(det.listed_status) : "",
         det.note ? esc(det.note) : ""].filter(Boolean).join(" · ");
       const silenced = x.silenced && !x.expected;
+      const gid = guideId("p", x.id);
+      const sid = x.kind === "ids_alert" ? (det.sid || String(x.indicator || "").replace(/^sid:/, "")) : "";
+      const supp = sid && window.twSuricataSuppress
+        ? `<button class="btn btn-sm btn-ghost" type="button" data-dev-suppress="${esc(x.id)}" title="Stop Suricata raising this alert (network-wide or for this device)">Suppress rule</button>` : "";
       return `<tr class="${x.expected || silenced ? "dev-f-expected" : ""}">
         <td title="first ${esc(when(x.first))}">${esc(ago(x.last))}${x.count > 1 ? `<br><span class="muted">×${num(x.count)}</span>` : ""}</td>
         <td>${sevBadge(x.severity)}</td>
         <td>${esc(x.title || KIND_LABEL[x.kind] || x.kind)}<br><span class="muted">${esc(KIND_LABEL[x.kind] || x.kind)}</span></td>
         <td>${why || "—"}</td>
-        <td class="td-right dev-row-acts">${silenced
+        <td class="td-right dev-row-acts">${guideBtn(gid, x.guidance)}${supp}${silenced
           ? `<span class="badge badge-static" title="Hidden by a silence rule">Silenced</span>
              <button class="btn btn-sm btn-ghost" type="button" data-dev-unsilence="${esc(x.silenced)}" title="Remove the silence rule that hides this finding">Unsilence</button>`
           : `${x.expected ? "" : `<button class="btn btn-sm btn-ghost" type="button" data-dev-silence-f="${esc(x.id)}" title="Silence: a rule for this and similar findings">Silence</button>`}
              <button class="btn btn-sm btn-ghost" type="button" data-dev-exp="${esc(x.id)}" data-on="${x.expected ? 0 : 1}" title="${x.expected ? "Count this finding again" : "Mark as expected: stops counting toward health and stops its alerts"}">${x.expected ? "Unmark" : "Expected"}</button>`}</td>
-      </tr>`;
+      </tr>${guideRow(gid, x.guidance, 5)}`;
     }).join("");
     const tops = (d.top_destinations || []).map((t) => `<tr>
         <td><span class="mono">${esc(t.ip)}</span>${t.name ? `<br><span class="muted">${esc(t.name)}</span>` : ""}</td>
@@ -540,6 +578,16 @@
       say("Renamed.");
       if (window.twClients) window.twClients.refresh();
     });
+    body.querySelectorAll("[data-dev-suppress]").forEach((b) => b.addEventListener("click", () => {
+      const f = (current.detail.findings || []).find((x) => x.id === b.dataset.devSuppress);
+      if (!f || !window.twSuricataSuppress) return;
+      const det = f.details || {};
+      window.twSuricataSuppress.open({
+        sid: det.sid || String(f.indicator || "").replace(/^sid:/, ""), sig: f.title, category: det.category,
+        severity: f.severity, device: d.id, device_name: d.name || d.mac || d.id,
+        addrs: (d.current_ips || []).filter((a) => !String(a).includes("/")),
+      });
+    }));
     body.querySelectorAll("[data-dev-silence-f]").forEach((b) => b.addEventListener("click", () => {
       const f = (current.detail.findings || []).find((x) => x.id === b.dataset.devSilenceF);
       if (f) openSilence(Object.assign({}, f, { device_name: d.name || d.mac || d.id }), () => reload());
@@ -1143,6 +1191,8 @@
       if (us) unsilence(us);
       const st = e.target.closest && e.target.closest("#dev-stats [data-dev-st]");
       if (st) statClick(st);
+      const gb = e.target.closest && e.target.closest("[data-dev-guide]");
+      if (gb) toggleGuide(gb);
     });
     const stats = $("dev-stats");
     if (stats) stats.addEventListener("keydown", (e) => {
@@ -1170,6 +1220,7 @@
       if (e.key !== "Escape") return;
       if (sm && !sm.hidden) closeSilence();
       else if (qm && !qm.hidden) qm.hidden = true;
+      else if ($("sur-s-modal") && !$("sur-s-modal").hidden) return;   // suricata-suppress.js closes its dialog
       else if (m && !m.hidden) closePanel();
     });
     const save = $("dev-al-save");
@@ -1177,6 +1228,8 @@
     window.addEventListener("resize", () => {
       if (current && current.detail && m && !m.hidden) drawChart($("dev-chart"), current.detail.device.hourly || []);
     });
+    // a rule suppressed from the panel: reload it (the finding stays; new alerts stop)
+    document.addEventListener("tw:suricata-suppress", () => { if (current && m && !m.hidden) reload(); });
   }
 
   document.addEventListener("tw:role", (e) => setRole(e.detail && e.detail.admin));

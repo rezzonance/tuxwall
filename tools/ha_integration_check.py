@@ -215,8 +215,23 @@ def t_device_events():
     ev3, seen3 = sd.device_events(sd.normalize_summary(nxt), seen2)
     check([e[0] for e in ev3] == ["tuxwall_device_finding", "tuxwall_new_device"]
           and ev3[0][1] == {"id": "f3", "severity": "high", "reason": "r3", "device_id": "m020000000002",
-                            "device": "Example tv", "first": int(NOW), "last": int(NOW)}
+                            "device": "Example tv", "first": int(NOW), "last": int(NOW), "guidance": None}
           and ev3[1][1]["device"] == "Example cam" and ev3[1][1]["zone"] == "LAN", "events: one per new id (%r)" % ev3)
+    # 1.3.1: "What to do" (first step) passed through when the router sends it; null from older routers
+    g = "Check the name, vendor and network: is it yours (a new device, a guest)?"
+    nxt2 = dict(SUMMARY, devices=dict(SUMMARY["devices"], findings=[
+        {"id": "f9", "severity": "high", "reason": "r9", "device": "m020000000002", "device_name": "Example tv",
+         "first": int(NOW), "last": int(NOW), "guidance": "Quarantine it (Isolate) while you check."}]
+        + SUMMARY["devices"]["findings"], new_devices=[
+        {"id": "m020000000009", "name": "Example cam 2", "zone": "LAN", "vendor": "Example", "first_seen": int(NOW),
+         "guidance": g}] + SUMMARY["devices"]["new_devices"],
+        worst=dict(SUMMARY["devices"].get("worst") or {}, guidance="Quarantine it now (Isolate).")))
+    ev5, _s5 = sd.device_events(sd.normalize_summary(nxt2), seen3)
+    check([e[1].get("guidance") for e in ev5] == ["Quarantine it (Isolate) while you check.", g],
+          "1.3.1 events: guidance of findings and new devices (%r)" % ev5)
+    if SUMMARY["devices"].get("worst"):
+        check(sd.attributes(sd.normalize_summary(nxt2), "flagged_devices").get("worst_guidance") == "Quarantine it now (Isolate).",
+              "1.3.1: flagged_devices attribute worst_guidance")
     ev4, _s = sd.device_events(sd.normalize_summary(nxt), seen3)
     check(ev4 == [], "events: deduped by id")
     old = sd.normalize_summary({k: v for k, v in SUMMARY.items() if k != "devices"})
@@ -255,7 +270,7 @@ def t_metadata():
                "documentation", "integration_type", "iot_class", "issue_tracker", "loggers", "requirements",
                "version", "quality_scale", "single_config_entry"}
     check(set(man) <= allowed, "manifest keys known (%s)" % sorted(set(man) - allowed))
-    check(man["domain"] == "tuxwall" and man["version"] == "1.3.0" and man["iot_class"] == "local_polling"
+    check(man["domain"] == "tuxwall" and man["version"] == "1.3.1" and man["iot_class"] == "local_polling"
           and re.fullmatch(r"\d+\.\d+\.\d+", man["version"]), "manifest domain/version/iot_class")
     for name, size in (("icon.png", 256), ("icon@2x.png", 512)):
         path = os.path.join(HA_DIR, "brand", name)

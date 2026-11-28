@@ -73,6 +73,16 @@ except Exception as _exc:  # device monitoring views answer "unavailable" withou
     print("tuxwall: devicewatch module unavailable: %r" % _exc, flush=True)
     _dw = None
 try:
+    import suricata_suppress as _ssup
+except Exception as _exc:  # rule suppression answers 503 without it
+    print("tuxwall: suricata_suppress module unavailable: %r" % _exc, flush=True)
+    _ssup = None
+try:
+    import devicewatch_guidance as _dg
+except Exception as _exc:  # findings are shown without "What to do" without it
+    print("tuxwall: devicewatch_guidance module unavailable: %r" % _exc, flush=True)
+    _dg = None
+try:
     import quarantine as _qm
 except Exception as _exc:  # quarantine routes answer 503 without it
     print("tuxwall: quarantine module unavailable: %r" % _exc, flush=True)
@@ -7383,6 +7393,144 @@ def build_suricata():
     }
 
 
+# Rule suppression (A8, 3.3.7): a TuxWall marker block in threshold.config
+# (suricata_suppress.py: hand-written lines are never touched; suricata -T on
+# the new file, reload-rules, restore on failure). The reload of a full ET
+# ruleset takes a while, so POST starts a background job (202) and GET
+# /api/security/suricata/suppress reports it. Admin only (names devices and
+# addresses: ADMIN_GET_PREFIXES; POST: admin + same Origin).
+_SUR_SUP_JOB = {"running": False}
+_SUR_SUP_LOCK = threading.Lock()
+
+
+def _suricata_sid_hits(sid, addrs=None, window=SURICATA_WINDOW):
+    """Alerts of one SID in the eve.json tail of the last 24 h (optionally
+    only those with one of addrs as source or destination)."""
+    lines = _suricata_tail_lines() or []
+    want = set(addrs or [])
+    needle = '"signature_id":%d' % sid
+    now = time.time()
+    n = 0
+    for raw in lines:
+        if needle not in raw.replace(" ", ""):
+            continue
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict) or ev.get("event_type") != "alert":
+            continue
+        if (ev.get("alert") or {}).get("signature_id") != sid:
+            continue
+        ts = _parse_iso(ev.get("timestamp")) or now
+        if now - ts > window:
+            continue
+        if want and ev.get("src_ip") not in want and ev.get("dest_ip") not in want:
+            continue
+        n += 1
+    return n
+
+
+def _suricata_suppress_device(body):
+    """Inventory record for scope "device": by device id or by one of its
+    addresses (Sensors rows) -> {id, name, addrs = current v4/v6}."""
+    devices = (_devices_state()[0] if _dw is not None else None) or []
+    did = str(body.get("device") or "")
+    ip = str(body.get("ip") or "").strip()
+    dev = None
+    if did:
+        dev = next((d for d in devices if d.get("id") == did), None)
+    elif ip:
+        dev = next((d for d in devices if ip in (d.get("current_ips") or [])), None) or \
+            next((d for d in devices if ip in (d.get("ips") or []) or ip in (d.get("ipv6") or [])), None)
+    if dev is None:
+        return None
+    addrs = [a for a in (dev.get("current_ips") or []) if "/" not in str(a)]
+    if ip and ip not in addrs and not did:
+        addrs.append(ip)
+    return {"id": dev.get("id"), "name": dev.get("name") or dev.get("mac") or dev.get("id"), "addrs": addrs}
+
+
+def build_suricata_suppress():
+    if _ssup is None:
+        return 503, {"ok": False, "error": "suricata_suppress module unavailable"}
+    st = _ssup.state()
+    for e in st["entries"]:
+        e["key"] = _ssup.entry_key(e)
+        e["risky"] = _ssup.risky(e.get("sig"))
+    with _SUR_SUP_LOCK:
+        job = {k: _SUR_SUP_JOB.get(k) for k in ("running", "action", "sid", "started", "finished", "ok", "message")}
+    return 200, dict(st, ok=True, job=job, max=_ssup.MAX_RULES, installed=os.path.exists(_ssup.SURICATA_YAML))
+
+
+def _suricata_suppress_run(new_text, action, sid, who):
+    try:
+        res = _ssup.apply(new_text)
+    except Exception as exc:
+        res = {"ok": False, "message": "could not write threshold.config (%s)" % exc.__class__.__name__}
+    print("[suricata] %s sid %s by %s: %s" % (action, sid, who, res.get("message")), flush=True)
+    with _SUR_SUP_LOCK:
+        _SUR_SUP_JOB.update(running=False, finished=int(time.time()), ok=bool(res.get("ok")),
+                            message=str(res.get("message") or "")[:240])
+
+
+def suricata_suppress_post(body, identity):
+    """POST /api/security/suricata/suppress {action: add, sid, scope
+    network|device, device|ip, sig, category, note} | {action: remove, key}."""
+    if _ssup is None:
+        return 503, {"ok": False, "error": "suricata_suppress module unavailable"}
+    who = (identity or {}).get("username") or "?"
+    action = str(body.get("action") or "")
+    if not os.path.exists(_ssup.SURICATA_YAML):
+        return 409, {"ok": False, "error": "Suricata is not installed"}
+    with _SUR_SUP_LOCK:
+        if _SUR_SUP_JOB.get("running"):
+            return 409, {"ok": False, "error": "A suppression change is still being applied"}
+        text = _ssup.read()
+        try:
+            _b, block, _a = _ssup.split(text)
+            entries = _ssup.parse_block(block)
+        except _ssup.BlockError as exc:
+            return 409, {"ok": False, "error": str(exc) + " - fix or remove it by hand first"}
+        if action == "add":
+            dev = None
+            if body.get("scope") == "device":
+                dev = _suricata_suppress_device(body)
+                if dev is None:
+                    return 404, {"ok": False, "error": "Unknown device - suppress network-wide instead"}
+            try:
+                e = _ssup.validate_new(dict(body, hits_24h=0), time.time(), who, dev)
+            except ValueError as exc:
+                return 400, {"ok": False, "error": str(exc)}
+            if any(h["sid"] == e["sid"] and not h["scoped"] for h in _ssup.hand_sids(text)):
+                return 409, {"ok": False, "error": "SID %d is already suppressed by a hand-written line in "
+                                                   "threshold.config" % e["sid"]}
+            if any(x["sid"] == e["sid"] and x["scope"] == "network" for x in entries) and e["scope"] == "device":
+                return 409, {"ok": False, "error": "SID %d is already suppressed network-wide" % e["sid"]}
+            e["hits_24h"] = _suricata_sid_hits(e["sid"], e["addrs"] if e["scope"] == "device" else None)
+            try:
+                entries = _ssup.merge(entries, e)
+            except ValueError as exc:
+                return 400, {"ok": False, "error": str(exc)}
+            sid = e["sid"]
+        elif action == "remove":
+            key = str(body.get("key") or "")
+            keep = [x for x in entries if _ssup.entry_key(x) != key]
+            if len(keep) == len(entries):
+                return 404, {"ok": False, "error": "No such suppressed rule"}
+            sid = key.split(":", 1)[0]
+            entries = keep
+        else:
+            return 400, {"ok": False, "error": "action must be add or remove"}
+        new_text = _ssup.render(text, entries)
+        _SUR_SUP_JOB.clear()
+        _SUR_SUP_JOB.update(running=True, action=action, sid=sid, started=int(time.time()), finished=None, ok=None,
+                            message="")
+    threading.Thread(target=_suricata_suppress_run, args=(new_text, action, sid, who), name="suricata-suppress",
+                     daemon=True).start()
+    return 202, {"ok": True, "started": True, "action": action, "sid": sid}
+
+
 def _suricata_talkers(alerts):
     """Aggregate the alert window for the Overview's Router Insights panel:
     the hosts involved in the most alerts (as source or destination), the
@@ -12431,6 +12579,8 @@ ADMIN_GET_PREFIXES = (
     "/api/devices/alerts",
     "/api/devices/findings",
     "/api/devices/silence",
+    # Suricata rule suppression (3.3.7): names devices and their addresses
+    "/api/security/suricata/suppress",
 )
 
 
@@ -17529,6 +17679,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, ai_security_summary(model))
         elif path == "/api/security/suricata":
             self._send(200, build_suricata())
+        elif path == "/api/security/suricata/suppress":
+            self._send(*build_suricata_suppress())
         elif path == "/api/security/zeek":
             self._send(200, build_zeek())
         elif path == "/api/security/zeek/quic":
@@ -18691,6 +18843,9 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/api/security/honeypot/config":
             self._send(200, set_honeypot_conf(body))
+
+        elif path == "/api/security/suricata/suppress":
+            self._send(*suricata_suppress_post(body, identity))
 
         elif path == "/api/security/aide/check":
             self._send(200, start_aide_run("check"))
@@ -20421,6 +20576,18 @@ def build_devices(identity):
             "quarantine_supported": _qm is not None, "devices": rows}
 
 
+def _devices_guidance(finding, dev_type, first_only=False):
+    """"What to do" for a finding (devicewatch_guidance.py; None without the
+    module): the full block, or only its first step (push alerts, HA)."""
+    if _dg is None:
+        return None
+    try:
+        return _dg.first_step(finding, dev_type) if first_only else _dg.guidance(finding, dev_type)
+    except Exception as exc:
+        print("[devices] guidance: %r" % (exc,), flush=True)
+        return None
+
+
 def build_device_detail(did):
     devices, findings, gen, running = _devices_state()
     if devices is None:
@@ -20428,7 +20595,8 @@ def build_device_detail(did):
     dev = next((d for d in devices if d["id"] == did), None)
     if dev is None:
         return 404, {"ok": False, "error": "Unknown device"}
-    fl = sorted((dict(f, critical=_dw.is_critical_finding(f)) for f in findings if f.get("device") == did),
+    fl = sorted((dict(f, critical=_dw.is_critical_finding(f), guidance=_devices_guidance(f, dev.get("type")))
+                 for f in findings if f.get("device") == did),
                 key=lambda f: (_dw.suppressed(f), -_dw.SEV_RANK.get(f.get("severity"), 0), -(f.get("last") or 0)))
     return 200, {"ok": True, "running": running, "generated_at": gen, "device": dev, "findings": fl,
                  "quarantine": _quar_detail(dev, devices)}
@@ -20489,7 +20657,8 @@ def _devices_new_rows(devices, now):
             "id": "new:" + did, "severity": "info", "feed": "Inventory", "kind": "new_device",
             "indicator": "", "detail": " · ".join(str(x) for x in what)[:80], "action": "new",
             "device": did, "device_name": d.get("name") or d.get("mac") or did,
-            "ts": ts, "iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(), "count": 1})
+            "ts": ts, "iso": datetime.fromtimestamp(ts, timezone.utc).isoformat(), "count": 1,
+            "guidance": _devices_guidance("new_device", d.get("type"))})
     return rows
 
 
@@ -20508,6 +20677,7 @@ def build_devices_findings_recent(limit_raw, show_silenced=False):
     if devices is None:
         return 200, {"ok": True, "available": False, "running": False, "findings": []}
     names = {d["id"]: (d.get("name") or d.get("mac") or d["id"]) for d in devices}
+    types = {d["id"]: d.get("type") for d in devices}
     rows = []
     hidden = sum(1 for x in findings if x.get("silenced") and not x.get("expected"))
     for f in sorted((x for x in findings if not x.get("expected") and (show_silenced or not x.get("silenced"))),
@@ -20540,7 +20710,8 @@ def build_devices_findings_recent(limit_raw, show_silenced=False):
             "ts": last, "iso": datetime.fromtimestamp(last, timezone.utc).isoformat(),
             "count": f.get("count") or 1, "silenced": f.get("silenced"),
             "critical": _dw.is_critical_finding(f),
-            "query": str(det.get("query") or "")[:255] if det.get("query") != f.get("indicator") else ""})
+            "query": str(det.get("query") or "")[:255] if det.get("query") != f.get("indicator") else "",
+            "guidance": _devices_guidance(f, types.get(f.get("device")))})
     try:
         rows += _devices_new_rows(devices, time.time())
     except Exception as exc:
@@ -21544,9 +21715,11 @@ def devices_alert_pass():
                 if private:
                     vendor = "Private (randomised) MAC address" if vendor in ("", "Private MAC") \
                         else vendor + ", private MAC"
+                todo = _devices_guidance("new_device", dev.get("type"), first_only=True)
                 msg = ("New device on %s: %s" % (dev.get("zone_name") or dev.get("zone") or "the network", name),
-                       "%s. First seen %s. Review it on the Clients page." % (
-                           vendor or "Unknown vendor", time.strftime("%H:%M", time.localtime(ev.get("ts") or now))),
+                       "%s. First seen %s. Review it on the Clients page.%s" % (
+                           vendor or "Unknown vendor", time.strftime("%H:%M", time.localtime(ev.get("ts") or now)),
+                           "\nWhat to do: " + todo if todo else ""),
                        "info")
             elif typ == "finding":
                 if not cfg["findings"]:
@@ -21558,8 +21731,10 @@ def devices_alert_pass():
                 key = "f:%s" % ev.get("finding")
                 if key in sent_keys and not ev.get("escalated") and now - float(sent_keys[key]) < FINDING_REALERT:
                     continue
+                todo = _devices_guidance(f or ev, dev.get("type"), first_only=True)
                 msg = ("Device flagged: %s" % name,
-                       "%s. Review it on the Clients page (Health)." % _device_alert_what(f, ev),
+                       "%s. Review it on the Clients page (Health).%s" % (
+                           _device_alert_what(f, ev), "\nWhat to do: " + todo if todo else ""),
                        "critical" if sev == "critical" else "warning")
             else:
                 continue
@@ -21630,16 +21805,32 @@ def _integ_devices_recent():
     if devices is None:
         return [], []
     names = {d["id"]: d.get("name") or "" for d in devices}
+    types = {d["id"]: d.get("type") for d in devices}
     act = sorted((f for f in findings if not _dw.suppressed(f) and f.get("id")),
                  key=lambda f: -(f.get("last") or 0))[:INTEG_DEVICES_RECENT]
     recent = [{"id": f["id"], "severity": f.get("severity"), "reason": _dw.public_reason(f),
                "device": f.get("device"), "device_name": names.get(f.get("device"), ""),
-               "first": int(f.get("first") or 0), "last": int(f.get("last") or 0)} for f in act]
+               "first": int(f.get("first") or 0), "last": int(f.get("last") or 0),
+               "guidance": _devices_guidance(f, types.get(f.get("device")), first_only=True)} for f in act]
     new = sorted((d for d in devices if d.get("health") == "new" or
                   (not d.get("baseline") and time.time() - (d.get("first_seen") or 0) < _dw.NEW_DEVICE_SECONDS)),
                  key=lambda d: -(d.get("first_seen") or 0))[:INTEG_DEVICES_RECENT]
     return recent, [{"id": d["id"], "name": d.get("name") or "", "zone": d.get("zone_name") or d.get("zone") or "",
-                     "vendor": d.get("vendor") or "", "first_seen": int(d.get("first_seen") or 0)} for d in new]
+                     "vendor": d.get("vendor") or "", "first_seen": int(d.get("first_seen") or 0),
+                     "guidance": _devices_guidance("new_device", d.get("type"), first_only=True)} for d in new]
+
+
+def _integ_worst_guidance(w):
+    """First "What to do" step of the summary's worst finding (HA attribute)."""
+    if not w or _dg is None:
+        return None
+    devices, findings, _gen, _run = _devices_state()
+    f = next((x for x in findings or [] if x.get("device") == w.get("device") and x.get("severity") == w.get("severity")
+              and int(x.get("last") or 0) == int(w.get("last") or 0) and not _dw.suppressed(x)), None)
+    if f is None:
+        return None
+    dev = next((d for d in devices or [] if d["id"] == f.get("device")), {})
+    return _devices_guidance(f, dev.get("type"), first_only=True)
 
 
 def _integ_devices():
@@ -21652,7 +21843,7 @@ def _integ_devices():
             "new_24h": s["new_24h"], "flagged": s["flagged"], "critical": s["critical"], "warning": s["warning"],
             "quarantined": s["quarantined"],
             "worst": {"severity": w["severity"], "reason": w["reason"], "device_name": w["device_name"],
-                      "last": w["last"]} if w else None,
+                      "last": w["last"], "guidance": _integ_worst_guidance(w)} if w else None,
             "findings": s.get("recent_findings") or [], "new_devices": s.get("recent_new") or []}
 
 

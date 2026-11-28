@@ -493,6 +493,10 @@ def t_api():
         det = sent[1][0]["detail"]
         check("Connected to a known botnet C2 server (Feodo Tracker): 203.0.113.9" in det and det.count("Feodo") == 1,
               "DW-10: finding alert names the source once and what differs (the indicator) (%r)" % det)
+        todo = [x for x in det.split("\n") if x.startswith("What to do: ")]
+        check(len(todo) == 1 and "Quarantine" in todo[0] and "203.0.113.9" not in todo[0]
+              and any(x.startswith("What to do: ") for x in sent[0][0]["detail"].split("\n")),
+              "guidance (push): one 'What to do:' line with the first step, also for a new device (%r)" % todo)
         f_loc = {"title": "Connected to a known malware host (local indicator list)", "source": "local",
                  "kind": "intel_connection", "indicator": "203.0.113.10", "count": 4,
                  "details": {"port": 443, "proto": "tcp"}}

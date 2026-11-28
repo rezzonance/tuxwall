@@ -192,7 +192,7 @@ def _worst(s: dict) -> dict | None:
     if not isinstance(w, dict):
         return None
     return {"severity": w.get("severity"), "reason": w.get("reason"), "device": w.get("device_name"),
-            "last": w.get("last")}
+            "last": w.get("last"), "guidance": w.get("guidance")}
 
 
 def _device_attrs(s: dict) -> dict:
@@ -200,7 +200,7 @@ def _device_attrs(s: dict) -> dict:
     return {"quarantined": s.get("quarantined"), "critical": s.get("critical"), "warning": s.get("warning"),
             "devices": s.get("devices"), "online": s.get("online"), "new_24h": s.get("new_24h"),
             "worst_severity": w.get("severity"), "worst_finding": w.get("reason"), "worst_device": w.get("device"),
-            "worst_last": w.get("last")}
+            "worst_last": w.get("last"), "worst_guidance": w.get("guidance")}
 
 
 VALUES: dict[str, tuple[str, Callable[[dict], Any], Callable[[dict], dict] | None]] = {
@@ -362,7 +362,7 @@ def device_events(data: Any, seen: dict | None) -> tuple[list[tuple[str, dict]],
             events.append(("tuxwall_device_finding", {
                 "id": f["id"], "severity": f.get("severity"), "reason": f.get("reason"),
                 "device_id": f.get("device"), "device": f.get("device_name"),
-                "first": f.get("first"), "last": f.get("last")}))
+                "first": f.get("first"), "last": f.get("last"), "guidance": f.get("guidance")}))
     for d in reversed(new):
         if d["id"] in seen["n"]:
             continue
@@ -370,6 +370,6 @@ def device_events(data: Any, seen: dict | None) -> tuple[list[tuple[str, dict]],
         if not first:
             events.append(("tuxwall_new_device", {
                 "device_id": d["id"], "device": d.get("name"), "zone": d.get("zone"), "vendor": d.get("vendor"),
-                "first_seen": d.get("first_seen")}))
+                "first_seen": d.get("first_seen"), "guidance": d.get("guidance")}))
     seen["f"], seen["n"] = seen["f"][-SEEN_MAX:], seen["n"][-SEEN_MAX:]
     return events, seen

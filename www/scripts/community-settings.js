@@ -1,6 +1,7 @@
-/* Community settings: one module, two places (Security ▸ Deception and
-   CrowdSec ▸ Community Bans). Renders the same two switches into every
-   mounted container and keeps them in sync:
+/* Community settings: one module, mounted on Security ▸ Deception ▸
+   Community (CrowdSec ▸ Community Bans shows their state with a link since
+   3.3.7). Renders the two switches into every mounted container and keeps
+   them in sync:
      - "Report catches to the community"  -> reporting.json "enabled"
      - "Use community bans" (auto-ban)     -> community-auto.json "enabled"
    Data: GET/POST /api/community/settings (admin; the POST is audited

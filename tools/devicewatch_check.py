@@ -35,6 +35,12 @@ domains and made-up MACs; no command, network or real log is touched.
 - Zeek checksum switch (A3): command building, policy/result parsing, the
   state on GET /api/devices/feeds, POST gates + one job at a time (the
   script itself: tools/zeek_site_check.py).
+- "What to do" guidance (B): every finding kind (ids_alert outbound vs
+  inbound-only, new_device, a generic entry for Phase 2 kinds) x device
+  class has a meaning + 2-4 steps within the length limits and without
+  links/markup; type -> class mapping; the API adds it to the device
+  detail, the Security > Local rows, the push text ("What to do:" line)
+  and Home Assistant (first step only, never an indicator).
 - Units: sandbox directives, writable paths = the state dir only.
 """
 import base64
@@ -56,6 +62,7 @@ sys.path.insert(0, os.path.join(ROOT, "www", "includes"))
 sys.path.insert(0, HERE)
 import devicewatch as dw  # noqa: E402
 import devicewatch_feeds as feeds  # noqa: E402
+import devicewatch_guidance as dg  # noqa: E402
 
 PASS = FAIL = 0
 
@@ -1078,6 +1085,44 @@ def t_silence():
 
 # ── API (loopback harness) ──────────────────────────────────────────────────
 
+def t_guidance():
+    check(dg.table_problems() == [], "guidance: table complete, bounded, no links (%r)" % dg.table_problems()[:3])
+    kinds = set(dw.KIND_TEXT) - {"ids_alert"} | {"new_device", "ids_alert:outbound", "ids_alert:inbound", "_generic"}
+    check(kinds <= set(dg.GUIDANCE), "guidance: every Phase 1 kind has an entry (%r)" % sorted(kinds - set(dg.GUIDANCE)))
+    bad = []
+    for k in sorted(kinds):
+        for cls in dg.DEVICE_CLASSES:
+            typ = {"computer": "computer", "phone": "phone", "iot": "camera", "vpn": "vpn-client", "unknown": ""}[cls]
+            g = dg.guidance({"kind": k.split(":")[0], "details": {"direction": k.split(":")[1]}} if ":" in k else k, typ)
+            if not (g["meaning"] and 2 <= len(g["steps"]) <= 4 and g["device_class"] == cls
+                    and all(len(x) <= dg.STEP_MAX for x in g["steps"]) and len(g["meaning"]) <= dg.MEANING_MAX):
+                bad.append((k, cls))
+            if "\n" in dg.first_step(k.split(":")[0], typ) or len(dg.first_step(k.split(":")[0], typ)) > dg.STEP_MAX:
+                bad.append((k, cls, "first step"))
+    check(not bad, "guidance: every kind x device class resolves to meaning + 2-4 bounded steps (%r)" % bad[:4])
+    types = {t for _f, _rx, t in dw.TYPE_RULES} | {"vpn-client"}
+    check(all(dg.device_class(t) != "unknown" for t in types) and dg.device_class("") == "unknown"
+          and dg.device_class(None) == "unknown" and dg.device_class("Private MAC") == "unknown"
+          and dg.device_class("tablet") == "phone" and dg.device_class("tv") == "iot",
+          "guidance: every engine type maps to a device class")
+    out = {"kind": "ids_alert", "severity": "high", "details": {"direction": "outbound"}}
+    inb = {"kind": "ids_alert", "severity": "low", "details": {"direction": "inbound"}}
+    resp = {"kind": "ids_alert", "severity": "high", "title": "ET ATTACK_RESPONSE id check returned root",
+            "details": {"direction": "inbound"}}
+    check(dg.guidance_key(out) == "ids_alert:outbound" and dg.guidance_key(inb) == "ids_alert:inbound"
+          and dg.guidance_key(resp) == "ids_alert:outbound" and dg.guidance_key({"kind": "beacon"}) == "_generic"
+          and dg.guidance_key("dns_blocked") == "dns_blocked",
+          "guidance: IDS outbound / inbound-only / attack response sent; unknown (Phase 2) kind -> generic")
+    check("Quarantine" in dg.first_step({"kind": "c2_connection"}, "computer")
+          and "No action" in dg.first_step({"kind": "dns_blocked"}, "phone")
+          and "WireGuard" in dg.first_step("new_device", "vpn-client")
+          and dg.guidance({"kind": "ids_alert", "details": {}}, "nas")["device_class"] == "computer",
+          "guidance: tailored first steps (C2 -> quarantine, blocked lookup -> none, VPN new peer)")
+    texts = json.dumps(dg.GUIDANCE)
+    check("http" not in texts and "://" not in texts and "<" not in texts and dg.MORE.startswith("README"),
+          "guidance: no external links or markup; details point at the README section")
+
+
 def t_api():
     import api_harness
     H = api_harness.Harness()
@@ -1209,8 +1254,27 @@ def t_api():
         A.build_devices_summary.__globals__["_INTEG_CACHES"]["devices"].drop()
         j = A._integ_devices()
         check(j["ok"] and j["flagged"] == 1 and j["quarantined"] == 0 and set(j["worst"]) ==
-              {"severity", "reason", "device_name", "last"} and C2_IP not in json.dumps(j),
+              {"severity", "reason", "device_name", "last", "guidance"} and C2_IP not in json.dumps(j),
               "integration section: small, no indicator")
+        check(j["worst"]["guidance"] == dg.first_step(fnd, "phone") and j["findings"]
+              and j["findings"][0]["guidance"] == dg.first_step(fnd, "phone"),
+              "guidance (HA): worst + finding events carry the first step for the device type (%r)" % j["worst"])
+        r = H.request("GET", "/api/devices/" + dev["id"], role="admin")
+        g = r.json["findings"][0].get("guidance") or {}
+        check(g.get("key") == "c2_connection" and g.get("device_class") == "phone" and len(g.get("steps") or []) >= 2
+              and C2_IP not in json.dumps(g), "guidance (panel): device detail findings carry the full block")
+        r = H.request("GET", "/api/devices/findings/recent", role="admin")
+        rows = r.json.get("findings") or []
+        check(rows and all((x.get("guidance") or {}).get("steps") for x in rows),
+              "guidance (Security > Local): every recent row carries guidance")
+        real_dg = A._dg
+        A._dg = None
+        try:
+            check(A._devices_guidance(fnd, "phone") is None and
+                  H.request("GET", "/api/devices/" + dev["id"], role="admin").status == 200,
+                  "guidance: without the module the views still answer (guidance null)")
+        finally:
+            A._dg = real_dg
         # WireGuard snapshot: public data only
         pre = base64.b64encode(b"p" * 32).decode()
         A.WG_CONF = os.path.join(H.scratch, "wg0.conf")
@@ -1566,7 +1630,7 @@ def t_units():
 
 
 for t in (t_follower, t_feeds, t_engine, t_campaign4, t_false_positives, t_small_batch, t_score, t_silence, t_units,
-          t_api):
+          t_guidance, t_api):
     try:
         t()
     except Exception:

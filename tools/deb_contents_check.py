@@ -48,6 +48,8 @@ REQUIRED = {
     "./etc/systemd/system/tuxwall-devicewatch-feeds.timer": "-rw-r--r--",
     "./var/www/html/includes/devicewatch.py": None,
     "./var/www/html/includes/devicewatch_feeds.py": None,
+    "./var/www/html/includes/devicewatch_guidance.py": None,
+    "./var/www/html/includes/suricata_suppress.py": None,
     "./var/www/html/includes/quarantine.py": None,
     "./etc/systemd/system/tuxwall-quarantine.service": "-rw-r--r--",
     "./var/www/html/scripts/devices.js": None,

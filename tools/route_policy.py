@@ -94,6 +94,9 @@ VIEWER_OK = {
     # security pages
     "GET /api/security": "security monitor snapshot",
     "GET /api/security/suricata": "IDS alerts view",
+    # Suricata rule suppression (A8, 3.3.7) keeps the default (admin only): GET
+    # /api/security/suricata/suppress names devices and their addresses (ADMIN_GET_PREFIXES), POST
+    # (add/remove a rule in TuxWall's block of threshold.config; root reloads Suricata) is admin + same Origin.
     "GET /api/security/zeek": "Zeek view",
     "GET /api/security/zeek/quic": "Zeek QUIC view",
     "GET /api/security/aide": "AIDE status (running a check is admin)",
