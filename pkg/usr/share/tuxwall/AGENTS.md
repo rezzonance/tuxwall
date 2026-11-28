@@ -61,7 +61,8 @@ Rules:
 - WAN interface — the default-route interface (`ip route show default`);
   dynamic IPv4 + delegated IPv6 prefix. NEVER hardcode its addresses.
 - LAN interface — the RFC1918 address holder (package default:
-  192.168.1.1/24, fd00:1::1/64; this install may differ — check `ip addr`).
+  192.168.1.1/24 plus a ULA /64 - random on fresh installs, often
+  fd00:1::1/64 on older ones; this install may differ — check `ip addr`).
 - VPN `wg0` — WireGuard server (default 10.0.0.1/24, UDP 51820).
 - Shaping — CAKE SQM via tc on an ifb device (if configured).
 
@@ -107,7 +108,9 @@ ask instead of guessing.
 4. Never disable CrowdSec, the firewall bouncer, or Suricata to
    troubleshoot — target the specific host/domain instead.
 5. Never echo public IPs, keys, or peer configs into anything web-served
-   under /var/www/html.
+   under /var/www/html. Never print secrets into the chat either: no
+   `systemctl show tuxwall|tuxwall-agent -p Environment`, no cat of the
+   agent-token or the password drop-ins - compare sha256 hashes instead.
 6. Read the current ruleset/config first and modify incrementally — never
    regenerate a whole ruleset or config from scratch unless asked.
 
@@ -166,7 +169,7 @@ how you work, not just which doc you read:
 The context JSON (fetched or cached at `~/.config/opencode/tuxwall-context.json`,
 schema 2) is built for partial loading - do not hold the whole file in mind:
 
-1. Start with the `index` fragment (~1.5k tokens; see `meta.fragments`) or its
+1. Start with the `index` fragment (~4k tokens; see `meta.fragments`) or its
    `triage_tldr`: severity order, one-liner per symptom, the top never-runs, and
    the done-definition.
 2. Honor `this_install`: if `this_install.resolved` is true, use `values`
