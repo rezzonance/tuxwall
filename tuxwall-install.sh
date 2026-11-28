@@ -1699,7 +1699,7 @@ step_harden() {
     fi
 
     for f in /etc/tuxwall/llm.json /etc/tuxwall/auth.json /etc/tuxwall/internal-token \
-             /etc/tuxwall/agent-token /etc/tuxwall/reporting.json /etc/tuxwall/llm.json.bak*; do
+             /etc/tuxwall/agent-token /etc/tuxwall/agent-password.env /etc/tuxwall/reporting.json /etc/tuxwall/llm.json.bak*; do
         if [[ -e $f ]]; then chmod 600 "$f"; fi
     done
     ok "Secrets in /etc/tuxwall readable by root only"
